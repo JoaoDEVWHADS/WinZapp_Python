@@ -1766,6 +1766,8 @@ class StatusPanel(wx.Panel):
             # to work.
             result = mw.send_text_message(poster_jid, text)
         except Exception:
+            logging.exception(
+                "[status-reply] send_text_message raised for %s", poster_jid)
             result = None
         # send_text_message() returns a message-id string or True on success,
         # or a dict ({"ok": False, ...}) on a definite failure.
@@ -1773,6 +1775,18 @@ class StatusPanel(wx.Panel):
         if ok:
             wx.CallAfter(self._on_status_reply_sent)
         else:
+            # The dialog can only say "it failed"; this is the only place that
+            # can say WHY. Reported live — "ao teclar enter deu Não foi
+            # possível enviar a resposta ao status", and the same text sent
+            # fine from the button seconds later — and the log held nothing at
+            # all about it, so there was no way to tell a rejected JID from a
+            # dropped connection from a server-side refusal. Enter and the
+            # button are the same handler (see the two Bind calls in
+            # _build_viewer), so the difference was never the key pressed.
+            logging.warning(
+                "[status-reply] failed for poster=%s (result=%r, text_len=%d)",
+                poster_jid, result, len(text),
+            )
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_reply_error"),

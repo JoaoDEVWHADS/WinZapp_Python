@@ -5,6 +5,7 @@ import socketio
 import wx
 import requests
 from core.i18n import I18n
+from core.sync_contracts import observe_payload
 from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 # ── Message delivery status ──────────────────────────────────────────────────
@@ -1373,6 +1374,11 @@ class WebSocketClient:
             if not wpp_msg:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
+            # When this message reached WinZapp, so on_new_message() can say how
+            # much of the delay before the screen reader speaks was its own.
+            # Kept out of the stored record by prune_message_record()'s caller
+            # popping it at the notification point.
+            normalized["_arrived_at"] = time.monotonic()
             self.on_messages_upsert({"data": normalized})
         except Exception:
             # A message is dropped entirely if this raises — log the full
@@ -1506,6 +1512,13 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_ack error")
 
     def _normalize_wpp_message(self, wpp_msg):
+        # Everything below reads this payload with .get()/defaults, which is
+        # the only way to survive WhatsApp Web — but it also means a field that
+        # stops arriving looks exactly like one that was never set. Checked
+        # here, on the way in, so the log names the field instead of leaving a
+        # symptom to be diagnosed three layers away. Observation only: the
+        # payload is returned untouched and nothing below changes behaviour.
+        observe_payload([wpp_msg], "get-messages", where="wpp message")
         msg_id = wpp_msg.get("id")
         if isinstance(msg_id, dict):
             msg_id = msg_id.get("_serialized", "")

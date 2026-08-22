@@ -267,6 +267,12 @@ class _LoopStub:
         self._wa_connected = True
         self._history_still_landing = False
         self._chats_awaiting_messages = set(pending)
+        # Read by the queue helpers bound in _loop(). __getattr__ hands back a
+        # lambda for anything missing, which is neither a dict nor a context
+        # manager, so both have to exist for real.
+        self._partial_history_counts = {}
+        self._backfill_state_lock = threading.RLock()
+        self._lid_to_phone = {}
         self._names = list(names)
         self._deep_pending = list(deep_pending)
         self.walked = []
@@ -306,10 +312,12 @@ class _LoopStub:
 
 def _loop(deep_pending, pending=(), names=()):
     stub = _LoopStub(deep_pending, pending, names)
-    stub._backfill_empty_chats = types.MethodType(
-        MainWindow.__dict__["_backfill_empty_chats"], stub)
+    for name in ("_backfill_empty_chats", "_collapse_and_list_backfill_pending",
+                 "_backfill_state_guard", "_canonical_backfill_jid"):
+        setattr(stub, name, types.MethodType(MainWindow.__dict__[name], stub))
     for const in ("_BACKFILL_BUDGET", "_BACKFILL_LANDING_BUDGET",
-                  "_BACKFILL_FIRST_DELAY", "_BACKFILL_MAX_DELAY",
+                  "_BACKFILL_FIRST_DELAY", "_BACKFILL_CHUNK_DELAY",
+                  "_BACKFILL_MAX_DELAY",
                   "_BACKFILL_CHUNK", "_BACKFILL_WORKERS",
                   "_DEEP_CHATS_PER_PASS"):
         setattr(stub, const, getattr(MainWindow, const))

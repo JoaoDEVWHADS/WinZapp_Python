@@ -22,6 +22,7 @@ import { Logger } from 'winston';
 
 import { version } from '../../package.json';
 import config from '../config';
+import { observePayload, StatusSessionSchema } from '../dto/sync';
 import CreateSessionUtil from '../util/createSessionUtil';
 import { callWebHook, contactToArray } from '../util/functions';
 import getAllTokens from '../util/getAllTokens';
@@ -1090,12 +1091,18 @@ export async function getSessionState(req: Request, res: Response) {
     if ((client == null || client.status == null) && !waitQrCode)
       res.status(200).json({ status: 'CLOSED', qrcode: null });
     else if (client != null)
-      res.status(200).json({
-        status: client.status,
-        qrcode: qr,
-        urlcode: client.urlcode,
-        version: version,
-      });
+      res.status(200).json(
+        observePayload(
+          StatusSessionSchema,
+          {
+            status: client.status,
+            qrcode: qr,
+            urlcode: client.urlcode,
+            version: version,
+          },
+          { logger: req.logger, endpoint: 'status-session' }
+        )
+      );
   } catch (ex) {
     req.logger.error(ex);
     res.status(500).json({

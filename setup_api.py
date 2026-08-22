@@ -62,7 +62,14 @@ if _CLIENT_DIR not in sys.path:
 # insisting its installed version was still 2.10.0 on a build that had
 # genuinely cloned/built 2.10.1, because api_patches/package.json's own
 # "version" field had gone stale.
-CUSTOM_ROOT_FILES = ["start.js", "config.json"]
+CUSTOM_ROOT_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+]
 CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",
@@ -71,6 +78,11 @@ CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
@@ -165,6 +177,17 @@ def _current_tag(cwd: str) -> str:
 # api_patches/ at some earlier point, undoing legitimate upstream bumps on
 # every future tag this script prepares.
 _PATCHED_DEPENDENCY_KEYS = [
+    "prom-client",  # imported by src/middleware/instrumentation.ts, which is
+                    # WinZapp's own patch. Upstream happens to declare it too,
+                    # but under devDependencies — so our production import is
+                    # satisfied today only because both installers run a plain
+                    # `npm install`. Listing it here means the merge writes it
+                    # into dependencies regardless of what upstream does with
+                    # its own copy. npm accepts the entry appearing in both
+                    # blocks (verified with `npm install --dry-run`).
+    "zod",  # runtime schema for the sync endpoints' response contracts
+            # (src/dto/sync.ts). Declared here because the controllers import
+            # it at runtime — it is not a build-only tool.
     "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary via npm — WinZapp's
                                   # own Python side shells out to it directly
                                   # (main.py: _find_api_ffmpeg/_convert_wav_to_ogg)

@@ -112,7 +112,14 @@ _PRESERVE = {"start.js", ".env", "config.json"}
 # version would silently keep its config.json forever — including any
 # createOptions a newer release changed. `.env` is deliberately absent: it is
 # the one root file that could be genuinely local, and nothing reads it anyway.
-_CUSTOM_ROOT_FILES = ["start.js", "config.json"]
+_CUSTOM_ROOT_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+]
 
 # Only these keys are copied from api_patches/package.json onto whatever the
 # downloaded ZIP produced — same list, and same reasoning, as setup_api.py's
@@ -133,6 +140,17 @@ _CUSTOM_ROOT_FILES = ["start.js", "config.json"]
 # never pins directly either, come along transitively at whichever paired
 # version @wppconnect-team/wppconnect itself resolves to.
 _PATCHED_DEPENDENCY_KEYS = [
+    "prom-client",  # imported by src/middleware/instrumentation.ts, which is
+                    # WinZapp's own patch. Upstream happens to declare it too,
+                    # but under devDependencies — so our production import is
+                    # satisfied today only because both installers run a plain
+                    # `npm install`. Listing it here means the merge writes it
+                    # into dependencies regardless of what upstream does with
+                    # its own copy. npm accepts the entry appearing in both
+                    # blocks (verified with `npm install --dry-run`).
+    "zod",  # runtime schema for the sync endpoints' response contracts
+            # (src/dto/sync.ts). Declared here because the controllers import
+            # it at runtime — it is not a build-only tool.
     "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary — WinZapp's own
                                   # Python side shells out to it directly to
                                   # encode voice messages to OGG/Opus.
@@ -180,6 +198,11 @@ _CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",

@@ -224,12 +224,17 @@ async function restoreStatusSender(page: any, logger: any, session: string) {
 
           sendModule.encryptAndSendMsg = async function (
             sendMsgRecord: any,
-            metricsReporter: any
+            metricsReporter: any,
+            ...additionalArgs: any[]
           ) {
             if (
               sendMsgRecord?.data?.to?.toString?.() !== 'status@broadcast'
             ) {
-              return original.apply(this, arguments as any);
+              return original.apply(this, [
+                sendMsgRecord,
+                metricsReporter,
+                ...additionalArgs,
+              ]);
             }
 
             await sendStatus({

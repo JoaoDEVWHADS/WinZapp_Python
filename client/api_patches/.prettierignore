@@ -1,0 +1,4 @@
+docs
+dist
+src/controller/deviceController.ts
+src/util/createSessionUtil.ts

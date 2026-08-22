@@ -16,6 +16,9 @@ after, so the store does fill in — it just needs to be asked again.
 _note_backfill_state() decides who gets asked; that decision is tested here.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pytest
 
 from main import MainWindow
@@ -27,6 +30,7 @@ claims = MainWindow._server_claims_content
 
 class _Stub:
     def __init__(self, page_size=1, chunks_pending=False):
+        self._backfill_state_lock = threading.RLock()
         self._chats_awaiting_messages = set()
         # Most cases here predate paging and care only about empty-vs-not, so
         # the default target of 1 keeps a single record meaning "done".
@@ -35,6 +39,12 @@ class _Stub:
 
     _server_claims_content = staticmethod(MainWindow._server_claims_content)
     _note_backfill_state = MainWindow._note_backfill_state
+    _backfill_state_guard = MainWindow._backfill_state_guard
+    _canonical_backfill_jid = MainWindow._canonical_backfill_jid
+    _collapse_and_list_backfill_pending = MainWindow._collapse_and_list_backfill_pending
+    _remove_backfill_pending = MainWindow._remove_backfill_pending
+    _is_backfill_pending = MainWindow._is_backfill_pending
+    _completed_backfill_targets = MainWindow._completed_backfill_targets
     _jid_address_forms = MainWindow._jid_address_forms
     _resolve_backfill_target = MainWindow._resolve_backfill_target
     history_page_target = MainWindow.history_page_target
@@ -111,6 +121,9 @@ class TestBackfillBookkeeping:
         class _Bare:
             _server_claims_content = staticmethod(MainWindow._server_claims_content)
             _note_backfill_state = MainWindow._note_backfill_state
+            _backfill_state_guard = MainWindow._backfill_state_guard
+            _canonical_backfill_jid = MainWindow._canonical_backfill_jid
+            _jid_address_forms = MainWindow._jid_address_forms
         b = _Bare()
         b._note_backfill_state("a@lid", _chat(unread=1), api_ok=True)
         assert b._chats_awaiting_messages == {"a@lid"}
@@ -267,6 +280,41 @@ class TestJidBridge:
             _chat(records=[{"key": {"id": "X"}}], t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
+    def test_snapshot_collapses_lid_and_phone_into_one_queue_entry(self):
+        s = self._stub()
+        phone = "5511999999999@s.whatsapp.net"
+        s._chats_awaiting_messages = {"111@lid", phone}
+        s._partial_history_counts = {"111@lid": 15, phone: 90}
+
+        assert s._collapse_and_list_backfill_pending() == [phone]
+        assert s._chats_awaiting_messages == {phone}
+        assert s._partial_history_counts == {phone: 90}
+
+    def test_parallel_workers_cannot_leave_both_address_forms_pending(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s.chats = {}
+        s._lid_to_phone = {"111@lid": "5511999999999@s.whatsapp.net"}
+        s._phone_to_lid = {"5511999999999@s.whatsapp.net": "111@lid"}
+        phone = "5511999999999@s.whatsapp.net"
+        chat = _chat(records=_records(15), t=1)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(s._note_backfill_state,
+                                   "111@lid" if i % 2 == 0 else phone,
+                                   chat, True)
+                       for i in range(200)]
+            for future in futures:
+                future.result()
+
+        assert s._collapse_and_list_backfill_pending() == [phone]
+
+    def test_completed_count_ignores_unrelated_concurrent_arrivals(self):
+        s = self._stub()
+        s._chats_awaiting_messages = {"done@lid", "still@lid", "new@lid"}
+        s._remove_backfill_pending("done@lid")
+
+        assert s._completed_backfill_targets(["done@lid", "still@lid"]) == 1
+
 
 class TestSweepCoverage:
     """The window advances by remembering what was tried, not by an index.
@@ -316,6 +364,7 @@ class TestBackfillPacing:
 
     def test_constants_are_sane(self):
         assert MainWindow._BACKFILL_FIRST_DELAY <= 60, "first retry must be soon"
+        assert 0 < MainWindow._BACKFILL_CHUNK_DELAY < MainWindow._BACKFILL_FIRST_DELAY
         assert MainWindow._BACKFILL_MAX_DELAY >= MainWindow._BACKFILL_FIRST_DELAY
         assert MainWindow._BACKFILL_BUDGET >= 15 * 60, "must outlast a slow warm-up"
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
@@ -347,6 +396,34 @@ class TestBackfillPacing:
         history nobody is waiting on — it must not burst."""
         assert MainWindow._BACKFILL_CHUNK <= 100
         assert MainWindow._BACKFILL_WORKERS <= 6, "must not exceed the sync's own cap"
+
+    def test_large_first_sweep_does_not_pay_the_retry_delay_per_chunk(self):
+        pending = 896
+        chunks = -(-pending // MainWindow._BACKFILL_CHUNK)
+        old_wait = chunks * MainWindow._BACKFILL_FIRST_DELAY
+        new_wait = (MainWindow._BACKFILL_FIRST_DELAY
+                    + (chunks - 1) * MainWindow._BACKFILL_CHUNK_DELAY)
+
+        assert new_wait < old_wait / 2
+
+    def test_partial_sweep_keeps_backoff_and_uses_chunk_delay(self):
+        sleep, retry = MainWindow._backfill_short_queue_delays(
+            retry_delay=120, sweep_finished=False, sweep_made_progress=False)
+
+        assert sleep == MainWindow._BACKFILL_CHUNK_DELAY
+        assert retry == 120
+
+    def test_finished_sweep_applies_backoff_once(self):
+        sleep, retry = MainWindow._backfill_short_queue_delays(
+            retry_delay=120, sweep_finished=True, sweep_made_progress=False)
+
+        assert sleep == retry == 240
+
+    def test_finished_sweep_with_progress_resets_backoff(self):
+        sleep, retry = MainWindow._backfill_short_queue_delays(
+            retry_delay=240, sweep_finished=True, sweep_made_progress=True)
+
+        assert sleep == retry == MainWindow._BACKFILL_FIRST_DELAY
 
     def test_the_window_rotates_so_every_chat_gets_tried(self):
         """`pending` is sorted, so slicing from the front every pass would retry

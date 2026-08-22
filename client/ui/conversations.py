@@ -45,7 +45,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -6230,6 +6230,13 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         i18n     = self.main_window.i18n
 
+        # A reaction to one of our statuses is a row of its own (see
+        # _is_displayable_message): there is no message here for it to
+        # decorate, because the status it points at lives in the Status tab.
+        if reaction_targets_status(msg):
+            emoji = ((msg_obj.get("reactionMessage") or {}).get("text") or "").strip()
+            return i18n.t("status_reaction_received").format(emoji=emoji)
+
         if not isinstance(msg_obj, dict):
             return i18n.t("unsupported_message").format(
                 app_name=self.main_window.app_name
@@ -6562,6 +6569,16 @@ class ConversationsPanel(wx.Panel):
         if not isinstance(m, dict):
             return False
         msg_type = m.get("messageType", "")
+
+        # A reaction normally decorates the message it points at and is never a
+        # row of its own — which is why reactionMessage is absent from the
+        # whitelist below. A reaction to one of OUR statuses is the exception:
+        # the status it points at lives in the Status tab, so there is no row
+        # here to decorate and the reaction had nowhere to go at all. Reported
+        # live as replies to a status that appeared and then were gone the
+        # moment the conversation was opened.
+        if reaction_targets_status(m):
+            return True
 
         # Whitelist of user-visible/displayable message types
         allowed_types = (

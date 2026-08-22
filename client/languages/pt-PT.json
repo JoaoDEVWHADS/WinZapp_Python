@@ -866,6 +866,7 @@
     "status_reply_label": "&Responder ao estado",
     "status_reply_send": "Enviar resposta",
     "status_reply_sent": "Resposta enviada.",
+    "status_reaction_received": "Reagiu ao seu estado: {emoji}",
     "status_reply_error": "Não foi possível enviar a resposta ao estado.",
     "status_unlike_unsupported": "Um gosto já enviado não pode ser desfeito — o WhatsApp não oferece uma forma de retirar uma reação já entregue.",
     "status_view_reactions": "Ver reações",

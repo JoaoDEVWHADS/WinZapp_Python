@@ -143,3 +143,45 @@ def test_empty_search_keeps_the_selected_category_only():
     selected = 3
 
     assert filter_emojis("", selected, labels) == EMOJI_CATEGORIES[selected][1].split()
+
+
+def test_pasting_an_emoji_finds_that_emoji():
+    """Looking a row up by pasting it used to answer with nothing at all:
+    filter_emojis() computed `direct_emoji` and then wrapped the entire body in
+    `if not direct_emoji`, so the one row that matched perfectly was the only
+    one skipped."""
+    labels = [key for key, _ in EMOJI_CATEGORIES]
+
+    results = filter_emojis("\U0001f436", 0, labels)
+
+    assert results[0] == "\U0001f436"
+
+
+def test_a_row_named_by_the_query_outranks_one_merely_associated_with_it():
+    """"cachorro" is a name of 🐶 and a CLDR association of 🦴 (bone). Both
+    match verbatim, so with a single flat word bucket the winner was whichever
+    category came first — the bone."""
+    labels = [key for key, _ in EMOJI_CATEGORIES]
+
+    results = filter_emojis("cachorro", 0, labels)
+
+    assert results.index("\U0001f436") < results.index("\U0001f9b4")
+
+
+def test_typo_tolerance_ranks_by_how_close_the_match_is():
+    """"cachoro" is one missing letter from "cachorro" and two edits from
+    "choro". Unranked, tolerance returned its hits in category order and
+    answered 😢 first."""
+    labels = [key for key, _ in EMOJI_CATEGORIES]
+
+    results = filter_emojis("cachoro", 0, labels)
+
+    assert results[0] == "\U0001f436"
+    assert results.index("\U0001f436") < results.index("\U0001f622")
+
+
+def test_an_unrelated_query_still_finds_nothing():
+    """The tiers must not turn ranking into matching."""
+    labels = [key for key, _ in EMOJI_CATEGORIES]
+
+    assert filter_emojis("zzzzqqqqxxxx", 0, labels) == []

@@ -2343,18 +2343,29 @@ def _word_matches(needle: str, candidate: str) -> bool:
     return False
 
 
-def _build_search_index() -> dict[str, tuple[str, ...]]:
+def _build_search_index() -> tuple[dict[str, tuple[str, ...]],
+                                   dict[str, tuple[str, ...]]]:
     """Pre-normalized word buckets per displayed row, built once at import.
 
     Every row's bucket also absorbs its family members' names and keywords,
     so hidden spellings (skin tones, gender forms, family compositions)
     remain findable through the single row that represents them.
+
+    Two buckets, not one. The first is everything a row can be found by. The
+    second holds only what the row IS — its Unicode name and curated aliases —
+    leaving out the CLDR keywords, which describe what a row is merely
+    associated with. Both are needed because those are different claims:
+    "cachorro" is a name of 🐶 and an association of 🦴 (bone), and with a
+    single flat bucket the two were indistinguishable, so searching for
+    "cachorro" answered with the bone — whichever category happened to come
+    first won. Matching still uses everything; only the ordering reads this.
     """
     alias_map = _aliases_by_emoji()
     words_by_row: dict[str, set[str]] = {}
+    names_by_row: dict[str, set[str]] = {}
 
-    def add(emoji: str, rep: str, *texts: str) -> None:
-        bucket = words_by_row.setdefault(rep, set())
+    def add(bucket_map: dict[str, set[str]], rep: str, *texts: str) -> None:
+        bucket = bucket_map.setdefault(rep, set())
         for text in texts:
             if text:
                 bucket.update(_search_text(text).split())
@@ -2367,18 +2378,54 @@ def _build_search_index() -> dict[str, tuple[str, ...]]:
             seen.add(emoji)
             family = _family_of(emoji)
             rep = family[0] if family else emoji
+            own_name = emoji if emoji == rep else ""
             add(
-                emoji,
+                words_by_row,
                 rep,
-                emoji if emoji == rep else "",
+                own_name,
                 _unicode_name(emoji),
                 alias_map.get(emoji, ""),
                 EMOJI_CLDR_KEYWORDS.get(emoji, ""),
             )
-    return {row: tuple(words) for row, words in words_by_row.items()}
+            add(
+                names_by_row,
+                rep,
+                own_name,
+                _unicode_name(emoji),
+                alias_map.get(emoji, ""),
+            )
+    return (
+        {row: tuple(words) for row, words in words_by_row.items()},
+        {row: tuple(words) for row, words in names_by_row.items()},
+    )
 
 
-_SEARCH_INDEX = _build_search_index()
+_SEARCH_INDEX, _NAME_INDEX = _build_search_index()
+
+
+def _closeness(query_words: list[str], candidates: tuple[str, ...]) -> float:
+    """How well a row matched, for ordering rows that only matched fuzzily.
+
+    Each query word scores its best similarity against any of the row's words;
+    the row scores the weakest of those, so a row cannot ride one strong word
+    while another barely scraped through. Without this, typo tolerance
+    returned its hits in category order: "cachoro" answered 😢 (choro) ahead of
+    🐶 (cachorro), even though one is a single missing letter away and the
+    other is two edits and a different word.
+    """
+    scores = []
+    for word in query_words:
+        best = 0.0
+        for candidate in candidates:
+            if not candidate:
+                continue
+            ratio = SequenceMatcher(None, word, candidate).ratio()
+            if ratio > best:
+                best = ratio
+                if best == 1.0:
+                    break
+        scores.append(best)
+    return min(scores) if scores else 0.0
 
 
 def filter_emojis(query: str, category_index: int, category_labels) -> list[str]:
@@ -2396,8 +2443,13 @@ def filter_emojis(query: str, category_index: int, category_labels) -> list[str]
     query_words = [word for word in needle.split() if word not in SEARCH_STOP_WORDS]
     if not query_words:
         return []
-    matches = []
-    fuzzy_only = []
+    # Four tiers, best first. The old code had two and computed the first
+    # without ever using it: `direct_emoji` was calculated and then guarded the
+    # whole body with `if not direct_emoji`, so pasting an emoji to look it up
+    # skipped that row entirely and the search answered with nothing at all.
+    named: list[str] = []       # the query IS this row's name or alias
+    associated: list[str] = []  # verbatim match, but only among CLDR keywords
+    fuzzy: list[tuple[float, int, str]] = []  # typo/inflection, best first
     seen = set()
     for index, (_key, values) in enumerate(EMOJI_CATEGORIES):
         label_words = tuple(_search_text(category_labels[index]).split())
@@ -2406,21 +2458,41 @@ def filter_emojis(query: str, category_index: int, category_labels) -> list[str]
                 continue
             seen.add(emoji)
             words = _SEARCH_INDEX.get(emoji, ()) + label_words
-            direct_emoji = needle == _search_text(emoji)
-            if not direct_emoji:
-                word_set = frozenset(words)
-                # Rows containing every query word verbatim outrank rows that
-                # only matched through typo/inflection tolerance.
-                if all(word in word_set for word in query_words):
-                    matches.append(emoji)
-                    continue
-                if not all(
-                    any(_word_matches(word, candidate) for candidate in words)
-                    for word in query_words
-                ):
-                    continue
-                fuzzy_only.append(emoji)
-    return matches + fuzzy_only
+            if needle == _search_text(emoji):
+                # The row the user pasted: nothing can outrank it.
+                named.insert(0, emoji)
+                continue
+            word_set = frozenset(words)
+            # Rows containing every query word verbatim outrank rows that only
+            # matched through typo/inflection tolerance.
+            if all(word in word_set for word in query_words):
+                name_set = frozenset(_NAME_INDEX.get(emoji, ()))
+                if all(word in name_set for word in query_words):
+                    named.append(emoji)
+                else:
+                    associated.append(emoji)
+                continue
+            if not all(
+                any(_word_matches(word, candidate) for candidate in words)
+                for word in query_words
+            ):
+                continue
+            # Name closeness leads, for the same reason the verbatim tiers
+            # split: a typo of a row's own name beats an equally close typo of
+            # something a row is merely associated with. "cachoro" scores an
+            # identical 0.93 against 🐶 and against 🦴 — both hold the word
+            # "cachorro" — and only this separates them, because for the bone
+            # it is a CLDR association while for the dog it is its name.
+            # Negated so the plain tuple sort puts the closest first; the index
+            # keeps rows of equal closeness in their original category order.
+            fuzzy.append((
+                -_closeness(query_words, _NAME_INDEX.get(emoji, ())),
+                -_closeness(query_words, words),
+                len(fuzzy),
+                emoji,
+            ))
+    fuzzy.sort()
+    return named + associated + [row[-1] for row in fuzzy]
 
 
 def insert_emoji(text_ctrl, emoji: str) -> bool:

@@ -531,7 +531,16 @@ class UpdateProgressDialog(wx.Dialog):
             if not _is_frozen():
                 logging.info("Auto-updater: Dev mode detected. Skipping real installation.")
                 time.sleep(1)
-                self._install_ok = True
+                # _install_ok means "the batch installer is running and will
+                # relaunch us", which is the caller's licence to quit the app.
+                # Nothing was launched here, so claiming it made _do_install()
+                # call real_exit() on a dev run: the app killed itself, took
+                # the WPPConnect server with it, and no installer existed to
+                # bring anything back. Reported live as a pairing that died
+                # mid-flow — the code arrived, the process was already gone.
+                # Same lie the declined-UAC path used to tell; see the
+                # ShellExecuteW comment above.
+                self._install_ok = False
                 wx.CallAfter(self.EndModal, wx.ID_OK)
                 return
 
@@ -818,9 +827,24 @@ class UpdateChecker:
         while True:
             prog = UpdateProgressDialog(self._mw, new_version, self._mw, zip_url, sha256sums_url)
             result = prog.run()
+            # Read before Destroy(): this is the dialog's answer to "is a batch
+            # installer now running and waiting for this process to exit?", and
+            # it is the only thing that justifies quitting.
+            install_launched = bool(getattr(prog, "_install_ok", False))
             prog.Destroy()
 
             if result == wx.ID_OK:
+                if not install_launched:
+                    # Downloaded and extracted, but nothing was installed and
+                    # nothing is waiting to relaunch us — the dev-mode path.
+                    # Quitting here would kill a perfectly healthy app (and the
+                    # WPPConnect server under it) to complete an update that
+                    # never happened.
+                    logging.info(
+                        "Auto-updater: nothing was installed and no installer is "
+                        "waiting — staying open instead of exiting."
+                    )
+                    return
                 # Install launched — quit the app so the batch script can run
                 self._mw.real_exit()
                 return

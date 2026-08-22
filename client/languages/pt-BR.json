@@ -866,6 +866,7 @@
     "status_reply_label": "&Responder ao status",
     "status_reply_send": "Enviar resposta",
     "status_reply_sent": "Resposta enviada.",
+    "status_reaction_received": "Reagiu ao seu status: {emoji}",
     "status_reply_error": "Não foi possível enviar a resposta ao status.",
     "status_unlike_unsupported": "Uma curtida já enviada não pode ser desfeita — o WhatsApp não oferece um jeito de retirar uma reação já entregue.",
     "status_view_reactions": "Ver reações",
