@@ -390,3 +390,17 @@ function servers() {
         assert caps["serviceWorker"] == "ok"
         assert caps["wasm"] == "object"
         assert caps["subtleCrypto"] == "object"
+
+
+def test_windows_chrome_spawn_is_hidden_and_not_detached():
+    """The local API's child browser must not create a console window."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "client" / "api_patches" / "start.js").read_text(
+        encoding="utf-8"
+    )
+    assert "childProcess.spawn = function winzappHiddenSpawn" in source
+    assert "windowsHide: true" in source
+    assert "detached: false" in source
+    assert source.index("winzappHiddenSpawn") < source.index("initServer")

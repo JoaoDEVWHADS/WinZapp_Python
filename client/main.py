@@ -5641,14 +5641,23 @@ class MainWindow(wx.Frame):
             "PUPPETEER_CACHE_DIR": resource_path("api", ".cache"),
         }
         creation_flags = 0
-        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-            creation_flags = subprocess.CREATE_NO_WINDOW
+        startup_info = None
+        if sys.platform == "win32":
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            if hasattr(subprocess, "STARTUPINFO"):
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= getattr(
+                    subprocess, "STARTF_USESHOWWINDOW", 0
+                )
+                startup_info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
             proc = subprocess.Popen(
                 npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=creation_flags,
+                startupinfo=startup_info,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -6168,7 +6177,26 @@ class MainWindow(wx.Frame):
             else:
                 node_exe = shutil.which("node") or "node"
 
-        start_js  = resource_path("api",  "start.js")
+        start_js = resource_path("api", "start.js")
+        # api/start.js is runtime state and older installs preserve it across
+        # API repairs. Refresh it from the immutable api_patches copy before
+        # every local launch so fixes such as hidden/non-detached Chrome reach
+        # existing users without requiring them to delete/reinstall the API.
+        pristine_start_js = resource_path("api_patches", "start.js")
+        if os.path.isfile(pristine_start_js) and os.path.isdir(os.path.dirname(start_js)):
+            try:
+                with open(pristine_start_js, "rb") as src:
+                    pristine_bytes = src.read()
+                current_bytes = b""
+                if os.path.isfile(start_js):
+                    with open(start_js, "rb") as current:
+                        current_bytes = current.read()
+                if current_bytes != pristine_bytes:
+                    with open(start_js, "wb") as target:
+                        target.write(pristine_bytes)
+                    logging.info("[startup] Refreshed api/start.js from api_patches.")
+            except Exception as exc:
+                logging.warning("[startup] Could not refresh api/start.js: %s", exc)
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs WPPConnect separately
         try:
@@ -6229,13 +6257,26 @@ class MainWindow(wx.Frame):
             # is therefore not needed and would prevent Node.js from writing session
             # tokens/cache to the installation directory, breaking admin users.
             creation_flags = 0
-            if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-                creation_flags = subprocess.CREATE_NO_WINDOW
+            startup_info = None
+            if sys.platform == "win32":
+                if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                    creation_flags = subprocess.CREATE_NO_WINDOW
+                # CREATE_NO_WINDOW covers node.exe itself. STARTUPINFO is kept
+                # as a second Windows-level guard and is inherited by ordinary
+                # descendants; start.js separately forces Puppeteer's Chrome
+                # child to be hidden and non-detached.
+                if hasattr(subprocess, "STARTUPINFO"):
+                    startup_info = subprocess.STARTUPINFO()
+                    startup_info.dwFlags |= getattr(
+                        subprocess, "STARTF_USESHOWWINDOW", 0
+                    )
+                    startup_info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
 
             self.wpp_process = subprocess.Popen(
                 [node_exe, "--max-old-space-size=4096", start_js],
                 cwd=cwd,
                 creationflags=creation_flags,
+                startupinfo=startup_info,
                 stdout=log_fh,
                 stderr=log_fh,
             )
@@ -13675,7 +13716,15 @@ class MainWindow(wx.Frame):
             return
         anchor = self._oldest_stored_message(jid)
         if anchor:
-            self.fetch_older_messages(jid, anchor, store_only=False)
+            # Background repair may walk pages that are already present in the
+            # linked-device store, but it must never issue an on-demand request
+            # to the primary phone.  A live account showed 94 such requests for
+            # 91 chats in 145 seconds, starving the one conversation the user
+            # was actively trying to scroll.  Phone history is interactive and
+            # is requested only by the open conversation's scroll path.
+            self.fetch_older_messages(
+                jid, anchor, store_only=False, allow_phone_request=False
+            )
 
     def _backfill_empty_chats(self):
         """Re-fetch messages for chats whose history WhatsApp Web had not loaded.
@@ -17277,7 +17326,9 @@ class MainWindow(wx.Frame):
                 count_before = self.db.get_message_count(remote_jid)
             except Exception:
                 count_before = None
-            page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
+            page = self.fetch_older_messages(
+                remote_jid, anchor, store_only=True, allow_phone_request=False
+            )
             if not page:
                 # Waiting for the phone must not require _exhausted_chats just
                 # to drain the deep-backfill queue. Pause this anchor for two
@@ -17310,34 +17361,20 @@ class MainWindow(wx.Frame):
                     anchor_identity,
                     time.monotonic() + self._DEEP_STALL_RETRY_SECONDS,
                 )
-                requested = False
-                older_requested = getattr(self, "_older_requested_chats", None)
-                if not isinstance(older_requested, dict):
-                    older_requested = self._older_requested_chats = {}
-                # Repeatable, not once-per-install. This used to ask only if
-                # the chat had never been asked, and the map is persisted, so
-                # the first request was the only one it would ever get: any
-                # later end-of-IndexedDB sent nothing, and a conversation that
-                # needs several on-demand cycles stayed truncated for good.
-                #
-                # Retry periodically.  The timestamp is a throttle only: a
-                # silent/slow primary must never become durable evidence that
-                # the conversation ended.  Only endOfHistoryTransferType=1 can
-                # make fetch_older_messages() persist exhaustion.
-                asked_at = older_requested.get(remote_jid)
-                due = (asked_at is None
-                       or (time.time() - asked_at) >= self._OLDER_REQUEST_RETRY)
-                if due:
-                    requested = bool(self.request_older_messages(remote_jid))
-                    if requested:
-                        older_requested[remote_jid] = time.time()
-                        self._persist_older_requested()
+                # Deep/background backfill is intentionally passive at the
+                # linked-device boundary.  It may drain pages that are already
+                # in WhatsApp Web's store, but it must never call
+                # request_older_messages().  In a real account that old branch
+                # launched 94 phone-history requests for 91 chats while the
+                # user was waiting on one open conversation, delaying its page
+                # by roughly 145 seconds.  Interactive scroll owns the scarce
+                # on-demand channel and will request this chat when the user
+                # actually opens/scrolls it.
                 logging.warning(
                     "[deep-backfill] Page for %s did not advance the oldest "
-                    "database anchor (%s; %d new row(s)). Pausing this anchor "
-                    "instead of counting duplicates%s.",
+                    "database anchor (%s; %d new row(s)). Pausing passive "
+                    "background paging; no phone-history request was sent.",
                     remote_jid, anchor_identity, added,
-                    " and requesting older history from the phone" if requested else "",
                 )
                 break
             stalled.pop(remote_jid, None)
@@ -17433,8 +17470,16 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[history] Could not persist older_history_requested: %s", exc)
 
-    def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
-        """Fetch older messages from server starting before the oldest_msg.
+    def fetch_older_messages(
+        self, remote_jid, oldest_msg, store_only: bool = False,
+        allow_phone_request: bool = True,
+    ):
+        """Fetch older messages from server starting before ``oldest_msg``.
+
+        ``allow_phone_request`` is deliberately true only for user-initiated
+        scrolling.  Background sync/backfill may consume pages already present
+        in WhatsApp Web's IndexedDB, but must not flood the primary phone with
+        hundreds of HISTORY_SYNC_ON_DEMAND requests.
 
         `store_only` writes the page to SQLite without growing the chat's
         in-memory record list. The scroll-up path needs that list to grow —
@@ -17565,7 +17610,17 @@ class MainWindow(wx.Frame):
                         due = (asked_at is None or
                                (now - asked_at) >= self._OLDER_REQUEST_RETRY)
                         requested = False
-                        if due:
+
+                        if not allow_phone_request:
+                            # Reaching the edge of the linked-device store during
+                            # background sync is not an invitation to ask the phone.
+                            # Leave the chat pending so an explicit user scroll can
+                            # request it with priority.
+                            logging.info(
+                                "[fetch_older_messages] Background paging reached "
+                                "the browser-store edge for %s; deferring the phone "
+                                "request to interactive scroll.", remote_jid)
+                        elif due:
                             requested = bool(self.request_older_messages(remote_jid))
                             # request_older_messages() can learn the explicit end
                             # signal even though its bool return is False.
@@ -17588,14 +17643,14 @@ class MainWindow(wx.Frame):
                                 "[fetch_older_messages] No browser-store history "
                                 "left for %s — on-demand phone history requested; "
                                 "keeping scroll-up re-queryable.", remote_jid)
-                        elif not due:
+                        elif allow_phone_request and not due:
                             waited = max(0.0, now - float(asked_at or now))
                             logging.info(
                                 "[fetch_older_messages] Waiting for on-demand "
                                 "history for %s (%.0fs since request); will retry "
                                 "without ever inferring end from timeout.",
                                 remote_jid, waited)
-                        else:
+                        elif allow_phone_request:
                             temporary = remote_jid in getattr(
                                 self, "_older_request_temporarily_blocked", set())
                             logging.info(
@@ -17686,6 +17741,87 @@ class MainWindow(wx.Frame):
         except Exception as e:
             logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
             return None
+
+    def wait_for_older_messages(
+        self, remote_jid, oldest_msg, timeout: float = 300.0,
+        poll_interval: float = 2.0, retry_request_every: float = 10.0,
+        should_continue=None,
+    ):
+        """Wait for interactive on-demand history to materialise.
+
+        The phone answers asynchronously. Previously the UI cleared its loading
+        flag immediately and required the user to hammer Home until a later call
+        happened to see the new IndexedDB page. Keep one daemon worker polling
+        the browser store instead.
+
+        A request can also be temporarily refused while RECENT history is still
+        finishing. Therefore this loop retries the *interactive* request at a
+        modest cadence; fetch_older_messages() still applies its accepted-request
+        throttle, so an already in-flight request is not duplicated. Background
+        sync never enters this path.
+
+        Returns a message list, ``[]`` for explicit end-of-history, or ``None``
+        when the wait expired, was cancelled, or disconnected.
+        """
+        jid = self._normalize_jid(remote_jid)
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        delay = max(0.5, float(poll_interval))
+        retry_delay = max(delay, float(retry_request_every))
+        next_interactive_retry = time.monotonic() + retry_delay
+        logging.info(
+            "[history-scroll] Waiting up to %.0fs for phone history for %s.",
+            timeout, jid,
+        )
+        while time.monotonic() < deadline:
+            if callable(should_continue):
+                try:
+                    if not should_continue():
+                        logging.info(
+                            "[history-scroll] Cancelled wait for %s because the "
+                            "conversation is no longer active.", jid,
+                        )
+                        return None
+                except Exception:
+                    return None
+            if not getattr(self, "_wa_connected", False) or getattr(
+                self, "offline_mode", False
+            ):
+                return None
+            time.sleep(delay)
+
+            # Most polls are read-only: check whether the asynchronous chunk has
+            # reached WhatsApp Web's store without generating a phone request.
+            page = self.fetch_older_messages(
+                jid, oldest_msg, store_only=False, allow_phone_request=False
+            )
+            if page is not None:
+                logging.info(
+                    "[history-scroll] Phone history became available for %s "
+                    "(%d message(s)).", jid, len(page),
+                )
+                return page
+
+            # If the first request was refused because RECENT sync was not done,
+            # try again from this sole interactive worker. If a request is already
+            # accepted, _older_requested_chats prevents a duplicate until the
+            # normal retry window has elapsed.
+            now = time.monotonic()
+            if now >= next_interactive_retry:
+                next_interactive_retry = now + retry_delay
+                page = self.fetch_older_messages(
+                    jid, oldest_msg, store_only=False, allow_phone_request=True
+                )
+                if page is not None:
+                    logging.info(
+                        "[history-scroll] Interactive retry produced history for "
+                        "%s (%d message(s)).", jid, len(page),
+                    )
+                    return page
+        logging.warning(
+            "[history-scroll] Timed out waiting for phone history for %s; "
+            "the chat remains re-queryable.", jid,
+        )
+        return None
 
     def save_audio_locally(self, msg, audio_content):
         """Encrypt and write a voice message to disk. Returns whether it worked."""
