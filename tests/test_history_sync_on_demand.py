@@ -519,6 +519,20 @@ class TestRoutesArePatched:
         assert "staleForMs >= 75_000" in controller
         assert "req.client.page.reload" in controller
 
+    def test_stale_partial_recent_chunks_are_requested_again(self):
+        """A progress<100 row is never selectable and blocks later chunks."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+        assert "progress < 100" in controller
+        assert "now - startedAt >= 120_000" in controller
+        assert "row.reuploadPending !== true" in controller
+        assert "api.markChunkForReuploadPending(row.msgKey)" in controller
+        assert "Number(result?.reuploadPending || 0) === 0" in controller
+
 
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.

@@ -2310,6 +2310,9 @@ export async function unblockHistorySync(req: Request, res: Response) {
       out.onDemandPending = rows.filter(
         (r: any) => r.syncType === ON_DEMAND
       ).length;
+      out.reuploadPending = rows.filter(
+        (r: any) => r.reuploadPending === true
+      ).length;
       // A stable identity for the pending queue. The captured failure reported
       // restarted=true for many minutes while the exact same RECENT rows stayed
       // parked at notification_stored, so the count alone is not enough to tell
@@ -2318,6 +2321,33 @@ export async function unblockHistorySync(req: Request, res: Response) {
         .map((r: any) => `${r.syncType}:${r.chunkOrder}:${String(r.msgKey)}`)
         .sort()
         .join('|');
+
+      // A partially downloaded RECENT notification is invisible to
+      // fetchNextHistorySyncChunkForProcessing(): it only selects progress=100.
+      // One old partial chunk therefore blocks every later chunk indefinitely.
+      // Ask WhatsApp's own history-sync layer to retransmit only those stale
+      // partial chunks. Complete notifications and fresh downloads are left
+      // untouched.
+      out.reuploadRequested = [];
+      const now = Date.now();
+      for (const row of rows) {
+        const progress = Number(row.progress);
+        const startedAt = Number(row.historySyncStepStartedTs);
+        const isStalePartialRecent =
+          row.syncType === RECENT &&
+          Number.isFinite(progress) &&
+          progress < 100 &&
+          startedAt > 0 &&
+          now - startedAt >= 120_000 &&
+          row.reuploadPending !== true;
+        if (!isStalePartialRecent) continue;
+        await api.markChunkForReuploadPending(row.msgKey);
+        out.reuploadRequested.push({
+          msgKey: String(row.msgKey),
+          chunkOrder: row.chunkOrder,
+          progress,
+        });
+      }
 
       if (out.recentCompleted === true) {
         out.skipped =
@@ -2338,18 +2368,53 @@ export async function unblockHistorySync(req: Request, res: Response) {
 
       if (out.removed.length > 0 || out.unprocessed > 0) {
         try {
-          const boot =
-            (window as any).requireInterop?.('WAWebSyncBootstrap') ??
-            req_('WAWebSyncBootstrap')?.default;
+          const rawBoot = req_('WAWebSyncBootstrap');
+          const interopBoot = (window as any).requireInterop?.(
+            'WAWebSyncBootstrap'
+          );
+          const bootCandidates = [
+            interopBoot,
+            interopBoot?.default,
+            rawBoot,
+            rawBoot?.default,
+          ];
+          const boot = bootCandidates.find(
+            (candidate) =>
+              typeof candidate?.continueProgressiveHistorySyncProcessingV2 ===
+              'function'
+          );
           const source = req_(
             'WAWebHistorySyncNotificationUtils'
           ).HistorySyncScheduleSource;
-          // Fire-and-forget: the job runs for as long as it needs (chunks are
-          // ~1.4MB each), and this response must not wait for it.
-          boot?.continueProgressiveHistorySyncProcessingV2?.(
-            source.ManualRestart
-          );
-          out.restarted = true;
+          if (!boot) {
+            out.restartError =
+              'continueProgressiveHistorySyncProcessingV2 unavailable';
+          } else if (source?.ManualRestart === undefined) {
+            out.restartError = 'ManualRestart schedule source unavailable';
+          } else {
+            // Catch immediate promise rejections without waiting for a healthy
+            // long-running chunk job to finish.
+            const processing = Promise.resolve(
+              boot.continueProgressiveHistorySyncProcessingV2(
+                source.ManualRestart
+              )
+            );
+            const immediate = await Promise.race([
+              processing.then(
+                () => 'completed',
+                (error: any) => `rejected: ${error?.message || String(error)}`
+              ),
+              new Promise<string>((resolve) =>
+                setTimeout(() => resolve('running'), 1500)
+              ),
+            ]);
+            out.bootstrapInvocation = immediate;
+            if (immediate.startsWith('rejected:')) {
+              out.restartError = immediate.slice('rejected: '.length);
+            } else {
+              out.restarted = true;
+            }
+          }
         } catch (e) {
           out.restartError = String(e);
         }
@@ -2368,7 +2433,8 @@ export async function unblockHistorySync(req: Request, res: Response) {
       !result?.error &&
       result?.recentCompleted !== true &&
       Number(result?.recentWaiting || 0) > 0 &&
-      Number(result?.onDemandPending || 0) === 0;
+      Number(result?.onDemandPending || 0) === 0 &&
+      Number(result?.reuploadPending || 0) === 0;
 
     if (blockedOnRecent) {
       const fingerprint = String(result?.queueFingerprint || '');
