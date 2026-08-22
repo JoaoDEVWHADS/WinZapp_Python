@@ -13648,10 +13648,28 @@ class MainWindow(wx.Frame):
     def _normalize_fetched_messages(self, raw_messages, remote_jid: str) -> list:
         """WPPConnect get-messages payload -> WinZapp's canonical message dicts."""
         out = []
+        target_jid = self._normalize_jid(remote_jid)
+        aliases = {target_jid}
+        lid = self._normalize_jid(
+            getattr(self, "_phone_to_lid", {}).get(target_jid, "")
+        )
+        phone = self._normalize_jid(
+            getattr(self, "_lid_to_phone", {}).get(target_jid, "")
+        )
+        aliases.update(jid for jid in (lid, phone) if jid)
         for wm in raw_messages or []:
             if isinstance(wm, dict) and self.ws:
                 try:
                     normalized = self.ws._normalize_wpp_message(wm)
+                    # A private chat may be queried through its @lid alias even
+                    # though WinZapp stores it under the canonical phone JID.
+                    # Canonicalize before the per-chat filter; otherwise valid
+                    # fetched messages are silently discarded.
+                    key = normalized.get("key") or {}
+                    message_jid = self._normalize_jid(key.get("remoteJid", ""))
+                    if target_jid and message_jid in aliases:
+                        key["remoteJid"] = target_jid
+                        normalized["key"] = key
                     prune_message_record(normalized)
                     out.append(normalized)
                 except Exception as e:

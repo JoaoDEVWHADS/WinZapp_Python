@@ -164,10 +164,28 @@ class _RefetchStub:
         self.token = "tok"
         self.ws = self          # _normalize_wpp_message lives here for the test
         self.requested = []
+        self._lid_to_phone = {}
+        self._phone_to_lid = {}
+
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
 
     @staticmethod
     def _normalize_wpp_message(wm):
         return dict(wm)
+
+
+def test_fetched_private_lid_message_is_canonicalized_to_phone_chat():
+    phone = "557791074215@s.whatsapp.net"
+    lid = "83069516128367@lid"
+    stub = _RefetchStub()
+    stub._phone_to_lid[phone] = lid
+    stub._lid_to_phone[lid] = phone
+
+    result = stub._normalize_fetched_messages([
+        {"key": {"id": "video-1002", "remoteJid": lid}, "type": "video"}
+    ], phone)
+
+    assert result[0]["key"]["remoteJid"] == phone
 
 
 def _fake_get(stub, by_count):

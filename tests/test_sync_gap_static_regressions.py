@@ -103,3 +103,12 @@ def test_gauge_visibility_toggles_the_sizer_item_and_forces_repaint():
     assert "self.conversation_panel.Layout()" in src
     assert "self.conversation_panel.Refresh()" in src
     assert "self.conversation_panel.Update()" in src
+
+
+def test_native_gauge_uses_the_same_laid_out_slot_as_media_actions():
+    src = CONV.read_text(encoding="utf-8")
+    assert "self._media_action_slot = wx.Panel(self.conversation_panel)" in src
+    assert "self._media_transfer_gauge = wx.Gauge(\n            self._media_action_slot," in src
+    assert "self._action_open_btn = wx.Button(\n            self._media_action_slot," in src
+    assert "self._action_save_as_btn = wx.Button(\n            self._media_action_slot," in src
+    assert "sizer = gauge.GetContainingSizer()" in src
