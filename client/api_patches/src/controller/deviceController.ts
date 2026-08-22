@@ -2093,14 +2093,37 @@ export async function getMessages(req: Request, res: Response) {
       }),
     });
   } catch (e: any) {
+    // Every internal failure used to answer 401 "Error on open list", so a
+    // chat that does not exist, a page whose WhatsApp layer is not injected
+    // yet, and a genuine crash were indistinguishable from the caller's side
+    // — and 401 claims "unauthenticated", which none of them are. The Python
+    // client retries 401, 404 and 500 alike, so naming them costs nothing in
+    // behaviour and makes both the log and the response say what happened.
+    const detail = String(e?.message || e || '');
+    const notFound = /not found|no such chat|chat not exist/i.test(detail);
+    // The page not being ready is the one case the original message was
+    // actually about.
+    const notReady =
+      /WAPI is not defined|not connected|Session (closed|not active)|Execution context/i.test(
+        detail
+      );
+    const status = notFound ? 404 : notReady ? 401 : 500;
+    const reason = notFound
+      ? 'chat_not_found'
+      : notReady
+        ? 'session_not_ready'
+        : 'internal_error';
     req.logger.error(
-      `Error in getMessages: ${e?.message || e}\nStack: ${e?.stack || ''}`
+      `Error in getMessages (${reason}, HTTP ${status}): ${detail}\nStack: ${
+        e?.stack || ''
+      }`
     );
-    res.status(401).json({
+    res.status(status).json({
       status: 'error',
+      reason,
       response: 'Error on open list',
       error: {
-        message: e?.message || String(e),
+        message: detail,
         stack: e?.stack || '',
       },
     });
