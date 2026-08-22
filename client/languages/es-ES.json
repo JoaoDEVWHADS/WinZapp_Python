@@ -148,6 +148,7 @@
     "all_files": "Todos los archivos",
     "audio_convert_failed": "Error al convertir el audio. FFmpeg no está disponible en este sistema.",
     "downloading_progress": "descargando, {pct}% completado",
+    "uploading_progress": "enviando, {pct}% completado",
     "discard_voice_message": "Descartar mensaje de voz",
     "pause_recording": "Pausar grabación",
     "resume_recording": "Reanudar grabación",

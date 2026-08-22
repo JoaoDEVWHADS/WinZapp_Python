@@ -255,6 +255,11 @@ class ConversationsPanel(wx.Panel):
         # local-id -> WhatsApp-id swap performed after send-file returns.
         self._download_progress: dict = {}
         self._media_upload_progress: dict = {}
+        # Optimistic attachment rows must outlive the currently open chat.
+        # navigate_to_conversation() reloads records from SQLite, but an upload
+        # has no real WhatsApp id (and therefore no DB row) until it finishes.
+        # Keep those rows independently so switching chats cannot erase them.
+        self._outgoing_virtual_messages: dict = {}
 
         # ── Unread separator ────────────────────────────────────────────────
         # Index in _sorted_messages of the unread-separator sentinel, or -1
@@ -1161,6 +1166,26 @@ class ConversationsPanel(wx.Panel):
                     limit += 50
                 db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)
                 db_msgs.reverse()
+                # SQLite cannot contain an attachment that is still uploading:
+                # it has only a local UUID until send-file returns. Merge the
+                # stable optimistic row back after every DB reload. Once the
+                # real message appears in SQLite, retire the optimistic copy.
+                db_ids = {
+                    str((m.get("key") or {}).get("id") or "")
+                    for m in db_msgs if isinstance(m, dict)
+                }
+                for local_id, pending in list(self._outgoing_virtual_messages.items()):
+                    pending_jid = str((pending.get("key") or {}).get("remoteJid") or "")
+                    if pending_jid != _conv_jid:
+                        continue
+                    real_id = str((pending.get("key") or {}).get("id") or "")
+                    if real_id and real_id != local_id and real_id in db_ids:
+                        self._outgoing_virtual_messages.pop(local_id, None)
+                        self._media_upload_progress.pop(local_id, None)
+                        continue
+                    if not any(m.get("_local_id") == local_id for m in db_msgs):
+                        db_msgs.append(pending)
+                db_msgs.sort(key=lambda m: self._extract_timestamp(m) or 0)
                 if "messages" not in conversation:
                     conversation["messages"] = {}
                 conversation["messages"]["messages"] = {
@@ -1262,6 +1287,7 @@ class ConversationsPanel(wx.Panel):
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
+        self._sync_pending_document_gauge()
 
         # Re-show audio controls only if the playing audio message is focused.
         if (self._current_audio_id is not None
@@ -1796,6 +1822,8 @@ class ConversationsPanel(wx.Panel):
                 .setdefault("records", [])
         )
         local_id = virtual_msg.get("_local_id", "")
+        if local_id:
+            self._outgoing_virtual_messages[local_id] = virtual_msg
         if local_id and any(r.get("_local_id") == local_id for r in records):
             return  # already registered
         records.append(virtual_msg)
@@ -1809,6 +1837,42 @@ class ConversationsPanel(wx.Panel):
             current_t //= 1000
         if msg_ts > current_t:
             chat["t"] = msg_ts
+
+    def _update_inactive_virtual_sent(self, local_id: str, real_id: str = None,
+                                      quote_lost: bool = False, send_status=None):
+        """Finalize a pending row even when its conversation is not open."""
+        msg = self._outgoing_virtual_messages.get(local_id)
+        if not isinstance(msg, dict):
+            return
+        msg["_local_pending"] = False
+        msg["_ui_sent"] = True
+        if quote_lost:
+            msg.pop("contextInfo", None)
+        if send_status is not None:
+            try:
+                msg["status"] = int(send_status)
+            except (TypeError, ValueError):
+                pass
+        if real_id and isinstance(real_id, str):
+            msg.setdefault("key", {})["id"] = real_id
+            if msg.get("messageType") in ("documentMessage", "imageMessage", "videoMessage"):
+                try:
+                    media_dir = data_path("media")
+                    old_media = os.path.join(media_dir, f"{local_id}.wzmedia")
+                    new_media = os.path.join(media_dir, f"{real_id}.wzmedia")
+                    if os.path.isfile(old_media) and not os.path.isfile(new_media):
+                        os.rename(old_media, new_media)
+                except Exception as exc:
+                    logging.warning("[_update_inactive_virtual_sent] cache rename failed: %s", exc)
+        if msg.get("messageType") != "documentMessage":
+            self._media_upload_progress.pop(local_id, None)
+        else:
+            try:
+                if send_status is not None and int(send_status) >= 2:
+                    msg["_awaiting_sent_ack"] = False
+                    self._media_upload_progress.pop(local_id, None)
+            except (TypeError, ValueError):
+                pass
 
     def _mark_message_sent(self, local_id: str, real_id: str = None, quote_lost: bool = False, send_status=None):
         """
@@ -1844,8 +1908,10 @@ class ConversationsPanel(wx.Panel):
             if len(_played) > 500:
                 _played.clear()
 
+        matched_visible_row = False
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
+                matched_visible_row = True
                 _status_int = None
                 if send_status is not None:
                     try:
@@ -1944,6 +2010,9 @@ class ConversationsPanel(wx.Panel):
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 self._show_document_actions_if_ready(i, msg)
                 break
+        if not matched_visible_row:
+            self._update_inactive_virtual_sent(
+                local_id, real_id, quote_lost, send_status)
         # A document may deliberately remain at 100% after send-file returns
         # if that response did not yet carry SENT. Keep (or retire) the gauge
         # according to the outstanding ACK latch, not according to HTTP return.
@@ -1954,8 +2023,10 @@ class ConversationsPanel(wx.Panel):
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
+        matched = False
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
+                matched = True
                 msg["_local_pending"] = False
                 msg["_send_failed"]   = True
                 msg.pop("_awaiting_sent_ack", None)
@@ -1964,6 +2035,13 @@ class ConversationsPanel(wx.Panel):
                 if self.conversation:
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
+        if not matched:
+            msg = self._outgoing_virtual_messages.get(local_id)
+            if isinstance(msg, dict):
+                msg["_local_pending"] = False
+                msg["_send_failed"] = True
+                msg.pop("_awaiting_sent_ack", None)
+                self._media_upload_progress.pop(local_id, None)
         self._sync_pending_document_gauge()
 
     def _mark_message_unconfirmed(self, local_id: str):
@@ -1975,8 +2053,10 @@ class ConversationsPanel(wx.Panel):
         as "sending" forever before, which reads as success once the spinner
         stops meaning anything.
         """
+        matched = False
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
+                matched = True
                 msg["_local_pending"]     = False
                 msg["_send_unconfirmed"]  = True
                 if msg.get("messageType") != "documentMessage":
@@ -1989,6 +2069,13 @@ class ConversationsPanel(wx.Panel):
                 if self.conversation:
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
+        if not matched:
+            msg = self._outgoing_virtual_messages.get(local_id)
+            if isinstance(msg, dict):
+                msg["_local_pending"] = False
+                msg["_send_unconfirmed"] = True
+                if msg.get("messageType") != "documentMessage":
+                    self._media_upload_progress.pop(local_id, None)
         self._sync_pending_document_gauge()
 
     def _show_document_actions_if_ready(self, index: int, msg: dict):
@@ -7537,6 +7624,15 @@ class ConversationsPanel(wx.Panel):
             if index is not None and total is not None and total > 0:
                 pieces.append(f", {index + 1} {i18n.t('of')} {total}")
 
+        local_id = str(msg.get("_local_id") or "")
+        if local_id and (msg.get("_local_pending") or msg.get("_awaiting_sent_ack")):
+            pct = max(0, min(100, round(
+                self._media_upload_progress.get(local_id, 0.0) * 100
+            )))
+            pieces.append(
+                f", {i18n.t('uploading_progress').format(pct=pct)}"
+            )
+
         line = " ".join(pieces)
         is_selected = bool(msg_id) and msg_id in getattr(self, "selected_messages", ())
         position = self.main_window.settings.get("user_interface", {}).get(
@@ -7569,11 +7665,18 @@ class ConversationsPanel(wx.Panel):
         previous = self._media_upload_progress.get(upload_id, 0.0)
         progress = max(previous, progress)
         self._media_upload_progress[upload_id] = progress
-        if any(msg.get("_local_id") == upload_id for msg in self._sorted_messages):
+        for index, msg in enumerate(self._sorted_messages):
+            if msg.get("_local_id") != upload_id:
+                continue
             self._update_media_transfer_gauge(progress)
+            # Also repaint the message row with a textual percentage. Native
+            # gauges are not consistently announced by Windows screen readers.
+            self.messages_list.SetItemText(index, self._render_message_line(msg))
+            self.messages_list.RefreshItem(index)
+            break
 
     def _sync_pending_document_gauge(self, preferred_local_id: str = ""):
-        """Keep the transfer gauge tied to documents waiting for SENT ACK.
+        """Restore the gauge for any active upload and document SENT wait.
 
         Reaching 100% is intentionally *not* a completion signal: it means the
         bytes have reached the WPPConnect side. WhatsApp may still be uploading
@@ -7582,8 +7685,12 @@ class ConversationsPanel(wx.Panel):
         """
         waiting = [
             msg for msg in self._sorted_messages
-            if msg.get("messageType") == "documentMessage"
-            and msg.get("_awaiting_sent_ack")
+            if msg.get("_local_id") and (
+                msg.get("_local_pending") or (
+                    msg.get("messageType") == "documentMessage"
+                    and msg.get("_awaiting_sent_ack")
+                )
+            )
         ]
         if not waiting:
             self._hide_media_transfer_gauge()
@@ -7636,7 +7743,9 @@ class ConversationsPanel(wx.Panel):
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge is None:
             return
-        gauge.SetValue(0)
+        # One visible step makes the control perceptible while the background
+        # cache/transcode stage runs, before the HTTP stream reports byte 1.
+        gauge.SetValue(1)
         self._set_media_transfer_gauge_visible(True)
 
     def _update_media_transfer_gauge(self, progress: float):
@@ -10835,6 +10944,9 @@ class ConversationsPanel(wx.Panel):
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
+        # Attachment-panel teardown performs its own layout pass. Reassert the
+        # transfer UI afterwards so that pass cannot swallow the new gauge.
+        self._sync_pending_document_gauge()
         self.main_window._schedule_set_chats()
         self.message_field.SetFocus()
 
