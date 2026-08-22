@@ -224,12 +224,17 @@ async function restoreStatusSender(page: any, logger: any, session: string) {
 
           sendModule.encryptAndSendMsg = async function (
             sendMsgRecord: any,
-            metricsReporter: any
+            metricsReporter: any,
+            ...additionalArgs: any[]
           ) {
             if (
               sendMsgRecord?.data?.to?.toString?.() !== 'status@broadcast'
             ) {
-              return original.apply(this, arguments as any);
+              return original.apply(this, [
+                sendMsgRecord,
+                metricsReporter,
+                ...additionalArgs,
+              ]);
             }
 
             await sendStatus({
@@ -857,36 +862,36 @@ export default class CreateSessionUtil {
               try {
               const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
               if (!chatId) return;
-              // The count this chat held BEFORE the change, forwarded so the
-              // client can tell a real read apart from a meaningless zero.
-              // A chat merely being loaded into the Store reports unreadCount=0
-              // with nothing behind it, and is indistinguishable from "the user
-              // just read this chat on their phone" unless you know whether the
-              // count actually fell from something.
-              //
-              // Measured against a live session: the field really is a plain
-              // number, matching wa-js's own typing. Three consecutive messages
-              // in one group came through as unreadCount 1/2/3 with
-              // previousUnreadCount 0/1/2 — tracking exactly one step behind.
-              // The suspicion it might be Backbone's options object (wa-js
-              // emits it straight from the Store's `change:unreadCount`
-              // callback, whose third argument is options in every other
-              // handler of that shape) did not hold. The `.previous()` fallback
-              // stays anyway: it costs nothing, and it is what keeps this
-              // working if a future wa-js changes the payload — silently, since
-              // nothing else here would notice. Neither being a number sends
-              // null, and the client then keeps its own conservative count.
-              // Deriving `previous` must never be able to suppress the event
-              // itself: the unread count is the payload that matters and the
-              // previous value is an extra, so it is computed defensively and
-              // the emit happens regardless. Reading `.previous` off a Store
-              // model is a property access on foreign, minified code that can
-              // throw or be a getter with side effects, and a throw anywhere in
-              // this callback silently takes the whole listener down — the
-              // client then stops being told about unread counts at all, with
-              // nothing in any log to say so. Measured, not hypothetical: an
-              // earlier version of this block computed `previous` inline and
-              // the chats-update stream stopped dead.
+                  // The count this chat held BEFORE the change, forwarded so the
+                  // client can tell a real read apart from a meaningless zero.
+                  // A chat merely being loaded into the Store reports unreadCount=0
+                  // with nothing behind it, and is indistinguishable from "the user
+                  // just read this chat on their phone" unless you know whether the
+                  // count actually fell from something.
+                  //
+                  // Measured against a live session: the field really is a plain
+                  // number, matching wa-js's own typing. Three consecutive messages
+                  // in one group came through as unreadCount 1/2/3 with
+                  // previousUnreadCount 0/1/2 — tracking exactly one step behind.
+                  // The suspicion it might be Backbone's options object (wa-js
+                  // emits it straight from the Store's `change:unreadCount`
+                  // callback, whose third argument is options in every other
+                  // handler of that shape) did not hold. The `.previous()` fallback
+                  // stays anyway: it costs nothing, and it is what keeps this
+                  // working if a future wa-js changes the payload — silently, since
+                  // nothing else here would notice. Neither being a number sends
+                  // null, and the client then keeps its own conservative count.
+                  // Deriving `previous` must never be able to suppress the event
+                  // itself: the unread count is the payload that matters and the
+                  // previous value is an extra, so it is computed defensively and
+                  // the emit happens regardless. Reading `.previous` off a Store
+                  // model is a property access on foreign, minified code that can
+                  // throw or be a getter with side effects, and a throw anywhere in
+                  // this callback silently takes the whole listener down — the
+                  // client then stops being told about unread counts at all, with
+                  // nothing in any log to say so. Measured, not hypothetical: an
+                  // earlier version of this block computed `previous` inline and
+                  // the chats-update stream stopped dead.
               let previous: any = null;
               try {
                 const raw = evt?.previousUnreadCount;
@@ -994,7 +999,9 @@ export default class CreateSessionUtil {
           callId: string,
           isVideo: boolean,
           isGroup: boolean,
-          groupJid: string
+          groupJid: string,
+          callTimestamp: number,
+          observedAt: number
         ) => {
           req.io.emit('incomingcall', {
             session: client.session,
@@ -1006,6 +1013,8 @@ export default class CreateSessionUtil {
               isVideo: isVideo,
               isGroup: isGroup,
               groupJid: groupJid,
+              timestamp: callTimestamp,
+              observedAt: observedAt,
             },
           });
         }
@@ -1017,8 +1026,12 @@ export default class CreateSessionUtil {
     }
 
     const installListener = () => {
+      // CallStore is hydrated from persisted WhatsApp Web state at startup.
+      // Its `add` event therefore does not necessarily mean "a call started
+      // now". Refresh the boundary on every page load and reject older calls.
+      const listenerStartedAt = Date.now();
       client.page
-        .evaluate(() => {
+        .evaluate((listenerStartedAt: number) => {
           const WPP = (window as any).WPP;
           if (
             !WPP ||
@@ -1033,6 +1046,8 @@ export default class CreateSessionUtil {
           // live in CallStore, and some WhatsApp builds mutate them without
           // firing the expected Backbone event, so retain and poll by call id.
           const trackedCalls = new Map<string, any>();
+          const ignoredHistoricalCallIds = new Set<string>();
+          const CALL_START_GRACE_MS = 5000;
           const stores = [
             WPP?.whatsapp?.CallStore,
             WPP?.whatsapp?.CallCollection,
@@ -1072,6 +1087,48 @@ export default class CreateSessionUtil {
             };
             return numericStates[raw] || raw;
           };
+          const callTimestampOf = (call: any) => {
+            const raw =
+              call?.offerTime ??
+              call?.timestamp ??
+              call?.t ??
+              call?.startTime ??
+              call?.createdAt ??
+              call?.get?.('offerTime') ??
+              call?.get?.('timestamp') ??
+              call?.get?.('t') ??
+              0;
+            const numeric = Number(raw);
+            if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+            if (numeric >= 1e15) return Math.floor(numeric / 1000);
+            if (numeric >= 1e12) return Math.floor(numeric);
+            if (numeric >= 1e9) return Math.floor(numeric * 1000);
+            return 0;
+          };
+          const isHistoricalIncomingCall = (call: any, source: string) => {
+            const id = callIdOf(call);
+            if (id && ignoredHistoricalCallIds.has(id)) return true;
+            const timestamp = callTimestampOf(call);
+            const receivedWhileOffline =
+              call?.offerReceivedWhileOffline === true ||
+              call?.get?.('offerReceivedWhileOffline') === true;
+            const predatesListener =
+              timestamp > 0 &&
+              timestamp < listenerStartedAt - CALL_START_GRACE_MS;
+            // A timestamp-less Store add is ambiguous because this collection
+            // also hydrates persisted models. Fail closed; the public event
+            // still covers a genuine live call when WA-JS provides it.
+            const timestampLessStoreEvent = !timestamp && source === 'store';
+            if (
+              receivedWhileOffline ||
+              predatesListener ||
+              timestampLessStoreEvent
+            ) {
+              if (id) ignoredHistoricalCallIds.add(id);
+              return true;
+            }
+            return false;
+          };
           const emitCall = (event: string, call: any, state = '') => {
             const peerJid =
               call?.peerJid?._serialized ||
@@ -1089,12 +1146,14 @@ export default class CreateSessionUtil {
               callIdOf(call),
               !!call?.isVideo || !!call?.isVideoCall,
               !!call?.isGroup || !!call?.isGroupCall,
-              groupJidOf(call)
+              groupJidOf(call),
+              Math.floor(callTimestampOf(call) / 1000),
+              Math.floor(Date.now() / 1000)
             );
           };
           const rememberCall = (call: any) => {
             const id = callIdOf(call);
-            if (!id) return;
+            if (!id || ignoredHistoricalCallIds.has(id)) return;
             const previous = trackedCalls.get(id) || {};
             trackedCalls.set(id, {
               call: call || previous.call,
@@ -1118,15 +1177,21 @@ export default class CreateSessionUtil {
             }
             return null;
           };
-          const emitIncomingOffer = (call: any, attempt = 0) => {
+          const emitIncomingOffer = (
+            call: any,
+            attempt = 0,
+            source = 'wpp'
+          ) => {
             const id = callIdOf(call);
             const richCall = findCall(id) || call;
+            if (isHistoricalIncomingCall(richCall, source)) return;
             const isGroup = !!richCall?.isGroup || !!richCall?.isGroupCall;
             if (isGroup && !groupJidOf(richCall) && attempt < 10) {
               window.setTimeout(() => {
                 // A terminal Store event removes this id. Do not resurrect a
                 // call that ended while we were waiting for group metadata.
-                if (trackedCalls.has(id)) emitIncomingOffer(call, attempt + 1);
+                if (trackedCalls.has(id))
+                  emitIncomingOffer(call, attempt + 1, source);
               }, 100);
               return;
             }
@@ -1140,13 +1205,14 @@ export default class CreateSessionUtil {
           try {
             WPP.on('call.incoming_call', (call: any) => {
               try {
+                if (isHistoricalIncomingCall(call, 'wpp')) return;
                 rememberCall(call);
                 // The public WA-JS event can be a reduced object: it says the
                 // call is a group call but omits groupJid. CallStore's model
                 // contains the group id, so briefly wait for it before
                 // announcing. The direct Store listener may win this race;
                 // Python deduplicates both events by call id.
-                emitIncomingOffer(call);
+                emitIncomingOffer(call, 0, 'wpp');
               } catch (e) {
                 // Never let one event kill the listener
               }
@@ -1172,6 +1238,8 @@ export default class CreateSessionUtil {
                       !call?.outgoing;
                     if (!isIncoming) return;
 
+                    if (isHistoricalIncomingCall(call, 'store')) return;
+
                     const initialState = String(call?.getState?.() || 'INCOMING_RING');
                     emitCall('offer', call, initialState);
                     rememberCall(call);
@@ -1181,6 +1249,14 @@ export default class CreateSessionUtil {
                 });
                 const onStateChange = (call: any) => {
                   try {
+                    const id = callIdOf(call);
+                    if (ignoredHistoricalCallIds.has(id)) {
+                      const ignoredState = callStateOf(call);
+                      if (ignoredState && ignoredState !== 'INCOMING_RING') {
+                        ignoredHistoricalCallIds.delete(id);
+                      }
+                      return;
+                    }
                     const nextState = callStateOf(call);
                     if (!nextState) return;
                     emitCall('state', call, nextState);
@@ -1196,6 +1272,8 @@ export default class CreateSessionUtil {
                 store.on('change', onStateChange);
                 store.on('remove', (call: any) => {
                   try {
+                    const id = callIdOf(call);
+                    if (ignoredHistoricalCallIds.delete(id)) return;
                     emitCall('ended', call, 'ENDED');
                     trackedCalls.delete(callIdOf(call));
                   } catch (e) {
@@ -1244,7 +1322,7 @@ export default class CreateSessionUtil {
               }
             }
           }, 500);
-        })
+        }, listenerStartedAt)
         .catch((e: any) =>
           req.logger.warn(
             `[onIncomingCallDirect] install failed: ${e?.message || e}`
@@ -1309,6 +1387,8 @@ export default class CreateSessionUtil {
   }
 
   async listenMessages(client: WhatsAppServer, req: Request) {
+    const incomingCallListenerStartedAt = Date.now();
+
     await client.onMessage(async (message: any) => {
       eventEmitter.emit(`mensagem-${client.session}`, client, message);
       callWebHook(client, req, 'onmessage', message);
@@ -1362,7 +1442,33 @@ export default class CreateSessionUtil {
     });
 
     await client.onIncomingCall(async (call) => {
-      req.io.emit('incomingcall', { ...call, session: client.session });
+      const rawOfferTime = Number((call as any)?.offerTime || 0);
+      const offerTimeMs =
+        rawOfferTime >= 1e15
+          ? Math.floor(rawOfferTime / 1000)
+          : rawOfferTime >= 1e12
+          ? Math.floor(rawOfferTime)
+          : rawOfferTime >= 1e9
+          ? Math.floor(rawOfferTime * 1000)
+          : 0;
+      const receivedWhileOffline =
+        (call as any)?.offerReceivedWhileOffline === true;
+      const predatesListener =
+        offerTimeMs > 0 && offerTimeMs < incomingCallListenerStartedAt - 5000;
+
+      if (receivedWhileOffline || predatesListener) {
+        req.logger.info(
+          '[incomingcall] ignored historical offer from WhatsApp state hydration'
+        );
+        return;
+      }
+
+      req.io.emit('incomingcall', {
+        ...call,
+        session: client.session,
+        timestamp: offerTimeMs ? Math.floor(offerTimeMs / 1000) : 0,
+        observedAt: Math.floor(Date.now() / 1000),
+      });
       callWebHook(client, req, 'incomingcall', call);
     });
   }

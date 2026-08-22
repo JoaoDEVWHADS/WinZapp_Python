@@ -17,6 +17,7 @@ so the method is bound to a plain object — the same pattern the other main.py
 tests use.
 """
 
+import threading
 import types
 
 import pytest
@@ -65,6 +66,11 @@ class _Stub:
         self._last_chat_fetch_disconnected = False
         self._last_chat_fetch_error = None
         self._chats_awaiting_messages = set()
+        # The backfill queue helpers below are bound for real, and they read
+        # both of these plus the lock. __getattr__ would hand back a lambda,
+        # which is neither a dict nor a context manager.
+        self._partial_history_counts = {}
+        self._backfill_state_lock = threading.RLock()
         self._lid_to_phone = {}
         self._history_still_landing = False
         self.unnamed = []
@@ -110,6 +116,15 @@ class _Stub:
     def sync_remote_chats(self):
         self.message_sync_ran += 1
 
+    def _chats_needing_deep_history(self):
+        # Chats holding a full page whose older history still has to be
+        # walked. _run_sync() asks about these when deciding whether to start
+        # the backfill thread, so __getattr__'s lambda (which answers None)
+        # would blow up on len(). Default: nothing owed.
+        # __dict__ and not getattr(): this stub's __getattr__ answers every
+        # unknown name with a lambda, so a default would never be reached.
+        return list(self.__dict__.get("_deep_pending", ()))
+
     def _pending_name_resolution(self):
         return list(self.unnamed)
 
@@ -143,6 +158,12 @@ class _Stub:
 def _make(counts, wa_web, local_chats=0, high_water=0):
     stub = _Stub(counts, wa_web, local_chats, high_water)
     for name in ("_run_sync", "_should_abort_sync_for_offline",
+                 # Bound for real rather than left to __getattr__: _run_sync()
+                 # counts the backfill queue through them, and a lambda
+                 # returning None used to force a `is None` fallback into
+                 # main.py that existed for no other reason than this stub.
+                 "_collapse_and_list_backfill_pending", "_backfill_state_guard",
+                 "_canonical_backfill_jid",
                  "_announce_sync_events_enabled", "count_contradicts_page",
                  "store_looks_broken", "snapshot_matches_page_store",
                  "_attempts_needed_to_confirm",
@@ -340,9 +361,31 @@ class TestTheSyncDoesNotBlockOnNameResolution:
         assert stub.backfill_started is True
 
     def test_nothing_pending_starts_nothing(self):
+        """Nothing owed at all — including no deeper walk."""
         stub = _make([931, 931], wa_web=937, local_chats=931)
         stub._chats_awaiting_messages = set()
         stub.unnamed = []
+        stub._deep_pending = []
         stub._run_sync()
         assert stub.backfill_started is False
         assert stub.lid_batches == []
+
+    def test_a_chat_owing_a_deeper_walk_is_enough_to_start_the_backfill(self):
+        """The deep walk lives inside the backfill thread, and the condition
+        that creates that thread never asked whether any chat still owed one.
+
+        This is the steady state of a synced account: every chat holds its full
+        page, every name resolves, nothing is still landing — so all three of
+        the old reasons are zero and the sync ended announcing success with the
+        older history untouched. A restart lands in the same state, so the walk
+        could not resume either: the SQLite anchor survived and nothing ever
+        came back for it.
+        """
+        stub = _make([931, 931], wa_web=937, local_chats=931)
+        stub._chats_awaiting_messages = set()
+        stub.unnamed = []
+        stub._deep_pending = ["120363@g.us"]
+
+        stub._run_sync()
+
+        assert stub.backfill_started is True

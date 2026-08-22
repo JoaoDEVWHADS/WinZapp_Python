@@ -4,7 +4,9 @@ import time
 import socketio
 import wx
 import requests
+from core.api_client import api_get, api_post
 from core.i18n import I18n
+from core.sync_contracts import observe_payload
 from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 # ── Message delivery status ──────────────────────────────────────────────────
@@ -428,7 +430,7 @@ class WebSocketClient:
         if old_token:
             def _close():
                 try:
-                    requests.post(
+                    api_post(
                         f"{mw.wpp_server}:{mw.wpp_port}/api/{old_token}/close-session",
                         headers={"Authorization": f"Bearer {old_token}", "Content-Type": "application/json"},
                         timeout=5,
@@ -1196,7 +1198,7 @@ class WebSocketClient:
                 "Authorization": f"Bearer {self.main_window.token}",
                 "Content-Type": "application/json",
             }
-            res = requests.get(url, headers=headers, timeout=5)
+            res = api_get(url, headers=headers, timeout=5)
             if res.status_code in (200, 201):
                 res_data = res.json()
                 resp = res_data.get("response", res_data)
@@ -1246,7 +1248,7 @@ class WebSocketClient:
         ]
         for limit_type, value in limits:
             try:
-                requests.post(
+                api_post(
                     url,
                     json={"type": limit_type, "value": value},
                     headers=headers,
@@ -1374,6 +1376,11 @@ class WebSocketClient:
             if not wpp_msg:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
+            # When this message reached WinZapp, so on_new_message() can say how
+            # much of the delay before the screen reader speaks was its own.
+            # Kept out of the stored record by prune_message_record()'s caller
+            # popping it at the notification point.
+            normalized["_arrived_at"] = time.monotonic()
             self.on_messages_upsert({"data": normalized})
         except Exception:
             # A message is dropped entirely if this raises — log the full
@@ -1451,12 +1458,42 @@ class WebSocketClient:
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_reaction error")
 
+    @staticmethod
+    def _call_timestamp_seconds(value):
+        """Normalize WhatsApp call timestamps to epoch seconds.
+
+        The public IncomingCall contract uses seconds, but internal CallStore
+        models and custom bridges may expose milliseconds or microseconds.
+        Invalid/relative values intentionally become zero so they cannot be
+        mistaken for a trustworthy session-age signal.
+        """
+        if isinstance(value, bool):
+            return 0
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if numeric >= 1_000_000_000_000_000:
+            numeric /= 1_000_000
+        elif numeric >= 1_000_000_000_000:
+            numeric /= 1_000
+        if numeric < 1_000_000_000:
+            return 0
+        return int(numeric)
+
     def on_wpp_incoming_call(self, data):
         """Forward WPPConnect call lifecycle events to the wx main thread."""
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             payload = data.get("data") if isinstance(data.get("data"), dict) else data
+            call_timestamp = self._call_timestamp_seconds(
+                payload.get("timestamp")
+                or payload.get("offerTime")
+                or payload.get("t")
+                or payload.get("startTime")
+            )
+            observed_at = self._call_timestamp_seconds(payload.get("observedAt"))
             normalized = {
                 "event": str(payload.get("event") or payload.get("status") or "offer"),
                 "state": str(payload.get("state") or ""),
@@ -1467,6 +1504,11 @@ class WebSocketClient:
                 "groupJid": self._clean_jid(payload.get("groupJid")),
                 "isVideo": bool(payload.get("isVideo", False)),
                 "isGroup": bool(payload.get("isGroup", False)),
+                "timestamp": call_timestamp,
+                "observedAt": observed_at,
+                "receivedWhileOffline": bool(
+                    payload.get("offerReceivedWhileOffline", False)
+                ),
             }
             if not normalized["id"] and not normalized["peerJid"]:
                 logging.warning("[WebSocketClient] incomingcall without id or peer: %r", data)
@@ -1518,6 +1560,13 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_ack error")
 
     def _normalize_wpp_message(self, wpp_msg):
+        # Everything below reads this payload with .get()/defaults, which is
+        # the only way to survive WhatsApp Web — but it also means a field that
+        # stops arriving looks exactly like one that was never set. Checked
+        # here, on the way in, so the log names the field instead of leaving a
+        # symptom to be diagnosed three layers away. Observation only: the
+        # payload is returned untouched and nothing below changes behaviour.
+        observe_payload([wpp_msg], "get-messages", where="wpp message")
         msg_id = wpp_msg.get("id")
         if isinstance(msg_id, dict):
             msg_id = msg_id.get("_serialized", "")

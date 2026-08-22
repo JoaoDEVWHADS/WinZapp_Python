@@ -12,6 +12,7 @@ from ui.accessible import (
     AccessibleRecordVoiceMessage, AccessibleDiscardVoiceMessage, AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
 )
+from core.api_client import api_get, api_post, redact_api_url
 from core.utils import format_number, get_downloads_folder, normalize_line_separators
 from core.video_player import VideoPlayer
 from core.audio_devices import (
@@ -984,7 +985,7 @@ class StatusPanel(wx.Panel):
         try:
             url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/statuses"
             headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
-            resp = requests.get(url, headers=headers, timeout=5)
+            resp = api_get(url, headers=headers, timeout=15)
             if resp.status_code not in (200, 201):
                 self._last_status_api_ok = False
                 return [], []
@@ -1990,6 +1991,8 @@ class StatusPanel(wx.Panel):
             # to work.
             result = mw.send_text_message(poster_jid, text)
         except Exception:
+            logging.exception(
+                "[status-reply] send_text_message raised for %s", poster_jid)
             result = None
         # send_text_message() returns a message-id string or True on success,
         # or a dict ({"ok": False, ...}) on a definite failure.
@@ -1997,6 +2000,18 @@ class StatusPanel(wx.Panel):
         if ok:
             wx.CallAfter(self._on_status_reply_sent)
         else:
+            # The dialog can only say "it failed"; this is the only place that
+            # can say WHY. Reported live — "ao teclar enter deu Não foi
+            # possível enviar a resposta ao status", and the same text sent
+            # fine from the button seconds later — and the log held nothing at
+            # all about it, so there was no way to tell a rejected JID from a
+            # dropped connection from a server-side refusal. Enter and the
+            # button are the same handler (see the two Bind calls in
+            # _build_viewer), so the difference was never the key pressed.
+            logging.warning(
+                "[status-reply] failed for poster=%s (result=%r, text_len=%d)",
+                poster_jid, result, len(text),
+            )
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_reply_error"),
@@ -2416,7 +2431,7 @@ class StatusPanel(wx.Panel):
         headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {"base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}"}
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             response_body = None
             try:
@@ -2469,7 +2484,7 @@ class StatusPanel(wx.Panel):
             }
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             logging.info(
                 "[status_post] POST %s -> HTTP %s, body=%.300s",
@@ -2490,7 +2505,8 @@ class StatusPanel(wx.Panel):
                     pass
         except Exception as exc:
             ok = False
-            logging.warning("[status_post] POST failed for %s: %s", url, exc)
+            logging.warning("[status_post] POST failed for %s: %s",
+                            redact_api_url(url), exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
         else:
@@ -2648,7 +2664,7 @@ class StatusPanel(wx.Panel):
             "caption": caption,
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             response_body = None
             try:

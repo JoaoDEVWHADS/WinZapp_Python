@@ -628,8 +628,16 @@ class NotificationManager:
                 break
             if dropped:
                 print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
-            title, body, remote_jid, msg_key = item
+            title, body, remote_jid, msg_key, queued_at = item
+            waited = time.monotonic() - queued_at
+            started = time.monotonic()
             self._dispatch(title, body, remote_jid, msg_key)
+            logging.info(
+                "[notif-timing] %s: %.0fms queued + %.0fms dispatch = %.0fms "
+                "from send() to on screen.",
+                remote_jid, waited * 1000, (time.monotonic() - started) * 1000,
+                (time.monotonic() - queued_at) * 1000,
+            )
 
     def _coalesce_pending(self, item):
         """Collapse everything already queued down to the newest notification.
@@ -964,7 +972,13 @@ class NotificationManager:
         toast's "Reagir" action react to that specific message instead of
         needing to look one up later.
         """
-        self._queue.put((title, body, remote_jid, msg_key))
+        # Stamped here so _dispatch() can say how long the toast waited behind
+        # the worker versus how long Windows itself took to put it on screen.
+        # Reported live: "ao chegar uma mensagem demora uns 3 segundos pra
+        # ler". Nothing on this path measured anything, so there was no way to
+        # tell our own queue from the Windows notification pipeline from the
+        # screen reader's own queue — three suspects, no evidence.
+        self._queue.put((title, body, remote_jid, msg_key, time.monotonic()))
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 

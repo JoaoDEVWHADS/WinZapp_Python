@@ -11,6 +11,7 @@
         "notifications_enabled": true,
         "keep_muted_chats_silent_when_open": true,
         "updates_enabled": true,
+        "alpha_updates_enabled": false,
         "noise_reduction_enabled": false,
         "first_run": true,
         "autostart": false,
@@ -22,6 +23,10 @@
     },
     "status": {
         "messages_set_completed": false
+    },
+    "calls": {
+        "alerts_enabled": true,
+        "popup_enabled": true
     },
     "user_interface": {
         "messages_page_size": 200,
