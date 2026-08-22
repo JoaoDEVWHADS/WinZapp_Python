@@ -4227,6 +4227,10 @@ class MainWindow(wx.Frame):
         Adds the message to local storage, updates the UI, and sends a
         notification if appropriate.
         """
+        # Popped here, not at the notification point: a message that never
+        # notifies (our own echo, a muted chat, a system event) would otherwise
+        # carry this straight into the stored record.
+        arrived_at = msg.pop("_arrived_at", None)
         # See _live_events_ready() for why this must be checked before
         # touching self.chats/self.db at all. Safe to drop unconditionally:
         # the sync that is either about to start or already running fetches
@@ -4852,6 +4856,16 @@ class MainWindow(wx.Frame):
         # worker thread got around to actually dispatching it. Reported
         # live as the toast's "✉️ N não lidas" line reading much lower
         # than what Alt+3 announced moments later in the same chat.
+        if arrived_at is not None:
+            # Everything WinZapp does between the socket event and handing the
+            # toast to Windows. Anything beyond this is the OS notification
+            # pipeline and the screen reader's own queue, which is exactly the
+            # split the "demora 3 segundos pra ler" report needed and nobody
+            # could make: no timestamp existed anywhere on this path.
+            logging.info(
+                "[notif-timing] %s: %.0fms from arrival to enqueue.",
+                remote_jid, (time.monotonic() - arrived_at) * 1000,
+            )
         self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
 
     def _learn_sender_name(self, msg: dict) -> bool:

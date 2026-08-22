@@ -1374,6 +1374,11 @@ class WebSocketClient:
             if not wpp_msg:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
+            # When this message reached WinZapp, so on_new_message() can say how
+            # much of the delay before the screen reader speaks was its own.
+            # Kept out of the stored record by prune_message_record()'s caller
+            # popping it at the notification point.
+            normalized["_arrived_at"] = time.monotonic()
             self.on_messages_upsert({"data": normalized})
         except Exception:
             # A message is dropped entirely if this raises — log the full
