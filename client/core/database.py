@@ -675,6 +675,22 @@ class DatabaseManager:
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
 
+    async def get_message(self, remote_jid: str, message_id: str) -> dict | None:
+        """Return one message by its WhatsApp id, including legacy JID aliases."""
+        if not remote_jid or not message_id:
+            return None
+        conn = await self._ensure_conn()
+        jids = self._jid_variants(remote_jid)
+        placeholders = ",".join("?" for _ in jids)
+        cursor = await conn.execute(
+            f"""SELECT message_json FROM messages
+                WHERE remote_jid IN ({placeholders}) AND message_id = ?
+                LIMIT 1""",
+            (*jids, message_id),
+        )
+        row = await cursor.fetchone()
+        return self._decrypt_json(row["message_json"]) if row else None
+
     def _build_message_values(self, remote_jid: str, msg: dict) -> tuple | None:
         """Compute the 8-tuple bound to the messages upsert, shared by every
         message-import path (insert_message/insert_messages_batch/
