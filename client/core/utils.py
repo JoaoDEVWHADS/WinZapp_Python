@@ -219,6 +219,10 @@ DEFAULT_SETTINGS = {
     "status": {
         "messages_set_completed": False
     },
+    "calls": {
+        "alerts_enabled": True,
+        "popup_enabled": True
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,

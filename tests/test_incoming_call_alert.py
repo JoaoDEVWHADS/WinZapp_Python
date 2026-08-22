@@ -20,6 +20,36 @@ class _Sound:
         self.stop_calls += 1
 
 
+class _Dialog:
+    def __init__(self):
+        self.closed = False
+
+    def close_from_call_lifecycle(self):
+        self.closed = True
+
+
+class _Bar:
+    def __init__(self):
+        self.shown = False
+
+    def Show(self):
+        self.shown = True
+
+    def Hide(self):
+        self.shown = False
+
+    def IsShown(self):
+        return self.shown
+
+
+class _Label:
+    def __init__(self):
+        self.text = ""
+
+    def SetLabel(self, text):
+        self.text = text
+
+
 class _I18n:
     def t(self, key):
         return {
@@ -36,17 +66,30 @@ class _MainStub:
     _group_name_from_chat_dict = staticmethod(MainWindow._group_name_from_chat_dict)
     on_incoming_call_event = MainWindow.on_incoming_call_event
     _expire_incoming_call_alert = MainWindow._expire_incoming_call_alert
+    stop_incoming_call_alert = MainWindow.stop_incoming_call_alert
+    stop_all_incoming_call_alerts = MainWindow.stop_all_incoming_call_alerts
+    _close_incoming_call_dialog = MainWindow._close_incoming_call_dialog
+    _sync_incoming_call_bar = MainWindow._sync_incoming_call_bar
 
     def __init__(self):
         self._active_incoming_calls = {}
         self._incoming_call_watchdogs = {}
+        self._incoming_call_dialogs = {}
         self.call_incoming_sound = _Sound()
+        self.settings = {"calls": {"alerts_enabled": True, "popup_enabled": True}}
         self.i18n = _I18n()
         self.announcements = []
         self.armed_watchdogs = []
         self.cancelled_watchdogs = []
         self.chats = {}
         self._group_name_cache = {}
+        self.popups = []
+        self.incoming_call_bar = _Bar()
+        self.incoming_call_label = _Label()
+        self.layout_calls = 0
+        self.wpp_server = "http://127.0.0.1"
+        self.wpp_port = 6300
+        self.token = "session-token"
 
     def _arm_incoming_call_watchdog(self, identity):
         self.armed_watchdogs.append(identity)
@@ -59,6 +102,12 @@ class _MainStub:
 
     def output(self, text, interrupt=False):
         self.announcements.append((text, interrupt))
+
+    def _show_incoming_call_dialog(self, identity, message):
+        self.popups.append((identity, message))
+
+    def Layout(self):
+        self.layout_calls += 1
 
 
 def _offer(call_id="call-1", peer="5511999999999@s.whatsapp.net"):
@@ -82,6 +131,43 @@ def test_offer_announces_and_starts_loop_only_once():
     assert stub._active_incoming_calls == {
         "call-1": "5511999999999@s.whatsapp.net"
     }
+    assert stub.popups == [("call-1", "Fulano está te ligando.")]
+
+
+def test_disabled_call_alerts_ignore_new_offer():
+    stub = _MainStub()
+    stub.settings["calls"]["alerts_enabled"] = False
+
+    stub.on_incoming_call_event(_offer())
+
+    assert stub.announcements == []
+    assert stub.call_incoming_sound.play_calls == 0
+    assert stub._active_incoming_calls == {}
+
+
+def test_popup_can_be_disabled_without_disabling_spoken_and_sound_alert():
+    stub = _MainStub()
+    stub.settings["calls"]["popup_enabled"] = False
+
+    stub.on_incoming_call_event(_offer())
+
+    assert stub.announcements == [("Fulano está te ligando.", True)]
+    assert stub.call_incoming_sound.play_calls == 1
+    assert stub.popups == []
+    assert stub.incoming_call_bar.shown is True
+    assert stub.incoming_call_label.text == "Fulano está te ligando."
+
+
+def test_in_window_stop_button_clears_non_popup_call_surface():
+    stub = _MainStub()
+    stub.settings["calls"]["popup_enabled"] = False
+    stub.on_incoming_call_event(_offer())
+
+    stub.stop_all_incoming_call_alerts()
+
+    assert stub._active_incoming_calls == {}
+    assert stub.incoming_call_bar.shown is False
+    assert stub.call_incoming_sound.stop_calls == 1
 
 
 def test_group_offer_announces_group_name_without_changing_personal_resolution():
@@ -104,12 +190,16 @@ def test_group_offer_announces_group_name_without_changing_personal_resolution()
 def test_answered_or_ended_state_stops_the_tone():
     stub = _MainStub()
     stub.on_incoming_call_event(_offer())
+    dialog = _Dialog()
+    stub._incoming_call_dialogs["call-1"] = dialog
 
     stub.on_incoming_call_event({"event": "state", "state": "HANDLED_REMOTELY", "id": "call-1"})
 
     assert stub._active_incoming_calls == {}
     assert stub.call_incoming_sound.stop_calls == 1
     assert stub.cancelled_watchdogs == ["call-1"]
+    assert dialog.closed is True
+    assert stub._incoming_call_dialogs == {}
 
 
 def test_ringing_state_update_does_not_stop_the_tone():
@@ -155,6 +245,17 @@ def test_one_ended_call_does_not_silence_another_ringing_call():
 
     assert set(stub._active_incoming_calls) == {"call-2"}
     assert stub.call_incoming_sound.stop_calls == 0
+
+
+def test_stop_button_only_stops_the_local_alert():
+    stub = _MainStub()
+    stub._active_incoming_calls["call-1"] = "peer@s.whatsapp.net"
+
+    stub.stop_incoming_call_alert("call-1")
+
+    assert stub._active_incoming_calls == {}
+    assert stub.call_incoming_sound.stop_calls == 1
+    assert stub.announcements == []
 
 
 def test_websocket_normalizes_nested_call_payload(monkeypatch):

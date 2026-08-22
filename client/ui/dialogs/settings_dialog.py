@@ -727,6 +727,26 @@ class SettingsDialog(wx.Dialog):
         self._audio_page.SetSizer(audio_sizer)
         self._notebook.AddPage(self._audio_page, i18n.t("tab_audio_playback"))
 
+        # ── Calls tab ───────────────────────────────────────────────────────
+        # Native checkboxes keep the complete feature reachable and clearly
+        # announced by NVDA/JAWS/Narrator without a custom accessibility layer.
+        self._calls_page = wx.Panel(self._notebook)
+        calls_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._call_alerts_check = wx.CheckBox(
+            self._calls_page, label=i18n.t("calls_alerts_enabled_label")
+        )
+        calls_sizer.Add(self._call_alerts_check, 0, wx.ALL, 8)
+
+        self._call_popup_check = wx.CheckBox(
+            self._calls_page, label=i18n.t("calls_popup_enabled_label")
+        )
+        calls_sizer.Add(self._call_popup_check, 0, wx.ALL, 8)
+
+        self._calls_page.SetSizer(calls_sizer)
+        self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
+        self._call_alerts_check.Bind(wx.EVT_CHECKBOX, self._on_call_alerts_toggle)
+
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("ok"))
@@ -758,6 +778,11 @@ class SettingsDialog(wx.Dialog):
 
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
+
+        call_settings = self.main_window.settings.get("calls", {})
+        self._call_alerts_check.SetValue(call_settings.get("alerts_enabled", True))
+        self._call_popup_check.SetValue(call_settings.get("popup_enabled", True))
+        self._update_call_fields_state()
 
         keep_muted_silent = self.main_window.settings.get("general", {}).get(
             "keep_muted_chats_silent_when_open", True
@@ -1286,6 +1311,13 @@ class SettingsDialog(wx.Dialog):
             speed_idx = 0
         self._audio_speed_combo.SetSelection(speed_idx)
 
+    def _on_call_alerts_toggle(self, _event):
+        self._update_call_fields_state()
+
+    def _update_call_fields_state(self):
+        """A popup is meaningful only while incoming-call alerts are enabled."""
+        self._call_popup_check.Enable(self._call_alerts_check.GetValue())
+
     def _validate(self) -> bool:
         """Return True if all values are valid; show an error and return False otherwise."""
         page_size_str = self._messages_page_size_field.GetValue().strip()
@@ -1660,6 +1692,19 @@ class SettingsDialog(wx.Dialog):
             self._keep_muted_silent_check.GetValue()
         )
 
+        # Incoming calls live in their own settings namespace so future call
+        # options do not overload the unrelated General/notification settings.
+        calls = self.main_window.settings.setdefault("calls", {})
+        calls["alerts_enabled"] = self._call_alerts_check.GetValue()
+        calls["popup_enabled"] = self._call_popup_check.GetValue()
+        if not calls["alerts_enabled"]:
+            stop_alerts = getattr(self.main_window, "stop_all_incoming_call_alerts", None)
+            if stop_alerts is not None:
+                stop_alerts()
+        sync_call_bar = getattr(self.main_window, "_sync_incoming_call_bar", None)
+        if sync_call_bar is not None:
+            sync_call_bar()
+
         # Sync/media/auto-offline announcements
         self.main_window.settings.setdefault("general", {})["announce_sync_events"] = (
             self._announce_sync_check.GetValue()
@@ -1819,12 +1864,15 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(6, i18n.t("tab_alert_tones"))
         self._notebook.SetPageText(7, i18n.t("tab_storage"))
         self._notebook.SetPageText(8, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(9, i18n.t("tab_calls"))
         self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
         self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
         self._audio_effects_label.SetLabel(i18n.t("audio_effects_output_device_label"))
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
+        self._call_alerts_check.SetLabel(i18n.t("calls_alerts_enabled_label"))
+        self._call_popup_check.SetLabel(i18n.t("calls_popup_enabled_label"))
         self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._search_norm_radio.SetLabel(i18n.t("search_normalization_label"))
