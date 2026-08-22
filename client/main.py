@@ -1018,6 +1018,11 @@ class MainWindow(wx.Frame):
         # queue and its growth counters behind one lock so a LID and its phone
         # JID cannot be inserted or retired in conflicting states.
         self._backfill_state_lock = threading.RLock()
+        # Chats whose message fetch exhausted its retries during the current
+        # sync. Reported at the end of sync_remote_chats() so a partial sync
+        # says so out loud instead of logging the same line as a clean one.
+        self._sync_failures_lock = threading.Lock()
+        self._sync_failed_chats = set()
         self._chats_awaiting_messages = set()
         self._partial_history_counts = {}
         self.contacts = {}
@@ -13006,10 +13011,23 @@ class MainWindow(wx.Frame):
                     failed_count += 1
                     jid = futs[fut].get("remoteJid", "?")
                     logging.warning("[sync_remote_chats] failed for %s: %s", jid, exc)
-        logging.info(
-            "[sync_remote_chats] done: %d chats, %d raised an exception",
-            len(valid_chats), failed_count,
-        )
+        with self._sync_failures_lock:
+            unfetched = sorted(self._sync_failed_chats)
+            self._sync_failed_chats = set()
+        if unfetched or failed_count:
+            logging.warning(
+                "[sync_remote_chats] done: %d chats, %d raised an exception, "
+                "%d had no messages fetched after exhausting retries (kept "
+                "queued for the backfill): %s%s",
+                len(valid_chats), failed_count, len(unfetched),
+                ", ".join(unfetched[:5]),
+                " ..." if len(unfetched) > 5 else "",
+            )
+        else:
+            logging.info(
+                "[sync_remote_chats] done: %d chats, all fetched.",
+                len(valid_chats),
+            )
 
     # Backfill pacing.  Adaptive rather than a fixed schedule: WhatsApp Web
     # loads each chat's history into its store at its own pace, so how long the
@@ -13176,9 +13194,39 @@ class MainWindow(wx.Frame):
 
             records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
             if not api_ok:
-                # The API never really answered — a failed call is the retry
-                # loop's business, not the backfill's.
+                # The API never really answered. This used to retire the chat,
+                # on the reasoning that a failed call was "the retry loop's
+                # business, not the backfill's" — but by the time this runs,
+                # sync_chat_messages() has already exhausted its own retries.
+                # Nothing else was coming back for it: the chat left the queue,
+                # sync_remote_chats() only counts futures that RAISE (this one
+                # returns normally), and _run_sync() declares the sync complete
+                # from the connection and the chat list alone. A chat whose
+                # messages never arrived was indistinguishable from one that
+                # had nothing to fetch.
+                #
+                # Keeping it queued is what makes the backfill pass come back
+                # for it. It costs at most a re-query per sweep, bounded by the
+                # loop's own budget, and the alternative is losing a whole
+                # conversation's history silently.
                 _done()
+                # Only when the failure left the chat with nothing at all.
+                #
+                # Retiring it unconditionally — the old behaviour — meant a
+                # conversation whose messages never arrived was dropped from
+                # the queue with nothing coming back for it: sync_chat_messages()
+                # had already exhausted its retries, sync_remote_chats() only
+                # counts futures that RAISE (this path returns normally), and
+                # _run_sync() declares success from the chat list alone.
+                #
+                # But requeueing every failure would undo an invariant that
+                # earned its own test: a chat that already holds history must
+                # stay out of the queue even when a later refresh fails, or a
+                # transient error puts fully-synced chats back in the loop
+                # forever. Failing to refresh loses nothing; failing to fetch
+                # the first page loses the conversation.
+                if not records:
+                    pending.add(canonical)
                 return
             if not records:
                 if self._server_claims_content(chat):
@@ -14322,6 +14370,13 @@ class MainWindow(wx.Frame):
 
         self.chats[remote_jid] = chat
         self._note_backfill_state(remote_jid, chat, api_ok)
+        if not api_ok:
+            # Counted so the sync stops reporting a clean run over chats whose
+            # messages never arrived. sync_remote_chats() cannot see this from
+            # the future alone: exhausting the retries returns normally, it
+            # does not raise.
+            with self._sync_failures_lock:
+                self._sync_failed_chats.add(remote_jid)
 
         # This replaces self.chats[remote_jid] with a NEW dict object rather
         # than mutating the old one in place — if the conversation is open

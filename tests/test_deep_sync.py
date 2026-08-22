@@ -12,6 +12,7 @@ the methods under test are exercised against a stub carrying just the state
 they touch.
 """
 
+import threading
 import main as main_module
 from main import MainWindow
 
@@ -44,6 +45,12 @@ class _SyncStub:
         self.chats = chats
         self.calls = []
         self.settings = {"user_interface": {"messages_page_size": 200}}
+        # sync_remote_chats() reports the chats whose fetch exhausted its
+        # retries — a failure that returns normally instead of raising, and so
+        # was invisible until it was counted. Both fields live on
+        # MainWindow.__init__.
+        self._sync_failures_lock = threading.Lock()
+        self._sync_failed_chats = set()
 
     def history_page_target(self):
         return int(
