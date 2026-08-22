@@ -12798,8 +12798,8 @@ class MainWindow(wx.Frame):
     # would have abandoned the rest while they were still arriving.  So: retry
     # quickly while passes keep recovering chats, back off when one recovers
     # nothing, and stop at an overall budget so this can never poll forever.
-    _BACKFILL_FIRST_DELAY = 30     # seconds before the first pass, and after any
-                                   # pass that made progress
+    _BACKFILL_FIRST_DELAY = 2      # the first repair must start while the user
+                                   # is still looking at the incomplete list
     _BACKFILL_MAX_DELAY   = 300    # ceiling once passes stop recovering anything
     _BACKFILL_BUDGET      = 45 * 60  # total wall-clock the backfill may run for
     # Renewal ceiling for a session whose history is still arriving — a fresh
@@ -13051,6 +13051,27 @@ class MainWindow(wx.Frame):
             logging.info("[backfill] Name resolution bridged %d new LID(s).", gained)
         return gained
 
+    def _repair_short_chat(self, chat: dict) -> None:
+        """Retry a short chat, then page it exactly like pressing Home does.
+
+        The old backfill only repeated sync_chat_messages(), an unanchored
+        newest-window query. A chat whose browser store exposed 1 or 15 rows
+        therefore returned the same 1 or 15 forever. The conversation view's
+        Home path succeeds because it follows that query with an anchored
+        ``fetch_older_messages`` call. Short-chat repair must use the same path.
+        """
+        self.sync_chat_messages(chat)
+        raw_jid = self._normalize_jid(chat.get("remoteJid", ""))
+        jid, _live = self._resolve_backfill_target(raw_jid)
+        if not jid:
+            return
+        count = self._local_record_count(jid)
+        if count <= 0 or count >= self.history_page_target():
+            return
+        anchor = self._oldest_stored_message(jid)
+        if anchor:
+            self.fetch_older_messages(jid, anchor, store_only=False)
+
     def _backfill_empty_chats(self):
         """Re-fetch messages for chats whose history WhatsApp Web had not loaded.
 
@@ -13239,7 +13260,7 @@ class MainWindow(wx.Frame):
                 # a wasted pass — that is what backs the delay off.
                 counts_before = {j: self._local_record_count(j) for j in window}
                 with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
-                    futs = [pool.submit(self.sync_chat_messages, c) for c in targets]
+                    futs = [pool.submit(self._repair_short_chat, c) for c in targets]
                     for fut in as_completed(futs):
                         try:
                             fut.result()

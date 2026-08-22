@@ -320,6 +320,40 @@ class TestBackfillPacing:
         assert MainWindow._BACKFILL_BUDGET >= 15 * 60, "must outlast a slow warm-up"
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
 
+    def test_first_repair_starts_before_user_can_give_up(self):
+        assert MainWindow._BACKFILL_FIRST_DELAY <= 5
+
+
+    def test_short_retry_is_followed_by_anchored_paging(self):
+        class Stub:
+            history_page_target = lambda self: 200
+            _normalize_jid = staticmethod(lambda jid: jid)
+
+            def __init__(self):
+                self.calls = []
+
+            def sync_chat_messages(self, chat):
+                self.calls.append(("newest", chat["remoteJid"]))
+
+            def _resolve_backfill_target(self, jid):
+                return jid, {"remoteJid": jid}
+
+            def _local_record_count(self, jid):
+                return 15
+
+            def _oldest_stored_message(self, jid):
+                return {"key": {"id": "oldest"}, "messageTimestamp": 1}
+
+            def fetch_older_messages(self, jid, anchor, store_only=False):
+                self.calls.append(("anchored", jid, anchor["key"]["id"], store_only))
+
+        stub = Stub()
+        MainWindow._repair_short_chat(stub, {"remoteJid": "dilla@lid"})
+        assert stub.calls == [
+            ("newest", "dilla@lid"),
+            ("anchored", "dilla@lid", "oldest", False),
+        ]
+
     @staticmethod
     def _next_delay(delay, recovered):
         """The pacing rule the loop applies after each pass."""
