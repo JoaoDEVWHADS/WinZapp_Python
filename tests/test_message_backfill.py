@@ -449,3 +449,10 @@ class TestBackfillPacing:
         s = _Stub(page_size=200, chunks_pending=True)
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=False)
         assert s._chats_awaiting_messages == set()
+
+
+def test_empty_chat_without_metadata_stays_pending_while_history_lands():
+    """Elder: first query was empty, but the same LID gained messages later."""
+    s = _Stub(page_size=200, chunks_pending=True)
+    s._note_backfill_state("elder@lid", _chat(), api_ok=True)
+    assert s._chats_awaiting_messages == {"elder@lid"}

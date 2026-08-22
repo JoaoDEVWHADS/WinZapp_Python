@@ -9300,6 +9300,7 @@ class MainWindow(wx.Frame):
         # decide whether a chat that came back short is worth re-querying while
         # the rest of its history is still landing.
         self.unblock_history_sync()
+        self.wait_for_recent_history_before_message_sync()
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -12802,6 +12803,8 @@ class MainWindow(wx.Frame):
                                    # is still looking at the incomplete list
     _BACKFILL_MAX_DELAY   = 300    # ceiling once passes stop recovering anything
     _BACKFILL_BUDGET      = 45 * 60  # total wall-clock the backfill may run for
+    # Wait long enough for the five-minute stalled-RECENT recovery to run.
+    _RECENT_HISTORY_WAIT = 6 * 60
     # Renewal ceiling for a session whose history is still arriving — a fresh
     # pairing delivers and decodes for far longer than the ordinary budget.
     _BACKFILL_LANDING_BUDGET = 4 * 60 * 60
@@ -12842,6 +12845,49 @@ class MainWindow(wx.Frame):
                               .get("messages_page_size", 200)))
         except (AttributeError, TypeError, ValueError):
             return 200
+
+    def wait_for_recent_history_before_message_sync(self) -> None:
+        """Wait for WhatsApp Web RECENT store before reading chats.
+
+        On a newly linked device, list-chats becomes ready before RECENT
+        history does. Querying conversations in that window records arbitrary
+        prefixes (1/15/100/124/137) and even empty lists. Reopening appears to
+        fix it only because the browser store has decoded more in the meantime.
+
+        The health recovery runs on every poll. This bounded wait still lets
+        the later backfill handle history arriving after the ceiling.
+        """
+        deadline = time.monotonic() + self._RECENT_HISTORY_WAIT
+        last_signature = None
+        while time.monotonic() < deadline:
+            if self._should_abort_sync_for_offline():
+                return
+            status = self.fetch_history_sync_status()
+            if not isinstance(status, dict):
+                return
+            if status.get("recentCompleted") is not False:
+                logging.info(
+                    "[history-sync] RECENT history is ready before message sync."
+                )
+                return
+            signature = (
+                status.get("unprocessedChunks"),
+                tuple(sorted((status.get("chunkStatus") or {}).values())),
+            )
+            if signature != last_signature:
+                logging.info(
+                    "[history-sync] Waiting for RECENT history before reading "
+                    "conversations (unprocessed=%s).",
+                    status.get("unprocessedChunks"),
+                )
+                last_signature = signature
+            self.unblock_history_sync()
+            time.sleep(10)
+        logging.warning(
+            "[history-sync] RECENT history did not settle within %ss; "
+            "continuing with automatic backfill enabled.",
+            self._RECENT_HISTORY_WAIT,
+        )
 
     def refresh_history_still_landing(self, context: str = "") -> bool:
         """Note whether more history is still on its way into WhatsApp Web.
@@ -12952,7 +12998,7 @@ class MainWindow(wx.Frame):
             _done()
             return
         if not records:
-            if self._server_claims_content(chat):
+            if getattr(self, "_history_still_landing", False) or self._server_claims_content(chat):
                 pending.add(remote_jid)
             else:
                 _done()
