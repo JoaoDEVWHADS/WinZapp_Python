@@ -40,7 +40,7 @@
     "@aws-sdk/client-s3": "^3.1019.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@puppeteer/browsers": "^3.2.0",
-    "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git",
+    "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git#6972a845474e75f77800361c7b242818c5eea377",
     "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
     "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git",
     "puppeteer": "^25.7.0",
