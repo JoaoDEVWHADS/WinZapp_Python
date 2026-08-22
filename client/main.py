@@ -1685,6 +1685,7 @@ class MainWindow(wx.Frame):
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
         self._ID_FORCE_REINSTALL_ZIP = wx.NewIdRef()
         self._ID_FORCE_REINSTALL_WPP = wx.NewIdRef()
+        self._ID_WHATS_NEW     = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
 
         menubar = wx.MenuBar()
@@ -1819,6 +1820,7 @@ class MainWindow(wx.Frame):
         help_menu.Append(self._ID_FORCE_REINSTALL_ZIP, self.i18n.t("menu_force_reinstall_zip"))
         help_menu.Append(self._ID_FORCE_REINSTALL_WPP, self.i18n.t("menu_force_reinstall_wpp"))
         help_menu.AppendSeparator()
+        help_menu.Append(self._ID_WHATS_NEW, self.i18n.t("menu_whats_new"))
         help_menu.Append(self._ID_ABOUT, self.i18n.t("menu_about"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
 
@@ -1834,6 +1836,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_wpp, id=self._ID_FORCE_REINSTALL_WPP)
+        self.Bind(wx.EVT_MENU, self._on_whats_new,     id=self._ID_WHATS_NEW)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _on_account_hotkey_char(self, event):
@@ -2284,8 +2287,33 @@ class MainWindow(wx.Frame):
             help_menu.FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
                 self.i18n.t("menu_force_reinstall_wpp")
             )
+            help_menu.FindItemById(self._ID_WHATS_NEW).SetItemLabel(
+                self.i18n.t("menu_whats_new")
+            )
             help_menu.FindItemById(self._ID_ABOUT).SetItemLabel(
                 self.i18n.t("menu_about")
+            )
+
+    def _on_whats_new(self, event=None):
+        """Help > Novidades: show the full local changelog for the user's
+        current language — same WhatsNewDialog the auto-updater's "Quais as
+        novidades?" button uses, but with the whole file rather than only
+        the entries between two versions. When no changelog_<lang>.txt ships
+        with this build (e.g. right after a version with no changelog file
+        yet, like this one), show a small "no changelog" dialog instead of a
+        blank/empty window."""
+        from updater import load_changelog_text, WhatsNewDialog
+        i18n = self.i18n
+        changelog = load_changelog_text(i18n.language)
+        if changelog.strip():
+            dlg = WhatsNewDialog(self, changelog)
+            dlg.ShowModal()
+            dlg.Destroy()
+        else:
+            wx.MessageBox(
+                i18n.t("whats_new_none_message"),
+                i18n.t("whats_new_none_title"),
+                wx.OK | wx.ICON_INFORMATION,
             )
 
     def _on_about(self, event=None):
