@@ -108,7 +108,23 @@ def test_gauge_visibility_toggles_the_sizer_item_and_forces_repaint():
 def test_native_gauge_uses_the_same_laid_out_slot_as_media_actions():
     src = CONV.read_text(encoding="utf-8")
     assert "self._media_action_slot = wx.Panel(self.conversation_panel)" in src
-    assert "self._media_transfer_gauge = wx.Gauge(\n            self._media_action_slot," in src
+    assert "self._media_transfer_gauge = _FocusedTransferGauge(\n            self._media_action_slot," in src
     assert "self._action_open_btn = wx.Button(\n            self._media_action_slot," in src
     assert "self._action_save_as_btn = wx.Button(\n            self._media_action_slot," in src
     assert "sizer = gauge.GetContainingSizer()" in src
+
+
+def test_progress_output_is_exposed_only_while_native_gauge_has_focus():
+    src = CONV.read_text(encoding="utf-8")
+    assert "class _FocusedTransferGaugeAccessible(wx.Accessible):" in src
+    assert "if self._gauge.HasFocus():" in src
+    assert "state |= wx.ACC_STATE_SYSTEM_INVISIBLE" in src
+    assert "def AcceptsFocusFromKeyboard(self):" in src
+
+
+def test_empty_media_action_slot_is_removed_from_layout():
+    init = _method_source(CONV, "ConversationsPanel", "init_UI")
+    sync = _method_source(CONV, "ConversationsPanel", "_sync_media_action_slot_visibility")
+    assert "self._media_action_slot.Hide()" in init
+    assert "slot.Show(visible)" in sync
+    assert "outer.Show(slot, visible" in sync

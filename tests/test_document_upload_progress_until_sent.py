@@ -1,8 +1,8 @@
 """Regression checks for outgoing document upload UI lifecycle.
 
 A just-attached document is pre-cached locally, so file existence alone must
-not unlock Open/Save As. Its gauge reaches 100% as bytes upload, then remains
-visible until WhatsApp confirms SENT (ACK 1 -> app status 2) or a later stage.
+not unlock Open/Save As. Its gauge exists only while bytes are transferring;
+WhatsApp's later SENT acknowledgement independently unlocks the actions.
 """
 
 import ast
@@ -48,12 +48,13 @@ def test_enter_and_save_as_are_blocked_until_sent_ack():
         assert "_sync_pending_document_gauge" in src
 
 
-def test_upload_100_percent_is_persisted_instead_of_hiding_gauge():
+def test_upload_100_percent_hides_gauge_without_unlocking_actions():
     progress = _method_source(CONV, "ConversationsPanel", "update_media_upload_progress")
     sync = _method_source(CONV, "ConversationsPanel", "_sync_pending_document_gauge")
     mark = _method_source(CONV, "ConversationsPanel", "_mark_message_sent")
     assert "self._media_upload_progress[upload_id] = progress" in progress
-    assert "self._media_upload_progress.get(local_id, 0.0)" in sync
+    assert "< 1.0" in sync
+    assert "self._sync_pending_document_gauge()" in progress
     assert "self._hide_media_transfer_gauge()" not in mark
 
 
