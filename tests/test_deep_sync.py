@@ -39,6 +39,7 @@ class _SyncStub:
     def __init__(self, chats):
         self.chats = chats
         self.calls = []
+        self.repair_calls = []
         self.settings = {"user_interface": {"messages_page_size": 200}}
 
     def history_page_target(self):
@@ -48,6 +49,10 @@ class _SyncStub:
 
     def sync_chat_messages(self, chat):
         self.calls.append((chat.get("remoteJid"), chat.get("_sync_limit")))
+
+    def _repair_short_chat(self, chat):
+        self.repair_calls.append(chat.get("remoteJid"))
+        self.sync_chat_messages(chat)
 
 
 def _chats(n, start_t):
@@ -64,6 +69,7 @@ class TestSyncRemoteChatsBoundedWindow:
         limits = dict(stub.calls)
         assert len(limits) == 15
         assert all(limit is None for limit in limits.values())
+        assert set(stub.repair_calls) == set(limits)
 
     def test_invalid_jids_are_filtered_before_ranking(self):
         stub = _SyncStub({

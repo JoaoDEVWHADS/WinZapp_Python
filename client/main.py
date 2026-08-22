@@ -12745,10 +12745,17 @@ class MainWindow(wx.Frame):
 
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
+        #
+        # A plain newest-window query can legitimately answer with only 1, 3 or
+        # 15 rows while WhatsApp Web is materialising history.  Do not postpone
+        # the anchored follow-up until the whole account has been swept: that
+        # left every short group/private chat incomplete until the user opened
+        # it and pressed Home.  The repair path performs that same anchored page
+        # immediately, while this chat already owns a worker slot.
         max_workers = min(6, len(valid_chats))
         failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(self.sync_chat_messages, c): c for c in valid_chats}
+            futs = {pool.submit(self._repair_short_chat, c): c for c in valid_chats}
             for fut in as_completed(futs):
                 try:
                     fut.result()
