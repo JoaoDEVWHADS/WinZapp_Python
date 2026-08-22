@@ -34,17 +34,15 @@ def test_pin_install_failure_never_reenables_blanket_interception():
     assert src.count("version = undefined;") >= 3
 
 
-def test_history_fetch_uses_only_public_wppconnect_get_messages():
+def test_history_recovery_restarts_backend_before_page_reload():
     controller = (
         ROOT / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
     ).read_text(encoding="utf-8")
-    start = controller.index("export async function getMessages(")
-    end = controller.index("\nexport async function ", start + 1)
-    get_messages = controller[start:end]
-    assert "req.client.getMessages(`${phone}`" in get_messages
-    assert "page.evaluate" not in get_messages
-    assert "restartBackend" not in controller
-    assert "WAWebUserPrefsHistorySync" not in controller
+    restart_at = controller.index("cmd.restartBackend()")
+    reload_at = controller.index("req.client.page.reload", restart_at)
+    assert restart_at < reload_at
+    assert "staleForMs >= 30_000" in controller
+    assert "staleForMs >= 75_000" in controller
 
 
 def test_live_whatsapp_web_is_default_with_opt_in_cached_pin():
@@ -59,17 +57,14 @@ def test_periodic_poll_recovers_messages_when_live_event_is_missed():
     assert "before_activity" in src
     assert "now_t > old_t" in src
     assert "self.sync_chat_messages(current)" in src
-    assert "_periodic_message_catchup_pending" in src
-    assert "ordered[:6]" in src
-    assert "pending_catchup.pop(jid, None)" in src
+    assert "len(changed) >= 6" in src
 
 
 def test_temporary_empty_older_page_does_not_mean_reached_start():
     fetch = _method_source(MAIN, "MainWindow", "fetch_older_messages")
     loader = _method_source(CONV, "ConversationsPanel", "_load_older_messages_from_server")
-    assert "_older_empty_strikes" in fetch
-    assert "if n < 6:" in fetch
-    assert "return None" in fetch
+    assert "confirmed_end_of_history = False" in fetch
+    assert "return [] if confirmed_end_of_history else None" in fetch
     assert "if fetched is not None:" in loader
     assert "self._set_reached_start" in loader
     assert "self._clear_loading_more" in loader
