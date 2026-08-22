@@ -933,22 +933,45 @@ class UpdateChecker:
             self._mw,
         )
 
+def _is_window_alive(w) -> bool:
+    if w is None:
+        return False
+    try:
+        if not bool(w):
+            return False
+        if hasattr(wx, "IsDestroyed") and wx.IsDestroyed(w):
+            return False
+        return bool(w.IsShown())
+    except (RuntimeError, TypeError, AttributeError):
+        return False
+
+
     def _get_active_parent(self):
         mw = self._mw
-        # Check if there is an active modal dialog (e.g. connection_dial, pairing_dial, settings)
-        cd = getattr(getattr(mw, "connect", None), "connection_dial", None)
-        if cd is not None and hasattr(cd, "IsShown") and cd.IsShown():
-            pd = getattr(getattr(mw, "connect", None), "pairing_dial", None)
-            if pd is not None and hasattr(pd, "IsShown") and pd.IsShown():
-                return pd
-            return cd
-        # Fallback to focused top-level window or main window
-        focused = wx.Window.FindFocus()
-        if focused:
-            tlw = wx.GetTopLevelParent(focused)
-            if tlw and hasattr(tlw, "IsShown") and tlw.IsShown():
-                return tlw
-        return mw
+        try:
+            connect = getattr(mw, "connect", None)
+            if connect:
+                pd = getattr(connect, "pairing_dial", None)
+                if _is_window_alive(pd):
+                    return pd
+                cd = getattr(connect, "connection_dial", None)
+                if _is_window_alive(cd):
+                    return cd
+        except Exception:
+            pass
+
+        try:
+            focused = wx.Window.FindFocus()
+            if _is_window_alive(focused):
+                tlw = wx.GetTopLevelParent(focused)
+                if _is_window_alive(tlw):
+                    return tlw
+        except Exception:
+            pass
+
+        if _is_window_alive(mw):
+            return mw
+        return None
 
     def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str, sha256sums_url: str = ""):
         previously_focused = wx.Window.FindFocus()
@@ -960,7 +983,7 @@ class UpdateChecker:
 
         # Restore focus to whichever window or control was active before the dialog appeared
         def _restore_focus():
-            if previously_focused:
+            if _is_window_alive(previously_focused):
                 try:
                     if hasattr(previously_focused, "IsShownOnScreen") and previously_focused.IsShownOnScreen():
                         previously_focused.SetFocus()
@@ -969,21 +992,33 @@ class UpdateChecker:
                     pass
 
             mw = self._mw
-            if hasattr(mw, "IsShown") and mw.IsShown():
-                mw.Raise()
-                mw.SetFocus()
-                # If connection_dial is active, focus its main element/panel
+            if _is_window_alive(mw):
+                try:
+                    mw.Raise()
+                    mw.SetFocus()
+                except Exception:
+                    pass
                 cd = getattr(getattr(mw, "connect", None), "connection_dial", None)
-                if cd is not None and hasattr(cd, "IsShown") and cd.IsShown():
-                    cd.Raise()
-                    cd.SetFocus()
+                if _is_window_alive(cd):
+                    try:
+                        cd.Raise()
+                        cd.SetFocus()
+                    except Exception:
+                        pass
                     return
-                # If conversations panel exists and has list, focus it
                 cp = getattr(mw, "conversations_panel", None)
                 if cp is not None and hasattr(cp, "conversations_list"):
-                    cp.conversations_list.SetFocus()
+                    try:
+                        if _is_window_alive(cp.conversations_list):
+                            cp.conversations_list.SetFocus()
+                    except Exception:
+                        pass
                 elif hasattr(mw, "navigation_panel"):
-                    mw.navigation_panel.nav_list.SetFocus()
+                    try:
+                        if _is_window_alive(getattr(mw.navigation_panel, "nav_list", None)):
+                            mw.navigation_panel.nav_list.SetFocus()
+                    except Exception:
+                        pass
 
         wx.CallAfter(_restore_focus)
 
