@@ -615,12 +615,39 @@ export async function getMediaByMessage(req: Request, res: Response) {
           const chatId = parts[1]; // e.g. 553195679326@c.us or 120363420948134065@g.us
           const msgStanzaId = parts[2];
 
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
+          // Load older history into the Store so getMessageById can find a
+          // message the page has since unloaded.
+          //
+          // This used to call client.loadEarlierMessages(), which cannot work
+          // any more: it reaches WAPI.loadEarlierMessages(), whose bundled
+          // implementation calls `chat.loadEarlierMsgs()` — a Chat model
+          // method WhatsApp Web has removed. Every call threw
+          // "t.loadEarlierMsgs is not a function" and was swallowed by the
+          // catch below, so the first and cheapest step of this recovery chain
+          // had been dead for a while with nothing but a warning to show for
+          // it. Measured: 424 occurrences in the accumulated API log, the most
+          // recent during this very session, on the same chat whose media
+          // requests were failing.
+          //
+          // WPP.chat.getMessages() with an explicit direction is the supported
+          // way to page backwards, and is what the getMessages() fallback
+          // below already relies on.
+          if (chatId) {
             req.logger.info(
-              `Message ${cleanMsgId} not found in cache. Attempting loadEarlierMessages for ${chatId}`
+              `Message ${cleanMsgId} not found in cache. Loading older history for ${chatId}`
             );
             try {
-              await client.loadEarlierMessages(chatId);
+              await client.page.evaluate(
+                async ({ id, count }) => {
+                  const WPP = (globalThis as any).WPP;
+                  if (!WPP?.chat?.getMessages) return;
+                  await WPP.chat.getMessages(id, {
+                    count,
+                    direction: 'before',
+                  });
+                },
+                { id: chatId, count: 50 }
+              );
               try {
                 message = await client.getMessageById(cleanMsgId);
               } catch (retryErr: any) {
@@ -630,7 +657,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
               }
             } catch (loadErr: any) {
               req.logger.warn(
-                `Error executing loadEarlierMessages for ${chatId}: ${
+                `Error loading older history for ${chatId}: ${
                   loadErr.message || loadErr
                 }`
               );
