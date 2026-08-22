@@ -140,6 +140,14 @@ _CUSTOM_ROOT_FILES = [
 # never pins directly either, come along transitively at whichever paired
 # version @wppconnect-team/wppconnect itself resolves to.
 _PATCHED_DEPENDENCY_KEYS = [
+    "prom-client",  # imported by src/middleware/instrumentation.ts, which is
+                    # WinZapp's own patch. Upstream happens to declare it too,
+                    # but under devDependencies — so our production import is
+                    # satisfied today only because both installers run a plain
+                    # `npm install`. Listing it here means the merge writes it
+                    # into dependencies regardless of what upstream does with
+                    # its own copy. npm accepts the entry appearing in both
+                    # blocks (verified with `npm install --dry-run`).
     "zod",  # runtime schema for the sync endpoints' response contracts
             # (src/dto/sync.ts). Declared here because the controllers import
             # it at runtime — it is not a build-only tool.
