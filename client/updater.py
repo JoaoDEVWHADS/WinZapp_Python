@@ -25,7 +25,7 @@ import requests
 import wx
 
 from app_paths import _outer_exe_dir, _is_frozen, resource_path
-from config import GITHUB_API_LATEST_RELEASE
+from config import GITHUB_API_LATEST_RELEASE, GITHUB_API_LATEST_STABLE_RELEASE
 from version import __version__
 
 
@@ -135,6 +135,86 @@ def is_newer(remote: str, local: str) -> bool:
     r_key = (r_nums, _PRE_ORDER.get(r_suf, 0))
     l_key = (l_nums, _PRE_ORDER.get(l_suf, 0))
     return r_key > l_key
+
+
+# ── Release channel selection ─────────────────────────────────────────────────
+# Two release channels live in the same GitHub Releases list: stable releases
+# (cut by hand) and alpha builds, which .github/workflows/alpha-release.yml
+# publishes automatically for every commit that lands on main. The ONLY thing
+# separating them is the literal word "alpha" in the tag/name — which is why
+# that workflow bakes it into both. An alpha is offered exclusively to users
+# who ticked "check for alpha updates" in Settings > General.
+
+
+def is_alpha_release(release: dict) -> bool:
+    """True if *release* (a GitHub Releases API object) is an alpha build.
+
+    Matches on the literal word "alpha" in the tag or the release name, the
+    marker alpha-release.yml guarantees on both. Deliberately not keyed on the
+    API's own `prerelease` flag: that flag is also set on unrelated one-off
+    test builds (see prerelease-test.yml), and the two channels must not be
+    conflated — enabling alpha updates must not silently opt a user into every
+    other prerelease anyone ever publishes.
+    """
+    tag  = (release.get("tag_name") or "").lower()
+    name = (release.get("name") or "").lower()
+    return "alpha" in tag or "alpha" in name
+
+
+def find_zip_asset(assets: list) -> str:
+    """Return the browser_download_url of a release's portable ZIP asset, or "".
+
+    Prefers the exact WinZapp.zip and falls back to any other .zip — the same
+    rule the two now-consolidated copies of this loop always used.
+    """
+    fallback = ""
+    for asset in assets or []:
+        name = (asset.get("name") or "").lower()
+        url  = asset.get("browser_download_url", "")
+        if name == "winzapp.zip":
+            return url
+        if name.endswith(".zip") and not fallback:
+            fallback = url
+    return fallback
+
+
+def select_release(releases: list, include_alpha: bool) -> "dict | None":
+    """Pick the newest release the user is eligible to receive, or None.
+
+    *releases* is a collection of GitHub release objects. Alpha builds are
+    skipped entirely unless *include_alpha*; drafts always are.
+
+    The newest ELIGIBLE release is chosen by comparing parsed versions rather
+    than trusting the list order, because the list is ordered by publish date
+    and mixes both channels: with alphas filtered out, the first entry is
+    frequently an alpha, and picking blindly used to mean the newest stable —
+    sitting a few entries down — was never even considered. Releases whose tag
+    isn't a parseable WinZapp version are ignored for the same reason; they
+    could never be compared against the running version anyway.
+
+    A release with no ZIP asset is also skipped rather than selected-then-
+    rejected. Both callers used to take the very first entry and give up
+    entirely if it had no ZIP; with alphas published automatically that stops
+    being a theoretical case (a build whose upload was cut short by a cancelled
+    workflow run), and one such release must not block updates for everyone
+    until the next one is cut.
+    """
+    best     = None
+    best_key = None
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft"):
+            continue
+        if is_alpha_release(release) and not include_alpha:
+            continue
+        parsed = parse_version((release.get("tag_name") or "").lstrip("vV"))
+        if parsed is None:
+            continue
+        if not find_zip_asset(release.get("assets", [])):
+            continue
+        key = (parsed[0], _PRE_ORDER.get(parsed[1], 0))
+        if best_key is None or key > best_key:
+            best, best_key = release, key
+    return best
 
 
 # ── Changelog parser ──────────────────────────────────────────────────────────
@@ -648,6 +728,91 @@ class UpdateChecker:
         self._retry_timer  = None
         self._force        = False
 
+    def _alpha_enabled(self) -> bool:
+        """Whether the user opted into alpha builds (Settings > General).
+
+        Read fresh on every check rather than cached at construction: the
+        checker is created once at startup and lives for the whole session,
+        so a user who ticks the box mid-session would otherwise not see an
+        alpha until the next launch. Off unless explicitly enabled.
+        """
+        try:
+            return bool(
+                self._mw.settings.get("general", {}).get("alpha_updates_enabled", False)
+            )
+        except Exception:
+            return False
+
+    def _get_json(self, url: str, params: "dict | None" = None):
+        resp = requests.get(
+            url,
+            headers={"User-Agent": f"WinZapp/{__version__}"},
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _fetch_releases(self) -> list:
+        """Fetch the candidate releases to choose from. Raises if nothing at
+        all could be fetched.
+
+        Reads TWO endpoints and merges them, because neither alone is
+        sufficient once alpha builds are published per commit:
+
+        - `/releases` is the only place alpha builds appear, but it is PAGED
+          (30 per page by default — hence per_page=100 here). Alphas land far
+          more often than stable releases, so given enough of them the newest
+          stable release falls off the first page entirely and a user on the
+          stable channel would silently stop being offered any update at all.
+        - `/releases/latest` is defined by GitHub as the newest release that is
+          neither draft nor prerelease. Alphas are published as prereleases, so
+          this always resolves to the current stable release no matter how many
+          alphas were published since — the exact guarantee paging can't give.
+
+        Either request failing on its own is survivable (a rate-limited listing
+        still leaves the stable release reachable; `/releases/latest` 404s on a
+        repo that has only ever published prereleases), so only a total failure
+        propagates.
+        """
+        releases: list = []
+        first_error = None
+
+        try:
+            data = self._get_json(GITHUB_API_LATEST_RELEASE, params={"per_page": 100})
+            # A fork could point WINZAPP_GITHUB_REPO-derived URLs at a single
+            # release object rather than a listing.
+            if isinstance(data, dict):
+                releases.append(data)
+            elif isinstance(data, list):
+                releases.extend(d for d in data if isinstance(d, dict))
+        except Exception as exc:
+            first_error = exc
+            logging.warning("Auto-updater: Could not fetch the releases listing: %s", exc)
+
+        try:
+            data = self._get_json(GITHUB_API_LATEST_STABLE_RELEASE)
+            if isinstance(data, dict):
+                releases.append(data)
+        except Exception as exc:
+            logging.warning("Auto-updater: Could not fetch the latest stable release: %s", exc)
+            if first_error is None:
+                first_error = exc
+
+        if not releases:
+            raise first_error or RuntimeError("No releases could be fetched")
+
+        # The same release legitimately arrives from both endpoints — dedupe so
+        # the log's candidate count reflects reality.
+        deduped, seen = [], set()
+        for release in releases:
+            marker = release.get("id") or release.get("tag_name")
+            if marker in seen:
+                continue
+            seen.add(marker)
+            deduped.append(release)
+        return deduped
+
     def start(self):
         """Launch the first check in a background thread."""
         t = threading.Thread(target=self._check_once, daemon=True)
@@ -679,42 +844,43 @@ class UpdateChecker:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _check_once(self):
-        logging.info("Auto-updater: Checking GitHub Releases for updates...")
+        include_alpha = self._alpha_enabled()
+        logging.info(
+            "Auto-updater: Checking GitHub Releases for updates (alpha channel: %s)...",
+            "on" if include_alpha else "off",
+        )
         try:
-            resp = requests.get(
-                GITHUB_API_LATEST_RELEASE,
-                headers={"User-Agent": f"WinZapp/{__version__}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list) and data:
-                data = data[0]
+            releases = self._fetch_releases()
         except Exception:
             logging.exception("Auto-updater: Exception checking for updates")
             self._schedule_retry()
             return
 
+        data = select_release(releases, include_alpha)
+        if data is None:
+            logging.warning(
+                "Auto-updater: No eligible release found among %d listed "
+                "(alpha channel: %s).", len(releases), "on" if include_alpha else "off",
+            )
+            self._schedule_retry()
+            return
+
         tag_name       = data.get("tag_name", "")
         remote_version = tag_name.lstrip("vV")
-        logging.info("Auto-updater: Latest release tag=%s version=%s", tag_name, remote_version)
+        logging.info(
+            "Auto-updater: Selected release tag=%s version=%s alpha=%s",
+            tag_name, remote_version, is_alpha_release(data),
+        )
 
         if not remote_version:
             logging.warning("Auto-updater: Could not parse version from tag_name=%r", tag_name)
             self._schedule_retry()
             return
 
-        # Find the portable ZIP asset (prefer WinZapp.zip by exact name)
-        zip_url = ""
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            url  = asset.get("browser_download_url", "")
-            if name == "winzapp.zip":
-                zip_url = url
-                break
-            if name.endswith(".zip") and not zip_url:
-                zip_url = url
-
+        # Find the portable ZIP asset (prefer WinZapp.zip by exact name).
+        # select_release() already refuses a release without one, so this only
+        # fires if that invariant is ever broken.
+        zip_url = find_zip_asset(data.get("assets", []))
         if not zip_url:
             logging.warning("Auto-updater: No ZIP asset found in release %s", tag_name)
             self._schedule_retry()
@@ -756,33 +922,25 @@ class UpdateChecker:
     def _fetch_latest_release_for_reinstall(self):
         logging.info("Auto-updater: Fetching latest GitHub release for forced ZIP reinstall...")
         try:
-            resp = requests.get(
-                GITHUB_API_LATEST_RELEASE,
-                headers={"User-Agent": f"WinZapp/{__version__}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list) and data:
-                data = data[0]
+            releases = self._fetch_releases()
         except Exception as exc:
             logging.exception("Auto-updater: Exception fetching latest release for forced reinstall")
             wx.CallAfter(self._show_reinstall_error, str(exc))
             return
 
+        # Same channel filter as the periodic check: a user who never opted
+        # into alpha builds must not be handed one by "reinstall from ZIP"
+        # either, just because an alpha happens to sit at the top of the list.
+        data = select_release(releases, self._alpha_enabled())
+        if data is None:
+            logging.warning("Auto-updater: No eligible release found for forced reinstall.")
+            wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
+            return
+
         tag_name       = data.get("tag_name", "")
         remote_version = tag_name.lstrip("vV") or tag_name
 
-        zip_url = ""
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            url  = asset.get("browser_download_url", "")
-            if name == "winzapp.zip":
-                zip_url = url
-                break
-            if name.endswith(".zip") and not zip_url:
-                zip_url = url
-
+        zip_url = find_zip_asset(data.get("assets", []))
         if not zip_url:
             logging.warning("Auto-updater: No ZIP asset found in latest release %s", tag_name)
             wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))

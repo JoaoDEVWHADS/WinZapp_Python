@@ -335,6 +335,8 @@
     "menu_about": "O programie",
     "about_dialog_title": "O programie WinZapp",
     "updates_label": "Automatycznie sprawdzaj &aktualizacje",
+    "alpha_updates_label": "Sprawdzaj aktualizacje a&lfa (niestabilne)",
+    "alpha_updates_tooltip": "Wersje alfa są tworzone automatycznie przy każdej zmianie w programie WinZapp i nie zostały przetestowane. Mogą zawierać błędy.",
     "fg_new_msg": "Nowa wiadomość od {name}",
     "conv_preview_you": "ty:",
     "add_member": "Dodaj członka",

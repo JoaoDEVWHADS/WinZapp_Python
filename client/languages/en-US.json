@@ -335,6 +335,8 @@
     "menu_about": "About the program",
     "about_dialog_title": "About WinZapp",
     "updates_label": "Automatically check for &updates",
+    "alpha_updates_label": "Check for a&lpha updates (unstable)",
+    "alpha_updates_tooltip": "Alpha builds are produced automatically for every change made to WinZapp and have not been tested. They may contain bugs.",
     "fg_new_msg": "New message from {name}",
     "conv_preview_you": "you:",
     "add_member": "Add member",

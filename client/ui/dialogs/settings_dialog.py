@@ -249,6 +249,17 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._updates_check, 0, wx.ALL, 8)
 
+        # Alpha channel opt-in: with this ticked the updater also considers the
+        # per-commit alpha builds published by .github/workflows/alpha-release.yml
+        # (see select_release() in client/updater.py). Placed right under the
+        # updates checkbox it depends on, so it reads as a sub-option in tab
+        # order too.
+        self._alpha_updates_check = wx.CheckBox(
+            self._general_page, label=i18n.t("alpha_updates_label")
+        )
+        self._alpha_updates_check.SetToolTip(i18n.t("alpha_updates_tooltip"))
+        gen_sizer.Add(self._alpha_updates_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self._hotkey_label = wx.StaticText(self._general_page, label=i18n.t("global_hotkey_label"))
         gen_sizer.Add(
             self._hotkey_label,
@@ -807,6 +818,13 @@ class SettingsDialog(wx.Dialog):
 
         updates = self.main_window.settings.get("general", {}).get("updates_enabled", True)
         self._updates_check.SetValue(updates)
+
+        # Off unless explicitly enabled — including on installs whose
+        # settings.json predates the option and has no key at all.
+        alpha_updates = self.main_window.settings.get("general", {}).get(
+            "alpha_updates_enabled", False
+        )
+        self._alpha_updates_check.SetValue(alpha_updates)
 
         hk = self.main_window.settings.get("general", {}).get("global_hotkey")
         if hk and isinstance(hk, dict) and hk.get("vk"):
@@ -1733,6 +1751,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("general", {})["updates_enabled"] = (
             self._updates_check.GetValue()
         )
+        self.main_window.settings.setdefault("general", {})["alpha_updates_enabled"] = (
+            self._alpha_updates_check.GetValue()
+        )
 
         # Account switch behavior
         new_switch_behavior = (
@@ -1885,6 +1906,8 @@ class SettingsDialog(wx.Dialog):
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
+        self._alpha_updates_check.SetLabel(i18n.t("alpha_updates_label"))
+        self._alpha_updates_check.SetToolTip(i18n.t("alpha_updates_tooltip"))
         self._focus_box.SetLabel(i18n.t("ui_focus_label"))
         self._focus_message_field_rb.SetLabel(i18n.t("ui_focus_message_field"))
         self._focus_unread_or_last_rb.SetLabel(i18n.t("ui_focus_unread_or_last"))

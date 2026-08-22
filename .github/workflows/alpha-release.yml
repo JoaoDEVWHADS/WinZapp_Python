@@ -1,37 +1,76 @@
-name: Release Build
+# Alpha Build — every commit that lands on main becomes a downloadable build.
+#
+# This is a deliberate, near-verbatim copy of release.yml's build pipeline
+# (same Node/MSYS2/venv/setup_api/PyInstaller/verify/checksum steps, in the
+# same order). It is duplicated rather than factored into a reusable workflow
+# on purpose: release.yml is the pipeline that has actually been proven to
+# produce a working WinZapp, and any divergence here — a missing MSYS2
+# package, a skipped WPP_MINIMUM_VERSION write, a different node_modules cache
+# key — reproduces as an alpha that installs but is subtly broken (missing
+# DLL, dead API, silently stale patches). Keep the two in sync when either
+# changes; only the marked ALPHA-SPECIFIC blocks differ.
+#
+# Differences from release.yml, all of them intentional:
+#   - Trigger: push to main (a direct push or a PR merge commit) instead of a
+#     manually created GitHub release.
+#   - The release does not exist yet when this runs, so this workflow CREATES
+#     it (tag + release) at the end instead of only uploading assets to one.
+#     There is therefore no `reject-on-test-failure` job: `needs: test`
+#     already prevents a broken commit from ever producing a release.
+#   - Version/tag carry the literal word "alpha" (e.g. v2026.08.22.1530alpha).
+#     That suffix is what client/updater.py filters on: an alpha release is
+#     only ever offered to users who ticked "check for alpha updates" in
+#     Settings > General. It is also a real, parseable WinZapp version
+#     (parse_version() in updater.py accepts a dev/alpha/beta suffix), so an
+#     alpha still compares correctly against stable versions.
+#   - No bump-version job: client/version.py in main must keep tracking the
+#     stable release line. Committing an alpha version back to main would
+#     also push to main, which is what triggers this workflow.
+name: Alpha Build
 
 on:
-  release:
-    types: [created]
+  push:
+    branches: [main]
+    # version.py-only commits come from release.yml's bump-version job (which
+    # already marks them [skip ci]); nothing in a docs/CI-only change alters
+    # what gets compiled, so don't burn a ~15 minute build and a release on it.
+    paths-ignore:
+      - "client/version.py"
+      - "**/*.md"
+      - ".github/workflows/**"
+  # Manual re-run, for when an alpha needs to be rebuilt from the current main
+  # without an empty commit.
+  workflow_dispatch:
+
+# A new commit on main cancels an alpha build still in flight. A build takes
+# well over ten minutes, so an alpha superseded before it even finished is of no
+# use to anyone — shipping it would just hand users a release that is already
+# stale and then a second one minutes later. The last commit wins.
+#
+# The cost is that a run can be killed at any point, including midway through
+# uploading assets, which would leave a half-populated release for the updater
+# to find. Two things close that: the release is created as a DRAFT and only
+# published once every asset is up (drafts are invisible to the updater — see
+# select_release() in client/updater.py), and select_release() independently
+# refuses any release with no ZIP asset.
+concurrency:
+  group: alpha-release
+  cancel-in-progress: true
 
 env:
   NODE_VERSION: "24.15.0"
   PYTHON_VERSION: "3.13"
 
 jobs:
-  # Gate for everything below: a release is only worth building/shipping if
-  # the test suite is green. Kept as its own job (rather than a step inside
-  # `build`) so `reject-on-test-failure` can react to it independently —
-  # cheap to run (no Node/MSYS2/PyInstaller setup needed) and fails fast
-  # before the ~10+ minute build job ever starts.
+  # Same gate as release.yml: cheap, fails fast, and stops the ~10+ minute
+  # build job before it ever starts. Here it also means a red commit simply
+  # never produces an alpha release at all.
   test:
     name: Run test suite
     runs-on: windows-latest
-    # Alpha releases are built and published by alpha-release.yml, which owns
-    # the whole flow end to end (it creates the release itself). Nothing should
-    # re-enter the stable pipeline for one: it would rebuild the same commit a
-    # second time and, worse, `bump-version` below would commit an alpha
-    # version string into main's client/version.py. Creating a release with the
-    # default GITHUB_TOKEN doesn't re-trigger workflows, so this guard is only
-    # a second line of defence — it also covers an alpha release created by
-    # hand or by a PAT-authenticated tool.
-    if: ${{ !contains(github.event.release.tag_name, 'alpha') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          # Tags are needed by the version-ordering check below.
-          fetch-depth: 0
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -47,76 +86,6 @@ jobs:
       - name: Run pytest
         run: pytest
 
-      # Alpha builds (alpha-release.yml) are versioned as
-      # <major>.<minor>.<patch>.<commit count>alpha off the CURRENT stable
-      # version, so they consume the fourth component. A stable release that
-      # only bumps that fourth component therefore sorts BELOW alphas already
-      # published — and updater.py would never offer it to anyone running one,
-      # stranding every alpha user permanently with no error anywhere.
-      #
-      # This lives in the test job (rather than as its own) on purpose: a
-      # failure here has to reach `reject-on-test-failure`, which deletes the
-      # already-created release and its tag. Otherwise a rejected tag would
-      # linger on the Releases page looking like a normal release.
-      # shell: bash (not the Windows default pwsh) — a heredoc is the only way
-      # to embed this script without escaping it into unreadability.
-      - name: Reject a stable tag that alphas have already passed
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          python - <<'PY'
-          import os, subprocess, sys
-          sys.path.insert(0, "client")
-          from updater import parse_version, is_newer
-
-          tag = os.environ["RELEASE_TAG"].lstrip("vV")
-          if parse_version(tag) is None:
-              print(f"::error::Release tag {tag!r} is not a major.minor.patch.build "
-                    f"version, so the auto-updater can never compare it.")
-              sys.exit(1)
-
-          tags = subprocess.run(
-              ["git", "tag", "--list"], capture_output=True, text=True, check=True
-          ).stdout.split()
-          alphas = [t for t in tags if "alpha" in t.lower()]
-          blockers = [t for t in alphas if not is_newer(tag, t.lstrip("vV"))]
-
-          if blockers:
-              print(f"::error::Stable release {tag} does not sort above already "
-                    f"published alpha builds: {', '.join(sorted(blockers))}. "
-                    f"Users on those alphas would never be offered it. Bump the "
-                    f"patch component or higher (e.g. 0.25.0.x -> 0.25.1.0), not "
-                    f"just the fourth component, and re-cut the release.")
-              sys.exit(1)
-
-          print(f"[INFO] {tag} sorts above all {len(alphas)} published alpha build(s).")
-          PY
-
-  # A release object already exists on GitHub by the time this workflow runs
-  # (the `release: created` trigger fires once the release itself is made,
-  # before any artifacts are attached) — `needs: test` only stops the BUILD
-  # job, it can't retroactively un-create the release. This job is what
-  # actually rejects a release whose tests failed: it deletes the just-created
-  # release (and its tag) outright, so a broken release never lingers on the
-  # Releases page looking like a normal one just because it has no assets yet.
-  reject-on-test-failure:
-    name: Delete release if tests failed
-    runs-on: ubuntu-latest
-    needs: test
-    if: ${{ failure() && needs.test.result == 'failure' }}
-    permissions:
-      contents: write
-    steps:
-      - name: Delete the release and its tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release delete "${{ github.event.release.tag_name }}" \
-            --repo "${{ github.repository }}" \
-            --cleanup-tag \
-            --yes
-
   build:
     name: Build Windows installer and portable ZIP
     runs-on: windows-latest
@@ -130,18 +99,75 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Bake the just-created release's tag into version.py so the compiled
-      # app reports the right version. This also gets committed back to the
-      # repo's default branch below, so client/version.py in source control
-      # matches what shipped in the release artifacts.
-      - name: Set version.py from release tag
+      # ── ALPHA-SPECIFIC ──────────────────────────────────────────────────────
+      # release.yml takes its version from the tag of a release a human already
+      # created. Nothing created one here, so derive one — and it has to be
+      # derived from the STABLE version line, not invented independently, or the
+      # two channels stop ordering against each other. updater.py compares
+      # ((major, minor, patch, build), pre_order) with alpha < beta < final, so:
+      #
+      #   base 0.25.0.0beta (client/version.py, kept current by release.yml's
+      #   bump-version job) + commit count N  ->  0.25.0.<N>alpha
+      #
+      #   - Newer than the base stable: (0,25,0,N) > (0,25,0,0) for any N >= 1,
+      #     so an alpha is offered to someone running 0.25.0.0beta.
+      #   - Newer than the previous alpha: N only ever grows.
+      #   - OLDER than the next stable (0.25.1.0beta / 0.26.0.0beta), so an
+      #     alpha user is pulled back onto the stable line as soon as one ships
+      #     rather than being stranded on the alpha channel forever.
+      #
+      # The build number is `git rev-list --count HEAD` rather than a timestamp:
+      # it is strictly monotonic, unique per commit, and immune to two commits
+      # landing in the same minute. (A date-based version like 2026.08.22.1530
+      # would be catastrophic here — it outranks EVERY 0.x stable release, so
+      # once one shipped, no future stable release could ever be offered again.)
+      #
+      # THE ONE RULE THIS RELIES ON: the next stable release must bump the
+      # patch component or higher (0.25.0.x -> 0.25.1.0 / 0.26.0.0), never just
+      # the fourth. release.yml enforces that rather than trusting it — see its
+      # "Reject a stable tag that alphas have already passed" step.
+      - name: Resolve alpha version
         shell: pwsh
         run: |
-          $ver = "${{ github.event.release.tag_name }}" -replace '^[vV]', ''
+          git fetch --tags --quiet
+
+          $raw = Get-Content "client/version.py" -Raw
+          if ($raw -notmatch '__version__\s*=\s*"([^"]+)"') {
+            Write-Error "Could not read __version__ out of client/version.py"
+            exit 1
+          }
+          $base = $matches[1]
+          if ($base -notmatch '^(\d+)\.(\d+)\.(\d+)\.(\d+)(dev|alpha|beta)?$') {
+            Write-Error "client/version.py holds $base, which is not a major.minor.patch.build version"
+            exit 1
+          }
+          $prefix = "{0}.{1}.{2}" -f $matches[1], $matches[2], $matches[3]
+
+          $build = [int](git rev-list --count HEAD).Trim()
+          # A manual re-run of an already-released commit would reuse its tag;
+          # step past it. The counter only ever moves forward, so ordering holds.
+          $existing = git tag --list
+          while ($existing -contains ("v{0}.{1}alpha" -f $prefix, $build)) {
+            $build++
+          }
+
+          $ver = "{0}.{1}alpha" -f $prefix, $build
+          "ALPHA_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "[INFO] Stable base version : $base"
+          Write-Output "[INFO] Alpha version       : $ver"
+
+      # Bake the alpha version into version.py so the compiled app reports it.
+      # Unlike release.yml this is NEVER committed back to the repository —
+      # main keeps tracking the stable version line.
+      - name: Set version.py from alpha version
+        shell: pwsh
+        run: |
+          $ver = "${{ env.ALPHA_VERSION }}"
           $filePath = "client/version.py"
           $content = "__version__ = `"$ver`""
           $content | Out-File -FilePath $filePath -Encoding utf8 -NoNewline
           Write-Output "[INFO] version.py set to $ver"
+      # ── END ALPHA-SPECIFIC ──────────────────────────────────────────────────
 
       # GCC and windres (from UCRT64 binutils) are required by build.py to compile
       # the C installer/uninstaller.  libopus-0.dll is committed to client/lib/
@@ -203,6 +229,7 @@ jobs:
       # Cache node_modules to avoid re-downloading hundreds of packages on every run.
       # setup_api.py preserves node_modules across clones (moves/restores the folder),
       # so this cache survives the WPPConnect Server re-clone in the next step.
+      # Same key as release.yml on purpose — the two share one cache entry.
       - name: Cache API node_modules
         uses: actions/cache@v4
         with:
@@ -317,7 +344,9 @@ jobs:
       # verify a downloaded ZIP's integrity before extracting it and handing
       # it elevated write access to the install directory — without this,
       # nothing checks that a release asset wasn't tampered with in transit
-      # or via a compromised/hijacked GitHub release edit.
+      # or via a compromised/hijacked GitHub release edit. An alpha goes
+      # through exactly the same install path as a stable release, so it
+      # needs exactly the same manifest.
       - name: Generate SHA256SUMS.txt for release assets
         shell: pwsh
         run: |
@@ -331,57 +360,55 @@ jobs:
           Write-Output "[INFO] dist/SHA256SUMS.txt:"
           Get-Content "dist/SHA256SUMS.txt"
 
-      - name: Upload release assets
+      # ── ALPHA-SPECIFIC ──────────────────────────────────────────────────────
+      # Creates the tag AND the release (release.yml only uploads into one a
+      # human already made). Both tag_name and name carry "alpha", which is
+      # what client/updater.py's is_alpha_release() matches on.
+      #
+      # Created as a DRAFT, published only by the next step. This run can be
+      # cancelled at any moment by a newer commit (see `concurrency` above),
+      # including partway through this upload — and a release that went live
+      # with, say, WinZapp.zip but no SHA256SUMS.txt would be offered to users
+      # and then fail its checksum verification, which fails CLOSED and surfaces
+      # as an update error. A draft is invisible to the updater, so a cancelled
+      # run leaves nothing behind that anyone can download.
+      #
+      # Uses the default GITHUB_TOKEN deliberately: GitHub does not re-trigger
+      # workflows for events raised by GITHUB_TOKEN, so publishing this release
+      # does NOT fire release.yml's `release: created` trigger and cause a
+      # second, duplicate build (release.yml also skips alpha tags outright,
+      # as a second line of defence).
+      - name: Create draft alpha release and upload assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.ALPHA_VERSION }}
+          name: "WinZapp Alpha ${{ env.ALPHA_VERSION }}"
+          target_commitish: ${{ github.sha }}
+          draft: true
+          # Marked as a prerelease so it never becomes the repository's
+          # "Latest release" — which also keeps `/releases/latest` resolving to
+          # the newest STABLE release, the one guarantee the updater relies on
+          # to keep finding stable releases once alphas fill the listing's first
+          # page (see UpdateChecker._fetch_releases). In-app, the channel gate
+          # is the word "alpha" in the name/tag, not this flag.
+          prerelease: true
+          generate_release_notes: true
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
             dist/SHA256SUMS.txt
 
-  # Push the version.py bump back to the default branch so the repo reflects
-  # the version that was actually released, not just the build artifacts.
-  # Split into its own job (rather than a step inside `build`) for two
-  # reasons: `needs: build` means this only runs once the build/verify above
-  # — including the asset upload — has already succeeded, so a failed build
-  # never lands a version bump for a release that didn't ship; and, the real
-  # reason, it keeps RELEASE_BUMP_TOKEN out of the build job entirely. The
-  # default GITHUB_TOKEN has no ruleset-bypass path on this repo (a
-  # branch-protection ruleset requires PRs on main, and the Actions bot
-  # identity isn't a bypassable actor — only a RepositoryRole is).
-  # RELEASE_BUMP_TOKEN is a fine-grained PAT (Contents: Read/write on this
-  # repo only, no Workflows permission) belonging to an account whose
-  # RepositoryRole does bypass — but GitHub has no per-file scoping for a
-  # PAT, so the only real containment is keeping this job's exposure to the
-  # bare minimum: checkout, write the file, commit, nothing else. The build
-  # job's own checkout above still uses the default GITHUB_TOKEN, so none of
-  # npm install/MSYS2/PyInstaller ever has this token in its environment.
-  bump-version:
-    name: Bump version.py in the repository
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          token: ${{ secrets.RELEASE_BUMP_TOKEN }}
-
-      - name: Set version.py from release tag
-        shell: bash
+      # Every asset is uploaded by now, so the release is safe to expose. This
+      # is deliberately the very last step: until it runs, nothing this workflow
+      # produced is visible to the updater.
+      - name: Publish the alpha release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ver="${{ github.event.release.tag_name }}"
-          ver="${ver#v}"
-          ver="${ver#V}"
-          printf '__version__ = "%s"' "$ver" > client/version.py
-          echo "[INFO] version.py set to $ver"
-
-      - name: Commit version.py bump back to the repository
-        uses: stefanzweifel/git-auto-commit-action@v5
-        continue-on-error: true
-        with:
-          commit_message: "chore: bump version to ${{ github.event.release.tag_name }} [skip ci]"
-          file_pattern: client/version.py
-          branch: main
-          commit_user_name: github-actions[bot]
-          commit_user_email: github-actions[bot]@users.noreply.github.com
+          gh release edit "v${{ env.ALPHA_VERSION }}" `
+            --repo "${{ github.repository }}" `
+            --draft=false `
+            --prerelease
+          Write-Output "[INFO] Published v${{ env.ALPHA_VERSION }}"
+      # ── END ALPHA-SPECIFIC ──────────────────────────────────────────────────
