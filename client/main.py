@@ -14206,11 +14206,11 @@ class MainWindow(wx.Frame):
                     logging.info(
                         "[history-sync] Older-history request %s for %s "
                         "(end_type=%s, more_on_primary=%s, primary_has_more=%s, "
-                        "inline=%s, sender_returned=%s).",
+                        "payload_mode=%s, sender_returned=%s).",
                         "already in flight" if payload.get("inFlight") else "sent",
                         jid, payload.get("endOfHistoryTransferType"),
                         payload.get("moreOnPrimary"), payload.get("primaryHasMore"),
-                        payload.get("supportInlineResponse"),
+                        payload.get("requestPayloadMode"),
                         payload.get("senderReturnedValue"),
                     )
                     return True
