@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.22.0303"
+=======
+__version__ = "2026.08.21.2006"
+>>>>>>> 34bd558c (refactor(api): update deviceController, main, and test suite for history sync)
