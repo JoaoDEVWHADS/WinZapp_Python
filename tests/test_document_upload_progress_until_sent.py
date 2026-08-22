@@ -1,8 +1,8 @@
 """Regression checks for outgoing document upload UI lifecycle.
 
 A just-attached document is pre-cached locally, so file existence alone must
-not unlock Open/Save As. Its gauge exists only while bytes are transferring;
-WhatsApp's later SENT acknowledgement independently unlocks the actions.
+not unlock Open/Save As. Its gauge reaches 100% with the byte transfer and stays
+there only on that selected message until WhatsApp confirms SENT.
 """
 
 import ast
@@ -48,13 +48,15 @@ def test_enter_and_save_as_are_blocked_until_sent_ack():
         assert "_sync_pending_document_gauge" in src
 
 
-def test_upload_100_percent_hides_gauge_without_unlocking_actions():
+def test_upload_100_percent_stays_until_sent_without_leaking_to_other_rows():
     progress = _method_source(CONV, "ConversationsPanel", "update_media_upload_progress")
     sync = _method_source(CONV, "ConversationsPanel", "_sync_pending_document_gauge")
     mark = _method_source(CONV, "ConversationsPanel", "_mark_message_sent")
     assert "self._media_upload_progress[upload_id] = progress" in progress
-    assert "< 1.0" in sync
-    assert "self._sync_pending_document_gauge()" in progress
+    assert "self._media_transfer_started.add(upload_id)" in progress
+    assert "if selected == index:" in progress
+    assert 'msg.get("_awaiting_sent_ack")' in sync
+    assert "selected_local_id != preferred_local_id" in sync
     assert "self._hide_media_transfer_gauge()" not in mark
 
 
@@ -102,6 +104,15 @@ def test_upload_progress_is_monotonic_across_python_and_wpp_events():
     progress = _method_source(CONV, "ConversationsPanel", "update_media_upload_progress")
     assert "previous = self._media_upload_progress.get(upload_id, 0.0)" in progress
     assert "progress = max(previous, progress)" in progress
+
+
+def test_deleting_pending_send_cancels_locally_even_if_everyone_was_selected():
+    src = _method_source(CONV, "ConversationsPanel", "_on_menu_delete_message")
+    cancel_at = src.index("self.main_window.message_queue.cancel(pending_local_id)")
+    revoke_at = src.index("elif for_everyone:")
+    assert cancel_at < revoke_at
+    assert "cancelled_pending = bool(msg.get(\"_local_pending\")" in src
+    assert "self._media_transfer_started.discard(pending_local_id)" in src
 
 
 def test_send_file_uses_streaming_multipart_instead_of_requests_files_buffering():

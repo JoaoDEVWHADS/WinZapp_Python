@@ -90,11 +90,12 @@ def test_read_ack_is_sent_to_every_known_jid_alias():
     assert 'payload["isLid"] = True' in src
 
 
-def test_document_gauge_is_made_visible_before_enqueue_worker_starts():
+def test_attachment_gauge_waits_for_real_transfer_progress():
     send = _method_source(CONV, "ConversationsPanel", "_on_send_attachment")
-    show_at = send.index('if media_type == "document":\n                self._show_media_transfer_gauge()')
-    worker_at = send.index("threading.Thread(target=_cache_then_enqueue, daemon=True).start()")
-    assert show_at < worker_at
+    progress = _method_source(CONV, "ConversationsPanel", "update_media_upload_progress")
+    assert "self._show_media_transfer_gauge()" not in send
+    assert "self._media_transfer_started.add(upload_id)" in progress
+    assert "self._update_media_transfer_gauge(progress)" in progress
 
 
 def test_gauge_visibility_toggles_the_sizer_item_and_forces_repaint():
