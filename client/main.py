@@ -4926,7 +4926,27 @@ class MainWindow(wx.Frame):
             "keep_muted_chats_silent_when_open", True
         ):
             return
-        if self.is_chat_archived(remote_jid):
+
+        # Determine focus/current-conversation BEFORE applying archive
+        # suppression. Archived chats should stay silent in the background, but
+        # if the user deliberately opened one, it must behave exactly like any
+        # other active conversation: current-message sound + optional TTS. The
+        # previous unconditional return here suppressed both private and group
+        # archived chats even while they were visibly open.
+        window_active = (
+            not getattr(self, "_window_hidden", False)
+            and self.IsShown()
+            and not self.IsIconized()
+            and self.IsActive()
+        )
+        cp = getattr(self, "conversations_panel", None)
+        current_jid = (
+            cp.conversation.get("remoteJid", "")
+            if cp is not None and cp.conversation is not None
+            else ""
+        )
+        is_current_conv = (current_jid == remote_jid)
+        if self.is_chat_archived(remote_jid) and not (window_active and is_current_conv):
             return
 
         from core.notification_manager import (
@@ -4936,24 +4956,8 @@ class MainWindow(wx.Frame):
 
         body  = format_notification_body(msg, self, self.i18n)
 
-        # Check if the WinZapp window is currently active/focused
-        window_active = (
-            not getattr(self, "_window_hidden", False)
-            and self.IsShown()
-            and not self.IsIconized()
-            and self.IsActive()
-        )
-
         if window_active:
             speech = self.settings.get("speech_content", {})
-            # Determine if the incoming message is for the currently-open conversation
-            cp = getattr(self, "conversations_panel", None)
-            current_jid = (
-                cp.conversation.get("remoteJid", "")
-                if cp is not None and cp.conversation is not None
-                else ""
-            )
-            is_current_conv = (current_jid == remote_jid)
 
             # Muted + not the open conversation: stay silent even with the
             # window active (the "keep silent when open" setting only ever
@@ -16510,12 +16514,40 @@ class MainWindow(wx.Frame):
                         except Exception as e:
                             logging.error("[on_presence_update] speak error: %s", e)
 
-        # Persist the updated pushName map to database metadata.
+        # Persist the updated pushName map without ever making the wx handler
+        # wait for SQLite. Presence events can fire rapidly while sync/backfill
+        # is busy; this exact synchronous write was one of the watchdog stacks.
         if _ppm_updated and hasattr(self, "db") and self.db is not None:
+            snapshot = dict(self._presence_pushname_map)
             try:
-                self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
+                submit = getattr(self.db, "set_metadata_json_async", None)
+                if callable(submit):
+                    fut = submit("presence_pushname_map", snapshot)
+
+                    def _presence_db_done(done):
+                        try:
+                            done.result()
+                        except Exception as db_err:
+                            logging.warning(
+                                "[on_presence_update] Failed to save presence_pushname_map: %s",
+                                db_err,
+                            )
+
+                    fut.add_done_callback(_presence_db_done)
+                else:
+                    # Compatibility fallback for alternate DB implementations:
+                    # still keep the synchronous call off the MainThread.
+                    def _save_presence_metadata():
+                        try:
+                            self.db.set_metadata_json("presence_pushname_map", snapshot)
+                        except Exception as db_err:
+                            logging.warning(
+                                "[on_presence_update] Failed to save presence_pushname_map: %s",
+                                db_err,
+                            )
+                    self._msg_bg_executor.submit(_save_presence_metadata)
             except Exception as db_err:
-                logging.warning("[on_presence_update] Failed to save presence_pushname_map: %s", db_err)
+                logging.warning("[on_presence_update] Failed to queue presence_pushname_map save: %s", db_err)
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.

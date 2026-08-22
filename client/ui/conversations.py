@@ -1142,6 +1142,165 @@ class ConversationsPanel(wx.Panel):
         )
         self.conversation_panel.Layout()
 
+    def _queue_conversation_db_load(self, conversation: dict, jid: str) -> None:
+        """Fetch the opening message page without blocking the wx MainLoop.
+
+        The old navigate_to_conversation() synchronously called get_messages()
+        and get_message_count(). During backfill those calls could sit behind a
+        large DB queue and freeze the whole window. The DB bridge now exposes a
+        priority future; completion is marshalled back to wx with CallAfter.
+        """
+        if not jid:
+            return
+        try:
+            configured_limit = int(
+                self.main_window.settings.get("user_interface", {}).get(
+                    "messages_page_size", 200
+                )
+            )
+        except (TypeError, ValueError):
+            configured_limit = 200
+        unread_count = int(conversation.get("unreadCount") or 0)
+        limit = db_fetch_limit(configured_limit, unread_count)
+        if not jid.endswith("@g.us"):
+            limit += 50
+
+        db = getattr(self.main_window, "db", None)
+        if db is None:
+            return
+
+        def _deliver_result(db_msgs, total):
+            wx.CallAfter(self._apply_conversation_db_load, jid, db_msgs, total)
+
+        submit = getattr(db, "get_messages_page_async", None)
+        if callable(submit):
+            try:
+                future = submit(jid, limit=limit)
+            except Exception as exc:
+                logging.error(
+                    "[navigate_to_conversation] Failed to queue DB load for %s: %s",
+                    jid, exc,
+                )
+                return
+
+            def _done(done):
+                try:
+                    db_msgs, total = done.result()
+                except Exception as exc:
+                    logging.error(
+                        "[navigate_to_conversation] Async DB load failed for %s: %s",
+                        jid, exc,
+                    )
+                    return
+                _deliver_result(db_msgs, total)
+
+            future.add_done_callback(_done)
+            return
+
+        # Compatibility fallback: old/custom bridges may not have the async
+        # page API. Do the exact same reads on a daemon thread, never on wx.
+        def _legacy_load():
+            try:
+                page_getter = getattr(db, "get_messages_page", None)
+                if callable(page_getter):
+                    db_msgs, total = page_getter(jid, limit=limit)
+                else:
+                    db_msgs = db.get_messages(jid, limit=limit)
+                    total = db.get_message_count(jid)
+                _deliver_result(db_msgs, total)
+            except Exception as exc:
+                logging.error(
+                    "[navigate_to_conversation] Background DB load failed for %s: %s",
+                    jid, exc,
+                )
+
+        threading.Thread(target=_legacy_load, daemon=True).start()
+
+    def _apply_conversation_db_load(self, jid: str, db_msgs, total: int) -> None:
+        """Apply a completed opening-page read if the same chat is still open."""
+        current = self.conversation
+        if current is None or current.get("remoteJid", "") != jid:
+            return
+        if getattr(self, "_last_open_jid", "") != jid:
+            return
+
+        try:
+            fetched = list(db_msgs or [])
+            fetched.reverse()  # DatabaseManager.get_messages is newest-first.
+
+            current_records = (
+                current.get("messages", {})
+                .get("messages", {})
+                .get("records", [])
+            )
+
+            # Prefer the in-memory copy for IDs that exist in both places. A
+            # live edit/status/message may have landed after the DB read began;
+            # replacing it with the older SQLite snapshot would regress the UI.
+            live_by_id = {}
+            live_without_id = []
+            for msg in current_records:
+                if not isinstance(msg, dict):
+                    continue
+                mid = str((msg.get("key") or {}).get("id") or "")
+                if mid:
+                    live_by_id[mid] = msg
+                else:
+                    live_without_id.append(msg)
+
+            merged = []
+            seen_ids = set()
+            for msg in fetched:
+                if not isinstance(msg, dict):
+                    continue
+                mid = str((msg.get("key") or {}).get("id") or "")
+                chosen = live_by_id.pop(mid, msg) if mid else msg
+                if mid:
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                merged.append(chosen)
+
+            # Keep live messages not yet persisted when the snapshot was taken.
+            for mid, msg in live_by_id.items():
+                if mid not in seen_ids:
+                    seen_ids.add(mid)
+                    merged.append(msg)
+            merged.extend(live_without_id)
+
+            # SQLite cannot contain attachments that are still uploading. Merge
+            # optimistic rows back until their real message ID appears on disk.
+            db_ids = set(seen_ids)
+            for local_id, pending in list(self._outgoing_virtual_messages.items()):
+                pending_jid = str((pending.get("key") or {}).get("remoteJid") or "")
+                if pending_jid != jid:
+                    continue
+                real_id = str((pending.get("key") or {}).get("id") or "")
+                if real_id and real_id != local_id and real_id in db_ids:
+                    self._outgoing_virtual_messages.pop(local_id, None)
+                    self._media_upload_progress.pop(local_id, None)
+                    continue
+                if not any(m.get("_local_id") == local_id for m in merged if isinstance(m, dict)):
+                    merged.append(pending)
+
+            merged.sort(key=lambda m: self._extract_timestamp(m) or 0)
+            current.setdefault("messages", {})["messages"] = {
+                "total": max(int(total or 0), len(merged)),
+                "pages": 1,
+                "currentPage": 1,
+                "records": merged,
+            }
+
+            # Refresh only if this chat is still open. preserve_focus avoids an
+            # async DB completion stealing the row the user is already reading.
+            self.populate_messages(preserve_focus=True)
+            self._sync_pending_document_gauge()
+        except Exception as exc:
+            logging.error(
+                "[navigate_to_conversation] Failed to apply DB page for %s: %s",
+                jid, exc,
+            )
+
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
@@ -1198,55 +1357,13 @@ class ConversationsPanel(wx.Panel):
             self._search_open_btn.Show()
             self._search_field.SetValue("")
         self.conversation = conversation
-        
-        # Load up to 200 messages from local DB when opening conversation to support fast startup
-        try:
-            _conv_jid = conversation.get("remoteJid", "")
-            if _conv_jid:
-                configured_limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
-                unread_count = int(conversation.get("unreadCount") or 0)
-                limit = db_fetch_limit(configured_limit, unread_count)
-                # Keep the configured limit as a visible-row limit. Private
-                # chats also store non-displayable WhatsApp events (ciphertext,
-                # reactions, pin updates), so read a raw margin and let
-                # populate_messages() filter first and paginate afterwards.
-                if not _conv_jid.endswith("@g.us"):
-                    limit += 50
-                db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)
-                db_msgs.reverse()
-                # SQLite cannot contain an attachment that is still uploading:
-                # it has only a local UUID until send-file returns. Merge the
-                # stable optimistic row back after every DB reload. Once the
-                # real message appears in SQLite, retire the optimistic copy.
-                db_ids = {
-                    str((m.get("key") or {}).get("id") or "")
-                    for m in db_msgs if isinstance(m, dict)
-                }
-                for local_id, pending in list(self._outgoing_virtual_messages.items()):
-                    pending_jid = str((pending.get("key") or {}).get("remoteJid") or "")
-                    if pending_jid != _conv_jid:
-                        continue
-                    real_id = str((pending.get("key") or {}).get("id") or "")
-                    if real_id and real_id != local_id and real_id in db_ids:
-                        self._outgoing_virtual_messages.pop(local_id, None)
-                        self._media_upload_progress.pop(local_id, None)
-                        continue
-                    if not any(m.get("_local_id") == local_id for m in db_msgs):
-                        db_msgs.append(pending)
-                db_msgs.sort(key=lambda m: self._extract_timestamp(m) or 0)
-                if "messages" not in conversation:
-                    conversation["messages"] = {}
-                conversation["messages"]["messages"] = {
-                    "total": self.main_window.db.get_message_count(_conv_jid),
-                    "pages": 1,
-                    "currentPage": 1,
-                    "records": db_msgs
-                }
-        except Exception as e:
-            logging.error(f"[navigate_to_conversation] Failed to load messages from DB: {e}")
-
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
+
+        # Never wait for SQLite from the wx handler. Render whatever is already
+        # resident immediately; the priority DB page is merged back via
+        # wx.CallAfter as soon as it is ready.
+        self._queue_conversation_db_load(conversation, _conv_jid)
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
@@ -9386,13 +9503,37 @@ class ConversationsPanel(wx.Panel):
                 m for m in records
                 if m.get("key", {}).get("id") not in msg_ids
             ]
-            for mid in msg_ids:
+            jid = self.conversation.get("remoteJid", "")
+            db = getattr(self.main_window, "db", None)
+            if jid and db is not None:
                 try:
-                    self.main_window.db.delete_message(
-                        self.conversation.get("remoteJid", ""), mid
-                    )
+                    submit_batch = getattr(db, "delete_messages_batch_async", None)
+                    if callable(submit_batch):
+                        fut = submit_batch(jid, set(msg_ids))
+
+                        def _delete_done(done):
+                            try:
+                                done.result()
+                            except Exception:
+                                logging.exception(
+                                    "[conversations] batch delete failed for %s", jid
+                                )
+
+                        fut.add_done_callback(_delete_done)
+                    else:
+                        # Compatibility path for old/test DB facades. Production
+                        # DatabaseBridge always takes the async batch branch, so
+                        # wx never waits here.
+                        delete_batch = getattr(db, "delete_messages_batch", None)
+                        if callable(delete_batch):
+                            threading.Thread(
+                                target=delete_batch, args=(jid, set(msg_ids)), daemon=True
+                            ).start()
+                        else:
+                            for mid in msg_ids:
+                                db.delete_message(jid, mid)
                 except Exception:
-                    logging.exception("[conversations] delete_message failed for %s", mid)
+                    logging.exception("[conversations] failed to queue batch delete for %s", jid)
 
             # The chat list's preview text and sort position both fall back to
             # chat["lastMessage"]/["t"] — without recomputing them here, a
