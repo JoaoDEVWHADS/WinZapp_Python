@@ -514,6 +514,47 @@ def _discount_non_countable_unread(records: list, unread_count: int) -> int:
     return max(0, unread_count - discount)
 
 
+def apply_history_sync_unread_correction(remote_jid: str, chat: dict) -> bool:
+    """Re-discount a chat's badge now that its messages have been fetched.
+
+    get_remote_chats() applies _discount_non_countable_unread() while merging
+    the list-chats snapshot, but at that moment the chat has no messages: the
+    snapshot is merged before any get-messages call runs (measured on a live
+    sync — chats merged at 21:17:30, first messages answered at 21:17:36). The
+    discount returns immediately on its own `not records` guard, so whatever
+    the server counted survives intact, including the own (fromMe) sends and
+    system events WhatsApp Web sometimes counts toward unread.
+
+    Reported live: a conversation showing "1 mensagem não lida" whose newest
+    line was the user's own "Eu: áudio 0:03, Entregue" — no incoming message
+    behind the badge at all. No chats-update event was involved; the count came
+    straight from the snapshot merge, which is exactly where the correction is
+    blind.
+
+    Running the same correction here, with the records finally in hand, closes
+    that window. It can only ever subtract, and only tail entries that
+    on_new_message() would never have counted itself, so a genuinely unread
+    conversation keeps its badge untouched.
+
+    Returns True when the badge changed.
+    """
+    records = (chat.get("messages", {})
+               .get("messages", {})
+               .get("records", []))
+    if not records:
+        return False
+    before = int(chat.get("unreadCount") or 0)
+    corrected = _discount_non_countable_unread(records, before)
+    if corrected == before:
+        return False
+    logging.info(
+        "[unread] %s: %s -> %s after history sync (own sends / system events "
+        "the chat-list snapshot counted).", remote_jid, before, corrected,
+    )
+    chat["unreadCount"] = corrected
+    return True
+
+
 def _message_ts(msg: dict) -> int:
     """The timestamp of a message record, whichever key it arrived under."""
     if not isinstance(msg, dict):
@@ -14004,6 +14045,11 @@ class MainWindow(wx.Frame):
         elif not has_records:
             if "messages" not in chat:
                 chat["messages"] = {}
+
+        # The chat-list snapshot set this badge before a single message of this
+        # conversation had been fetched, so its own discount could not run.
+        # Now it can.
+        apply_history_sync_unread_correction(remote_jid, chat)
 
         self.chats[remote_jid] = chat
         self._note_backfill_state(remote_jid, chat, api_ok)
