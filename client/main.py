@@ -514,6 +514,77 @@ def _discount_non_countable_unread(records: list, unread_count: int) -> int:
     return max(0, unread_count - discount)
 
 
+# Media the server could not produce because WhatsApp Web no longer holds that
+# message, counted for the summary _report_media_fetch_failure() emits.
+_media_not_in_store_lock = threading.Lock()
+_media_not_in_store = 0
+# How often the running total is repeated once the first one has been reported.
+_MEDIA_MISSING_LOG_EVERY = 25
+
+
+def _report_media_fetch_failure(msg_id: str, status_code: int, body: str) -> bool:
+    """Log a "message not found" media failure as a tally. True when handled.
+
+    This is not a WinZapp bug and not a transient error, which is exactly why
+    it deserves different treatment from every other failure here: asking for
+    the media of a message WhatsApp Web has unloaded from its Store cannot
+    succeed. The Node side already exhausts a deep recovery chain before saying
+    so — the original id, the id without its device-port suffix, the cleaned
+    id, loadEarlierMessages(), getMessages(count: 100), and finally a LID/phone
+    JID resolution (see getMediaByMessage in sessionController.ts).
+
+    Measured on one live sync: 106 of 1,110 media requests ended here, and each
+    wrote two lines, so a perfectly healthy session buried its log under 212
+    warnings about something nobody can act on. That matters because log.log is
+    what users send when something is actually wrong, and it is truncated on
+    every launch — noise here costs real diagnosis later.
+
+    The count still surfaces: the first one explains itself, and the running
+    total is repeated every _MEDIA_MISSING_LOG_EVERY after that, so a session
+    where suddenly EVERY message is missing still looks different from a normal
+    one, which a silent counter would have hidden.
+    """
+    global _media_not_in_store
+    if status_code != 400 or "not found" not in (body or "").lower():
+        return False
+    with _media_not_in_store_lock:
+        _media_not_in_store += 1
+        total = _media_not_in_store
+    if total == 1:
+        logging.warning(
+            "[get_base64_from_media] %s: WhatsApp Web no longer holds this "
+            "message, so its media cannot be fetched (the server already tried "
+            "loading the chat's history). Further occurrences are counted, and "
+            "the running total is logged every %d.",
+            msg_id, _MEDIA_MISSING_LOG_EVERY,
+        )
+    elif total % _MEDIA_MISSING_LOG_EVERY == 0:
+        logging.warning(
+            "[get_base64_from_media] %d media unavailable so far this run "
+            "(message no longer in WhatsApp Web's store); latest: %s",
+            total, msg_id,
+        )
+    else:
+        logging.info(
+            "[get_base64_from_media] media unavailable for %s (#%d).",
+            msg_id, total,
+        )
+    return True
+
+
+def media_not_in_store_count() -> int:
+    """How many media were unavailable this run. For tests and diagnostics."""
+    with _media_not_in_store_lock:
+        return _media_not_in_store
+
+
+def reset_media_not_in_store_count() -> None:
+    """Forget the tally. Exists for tests."""
+    global _media_not_in_store
+    with _media_not_in_store_lock:
+        _media_not_in_store = 0
+
+
 def apply_history_sync_unread_correction(remote_jid: str, chat: dict) -> bool:
     """Re-discount a chat's badge now that its messages have been fetched.
 
@@ -16122,8 +16193,17 @@ class MainWindow(wx.Frame):
             # happened to correct it. With previousUnreadCount telling the two
             # apart, only the uninformative kind is rejected.
             logging.info(
-                "[unread] %s: dropped, uninformative server zero "
-                "(%s -> %s, previous=%s).",
+                # Named for what the branch tests, not for the case that
+                # motivated it. The condition is `unread_count < old_count`
+                # with no confirmed remote read — it rejects any count that
+                # falls below the local one, and the load-time zero is only the
+                # commonest shape of that. Calling every one of them a "server
+                # zero" sent the reader looking for a zero that is not there:
+                # seen live as `dropped, uninformative server zero (32 -> 8,
+                # previous=7)`, where nothing was zero and the guard was right
+                # anyway (WhatsApp Web's store was under-counting by 24).
+                "[unread] %s: dropped, server count below local and no "
+                "confirmed remote read (%s -> %s, previous=%s).",
                 normalized, old_count, unread_count, previous_unread,
             )
             return
@@ -16380,10 +16460,12 @@ class MainWindow(wx.Frame):
                     if attempt < max_attempts - 1:
                         time.sleep(3)
                         continue
-                logging.warning(
-                     "[get_base64_from_media] HTTP %s fetching media for %s: %s",
-                     response.status_code, msg_id, resp_text[:200],
-                )
+                if not _report_media_fetch_failure(msg_id, response.status_code,
+                                                   resp_text):
+                    logging.warning(
+                         "[get_base64_from_media] HTTP %s fetching media for %s: %s",
+                         response.status_code, msg_id, resp_text[:200],
+                    )
                 return ""
             else:
                 # Streaming mode so we can report per-chunk progress
