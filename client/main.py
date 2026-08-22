@@ -9406,7 +9406,16 @@ class MainWindow(wx.Frame):
             # already produced cannot be explained by the store still warming
             # up, which is what makes it evidence at all.
             evidence_count = getattr(self, "_chat_list_high_water", 0)
-            if evidence_count > server_count:
+            # A returning account can legitimately start at zero while the
+            # page warms up, so the local cache alone is not evidence on the
+            # first reading.  Once zero repeats, however, ask the page itself.
+            # If IndexedDB says chats exist, a repeatedly empty list-chats is a
+            # broken in-memory store, not a reason to wait through the full
+            # 30-attempt (~3 minute) extension observed in production.
+            stable_zero_with_cache = (
+                server_count == 0 and last_count == 0 and local_chat_count > 0
+            )
+            if evidence_count > server_count or stable_zero_with_cache:
                 # Re-read rather than caching one reading for the round: the
                 # count can still be filling in, and only a later, higher
                 # answer can turn a wrongly-innocent verdict into the right
@@ -9415,6 +9424,8 @@ class MainWindow(wx.Frame):
                 latest = self._wa_web_chat_count()
                 if latest is not None:
                     wa_web_count = max(wa_web_count or 0, latest)
+                if stable_zero_with_cache:
+                    evidence_count = max(evidence_count, local_chat_count)
 
             # WA-JS can answer correctly once and then collapse to [] while
             # IndexedDB and the rest of the page remain healthy.  The captured

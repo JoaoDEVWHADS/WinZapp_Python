@@ -87,8 +87,13 @@ def _run_loop(counts, local_cache, retries=6, confirm=CONFIRM, wa_web=None,
         server_count = counts[min(attempt, len(counts) - 1)]
         fetches += 1
         evidence_count = high_water
-        if evidence_count > server_count and wa_web is not None:
+        stable_zero_with_cache = (
+            server_count == 0 and last_count == 0 and local_cache > 0
+        )
+        if (evidence_count > server_count or stable_zero_with_cache) and wa_web is not None:
             wa_web_count = max(wa_web_count or 0, wa_web)
+            if stable_zero_with_cache:
+                evidence_count = max(evidence_count, local_cache)
         still_growing = server_count > last_count
         last_count = server_count
         if (not still_growing
@@ -175,6 +180,15 @@ class TestSettleDecision:
         stay incomplete and be retried rather than be taken at face value."""
         settled, _, _ = _run_loop([0] * 40, local_cache=500)
         assert settled is False
+
+    def test_repeated_zero_contradicting_page_store_fails_fast(self):
+        """Do not spend the 30-attempt extension on a demonstrably broken store."""
+        settled, fetches, broken = _run_loop(
+            [0] * 40, local_cache=175, wa_web=187
+        )
+        assert settled is False
+        assert broken is True
+        assert fetches == MainWindow._BROKEN_STORE_CONFIRM + 1
 
     def test_an_account_that_really_is_empty_eventually_settles(self):
         """Same answers, no local cache to contradict them — a first pairing

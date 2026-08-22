@@ -234,17 +234,43 @@ async function listChatsWithStoreRecovery(
             open.onsuccess = () => {
               const db = open.result;
               const found = new Set<string>();
-              const jidPattern = /(?:^|_)([^_\s]+@(c\.us|s\.whatsapp\.net|lid|g\.us|newsletter|broadcast))$/;
+              // model-storage's value shape is not stable across WhatsApp Web
+              // releases.  Current builds wrap the jid several objects deep
+              // (and sometimes put it inside a compound IndexedDB key), so the
+              // old shallow/suffix-only reader saw 0 ids although this store
+              // contained hundreds of chat records.
+              const jidPattern = /([0-9A-Za-z._-]+@(?:c\.us|s\.whatsapp\.net|lid|g\.us|newsletter|broadcast))/g;
 
               const add = (candidate: any) => {
-                if (candidate && typeof candidate === 'object') {
-                  candidate =
-                    candidate._serialized || candidate.id || candidate.jid ||
-                    candidate.remoteJid || candidate.chatId;
-                }
-                if (typeof candidate !== 'string') return;
-                const match = candidate.match(jidPattern);
-                if (match?.[1]) found.add(match[1]);
+                const seen = new Set<any>();
+                let visited = 0;
+                const walk = (value: any, depth: number) => {
+                  if (found.size >= 5000 || visited++ >= 300 || depth > 6 || value == null) return;
+                  if (typeof value === 'string') {
+                    // Avoid scanning unexpectedly large serialized payloads.
+                    // JIDs live in keys/metadata near the beginning of records.
+                    const text = value.slice(0, 16_384);
+                    jidPattern.lastIndex = 0;
+                    let match: RegExpExecArray | null;
+                    while ((match = jidPattern.exec(text)) !== null) {
+                      found.add(match[1]);
+                      if (found.size >= 5000) return;
+                    }
+                    return;
+                  }
+                  if (typeof value !== 'object' || seen.has(value)) return;
+                  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+                  seen.add(value);
+                  if (Array.isArray(value)) {
+                    for (const item of value.slice(0, 100)) walk(item, depth + 1);
+                    return;
+                  }
+                  for (const [key, nested] of Object.entries(value).slice(0, 100)) {
+                    walk(key, depth + 1);
+                    walk(nested, depth + 1);
+                  }
+                };
+                walk(candidate, 0);
               };
 
               try {
@@ -266,13 +292,6 @@ async function listChatsWithStoreRecovery(
                   add(current.primaryKey);
                   add(current.key);
                   add(value);
-                  add(value?.id);
-                  add(value?.jid);
-                  add(value?.remoteJid);
-                  add(value?.chatId);
-                  add(value?.key);
-                  add(value?.value?.id);
-                  add(value?.data?.id);
                   current.continue();
                 };
               } catch (_error) {
