@@ -542,42 +542,50 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._media_bitmap, 0, wx.ALIGN_LEFT | wx.LEFT | wx.BOTTOM, 5)
         self._media_bitmap.Hide()
 
+        # Stable row shared by transfer progress and the selected media's
+        # actions. This gives the native Windows gauge an already-laid-out
+        # parent and puts it exactly where Open / Save As normally appear.
+        self._media_action_slot = wx.Panel(self.conversation_panel)
+        self._media_action_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._media_action_slot.SetSizer(self._media_action_sizer)
+        conv_sizer.Add(
+            self._media_action_slot, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
+        )
+
         self._media_transfer_gauge = wx.Gauge(
-            self.conversation_panel,
+            self._media_action_slot,
             range=100,
             style=wx.GA_HORIZONTAL | wx.GA_SMOOTH,
         )
         self._media_transfer_gauge.SetMinSize((-1, 24))
-        conv_sizer.Add(
-            self._media_transfer_gauge, 0,
-            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
-        )
+        self._media_action_sizer.Add(self._media_transfer_gauge, 0, wx.EXPAND)
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge:
             gauge.Hide()
 
         # ── Action buttons (document / image / video) ───────────────────────
         self._action_open_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("open")
+            self._media_action_slot, label=i18n.t("open")
         )
         self._action_open_btn.Bind(wx.EVT_BUTTON, self._on_action_open)
-        conv_sizer.Add(self._action_open_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_open_btn, 0, wx.TOP, 2)
         self._action_open_btn.Hide()
 
         self._action_save_as_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("save_as")
+            self._media_action_slot, label=i18n.t("save_as")
         )
         self._action_save_as_btn.SetAccessible(AccessibleSaveAs())
         self._action_save_as_btn.Bind(wx.EVT_BUTTON, self._on_action_save_as)
-        conv_sizer.Add(self._action_save_as_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_save_as_btn, 0, wx.TOP, 2)
         self._action_save_as_btn.Hide()
 
         # ── Download button (shown when media is not yet cached locally) ───
         self._action_download_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("download")
+            self._media_action_slot, label=i18n.t("download")
         )
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
-        conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_download_btn, 0, wx.TOP, 2)
         self._action_download_btn.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
@@ -7802,6 +7810,31 @@ class ConversationsPanel(wx.Panel):
         local_id = target.get("_local_id", "")
         progress = self._media_upload_progress.get(local_id, 0.0)
         self._update_media_transfer_gauge(progress)
+
+    def _set_media_transfer_gauge_visible(self, visible: bool):
+        """Show/hide the gauge as both a window and a sizer item.
+
+        wx.Window.Show() alone is not reliable for a child that was hidden
+        before its containing sizer first laid out (the document gauge is born
+        hidden).  Explicitly toggling the sizer item and repainting the outer
+        panel makes the progress row exist immediately on Windows.
+        """
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.Show(visible)
+        sizer = gauge.GetContainingSizer()
+        if sizer is not None:
+            try:
+                sizer.Show(gauge, visible, recursive=True)
+            except TypeError:
+                # wxPython builds differ on the recursive keyword for Show().
+                sizer.Show(gauge, visible)
+        self._media_action_slot.Layout()
+        self.conversation_panel.Layout()
+        self.Layout()
+        self.conversation_panel.Refresh()
+        self.conversation_panel.Update()
 
     def _show_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
