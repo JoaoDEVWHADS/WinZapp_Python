@@ -39,12 +39,23 @@ def _post_was_rejected(body) -> bool:
     if not isinstance(body, dict):
         return True
     resp_data = body.get("response")
-    if isinstance(resp_data, list) and resp_data:
+    if isinstance(resp_data, list) and len(resp_data) > 0:
         for item in resp_data:
             if isinstance(item, dict):
-                s = (item.get("sendMsgResult") or {}).get("messageSendResult")
-                if s and s not in ("SUCCESS", "OK"):
-                    return True
+                msg_res = item.get("sendMsgResult")
+                if isinstance(msg_res, dict):
+                    s = msg_res.get("messageSendResult")
+                    if s and str(s).upper() not in ("SUCCESS", "OK", "READ"):
+                        return True
+        return False
+    elif isinstance(resp_data, dict):
+        msg_res = resp_data.get("sendMsgResult")
+        if isinstance(msg_res, dict):
+            s = msg_res.get("messageSendResult")
+            if s and str(s).upper() not in ("SUCCESS", "OK", "READ"):
+                return True
+        return False
+    elif body.get("status") in ("success", "SUCCESS") or body.get("id") or body.get("ack"):
         return False
     return resp_data is None
 
