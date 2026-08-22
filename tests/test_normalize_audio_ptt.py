@@ -70,3 +70,23 @@ def test_ptt_flag_feeds_voice_message_detection():
 
     result = _Stub()._normalize_wpp_message(_audio_msg())
     assert ConversationsPanel._is_voice_message(None, result) is True
+
+
+def test_audio_mimetype_is_preserved_for_save_as_extension():
+    result = _Stub()._normalize_wpp_message(
+        _audio_msg(type="audio", mimetype="audio/mp4")
+    )
+    assert result["message"]["audioMessage"]["mimetype"] == "audio/mp4"
+
+
+def test_audio_filename_is_preserved_from_media_data():
+    result = _Stub()._normalize_wpp_message(
+        _audio_msg(
+            type="audio",
+            mediaData={"mimetype": "audio/ogg", "fileName": "gravacao.ogg"},
+        )
+    )
+    audio = result["message"]["audioMessage"]
+    assert audio["mimetype"] == "audio/ogg"
+    assert audio["fileName"] == "gravacao.ogg"
+

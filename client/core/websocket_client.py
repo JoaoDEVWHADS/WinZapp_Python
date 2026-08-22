@@ -117,6 +117,7 @@ class WebSocketClient:
         self.sio.on("chats-update", self.on_chats_update)
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
+        self.sio.on("media-upload-progress", self.on_media_upload_progress)
         self.sio.on("incomingcall", self.on_wpp_incoming_call)
         # These two handlers existed but were never registered — contact
         # name/photo updates and presence changes only ever reached the app
@@ -1268,7 +1269,7 @@ class WebSocketClient:
             if session and session != self.instance_name:
                 return
                 
-            if status in ("disconnectedMobile", "notLogged"):
+            if status in ("disconnectedMobile", "notLogged", "UNPAIRED", "UNPAIRED_IDLE"):
                 # Handle permanent WhatsApp logout / disconnection.
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):
@@ -1387,6 +1388,17 @@ class WebSocketClient:
             # diagnosable from the logs instead of a message just vanishing
             # with no trace of why.
             logging.exception("[WebSocketClient] on_wpp_message_received error")
+
+    def on_media_upload_progress(self, data):
+        if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            return
+        try:
+            upload_id = str(data.get("uploadId") or "")
+            progress = float(data.get("progress"))
+            if upload_id and 0 <= progress <= 1:
+                wx.CallAfter(self.main_window.on_media_upload_progress, upload_id, progress)
+        except (TypeError, ValueError):
+            return
 
     def on_wpp_reaction(self, data):
         try:
@@ -1627,14 +1639,25 @@ class WebSocketClient:
                 }
             }
         elif msg_type in ("audio", "ptt"):
+            media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
+            audio_mimetype = wpp_msg.get("mimetype") or media_data.get("mimetype") or ""
+            audio_file_name = (
+                wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title")
+                or media_data.get("filename") or media_data.get("fileName") or media_data.get("title")
+                or ""
+            )
             seconds_val = _media_seconds(wpp_msg)
-            message_content = {
-                "audioMessage": {
-                    "url": wpp_msg.get("clientUrl", ""),
-                    "seconds": seconds_val,
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
-                }
+            audio_message = {
+                "url": wpp_msg.get("clientUrl", ""),
+                "seconds": seconds_val,
+                "mediaKey": _safe_media_key(wpp_msg.get("mediaKey")),
             }
+            if audio_mimetype:
+                audio_message["mimetype"] = audio_mimetype
+            if audio_file_name:
+                audio_message["fileName"] = audio_file_name
+
+            message_content = {"audioMessage": audio_message}
             # Preserve the PTT/voice-note flag: WPPConnect reports voice notes
             # with type="ptt", but that raw type is later mapped to
             # "audioMessage" (see type_mapping below) and the flag would be

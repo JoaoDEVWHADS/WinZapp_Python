@@ -16,10 +16,10 @@ an exhausted chat, and that early return is shared with the user scrolling up,
 so the conversation stopped loading older messages in every future session,
 with no removal path anywhere in the code and F5 preserving the metadata.
 
-So: mark in memory as eagerly as before (the deep-backfill queue has to drain
-at the same rate), but only persist once the request has had longer than its
-reply window. _older_requested_chats is persisted too, which is what lets the
-bar be cleared on a later launch rather than inside one session.
+So: do not mark a chat exhausted at all while the confirmed phone request is
+still inside its reply window. Deep backfill has its own short stall cooldown,
+while the user-facing scroll path remains re-queryable. Only a confirmed
+request older than the reply window becomes durable exhaustion.
 
 MainWindow is a wx.Frame and cannot be instantiated without a running wx.App,
 so the method is bound to a plain stub, as elsewhere in this suite.
@@ -125,12 +125,12 @@ class TestTheSecondEmptyPageInsideTheReplyWindow:
     """The captured failure: a backfill pass revisits the chat ~30 s after the
     ask, long before the phone's history-sync chunk lands."""
 
-    def test_it_marks_in_memory_so_the_queue_still_drains(self):
+    def test_it_stays_requeryable_in_memory_too(self):
         stub = _make()
         stub.fetch_older_messages(JID, ANCHOR)          # asks
-        stub.fetch_older_messages(JID, ANCHOR)          # 30 s later, still empty
-        assert JID in stub._exhausted_chats, (
-            "the deep-backfill queue must drain at the same rate it always did")
+        stub.fetch_older_messages(JID, ANCHOR)          # still inside reply window
+        assert JID not in stub._exhausted_chats, (
+            "temporary waiting must never kill user scroll-up in this session")
 
     def test_it_does_NOT_persist(self):
         stub = _make()
@@ -166,23 +166,30 @@ class TestOnceTheReplyWindowHasPassed:
         stub.fetch_older_messages(JID, ANCHOR)
         assert stub.db.metadata["exhausted_chats"] == [JID]
 
-    def test_an_exhausted_chat_is_never_queried_again(self):
-        """Unchanged, and the reason the write-off has to be right: this early
-        return is shared with the user scrolling up, not just the backfill."""
+    def test_user_scroll_overrides_an_exhausted_cache(self):
+        """A durable background conclusion must never permanently block an
+        explicit user request for older messages."""
         stub = _make()
         stub._exhausted_chats.add(JID)
-        assert stub.fetch_older_messages(JID, ANCHOR) == []
+        stub.fetch_older_messages(JID, ANCHOR)
+        assert stub.asks == [JID]
+        assert JID not in stub._exhausted_chats
+
+    def test_background_backfill_still_respects_exhausted_cache(self):
+        stub = _make()
+        stub._exhausted_chats.add(JID)
+        assert stub.fetch_older_messages(JID, ANCHOR, store_only=True) == []
         assert stub.asks == []
 
 
 class TestAFailedAskIsNotDurableEvidenceEither:
-    def test_a_request_that_never_went_out_marks_only_in_memory(self):
-        """request_older_messages() returning False covers a 60 s timeout and a
-        dropped connection. Its own docstring calls this out as writing off
-        exactly the chats that still have history coming."""
+    def test_a_request_that_never_went_out_is_not_exhaustion_at_all(self):
+        """A timeout, transport failure, or recent-sync refusal says nothing
+        about whether the conversation has older history."""
         stub = _make(ask_succeeds=False)
         stub.fetch_older_messages(JID, ANCHOR)
-        assert JID in stub._exhausted_chats
+        assert JID not in stub._exhausted_chats
+        assert JID not in stub._older_requested_chats
         assert "exhausted_chats" not in stub.db.metadata
 
 

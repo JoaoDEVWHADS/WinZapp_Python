@@ -275,13 +275,17 @@ class TestRefreshHistoryStillLanding:
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
-    def test_an_interrupted_recent_sync_does_not_pin_the_flag(self, monkeypatch):
-        """recentCompleted stays false forever on such a session — keying off it
-        would re-query every short chat on every launch for good."""
+    def test_incomplete_recent_sync_keeps_short_chats_pending(self, monkeypatch):
+        """RECENT may still be landing after the bootstrap queue looks empty.
+
+        The retry loop is time-budgeted, so keeping the chats pending cannot
+        re-query them forever and avoids requiring Home in every conversation.
+        """
         stub = self._stub(
             {"unprocessedChunks": 0, "initialSyncComplete": True, "recentCompleted": False},
             monkeypatch)
-        assert stub.refresh_history_still_landing() is False
+        assert stub.refresh_history_still_landing() is True
+        assert stub._history_still_landing is True
 
     def test_an_unreadable_status_is_treated_as_settled(self, monkeypatch):
         """Better to take a short chat at face value than to re-query 600 of
@@ -289,6 +293,17 @@ class TestRefreshHistoryStillLanding:
         stub = self._stub(None, monkeypatch)
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
+
+
+class TestBackfillPriority:
+    """Visible 1/15-message gaps must not wait behind cosmetic/deep work."""
+
+    def test_short_chats_gate_lower_priority_work(self):
+        import inspect
+
+        source = inspect.getsource(MainWindow._backfill_empty_chats)
+        assert "if not pending:\n                    named = self._backfill_names()" in source
+        assert "if deep_pending and not pending:" in source
 
 
 def _history_sync_warnings(caplog):
@@ -390,14 +405,15 @@ class _FetchStub:
 
 
 def _run_empty_result_branch(stub, remote_jid):
-    """Mirror of the no-messages branch in fetch_older_messages()."""
+    """Mirror the immediate no-messages decision in fetch_older_messages()."""
     already_asked = remote_jid in stub._older_requested_chats
-    requested = False
     if not already_asked:
-        stub._older_requested_chats.add(remote_jid)
         requested = stub.request_older_messages(remote_jid)
-    if not requested:
-        stub._exhausted_chats.add(remote_jid)
+        # A timestamp/asked marker is evidence only after the request went out.
+        if requested:
+            stub._older_requested_chats.add(remote_jid)
+    # Neither a failed/refused request nor a second empty page inside the reply
+    # window is enough to mark the chat exhausted anymore.
 
 
 class TestExhaustionBookkeeping:
@@ -414,19 +430,20 @@ class TestExhaustionBookkeeping:
         assert stub.requested_for == ["120363000000000000@g.us"]
         assert "120363000000000000@g.us" not in stub._exhausted_chats
 
-    def test_failed_request_marks_exhausted(self):
+    def test_failed_request_keeps_the_chat_requeryable(self):
         stub = _FetchStub(request_succeeds=False)
-        _run_empty_result_branch(stub, "120363000000000000@g.us")
-        assert "120363000000000000@g.us" in stub._exhausted_chats
+        jid = "120363000000000000@g.us"
+        _run_empty_result_branch(stub, jid)
+        assert jid not in stub._exhausted_chats
+        assert jid not in stub._older_requested_chats
 
-    def test_the_phone_is_asked_only_once_per_chat(self):
-        """Second empty result gives up instead of re-asking the phone."""
+    def test_confirmed_request_is_not_repeated_inside_reply_window(self):
         stub = _FetchStub(request_succeeds=True)
         jid = "120363000000000000@g.us"
         _run_empty_result_branch(stub, jid)
         _run_empty_result_branch(stub, jid)
         assert stub.requested_for == [jid]
-        assert jid in stub._exhausted_chats
+        assert jid not in stub._exhausted_chats
 
 
 class TestBrowserFlagsStayRemoved:
@@ -504,6 +521,51 @@ class TestRoutesArePatched:
         assert guard_at < send_at, "the guard must run before the request goes out"
 
 
+    def test_stuck_recent_queue_has_a_real_recovery_path(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+        assert "queueFingerprint" in controller
+        assert "cmd.restartBackend()" in controller
+        assert "staleForMs >= 30_000" in controller
+        assert "staleForMs >= 75_000" in controller
+        assert "req.client.page.reload" in controller
+
+    def test_stale_partial_recent_chunks_are_requested_again(self):
+        """A progress<100 row is never selectable and blocks later chunks."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+        assert "progress < 100" in controller
+        assert "now - startedAt >= 120_000" in controller
+        assert "row.reuploadPending !== true" in controller
+        assert "api.markChunkForReuploadPending(row.msgKey)" in controller
+        assert "Number(result?.reuploadPending || 0) === 0" in controller
+        assert "PARTIAL_REUPLOAD_GRACE_MS = 5 * 60_000" in controller
+        assert "droppedStalePartialChunks" in controller
+        assert "row.reuploadPending !== true" in controller
+        assert "getHistorySyncCompleteOnDemandAccessGranted" in controller
+        assert "setHistorySyncCompleteOnDemandAccessGranted(true)" in controller
+        assert "droppedBlockedCompleteChunks" in controller
+        assert "orphanedCompleteRecent" in controller
+        assert "!recentOrders.includes(1)" in controller
+        assert "getPnLidEntry" in controller
+        assert "resolvedChatId = alternateId" in controller
+        assert "history_sync_on_demand_message_count" in controller
+        assert "oldestMsgId: oldest?.id?.id" in controller
+        assert "oldestMsgFromMe: oldest?.id?.fromMe" in controller
+        assert "oldestMsgTimestampMs" in controller
+        assert "supportInlineResponse: true" in controller
+        assert "sendPeerDataOperationRequest(kind, request)" in controller
+        assert "sendPeerDataOperationRequest(kind, { chatId: wid })" not in controller
+
+
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.
 
@@ -541,6 +603,11 @@ class TestDocumentOnlyInterception:
         assert "version = undefined;" in start
         assert "browserController.initWhatsapp = async function" in start
 
+    def test_pin_failure_also_consumes_version_instead_of_using_blanket_fallback(self):
+        start = self._start_js()
+        assert "falling back to WPPConnect's blanket one" not in start
+        assert "History sync is preserved" in start
+
     def test_every_paused_request_is_answered(self):
         """A paused request nobody answers is the bug itself, not a fix for it."""
         start = self._start_js()
@@ -561,3 +628,38 @@ class TestDocumentOnlyInterception:
         # why the old call was wrong and legitimately names it.
         assert "await (window as any).WAPI.loadEarlierMessages(" not in controller
         assert "await (window as any).WPP.chat.loadEarlierMessages(" not in controller
+
+
+class TestWaitForRecentHistoryBeforeMessageSync:
+    class Stub:
+        _RECENT_HISTORY_WAIT = 360
+        wait_for_recent_history_before_message_sync = (
+            MainWindow.wait_for_recent_history_before_message_sync
+        )
+
+        def __init__(self, statuses):
+            self.statuses = list(statuses)
+            self.unblocked = 0
+
+        def _should_abort_sync_for_offline(self):
+            return False
+
+        def fetch_history_sync_status(self):
+            return self.statuses.pop(0)
+
+        def unblock_history_sync(self):
+            self.unblocked += 1
+
+    def test_ready_store_does_not_wait_or_recover(self):
+        stub = self.Stub([{"recentCompleted": True}])
+        stub.wait_for_recent_history_before_message_sync()
+        assert stub.unblocked == 0
+
+    def test_incomplete_store_is_recovered_before_chat_reads(self, monkeypatch):
+        stub = self.Stub([
+            {"recentCompleted": False, "unprocessedChunks": 2},
+            {"recentCompleted": True, "unprocessedChunks": 0},
+        ])
+        monkeypatch.setattr("main.time.sleep", lambda _seconds: None)
+        stub.wait_for_recent_history_before_message_sync()
+        assert stub.unblocked == 1

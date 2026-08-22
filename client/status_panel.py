@@ -4,6 +4,7 @@ import mimetypes
 import os
 import tempfile
 import threading
+import time
 import wx
 import requests
 from ui.accessible import (
@@ -18,6 +19,7 @@ from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
+from ui.media_viewer import MediaViewerDialog
 
 try:
     import pyaudio
@@ -37,14 +39,64 @@ def _post_was_rejected(body) -> bool:
     if not isinstance(body, dict):
         return True
     resp_data = body.get("response")
-    if isinstance(resp_data, list) and resp_data:
+    if isinstance(resp_data, list) and len(resp_data) > 0:
         for item in resp_data:
             if isinstance(item, dict):
-                s = (item.get("sendMsgResult") or {}).get("messageSendResult")
-                if s and s not in ("SUCCESS", "OK"):
-                    return True
+                msg_res = item.get("sendMsgResult")
+                if isinstance(msg_res, dict):
+                    s = msg_res.get("messageSendResult")
+                    if s and str(s).upper() not in ("SUCCESS", "OK", "READ"):
+                        return True
+        return False
+    elif isinstance(resp_data, dict):
+        msg_res = resp_data.get("sendMsgResult")
+        if isinstance(msg_res, dict):
+            s = msg_res.get("messageSendResult")
+            if s and str(s).upper() not in ("SUCCESS", "OK", "READ"):
+                return True
+        return False
+    elif body.get("status") in ("success", "SUCCESS") or body.get("id") or body.get("ack"):
         return False
     return resp_data is None
+
+
+def _response_message_ids(body) -> set[str]:
+    """Collect status message ids from arbitrarily nested API responses."""
+    found = set()
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in ("id", "messageId", "stanzaId") and isinstance(child, str):
+                    found.add(child)
+                else:
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(body)
+    return found
+
+
+def _discard_rejected_response(main_window, body) -> None:
+    for message_id in _response_message_ids(body):
+        wx.CallAfter(main_window.remove_failed_status_update, message_id)
+
+
+def _download_status_media(main_window, status: dict, attempts: int = 4) -> bytes:
+    """Wait for pending status media instead of misreporting it as corrupt."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            encoded = main_window.get_base64_from_media(status)
+            if encoded:
+                return base64.b64decode(encoded)
+        except Exception as exc:
+            last_error = exc
+        if attempt + 1 < attempts:
+            time.sleep(1.0)
+    raise ValueError(str(last_error or "empty media response"))
 
 
 def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
@@ -338,6 +390,8 @@ class MyStatusDialog(wx.Dialog):
         is_audio = msg_type == "audioMessage"
         self._play_pause_btn.Show(is_video or is_audio)
         self.Layout()
+        if is_audio:
+            wx.CallAfter(self._on_play_pause_video, None)
 
     # ── Navigation ────────────────────────────────────────────────────────
 
@@ -409,10 +463,7 @@ class MyStatusDialog(wx.Dialog):
     def _download_and_play_video(self, status, status_id: str, msg_type: str):
         suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
-            b64 = self._mw.get_base64_from_media(status)
-            if not b64:
-                raise ValueError("empty media response")
-            content = base64.b64decode(b64)
+            content = _download_status_media(self._mw, status)
             tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
@@ -688,7 +739,7 @@ class StatusPanel(wx.Panel):
         self._voice_post_panel = wx.Panel(self)
         voice_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("voice_recording"))
+        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("recording_in_progress"))
         voice_sizer.Add(self._voice_status_lbl, 0, wx.ALL, 5)
 
         voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -818,7 +869,7 @@ class StatusPanel(wx.Panel):
             self._video_player.stop()
         event.Skip()
 
-    def _load_statuses(self):
+    def _load_statuses(self, show_loading: bool = True):
         """
         Build the status list.
 
@@ -832,8 +883,14 @@ class StatusPanel(wx.Panel):
         """
         mw   = self.main_window
         i18n = mw.i18n
-        wx.CallAfter(self._set_list_loading)
+        if show_loading:
+            wx.CallAfter(self._set_list_loading)
         my_statuses, contacts = self._fetch_statuses_from_api()
+        api_ok = getattr(self, "_last_status_api_ok", False)
+        # A successful StatusV3Store answer is authoritative for own stories.
+        # In particular, an empty list must clear stale local optimistic rows.
+        if api_ok:
+            self._reconcile_my_status_cache(my_statuses)
         # Merge, never replace: the API's StatusV3Store may only hold the
         # pages loaded so far, while _status_updates (seeded from the DB at
         # startup) keeps the stories that arrived via status@broadcast
@@ -849,6 +906,34 @@ class StatusPanel(wx.Panel):
             my_statuses = self._merge_status_lists(my_statuses, fb_my)
             contacts = self._merge_status_contacts(contacts, fb_contacts)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
+
+    def _reconcile_my_status_cache(self, remote_my_statuses: list) -> None:
+        """Delete cached own stories absent from authoritative WhatsApp."""
+        mw = self.main_window
+        remote_ids = {
+            (status.get("key") or {}).get("id")
+            for status in remote_my_statuses
+            if isinstance(status, dict)
+        }
+        local_records = [
+            status
+            for bucket in getattr(mw, "_status_updates", {}).values()
+            for status in bucket
+        ]
+        local_my, _ = self._parse_statuses(local_records, mw.i18n)
+        stale_ids = {
+            (status.get("key") or {}).get("id")
+            for status in local_my
+            if isinstance(status, dict)
+        } - remote_ids
+        for message_id in stale_ids:
+            if message_id:
+                mw.remove_failed_status_update(message_id, refresh=False)
+        if stale_ids:
+            logging.info(
+                "[status_panel] Removed %d local own status(es) absent from WhatsApp",
+                len(stale_ids),
+            )
 
     @staticmethod
     def _merge_status_lists(a: list, b: list) -> list:
@@ -913,13 +998,16 @@ class StatusPanel(wx.Panel):
             headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
             resp = api_get(url, headers=headers, timeout=15)
             if resp.status_code not in (200, 201):
+                self._last_status_api_ok = False
                 return [], []
             body = resp.json() or {}
             data = body.get("response") if isinstance(body, dict) else None
         except Exception as exc:
             logging.warning("[status_panel] statuses API failed, falling back to WebSocket cache: %s", exc)
+            self._last_status_api_ok = False
             return [], []
         if not isinstance(data, dict):
+            self._last_status_api_ok = False
             return [], []
 
         ws  = getattr(mw, "ws", None)
@@ -941,6 +1029,7 @@ class StatusPanel(wx.Panel):
                 except Exception as exc:
                     logging.warning("[status_panel] failed to normalize API status: %s", exc)
             records.append(wm)
+        self._last_status_api_ok = True
         return self._parse_statuses(records, i18n)
 
     def _parse_statuses(self, items, i18n) -> tuple:
@@ -1181,38 +1270,27 @@ class StatusPanel(wx.Panel):
         )
 
     def _on_status_list_key_down(self, event):
-        """Make Space activate the focused status item (same as Enter).
+        """Space opens the focused status exactly like Enter.
 
-        Select() below fires EVT_LIST_ITEM_SELECTED -> _on_status_contact_
-        selected() too, which is where the actual reset-position decision
-        lives — see its own comment. This handler never resets
-        _current_status_idx itself, so whichever of the two paths runs
-        first still leaves the user's position intact.
+        Plain arrow navigation only changes the selected contact. It never
+        opens a status and therefore never marks anything as viewed.
         """
-        if event.GetKeyCode() == wx.WXK_SPACE:
-            idx = self._status_list.GetFocusedItem()
-            if idx >= 0:
-                if idx == 0:
-                    self._status_list.Select(idx)
-                    self._open_my_status_dialog()
-                    return
-                contact_idx = self._status_row_contact.get(idx, -1)
-                if contact_idx < 0:
-                    return  # a "--- Recentes/Vistos ---" header row — not selectable
-                # Play/pause toggle deliberately checked BEFORE Select(idx)
-                # runs (below): Select() re-fires EVT_LIST_ITEM_SELECTED
-                # even for an already-selected row, which would otherwise
-                # stop() the player out from under this toggle a moment
-                # later — see _is_current_status_playable()'s docstring.
-                if self._is_current_status_playable(contact_idx):
-                    self._on_play_pause_video(None)
-                    return
-                self._status_list.Select(idx)
-                if 0 <= contact_idx < len(self._status_contacts):
-                    self._selected_contact_idx = contact_idx
-                    self._show_current_status()
-        else:
+        if event.GetKeyCode() != wx.WXK_SPACE:
             event.Skip()
+            return
+        idx = self._status_list.GetFocusedItem()
+        if idx < 0:
+            return
+        if idx == 0:
+            self._open_my_status_dialog()
+            return
+        contact_idx = self._status_row_contact.get(idx, -1)
+        if contact_idx < 0 or contact_idx >= len(self._status_contacts):
+            return
+        if contact_idx != self._selected_contact_idx:
+            self._current_status_idx = 0
+        self._selected_contact_idx = contact_idx
+        self._open_status_media_viewer(contact_idx)
 
     def _on_refresh(self, event):
         threading.Thread(target=self._load_statuses, daemon=True).start()
@@ -1220,36 +1298,27 @@ class StatusPanel(wx.Panel):
     # ── Status list selection / activation ───────────────────────────────────
 
     def _on_status_contact_selected(self, event, announce: bool = False):
+        """Track focus only; selecting a row is not the same as viewing it."""
         idx = event.GetIndex()
-        if idx == 0:
-            # My Status row selected — hide the inline viewer; dialog opens on activate
-            self._selected_contact_idx = -1
-            self._viewer_panel.Hide()
-            self.Layout()
-            return
+        # The old inline viewer is deliberately not used for passive list
+        # navigation anymore. Keeping it hidden is also important for screen
+        # readers: arrowing the list should announce only the list item.
+        try:
+            self._video_player.stop()
+        except Exception:
+            pass
+        self._viewer_panel.Hide()
+        self.Layout()
 
+        if idx == 0:
+            self._selected_contact_idx = -1
+            return
         contact_idx = self._status_row_contact.get(idx, -1)
         if contact_idx < 0 or contact_idx >= len(self._status_contacts):
-            self._viewer_panel.Hide()
-            self.Layout()
             return
-
-        # Only jump back to the FIRST status when selecting a genuinely
-        # different contact. This event also fires from Select() calls
-        # elsewhere (e.g. Space re-activating the row the list already has
-        # focused, while the user has since moved forward within the viewer
-        # via Ctrl+Left/Right) — resetting unconditionally meant pressing
-        # Space while sitting on "status 3 de 5" silently snapped it back to
-        # "1 de 5" for no reason.
         if contact_idx != self._selected_contact_idx:
             self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
-        # Defaults to silent: NVDA/JAWS already read the newly-focused list
-        # item on their own on plain arrow-key navigation (EVT_LIST_ITEM_
-        # SELECTED) — see _show_current_status()'s own docstring. Callers
-        # driven by an explicit action rather than mere focus movement
-        # (Space, Enter/double-click activation) pass announce=True.
-        self._show_current_status(announce=announce)
 
     def _on_status_contact_activated(self, event):
         idx = event.GetIndex()
@@ -1257,12 +1326,12 @@ class StatusPanel(wx.Panel):
             self._open_my_status_dialog()
             return
         contact_idx = self._status_row_contact.get(idx, -1)
-        if contact_idx < 0:
-            return  # a "--- Recentes/Vistos ---" header row — not selectable
-        if self._is_current_status_playable(contact_idx):
-            self._on_play_pause_video(None)
+        if contact_idx < 0 or contact_idx >= len(self._status_contacts):
             return
-        self._on_status_contact_selected(event, announce=True)
+        if contact_idx != self._selected_contact_idx:
+            self._current_status_idx = 0
+        self._selected_contact_idx = contact_idx
+        self._open_status_media_viewer(contact_idx)
 
     def _open_my_status_dialog(self):
         dlg    = MyStatusDialog(self.main_window, self._my_statuses)
@@ -1271,6 +1340,178 @@ class StatusPanel(wx.Panel):
         if result == MyStatusDialog.RC_ADD_STATUS:
             # User wants to add a status — open the popup menu
             self._on_add_status(None)
+
+    # ── Unified status media viewer ─────────────────────────────────────────
+
+    def _open_status_media_viewer(self, contact_idx: int):
+        if contact_idx < 0 or contact_idx >= len(self._status_contacts):
+            return
+        entry = self._status_contacts[contact_idx]
+        statuses = entry.get("statuses", [])
+        if not statuses:
+            return
+
+        items = [self._status_to_media_viewer_item(entry, status) for status in statuses]
+        start_index = max(0, min(self._current_status_idx, len(items) - 1))
+        dlg = MediaViewerDialog(
+            self,
+            self.main_window,
+            items,
+            start_index=start_index,
+            on_item_opened=self._on_viewer_status_opened,
+            is_liked=self._viewer_status_is_liked,
+            on_like=self._viewer_like_status,
+            on_reply=self._viewer_reply_status,
+        )
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+            row = self._status_contact_row.get(contact_idx)
+            if row is not None and 0 <= row < self._status_list.GetItemCount():
+                try:
+                    self._status_list.Focus(row)
+                    self._status_list.Select(row)
+                    self._status_list.SetFocus()
+                except Exception:
+                    pass
+
+    def _status_to_media_viewer_item(self, entry: dict, status: dict) -> dict:
+        i18n = self.main_window.i18n
+        msg_type = status.get("messageType", "")
+        msg_obj = status.get("message") or {}
+        key = status.get("key", {})
+        status_id = key.get("id", "")
+        from_me = bool(key.get("fromMe", False))
+        label = entry.get("name", "")
+
+        item = {
+            "status": status,
+            "entry": entry,
+            "status_id": status_id,
+            "from_me": from_me,
+            "label": label,
+        }
+
+        if msg_type in ("conversation", "extendedTextMessage"):
+            if msg_type == "conversation":
+                text = msg_obj.get("conversation", "")
+            else:
+                text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+            item.update(kind="text", text=text)
+            return item
+
+        type_map = {
+            "imageMessage": ("image", ".jpg", "photo"),
+            "videoMessage": ("video", ".mp4", "video"),
+            "audioMessage": ("audio", ".ogg", "message_type_audio"),
+        }
+        if msg_type in type_map:
+            kind, default_ext, label_key = type_map[msg_type]
+            inner = msg_obj.get(msg_type) or {}
+            mime = str(inner.get("mimetype") or "").split(";")[0].strip().lower()
+            ext = default_ext
+            if "/" in mime:
+                subtype = mime.split("/", 1)[1]
+                canonical = {
+                    "jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp",
+                    "gif": ".gif", "mp4": ".mp4", "webm": ".webm",
+                    "ogg": ".ogg", "opus": ".opus", "mpeg": ".mp3", "mp3": ".mp3",
+                    "mp4a-latm": ".m4a", "x-m4a": ".m4a", "aac": ".aac",
+                    "wav": ".wav", "x-wav": ".wav", "flac": ".flac",
+                }
+                ext = canonical.get(subtype, "." + subtype.split("+")[0])
+            caption = str(inner.get("caption") or "")
+
+            def _loader(st=status):
+                return _download_status_media(self.main_window, st)
+
+            item.update(
+                kind=kind,
+                loader=_loader,
+                extension=ext,
+                filename=f"status{ext}",
+                caption=caption,
+                media_label=i18n.t(label_key),
+            )
+            return item
+
+        # Documents, stickers, contacts and any future status type still open
+        # in the same modal window as accessible read-only text rather than
+        # silently doing nothing.
+        item.update(kind="text", text=_status_content_label(msg_type, msg_obj, i18n))
+        return item
+
+    def _on_viewer_status_opened(self, item: dict, index: int):
+        """The ONLY place where another person's status becomes viewed."""
+        self._current_status_idx = index
+        self._current_status = item.get("status")
+        self._current_status_entry = item.get("entry")
+        status_id = item.get("status_id", "")
+        if status_id and not item.get("from_me"):
+            self._mark_status_viewed(status_id)
+        self._update_focused_status_row_text()
+
+    def _viewer_status_is_liked(self, item: dict) -> bool:
+        return self._is_status_liked(item.get("status_id", ""))
+
+    def _viewer_like_status(self, item: dict, done):
+        """Send a status like and report completion back to MediaViewer."""
+        status = item.get("status") or {}
+        entry = item.get("entry") or {}
+        status_key = status.get("key", {})
+        status_id = item.get("status_id", "")
+        if not status_id:
+            wx.CallAfter(done, False)
+            return
+        if self._is_status_liked(status_id):
+            self._on_unlike_status_attempted()
+            wx.CallAfter(done, False)
+            return
+
+        sender_jid = status_key.get("participant", "") or entry.get("jid", "")
+        if not sender_jid:
+            wx.CallAfter(done, False)
+            return
+
+        mw = self.main_window
+
+        def _send_like():
+            try:
+                ok = bool(mw.send_text_message(sender_jid, "❤️"))
+            except Exception:
+                ok = False
+            if ok:
+                wx.CallAfter(self._on_like_sent, status_id)
+                wx.CallAfter(done, True)
+            else:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_like_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+                wx.CallAfter(done, False)
+
+        threading.Thread(target=_send_like, daemon=True).start()
+
+    def _viewer_reply_status(self, item: dict, text: str, done):
+        status = item.get("status") or {}
+        entry = item.get("entry") or {}
+        poster_jid = entry.get("jid", "")
+        if not poster_jid or status.get("key", {}).get("fromMe"):
+            wx.CallAfter(done, False)
+            return
+
+        def _send():
+            try:
+                result = self.main_window.send_text_message(poster_jid, text)
+                ok = bool(result) and not isinstance(result, dict)
+            except Exception:
+                ok = False
+            wx.CallAfter(done, ok)
+
+        threading.Thread(target=_send, daemon=True).start()
 
     # ── Status viewer ────────────────────────────────────────────────────────
 
@@ -1353,8 +1594,8 @@ class StatusPanel(wx.Panel):
         from_me     = status_key.get("fromMe", False)
         if not from_me:
             status_id = status_key.get("id", "")
-            if status_id:
-                self._mark_status_viewed(status_id)
+            # A status is marked viewed only by MediaViewer after the user
+            # explicitly activates it; passive/legacy rendering must not do it.
             is_liked  = self._is_status_liked(status_id)
             i18n2     = self.main_window.i18n
             self._like_btn.SetLabel(
@@ -1616,10 +1857,7 @@ class StatusPanel(wx.Panel):
         # fallback and for a sensible temp filename, not correctness.
         suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
-            b64 = mw.get_base64_from_media(status)
-            if not b64:
-                raise ValueError("empty media response")
-            content = base64.b64decode(b64)
+            content = _download_status_media(mw, status)
             tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
@@ -1710,10 +1948,7 @@ class StatusPanel(wx.Panel):
     def _save_status_media_bg(self, status, save_path: str):
         mw = self.main_window
         try:
-            b64 = mw.get_base64_from_media(status)
-            if not b64:
-                raise ValueError("empty media response")
-            content = base64.b64decode(b64)
+            content = _download_status_media(mw, status)
             with open(save_path, "wb") as fh:
                 fh.write(content)
             wx.CallAfter(mw.output, mw.i18n.t("status_media_saved"))
@@ -1894,7 +2129,7 @@ class StatusPanel(wx.Panel):
         self._stop_recording_stream()
 
         i18n = self.main_window.i18n
-        self._voice_status_lbl.SetLabel(i18n.t("voice_recording"))
+        self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
         self._voice_start_btn.SetLabel(i18n.t("record_voice_message"))
         self._voice_start_btn.Show()
         self._voice_pause_btn.Hide()
@@ -2209,6 +2444,14 @@ class StatusPanel(wx.Panel):
         try:
             resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
+            response_body = None
+            try:
+                response_body = resp.json()
+            except Exception:
+                pass
+            if ok and _post_was_rejected(response_body):
+                ok = False
+                _discard_rejected_response(mw, response_body)
             err_msg = "" if ok else f"HTTP {resp.status_code}: {resp.text[:200]}"
         except Exception as exc:
             ok = False
@@ -2268,6 +2511,7 @@ class StatusPanel(wx.Panel):
                 try:
                     if _post_was_rejected(resp.json()):
                         ok = False
+                        _discard_rejected_response(mw, resp.json())
                 except Exception:
                     pass
         except Exception as exc:
@@ -2285,12 +2529,25 @@ class StatusPanel(wx.Panel):
             )
 
     def _on_status_sent(self):
+        logging.info("[status_post] Client acknowledged successful status post")
         self._post_panel.Hide()
         self._media_post_panel.Hide()
         self.Layout()
         self._status_list.SetFocus()
-        self.main_window.output(self.main_window.i18n.t("status_posted"))
-        threading.Thread(target=self._load_statuses, daemon=True).start()
+        self.main_window.output(
+            self.main_window.i18n.t("status_posted"), interrupt=True
+        )
+        # Give StatusV3Store a moment to ingest the already-ACKed story.  The
+        # refresh is silent so a slow endpoint never replaces the usable list
+        # with a long-lived "loading" row after a successful post.
+        wx.CallLater(2000, self._refresh_after_status_sent)
+
+    def _refresh_after_status_sent(self):
+        threading.Thread(
+            target=self._load_statuses,
+            kwargs={"show_loading": False},
+            daemon=True,
+        ).start()
 
     # ── Send media status ────────────────────────────────────────────────────
 
@@ -2420,6 +2677,14 @@ class StatusPanel(wx.Panel):
         try:
             resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
+            response_body = None
+            try:
+                response_body = resp.json()
+            except Exception:
+                pass
+            if ok and _post_was_rejected(response_body):
+                ok = False
+                _discard_rejected_response(mw, response_body)
         except Exception:
             ok = False
         if ok:
