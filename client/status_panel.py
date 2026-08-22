@@ -11,6 +11,7 @@ from ui.accessible import (
     AccessibleRecordVoiceMessage, AccessibleDiscardVoiceMessage, AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
 )
+from core.api_client import api_get, api_post, redact_api_url
 from core.utils import format_number, get_downloads_folder, normalize_line_separators
 from core.video_player import VideoPlayer
 from core.audio_devices import (
@@ -910,7 +911,7 @@ class StatusPanel(wx.Panel):
         try:
             url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/statuses"
             headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = api_get(url, headers=headers, timeout=15)
             if resp.status_code not in (200, 201):
                 return [], []
             body = resp.json() or {}
@@ -2206,7 +2207,7 @@ class StatusPanel(wx.Panel):
         headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {"base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}"}
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             err_msg = "" if ok else f"HTTP {resp.status_code}: {resp.text[:200]}"
         except Exception as exc:
@@ -2251,7 +2252,7 @@ class StatusPanel(wx.Panel):
             }
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             logging.info(
                 "[status_post] POST %s -> HTTP %s, body=%.300s",
@@ -2271,7 +2272,8 @@ class StatusPanel(wx.Panel):
                     pass
         except Exception as exc:
             ok = False
-            logging.warning("[status_post] POST failed for %s: %s", url, exc)
+            logging.warning("[status_post] POST failed for %s: %s",
+                            redact_api_url(url), exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
         else:
@@ -2416,7 +2418,7 @@ class StatusPanel(wx.Panel):
             "caption": caption,
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
         except Exception:
             ok = False

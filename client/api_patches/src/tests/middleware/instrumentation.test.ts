@@ -3,7 +3,10 @@ import { NextFunction, Request, Response } from 'express';
 import { Logger } from 'winston';
 
 import {
+  countJidFallback,
+  jidForm,
   metrics,
+  observeEvaluate,
   prometheusRegister,
   requestInstrumentation,
 } from '../../middleware/instrumentation';
@@ -141,5 +144,83 @@ describe('HTTP instrumentation', () => {
     expect(res.body).toContain('winzapp_node_process_cpu_user_seconds_total');
     expect(res.body).toContain('winzapp_http_requests_total');
     expect(res.body).toContain('winzapp_http_request_duration_seconds');
+  });
+
+  it('names the session without leaking the token that rides with it', async () => {
+    // WPPConnect authenticates with `<session>:<token>` in the path, so
+    // Express's :session param captures both. The log needs the name (a 10MB
+    // file accumulated across runs and accounts is unusable without it) and
+    // must never carry the credential.
+    const logged: string[] = [];
+    const logger = {
+      child: () => ({
+        warn: (m: string) => logged.push(m),
+        http: (m: string) => logged.push(m),
+      }),
+    } as any;
+    const req: any = {
+      headers: {},
+      method: 'GET',
+      params: { session: 'mysession:$2b$10$supersecrettoken' },
+      route: { path: '/api/:session/list-chats' },
+      baseUrl: '',
+    };
+    const res = new MockResponse();
+
+    requestInstrumentation(logger)(req, res as any, () => undefined);
+    res.send('ok');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const output = logged.join(' | ');
+    expect(output).toContain('session=mysession');
+    expect(output).not.toContain('supersecrettoken');
+  });
+});
+
+describe('where the time goes', () => {
+  it('classifies every JID form into a bounded label set', () => {
+    // Bounded on purpose: a label that can take a chat id as its value turns
+    // one metric into hundreds of thousands of series.
+    expect(jidForm('123@lid')).toBe('lid');
+    expect(jidForm('5511999@c.us')).toBe('phone');
+    expect(jidForm('5511999@s.whatsapp.net')).toBe('phone');
+    expect(jidForm('12036@g.us')).toBe('group');
+    expect(jidForm('status@broadcast')).toBe('broadcast');
+    expect(jidForm('x@newsletter')).toBe('newsletter');
+    expect(jidForm('')).toBe('other');
+    expect(jidForm(undefined as any)).toBe('other');
+  });
+
+  it('records how long in-page work took', async () => {
+    await observeEvaluate('unit-test-op', async () => 'done');
+
+    const metrics = await prometheusRegister.metrics();
+    expect(metrics).toContain('winzapp_page_evaluate_duration_seconds');
+    expect(metrics).toContain('operation="unit-test-op"');
+    expect(metrics).toContain('outcome="ok"');
+  });
+
+  it('records a failure and lets it through untouched', async () => {
+    // A call that fails after 30 seconds is exactly the sample worth having;
+    // swallowing it would leave the histogram describing only the happy path.
+    await expect(
+      observeEvaluate('unit-test-failing', async () => {
+        throw new Error('page died');
+      })
+    ).rejects.toThrow('page died');
+
+    const metrics = await prometheusRegister.metrics();
+    expect(metrics).toContain('operation="unit-test-failing"');
+    expect(metrics).toContain('outcome="error"');
+  });
+
+  it('counts a JID fallback by form, not by id', async () => {
+    countJidFallback('unit-test-lookup', '123@lid', '5511@c.us');
+
+    const metrics = await prometheusRegister.metrics();
+    expect(metrics).toContain('winzapp_jid_fallback_total');
+    expect(metrics).toContain('from_form="lid"');
+    expect(metrics).toContain('to_form="phone"');
+    expect(metrics).not.toContain('123@lid');
   });
 });

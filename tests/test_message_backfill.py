@@ -92,11 +92,27 @@ class TestBackfillBookkeeping:
         s._note_backfill_state("a@lid", _chat(), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
-    def test_does_not_mark_when_the_api_never_answered(self):
-        """A failed call is the retry loop's business — retrying it here would
-        hammer an API that is down."""
+    def test_a_chat_left_with_nothing_stays_queued_when_the_api_never_answered(self):
+        """This used to retire the chat, on the reasoning that a failed call
+        belonged to "the retry loop". There is no such loop by this point:
+        sync_chat_messages() has already exhausted its retries, and the failure
+        returns normally rather than raising, so sync_remote_chats() does not
+        see it either. The conversation was dropped from the queue with nothing
+        coming back for it, and the sync still reported success.
+
+        Bounded by the backfill loop's own pacing (offline check, chunking and
+        30s→300s backoff), which is what keeps a re-queue from hammering an API
+        that is down — the concern this test originally encoded."""
         s = _Stub()
         s._note_backfill_state("a@lid", _chat(unread=2), api_ok=False)
+        assert s._chats_awaiting_messages == {"a@lid"}
+
+    def test_a_chat_that_already_has_history_is_not_requeued_by_a_failure(self):
+        """The other half of the rule: failing to REFRESH loses nothing, so a
+        transient error must not put fully-synced chats back in the loop."""
+        s = _Stub()
+        s._note_backfill_state(
+            "a@lid", _chat(records=_records(200), t=1), api_ok=False)
         assert s._chats_awaiting_messages == set()
 
     def test_clears_the_mark_once_history_arrives(self):

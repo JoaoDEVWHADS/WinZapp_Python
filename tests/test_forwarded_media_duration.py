@@ -349,7 +349,9 @@ class TestTheWiringInsideForwardMessage:
     def test_it_is_registered_before_the_request_goes_out(self):
         src = self._source()
         registered = src.index("_expect_forwarded_duration(")
-        requested = src.index("requests.post(")
+        # api_post() since the call sites moved behind core/api_client.py —
+        # same call, one door, with correlation id and a redacted log line.
+        requested = src.index("api_post(")
         assert registered < requested, (
             "the duration is put aside only after the forward request — the "
             "socket echo beats the HTTP answer back, so the copy gets stored "

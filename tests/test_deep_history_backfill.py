@@ -114,7 +114,10 @@ def _make(pages, oldest=None, advances=True):
         else:
             setattr(stub, name, types.MethodType(raw, stub))
     for const in ("_DEEP_PAGES_PER_VISIT", "_DEEP_PAGE_DELAY",
-                  "_DEEP_CHATS_PER_PASS", "_DEEP_STALL_RETRY_SECONDS"):
+                  "_DEEP_CHATS_PER_PASS", "_DEEP_STALL_RETRY_SECONDS",
+                  # Gates asking the phone again for a chat still stalled at
+                  # the same anchor.
+                  "_OLDER_REQUEST_GRACE"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
@@ -498,3 +501,39 @@ class TestAnchorIdentity:
     def test_a_missing_reading_does_not_raise(self):
         assert MainWindow._anchor_identity(None) == (0, "")
         assert MainWindow._anchor_identity({}) == (0, "")
+
+
+class TestAskingThePhoneAgain:
+    """The request for older history used to be once per chat, for good.
+
+    _older_requested_chats is persisted, and the old condition was "have we
+    ever asked?" — so the first request was the only one a conversation would
+    ever get. Any later end-of-IndexedDB sent nothing, and a chat that needs
+    several on-demand cycles (each chunk revealing one more end) stayed
+    truncated permanently. It is now gated by _OLDER_REQUEST_GRACE, the same
+    window that governs writing a chat off, so asking again is never cheaper
+    than waiting for the answer already outstanding.
+    """
+
+    def test_a_second_stall_within_the_grace_does_not_ask_again(self):
+        stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
+        stub.deep_backfill_chat("chat@g.us")
+
+        stub._deep_stalled_anchors.clear()   # let the walk reach the stall again
+        stub.deep_backfill_chat("chat@g.us")
+
+        assert stub.requested == ["chat@g.us"]
+
+    def test_once_the_grace_has_passed_the_phone_is_asked_again(self):
+        """The case the old code could not reach at all: the previous chunk
+        either arrived and was consumed — revealing a new end — or never came.
+        Either way the conversation is owed another ask."""
+        stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
+        stub.deep_backfill_chat("chat@g.us")
+
+        stub._older_requested_chats["chat@g.us"] = (
+            main.time.time() - MainWindow._OLDER_REQUEST_GRACE - 1)
+        stub._deep_stalled_anchors.clear()
+        stub.deep_backfill_chat("chat@g.us")
+
+        assert stub.requested == ["chat@g.us", "chat@g.us"]
