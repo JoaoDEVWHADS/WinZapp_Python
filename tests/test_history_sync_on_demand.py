@@ -514,7 +514,9 @@ class TestRoutesArePatched:
             root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
         ).read_text(encoding="utf-8")
         assert "queueFingerprint" in controller
-        assert "staleForMs >= 45_000" in controller
+        assert "cmd.restartBackend()" in controller
+        assert "staleForMs >= 30_000" in controller
+        assert "staleForMs >= 75_000" in controller
         assert "req.client.page.reload" in controller
 
 

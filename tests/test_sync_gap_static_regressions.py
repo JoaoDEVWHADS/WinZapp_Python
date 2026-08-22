@@ -34,6 +34,32 @@ def test_pin_install_failure_never_reenables_blanket_interception():
     assert src.count("version = undefined;") >= 3
 
 
+def test_history_recovery_restarts_backend_before_page_reload():
+    controller = (
+        ROOT / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+    ).read_text(encoding="utf-8")
+    restart_at = controller.index("cmd.restartBackend()")
+    reload_at = controller.index("req.client.page.reload", restart_at)
+    assert restart_at < reload_at
+    assert "staleForMs >= 30_000" in controller
+    assert "staleForMs >= 75_000" in controller
+
+
+def test_live_whatsapp_web_is_default_with_opt_in_cached_pin():
+    src = START.read_text(encoding="utf-8")
+    assert "WINZAPP_WA_WEB_VERSION" in src
+    assert "Using live WhatsApp Web (no HTML version pin)" in src
+    assert "return undefined;" in src
+
+
+def test_periodic_poll_recovers_messages_when_live_event_is_missed():
+    src = _method_source(MAIN, "MainWindow", "start_periodic_contacts_sync")
+    assert "before_activity" in src
+    assert "now_t > old_t" in src
+    assert "self.sync_chat_messages(current)" in src
+    assert "len(changed) >= 6" in src
+
+
 def test_temporary_empty_older_page_does_not_mean_reached_start():
     fetch = _method_source(MAIN, "MainWindow", "fetch_older_messages")
     loader = _method_source(CONV, "ConversationsPanel", "_load_older_messages_from_server")
