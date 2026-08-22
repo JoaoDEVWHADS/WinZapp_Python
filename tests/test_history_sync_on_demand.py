@@ -247,19 +247,20 @@ class TestRequestOlderMessages:
         assert stub.request_older_messages(jid) is False
         assert jid in stub._older_request_confirmed_end
 
-    def test_type_two_is_not_mistaken_for_end_even_if_helper_says_false(self, monkeypatch):
+    def test_incomplete_chat_is_temporarily_blocked(self, monkeypatch):
         stub = _Stub()
         jid = "120363000000000000@g.us"
         monkeypatch.setattr(
             "main.api_post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {
-                "requested": True, "endOfHistoryTransferType": 2,
+                "requested": False, "endOfHistoryTransferType": 2,
                 "endOfHistory": False, "primaryHasMore": False,
-                "moreOnPrimary": True,
+                "moreOnPrimary": False, "initialHistoryIncomplete": True,
             }}),
         )
-        assert stub.request_older_messages(jid) is True
+        assert stub.request_older_messages(jid) is False
         assert jid not in getattr(stub, "_older_request_confirmed_end", set())
+        assert jid in stub._older_request_temporarily_blocked
 
     def test_disconnected_session_never_calls_the_api(self, monkeypatch):
         stub = _Stub(connected=False)
@@ -586,13 +587,11 @@ class TestRoutesArePatched:
         assert "api.markChunkForReuploadPending(row.msgKey)" in controller
         assert "Number(result?.reuploadPending || 0) === 0" in controller
         assert "PARTIAL_REUPLOAD_GRACE_MS = 5 * 60_000" in controller
-        assert "droppedStalePartialChunks" in controller
+        assert "partialRetryReset" in controller
         assert "row.reuploadPending !== true" in controller
         assert "getHistorySyncCompleteOnDemandAccessGranted" in controller
-        assert "setHistorySyncCompleteOnDemandAccessGranted(true)" in controller
-        assert "droppedBlockedCompleteChunks" in controller
-        assert "orphanedCompleteRecent" in controller
-        assert "!recentOrders.includes(1)" in controller
+        assert "setHistorySyncCompleteOnDemandAccessGranted(true)" not in controller
+        assert "droppedStalePartialChunks" not in controller
         assert "getPnLidEntry" in controller
         assert "resolvedChatId = alternateId" in controller
         assert "history_sync_on_demand_message_count" in controller
@@ -600,8 +599,9 @@ class TestRoutesArePatched:
         assert "out.oldestMsgFromMe = oldest?.id?.fromMe" in controller
         assert "oldestMsgTimestampMs" in controller
         assert "out.requestPayloadMode = 'chatId'" in controller
-        assert "out.endOfHistory = endType === 1" in controller
-        assert "out.moreOnPrimary = endType === 0 || endType === 2" in controller
+        assert "ConversationEndOfHistoryTransferModelPropType" in controller
+        assert "out.initialHistoryIncomplete" in controller
+        assert "out.moreOnPrimary = out.primaryHasMore === true" in controller
         assert "sendPeerDataOperationRequest(kind, {" in controller
         assert "chatId: chatModel.id" in controller
 

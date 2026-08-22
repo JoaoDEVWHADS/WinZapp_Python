@@ -2310,14 +2310,16 @@ export async function requestOlderMessages(req: Request, res: Response) {
         const chat = (window as any).WAPI?.getChat?.(resolvedChatId);
         const endType = chat?.endOfHistoryTransferType ?? null;
         out.endOfHistoryTransferType = endType;
-        // Protocol enum (Conversation.EndOfHistoryTransferType):
-        //   0 = initial transfer complete, MORE messages remain on primary
-        //   1 = complete, NO more messages remain on primary
-        //   2 = on-demand transfer complete, MORE messages remain on primary
-        // Do not infer exhaustion from a timeout on the Python side when the
-        // phone has already given us this authoritative per-chat answer.
-        out.endOfHistory = endType === 1;
-        out.moreOnPrimary = endType === 0 || endType === 2;
+        // ChatModel uses a newer six-value enum in current WhatsApp Web builds;
+        // numeric 2 means INCOMPLETE, not "on-demand complete, more remain".
+        const transferTypes = req_(
+          'WAWebChatConstants'
+        ).ConversationEndOfHistoryTransferModelPropType;
+        out.endOfHistory =
+          endType ===
+          transferTypes.COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY;
+        out.initialHistoryIncomplete =
+          endType === transferTypes.INCOMPLETE;
         try {
           // Keep the WA Web helper as diagnostics only. It reports whether a
           // page is immediately ready to load and can be false for enum value
@@ -2329,9 +2331,17 @@ export async function requestOlderMessages(req: Request, res: Response) {
         } catch (e) {
           out.primaryHasMore = null;
         }
+        out.moreOnPrimary = out.primaryHasMore === true;
         if (out.endOfHistory) {
           out.requested = false;
           out.skipped = 'primary phone confirms end of history';
+          return out;
+        }
+        if (out.primaryHasMore !== true) {
+          out.requested = false;
+          out.skipped = out.initialHistoryIncomplete
+            ? 'initial history for this chat is incomplete'
+            : 'WhatsApp Web says older history is not requestable';
           return out;
         }
 
@@ -2729,38 +2739,6 @@ export async function unblockHistorySync(req: Request, res: Response) {
         .map((row: any) => String(row.msgKey))
         .sort();
       out.partialReuploadFingerprint = out.partialReuploadKeys.join('|');
-      const recentRows = rows.filter((row: any) => row.syncType === RECENT);
-      const recentOrders = recentRows.map((row: any) => Number(row.chunkOrder));
-      const orphanedCompleteRecent =
-        recentRows.length > 0 &&
-        recentRows.every((row: any) => Number(row.progress) >= 100) &&
-        !recentOrders.includes(1) &&
-        recentRows.every(
-          (row: any) =>
-            Date.now() - Number(row.historySyncStepStartedTs || Date.now()) >=
-            5 * 60_000
-        ) &&
-        Number(api.inFlightChunk?.size || 0) === 0;
-      if (orphanedCompleteRecent) {
-        const historyPrefs = req_('WAWebUserPrefsHistorySync');
-        out.droppedBlockedCompleteChunks = [];
-        for (const row of recentRows) {
-          await api.updateCurrentlyProcessed(
-            row.msgKey,
-            row.syncType,
-            row.chunkOrder
-          );
-          out.droppedBlockedCompleteChunks.push(String(row.msgKey));
-        }
-        const currentStatus = await historyPrefs.getHistorySyncStatus();
-        await historyPrefs.setHistorySyncStatus({
-          ...(currentStatus || {}),
-          recentCompleted: true,
-        });
-        historyPrefs.setHistorySyncCompleteOnDemandAccessGranted(true);
-        out.onDemandAccessGranted = true;
-        out.recentCompleted = true;
-      }
 
       if (out.recentCompleted === true) {
         out.skipped =
@@ -2856,10 +2834,12 @@ export async function unblockHistorySync(req: Request, res: Response) {
         );
         result.partialStaleForMs = partialStaleForMs;
         if (partialStaleForMs >= PARTIAL_REUPLOAD_GRACE_MS) {
-          const dropped = await req.client.page.evaluate(async () => {
+          // Never delete RECENT chunks or forge recentCompleted. Doing that at
+          // 63% leaves ChatModels permanently INCOMPLETE. Reset only the retry
+          // marker so the normal backend recovery can resume the same chunk.
+          await req.client.page.evaluate(async () => {
             const req_ = (window as any).require;
             const api = req_('WAWebApiHistorySyncNotification');
-            const historyPrefs = req_('WAWebUserPrefsHistorySync');
             const pb = req_('WAWebProtobufsHistorySync.pb');
             const RECENT = pb?.HistorySync$HistorySyncType?.RECENT;
             const table = req_(
@@ -2868,30 +2848,15 @@ export async function unblockHistorySync(req: Request, res: Response) {
             const rows = await table.equals(['processed'], 0, {
               shouldDecrypt: false,
             });
-            const partial: string[] = [];
-            const complete: string[] = [];
             for (const row of rows) {
               if (row.syncType !== RECENT) continue;
-              await api.updateCurrentlyProcessed(
-                row.msgKey,
-                row.syncType,
-                row.chunkOrder
-              );
-              (Number(row.progress) < 100 ? partial : complete).push(
-                String(row.msgKey)
-              );
+              if (row.reuploadPending === true) {
+                await table.merge(row.msgKey, { reuploadPending: false });
+                api.removeLocalFailureFromInFlightChunk?.(row.msgKey);
+              }
             }
-            const status = await historyPrefs.getHistorySyncStatus();
-            await historyPrefs.setHistorySyncStatus({
-              ...(status || {}),
-              recentCompleted: true,
-            });
-            historyPrefs.setHistorySyncCompleteOnDemandAccessGranted(true);
-            return { partial, complete };
           });
-          result.droppedStalePartialChunks = dropped.partial;
-          result.droppedBlockedCompleteChunks = dropped.complete;
-          result.onDemandAccessGranted = true;
+          result.partialRetryReset = true;
           clientAny.__winzappPartialHistoryRecovery = {
             fingerprint: '',
             since: now,

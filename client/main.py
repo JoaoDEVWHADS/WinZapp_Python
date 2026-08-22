@@ -14143,10 +14143,9 @@ class MainWindow(wx.Frame):
         """Ask the primary phone for the next on-demand history chunk.
 
         ``True`` means the request was accepted *or is already in flight*.  It
-        never means the history has arrived yet.  End-of-history is not inferred
-        from timeouts anymore: WhatsApp exposes ``endOfHistoryTransferType`` and
-        only value 1 is authoritative (0/2 explicitly mean more messages remain
-        on the primary device).
+        never means the history has arrived yet. End-of-history and request
+        eligibility come from the named ChatModel state returned by the API;
+        numeric value 2 is INCOMPLETE in current WhatsApp Web builds.
         """
         if not getattr(self, "_wa_connected", False):
             return False
@@ -14198,6 +14197,14 @@ class MainWindow(wx.Frame):
                         "[history-sync] Primary phone confirmed end of history for "
                         "%s (end_type=%s).", jid,
                         payload.get("endOfHistoryTransferType"),
+                    )
+                    return False
+
+                if payload.get("initialHistoryIncomplete") is True:
+                    self._older_request_temporarily_blocked.add(jid)
+                    logging.info(
+                        "[history-sync] Initial history for %s is incomplete; "
+                        "not issuing an invalid on-demand request.", jid,
                     )
                     return False
 
@@ -17414,9 +17421,8 @@ class MainWindow(wx.Frame):
 
     # On-demand history is asynchronous.  Retry an empty browser-store page
     # periodically, but NEVER turn elapsed time into "end of conversation".
-    # Current WhatsApp builds expose an explicit endOfHistoryTransferType; only
-    # type 1 is authoritative.  Types 0 and 2 both mean the primary still has
-    # older messages.
+    # Current WhatsApp builds expose a six-state ChatModel enum. The API maps it
+    # to explicit booleans; raw numeric value 2 now means INCOMPLETE.
     _OLDER_REQUEST_RETRY = 30
     # Compatibility alias for older tests/plugins that imported this name.
     _OLDER_REQUEST_GRACE = _OLDER_REQUEST_RETRY
