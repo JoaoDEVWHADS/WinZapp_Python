@@ -294,6 +294,7 @@ class ConversationsPanel(wx.Panel):
         # local-id -> WhatsApp-id swap performed after send-file returns.
         self._download_progress: dict = {}
         self._media_upload_progress: dict = {}
+        self._media_transfer_started: set = set()
         # Optimistic attachment rows must outlive the currently open chat.
         # navigate_to_conversation() reloads records from SQLite, but an upload
         # has no real WhatsApp id (and therefore no DB row) until it finishes.
@@ -3454,10 +3455,9 @@ class ConversationsPanel(wx.Panel):
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
         self._action_download_btn.Hide()
-        # The transfer gauge is not a selection-specific media control.  Hiding
-        # it here made an in-flight upload/download disappear whenever focus or
-        # message selection changed.  Transfer completion / conversation exit
-        # owns its lifetime instead.
+        # The gauge belongs to the selected transfer. Moving to another message
+        # must never leave that message displaying somebody else's percentage.
+        self._hide_media_transfer_gauge()
         self._sync_media_action_slot_visibility()
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
@@ -7805,51 +7805,67 @@ class ConversationsPanel(wx.Panel):
         previous = self._media_upload_progress.get(upload_id, 0.0)
         progress = max(previous, progress)
         self._media_upload_progress[upload_id] = progress
+        self._media_transfer_started.add(upload_id)
+        matched = False
         for index, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") != upload_id:
                 continue
-            if progress < 1.0:
+            matched = True
+            try:
+                selected = self.messages_list.GetFirstSelected()
+            except Exception:
+                selected = -1
+            if selected == index:
                 self._update_media_transfer_gauge(progress)
             else:
-                # Byte transfer is done. Waiting for WhatsApp's later SENT ACK
-                # still keeps document actions locked, but it must not leave a
-                # completed progress bar fixed on screen.
-                self._sync_pending_document_gauge()
+                self._hide_media_transfer_gauge()
             # Also repaint the message row with a textual percentage. Native
             # gauges are not consistently announced by Windows screen readers.
             self.messages_list.SetItemText(index, self._render_message_line(msg))
             self.messages_list.RefreshItem(index)
             break
+        if not matched:
+            self._hide_media_transfer_gauge()
 
     def _sync_pending_document_gauge(self, preferred_local_id: str = ""):
-        """Restore the gauge only while bytes are genuinely transferring.
+        """Restore progress only for the selected, genuinely-started transfer.
 
-        WhatsApp's SENT acknowledgement independently controls when document
-        actions unlock; it never keeps a completed progress bar visible.
+        A completed document remains at 100% until WhatsApp confirms SENT, but
+        selecting any other message removes that document's gauge immediately.
         """
         waiting = [
             msg for msg in self._sorted_messages
             if msg.get("_local_id")
-            and msg.get("_local_pending")
-            and self._media_upload_progress.get(msg.get("_local_id", ""), 0.0) < 1.0
+            and msg.get("_local_id") in self._media_transfer_started
+            and (
+                msg.get("_local_pending") or (
+                    msg.get("messageType") == "documentMessage"
+                    and msg.get("_awaiting_sent_ack")
+                )
+            )
         ]
         if not waiting:
             self._hide_media_transfer_gauge()
             return
 
-        target = None
-        if preferred_local_id:
-            target = next(
-                (msg for msg in waiting if msg.get("_local_id") == preferred_local_id),
-                None,
-            )
+        try:
+            selected = self.messages_list.GetFirstSelected()
+        except Exception:
+            selected = -1
+        selected_local_id = ""
+        if 0 <= selected < len(self._sorted_messages):
+            selected_local_id = self._sorted_messages[selected].get("_local_id", "")
+        if preferred_local_id and selected_local_id != preferred_local_id:
+            self._hide_media_transfer_gauge()
+            return
+        target_id = preferred_local_id or selected_local_id
+        target = next(
+            (msg for msg in waiting if msg.get("_local_id") == target_id),
+            None,
+        )
         if target is None:
-            # Prefer an upload already moving over one still at byte zero.
-            target = next(
-                (msg for msg in waiting
-                 if 0.0 < self._media_upload_progress.get(msg.get("_local_id", ""), 0.0) < 1.0),
-                waiting[0],
-            )
+            self._hide_media_transfer_gauge()
+            return
         local_id = target.get("_local_id", "")
         progress = self._media_upload_progress.get(local_id, 0.0)
         self._update_media_transfer_gauge(progress)
@@ -9281,7 +9297,17 @@ class ConversationsPanel(wx.Panel):
             self.conversation.get("remoteJid", "") if self.conversation else ""
         )
 
-        if for_everyone:
+        pending_local_id = str(msg.get("_local_id") or "")
+        cancelled_pending = bool(msg.get("_local_pending") and pending_local_id)
+        if cancelled_pending:
+            # There is no WhatsApp message ID to revoke yet. Whichever scope the
+            # dialog had selected, cancel the queued/in-flight upload and apply
+            # a local deletion; asking the API for "everyone" here can only fail.
+            self.main_window.message_queue.cancel(pending_local_id)
+            self._media_upload_progress.pop(pending_local_id, None)
+            self._media_transfer_started.discard(pending_local_id)
+            self._hide_media_transfer_gauge()
+        elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
             # correct serialized id and actually revoke it.
@@ -11090,6 +11116,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
+                self.messages_list.Select(last, True)
                 self.messages_list.EnsureVisible(last)
             def _update_upload_progress(progress, local_id=local_id):
                 wx.CallAfter(self.update_media_upload_progress, local_id, progress)
@@ -11102,13 +11129,6 @@ class ConversationsPanel(wx.Panel):
             self._register_virtual_msg(virtual_msg)
             self._media_upload_progress[local_id] = 0.0
 
-            # A document has no Open/Save As controls until SENT, so establish
-            # its progress UI synchronously before any cache/enqueue worker can
-            # race ahead. The gauge disappears when byte transfer reaches 100%;
-            # the SENT ACK independently controls when actions unlock.
-            if media_type == "document":
-                self._show_media_transfer_gauge()
-
             # Pre-cache the file under local_id BEFORE enqueueing the actual
             # send: _mark_message_sent() renames the cache entry from
             # local_id to the real WhatsApp id as soon as the send is
@@ -11120,8 +11140,6 @@ class ConversationsPanel(wx.Panel):
                 self.main_window.message_queue.enqueue(pm)
 
             threading.Thread(target=_cache_then_enqueue, daemon=True).start()
-
-            self._show_media_transfer_gauge()
 
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)

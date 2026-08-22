@@ -102,3 +102,12 @@ def test_upload_progress_is_monotonic_across_python_and_wpp_events():
     progress = _method_source(CONV, "ConversationsPanel", "update_media_upload_progress")
     assert "previous = self._media_upload_progress.get(upload_id, 0.0)" in progress
     assert "progress = max(previous, progress)" in progress
+
+
+def test_deleting_pending_send_cancels_locally_even_if_everyone_was_selected():
+    src = _method_source(CONV, "ConversationsPanel", "_on_menu_delete_message")
+    cancel_at = src.index("self.main_window.message_queue.cancel(pending_local_id)")
+    revoke_at = src.index("elif for_everyone:")
+    assert cancel_at < revoke_at
+    assert "cancelled_pending = bool(msg.get(\"_local_pending\")" in src
+    assert "self._media_transfer_started.discard(pending_local_id)" in src
