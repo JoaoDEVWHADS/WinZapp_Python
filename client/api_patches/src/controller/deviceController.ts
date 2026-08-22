@@ -2375,13 +2375,71 @@ export async function unblockHistorySync(req: Request, res: Response) {
       const previous = clientAny.__winzappHistoryRecovery || {};
       if (fingerprint && previous.fingerprint === fingerprint) {
         const staleForMs = Math.max(0, now - Number(previous.since || now));
+        const lastBackendRestart = Number(previous.lastBackendRestart || 0);
         const lastReload = Number(previous.lastReload || 0);
         result.staleForMs = staleForMs;
-        if (staleForMs >= 45_000 && now - lastReload >= 120_000) {
+
+        // First recovery stage: use WhatsApp Web's *own* backend restart
+        // command.  Re-running the progressive scheduler only pokes the queue;
+        // it does not recreate a worker whose processing loop has wedged.  The
+        // Cmd event is what the real web client uses to restart its backend and
+        // is materially less disruptive than reloading the entire page.
+        if (
+          staleForMs >= 30_000 &&
+          now - lastBackendRestart >= 60_000 &&
+          typeof (req.client as any)?.page?.evaluate === 'function'
+        ) {
+          try {
+            const restarted = await req.client.page.evaluate(() => {
+              const cmd = (window as any).WPP?.whatsapp?.Cmd;
+              if (!cmd || typeof cmd.restartBackend !== 'function') return false;
+              cmd.restartBackend();
+              return true;
+            });
+            if (restarted) {
+              result.backendRestarted = true;
+              result.restarted = true;
+              req.logger.warn(
+                `[unblockHistorySync] RECENT queue unchanged for ${staleForMs}ms; ` +
+                'asked WhatsApp Web to restart its backend worker.'
+              );
+              clientAny.__winzappHistoryRecovery = {
+                fingerprint,
+                since: Number(previous.since || now),
+                lastBackendRestart: now,
+                lastReload,
+              };
+              // Give the fresh worker a health-check interval to consume the
+              // already-persisted notifications before escalating to a reload.
+              req.logger.info(`[unblockHistorySync] ${JSON.stringify(result)}`);
+              return res.status(200).json({ status: 'success', response: result });
+            }
+            result.backendRestartUnavailable = true;
+          } catch (backendRestartError: any) {
+            result.backendRestartError =
+              backendRestartError?.message || String(backendRestartError);
+          }
+        }
+
+        // Second stage: if the exact same RECENT rows survive a backend restart
+        // for another interval, reload the page.  With WinZapp's default live
+        // WhatsApp Web mode this also recreates the complete module graph from
+        // the currently supported web build instead of re-serving a stale
+        // cached HTML snapshot.
+        const backendWasTried =
+          Number(previous.lastBackendRestart || 0) > 0 ||
+          Number(clientAny.__winzappHistoryRecovery?.lastBackendRestart || 0) > 0 ||
+          result.backendRestartUnavailable === true ||
+          !!result.backendRestartError;
+        if (
+          staleForMs >= 75_000 &&
+          backendWasTried &&
+          now - lastReload >= 120_000
+        ) {
           try {
             req.logger.warn(
-              `[unblockHistorySync] RECENT queue unchanged for ${staleForMs}ms; ` +
-              'reloading WhatsApp Web to recreate the history backend worker.'
+              `[unblockHistorySync] RECENT queue still unchanged for ${staleForMs}ms ` +
+              'after backend restart; reloading WhatsApp Web.'
             );
             await req.client.page.reload({
               waitUntil: 'domcontentloaded',
@@ -2392,6 +2450,7 @@ export async function unblockHistorySync(req: Request, res: Response) {
             clientAny.__winzappHistoryRecovery = {
               fingerprint: '',
               since: Date.now(),
+              lastBackendRestart: now,
               lastReload: Date.now(),
             };
           } catch (reloadError: any) {
@@ -2399,6 +2458,7 @@ export async function unblockHistorySync(req: Request, res: Response) {
             clientAny.__winzappHistoryRecovery = {
               fingerprint,
               since: Number(previous.since || now),
+              lastBackendRestart,
               lastReload: now,
             };
           }
@@ -2406,6 +2466,7 @@ export async function unblockHistorySync(req: Request, res: Response) {
           clientAny.__winzappHistoryRecovery = {
             fingerprint,
             since: Number(previous.since || now),
+            lastBackendRestart,
             lastReload,
           };
         }
@@ -2421,6 +2482,7 @@ export async function unblockHistorySync(req: Request, res: Response) {
       clientAny.__winzappHistoryRecovery = {
         fingerprint: '',
         since: now,
+        lastBackendRestart: Number(previous.lastBackendRestart || 0),
         lastReload: Number(previous.lastReload || 0),
       };
     }

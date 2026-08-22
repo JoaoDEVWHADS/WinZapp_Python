@@ -285,10 +285,10 @@ const optimizedBrowserArgs = [
 // isSendFailure with ack 0, and the REST call still answered 200. Groups kept
 // working because they use sender keys and need no usync.
 //
-// Rather than hardcoding a version — which rots as soon as WhatsApp removes the
-// old build's assets (HTTP 410) — ask wa-version itself for the newest build it
-// can serve. `npm update @wppconnect/wa-version` is then enough to keep up with
-// WhatsApp Web.
+// Pinning is now diagnostic/rollback-only. The normal path deliberately leaves
+// whatsappVersion undefined so WPPConnect loads WhatsApp Web's current official
+// build. If WINZAPP_WA_WEB_VERSION opts back into a cached/exact pin, resolve it
+// from WPPConnect's own wa-version dependency and verify the HTML exists first.
 //
 // wa-version is resolved through WPPConnect's own dependency tree, never as a
 // direct dependency of ours. WPPConnect's setWhatsappVersion() serves the HTML
@@ -332,21 +332,48 @@ const waVersion = (() => {
 })();
 
 function resolveWhatsappVersion() {
+  // Live WhatsApp Web is the safe default.  This is deliberate rather than a
+  // fallback: current WPPConnect/WA-JS builds are updated together with the
+  // live client, while a cached HTML pin can remain loadable after Meta has
+  // changed the server-side history-sync protocol it talks to.  The resulting
+  // failure is especially nasty: the UI reaches MAIN, the backend-worker bridge
+  // reports ready, but RECENT chunks stay at notification_stored forever and
+  // every chat looks as if it only contains 1-20 messages.
+  //
+  // Keep pinning available for diagnostics/rollback, but make it opt-in. Set
+  // WINZAPP_WA_WEB_VERSION=latest-cached to use wa-version's newest snapshot,
+  // or set it to an exact version string present in that package.
+  const requested = String(process.env.WINZAPP_WA_WEB_VERSION || '').trim();
+  if (!requested || /^(live|current|off|none)$/i.test(requested)) {
+    console.log(
+      '[WinZapp] Using live WhatsApp Web (no HTML version pin). ' +
+      'This avoids cached-build history-sync deadlocks.'
+    );
+    return undefined;
+  }
+
   try {
     if (!waVersion) throw new Error('@wppconnect/wa-version could not be resolved');
     const available = waVersion.getAvailableVersions();
-    if (!Array.isArray(available) || available.length === 0) return undefined;
-    const newest = available[available.length - 1];
-    // getPageContent throws when the version cannot be served, so only pin what
-    // is known to work: no pin at all beats silently landing in the fallback.
-    waVersion.getPageContent(newest);
-    console.log(`[WinZapp] Pinning WhatsApp Web to ${newest} (of ${available.length} available)`);
-    return newest;
+    if (!Array.isArray(available) || available.length === 0) {
+      throw new Error('wa-version contains no snapshots');
+    }
+    const selected = /^(latest|latest-cached|cached)$/i.test(requested)
+      ? available[available.length - 1]
+      : requested;
+    // getPageContent is the authoritative check that this exact build can be
+    // served. Never hand an unknown version to WPPConnect: its own fallback
+    // enables blanket request interception and stalls dedicated workers.
+    waVersion.getPageContent(selected);
+    console.log(
+      `[WinZapp] Explicitly pinning WhatsApp Web to ${selected} ` +
+      `(WINZAPP_WA_WEB_VERSION=${requested})`
+    );
+    return selected;
   } catch (e) {
     console.error(
-      '[WinZapp] Could not resolve a WhatsApp Web version via @wppconnect/wa-version ' +
-      `(${e && e.message}). Continuing unpinned — WhatsApp Web will serve its newest ` +
-      'build, which the bundled wa-js may not support. Run: npm update @wppconnect/wa-version'
+      `[WinZapp] Requested WhatsApp Web pin '${requested}' is unavailable ` +
+      `(${e && e.message}); using the live build instead.`
     );
     return undefined;
   }
@@ -559,9 +586,9 @@ const finalConfig = {
     },
     disableSpins: true,  // Disables command line spinners (saves CPU)
     updatesLog: false,   // Disables checking for updates on startup
-    // undefined => WPPConnect pins nothing and uses the live build (see
-    // resolveWhatsappVersion above). Set explicitly here because WPPConnect's
-    // own default points at a version wa-version no longer ships.
+    // undefined => WPPConnect pins nothing and uses the live build. This is
+    // now the normal path; an explicit WINZAPP_WA_WEB_VERSION opt-in can still
+    // select a cached snapshot for diagnostics/rollback.
     whatsappVersion,
   }
 };

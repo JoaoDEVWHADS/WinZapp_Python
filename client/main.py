@@ -11399,10 +11399,64 @@ class MainWindow(wx.Frame):
                         elapsed = 0
                         self.get_remote_contacts()
                         self.get_block_list()
+                    # Snapshot activity before list-chats merges its newest
+                    # metadata. WPPConnect has a known class of missed-event
+                    # races when reopening an existing session; relying on the
+                    # WebSocket alone can therefore leave a conversation frozen
+                    # until some later event happens to repaint it. The upstream
+                    # recommendation is events + periodic message queries.
+                    before_activity = {
+                        self._normalize_jid(j): int((c or {}).get("t", 0) or 0)
+                        for j, c in self.chats.items()
+                        if isinstance(c, dict)
+                    }
+                    before_unread = {
+                        self._normalize_jid(j): int((c or {}).get("unreadCount", 0) or 0)
+                        for j, c in self.chats.items()
+                        if isinstance(c, dict)
+                    }
                     result = self.get_remote_chats(dict(self.chats), persist_full=False,
                                                    notify_errors=False)
                     if result is not None:
                         self.chats = result
+
+                        # Recover messages whose live event was missed. Only
+                        # chats whose server-side activity timestamp advanced
+                        # are queried, plus the currently open conversation;
+                        # cap each poll so a busy account cannot turn this
+                        # safety net into another bulk initial sync.
+                        changed = []
+                        seen_changed = set()
+                        cp = getattr(self, "conversations_panel", None)
+                        open_jid = self._normalize_jid(
+                            getattr(cp, "_last_open_jid", "") or ""
+                        )
+                        if open_jid and open_jid in result:
+                            changed.append(result[open_jid].copy())
+                            seen_changed.add(open_jid)
+                        for jid, current in result.items():
+                            if len(changed) >= 6:
+                                break
+                            if not isinstance(current, dict):
+                                continue
+                            normalized = self._normalize_jid(jid)
+                            if normalized in seen_changed:
+                                continue
+                            now_t = int(current.get("t", 0) or 0)
+                            old_t = int(before_activity.get(normalized, 0) or 0)
+                            now_unread = int(current.get("unreadCount", 0) or 0)
+                            old_unread = int(before_unread.get(normalized, 0) or 0)
+                            if now_t > old_t or now_unread > old_unread:
+                                changed.append(current.copy())
+                                seen_changed.add(normalized)
+                        for current in changed:
+                            try:
+                                self.sync_chat_messages(current)
+                            except Exception as sync_exc:
+                                logging.warning(
+                                    "[periodic_message_catchup] failed for %s: %s",
+                                    current.get("remoteJid", ""), sync_exc,
+                                )
                     wx.CallAfter(self._schedule_set_chats)
                     # Phone-side clears/deletions — active conversation only,
                     # one extra cheap GET per cycle, nothing at all when no
@@ -13207,10 +13261,10 @@ class MainWindow(wx.Frame):
     # looks like it worked and simply found short conversations. That is
     # exactly the shape of the "only 15-20 messages per group" reports.
     #
-    # There is nothing WinZapp can do about it at runtime, so these two
-    # methods only observe and log. What they buy is that the next report of
-    # this comes with the answer already in log.log instead of needing a
-    # CDP session against the live page to find.
+    # WinZapp also exposes a staged recovery: restart the progressive loop,
+    # then WhatsApp Web's own backend worker, and finally reload the page if the
+    # exact same RECENT queue remains frozen. The status logging stays here so
+    # the next report contains the evidence rather than just the symptom.
 
     def fetch_history_sync_status(self, timeout: int = 30):
         """Raw /history-sync-status payload, or None when it can't be read."""
@@ -13318,10 +13372,15 @@ class MainWindow(wx.Frame):
             payload = body.get("response") if isinstance(body, dict) else None
             if not isinstance(payload, dict):
                 return None
-            if payload.get("pageReloaded"):
+            if payload.get("backendRestarted"):
                 logging.warning(
                     "[history-sync] RECENT history queue stayed frozen; "
-                    "reloaded WhatsApp Web to recreate the backend worker."
+                    "restarted WhatsApp Web's backend worker."
+                )
+            if payload.get("pageReloaded"):
+                logging.warning(
+                    "[history-sync] RECENT history queue survived the backend "
+                    "restart; reloaded WhatsApp Web for a clean bootstrap."
                 )
             removed = payload.get("removed") or []
             if removed:
