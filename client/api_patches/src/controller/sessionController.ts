@@ -23,6 +23,10 @@ import { Logger } from 'winston';
 import { version } from '../../package.json';
 import config from '../config';
 import { observePayload, StatusSessionSchema } from '../dto/sync';
+import {
+  countJidFallback,
+  observeEvaluate,
+} from '../middleware/instrumentation';
 import CreateSessionUtil from '../util/createSessionUtil';
 import { callWebHook, contactToArray } from '../util/functions';
 import getAllTokens from '../util/getAllTokens';
@@ -594,6 +598,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
       } catch (err: any) {}
 
       if (!message && messageId.includes(':')) {
+        countJidFallback('get-media-by-message', messageId, messageId);
         // Strip device port suffix e.g. 62655318482954:94@lid -> 62655318482954@lid
         const noPortId = messageId.replace(/:\d+@/, '@');
         try {
@@ -637,7 +642,8 @@ export async function getMediaByMessage(req: Request, res: Response) {
               `Message ${cleanMsgId} not found in cache. Loading older history for ${chatId}`
             );
             try {
-              await client.page.evaluate(
+              await observeEvaluate('load-older-history', () =>
+                client.page.evaluate(
                 async ({ id, count }) => {
                   const WPP = (globalThis as any).WPP;
                   if (!WPP?.chat?.getMessages) return;
@@ -647,6 +653,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
                   });
                 },
                 { id: chatId, count: 50 }
+                )
               );
               try {
                 message = await client.getMessageById(cleanMsgId);

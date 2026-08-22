@@ -13614,6 +13614,19 @@ class MainWindow(wx.Frame):
                     logging.info("[backfill] Pass %d: retrying %d of %d chat(s) short of a "
                                  "full page (%d msg).",
                                  attempt, len(targets), before, self.history_page_target())
+                # One line per pass saying how much work is left and how much
+                # of the budget is gone. "The backfill is slow" and "the
+                # backfill will not finish" look identical without it — and the
+                # second is the case that silently truncates history, because
+                # the budget expires with pending chats still queued and
+                # nothing says so.
+                logging.info(
+                    "[backfill-queue] pass=%d short=%d deep=%d unnamed=%d "
+                    "elapsed=%.0fs of %ds budget",
+                    attempt, before, len(deep_pending), len(names_pending),
+                    time.monotonic() - (deadline - self._BACKFILL_BUDGET),
+                    self._BACKFILL_BUDGET,
+                )
                 # Snapshot what each target holds so progress can be measured in
                 # messages, not just in chats that finished. A chat that went
                 # from 15 to 90 messages made real progress and must not read as

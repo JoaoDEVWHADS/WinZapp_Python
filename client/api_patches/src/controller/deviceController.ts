@@ -17,6 +17,11 @@ import { Chat } from '@wppconnect-team/wppconnect';
 import { Request, Response } from 'express';
 
 import {
+  countJidFallback,
+  countStoreRecovery,
+  observeEvaluate,
+} from '../middleware/instrumentation';
+import {
   observePayload,
   SyncChatListSchema,
   SyncContactListSchema,
@@ -177,7 +182,8 @@ async function listChatsWithStoreRecovery(
   req: Request,
   options: Record<string, any>
 ): Promise<any[]> {
-  const result: any = await req.client.page.evaluate(
+  const result: any = await observeEvaluate('list-chats', () =>
+    req.client.page.evaluate(
     async ({ listOptions }) => {
       const root = globalThis as any;
 
@@ -317,9 +323,13 @@ async function listChatsWithStoreRecovery(
       };
     },
     { listOptions: options }
+    )
   );
 
   if (result?.recovered) {
+    countStoreRecovery(
+      (result?.chats?.length || 0) > 0 ? 'recovered' : 'still_empty'
+    );
     req.logger.warn(
       `[listChats] ChatStore was empty/invalid; IndexedDB recovery: ${JSON.stringify(
         result.recovery || {}
