@@ -860,6 +860,7 @@
     "status_reply_label": "&Odpowiedz na status",
     "status_reply_send": "Wyślij odpowiedź",
     "status_reply_sent": "Odpowiedź wysłana.",
+    "status_reaction_received": "Zareagował(a) na Twój status: {emoji}",
     "status_reply_error": "Nie udało się wysłać odpowiedzi na status.",
     "status_unlike_unsupported": "Wysłanego polubienia nie można cofnąć — WhatsApp nie udostępnia sposobu na wycofanie dostarczonej już reakcji.",
     "status_view_reactions": "Zobacz reakcje",

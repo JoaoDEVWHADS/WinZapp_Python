@@ -754,3 +754,18 @@ def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
     if adjusted < 0:
         adjusted = -1
     return offset, adjusted
+
+
+def reaction_targets_status(msg: dict) -> bool:
+    """True when this reaction is aimed at a status (story), not a chat message.
+
+    A reaction carries the key of the message it reacts to, and for a status
+    that key's remoteJid is status@broadcast. The distinction matters because a
+    status has no counterpart in any conversation: it is kept in
+    _status_updates for the Status tab, so a reaction to one has nothing to
+    attach itself to and disappears the moment the conversation is rebuilt.
+    """
+    if msg.get("messageType") != "reactionMessage":
+        return False
+    target = ((msg.get("message") or {}).get("reactionMessage") or {}).get("key") or {}
+    return str(target.get("remoteJid") or "").endswith("@broadcast")

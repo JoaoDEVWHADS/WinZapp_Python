@@ -46,7 +46,7 @@ from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
@@ -4369,10 +4369,31 @@ class MainWindow(wx.Frame):
         # they must not be added to records or unread counts. They DO, however,
         # trigger a notification when someone reacts to one of *your* messages.
         if msg.get("messageType") == "reactionMessage":
-            if hasattr(self, "conversations_panel"):
-                self.conversations_panel.on_incoming_message(remote_jid, msg)
-            self._maybe_notify_reaction(remote_jid, msg)
-            self._track_last_reaction(remote_jid, msg)
+            if reaction_targets_status(msg):
+                # A reaction to one of OUR statuses has no message in this
+                # conversation to attach itself to — the status lives in
+                # _status_updates and the Status tab, never in a chat. The
+                # transient handling below is right for every other reaction
+                # and is exactly what made these vanish: the notification fired
+                # and the chat-list preview updated, so the user saw something
+                # arrive, and then opening the conversation showed nothing at
+                # all because no record was ever stored. Reported three times,
+                # in the same words: "respondeu meu status com um emoji, a
+                # mensagem apareceu, quando fui abrir desapareceu."
+                #
+                # Keep the notification and the preview, then fall through to
+                # normal storage so it survives as its own timeline entry —
+                # which is also how WhatsApp itself shows it. Deliberately NOT
+                # calling conversations_panel.on_incoming_message() here: the
+                # normal path below calls it once the record exists, and
+                # calling it twice showed the reaction twice.
+                self._maybe_notify_reaction(remote_jid, msg)
+                self._track_last_reaction(remote_jid, msg)
+            else:
+                if hasattr(self, "conversations_panel"):
+                    self.conversations_panel.on_incoming_message(remote_jid, msg)
+                self._maybe_notify_reaction(remote_jid, msg)
+                self._track_last_reaction(remote_jid, msg)
             # Own reactions refresh the chat list explicitly from
             # _on_own_reaction_sent() right after sending. A reaction from
             # someone else only ever arrives here, so without this the chat
@@ -4380,7 +4401,8 @@ class MainWindow(wx.Frame):
             # chat["_last_reaction"] until some unrelated event happened to
             # trigger a refresh.
             self._schedule_set_chats()
-            return
+            if not reaction_targets_status(msg):
+                return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
         # Handles both API key formats and all combinations of which entries exist:
