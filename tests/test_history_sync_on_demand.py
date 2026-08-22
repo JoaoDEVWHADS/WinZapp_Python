@@ -295,6 +295,17 @@ class TestRefreshHistoryStillLanding:
         assert stub._history_still_landing is False
 
 
+class TestBackfillPriority:
+    """Visible 1/15-message gaps must not wait behind cosmetic/deep work."""
+
+    def test_short_chats_gate_lower_priority_work(self):
+        import inspect
+
+        source = inspect.getsource(MainWindow._backfill_empty_chats)
+        assert "if not pending:\n                    named = self._backfill_names()" in source
+        assert "if deep_pending and not pending:" in source
+
+
 def _history_sync_warnings(caplog):
     """WARNING+ messages from this feature only.
 

@@ -13128,11 +13128,17 @@ class MainWindow(wx.Frame):
                     logging.info("[backfill] Nothing pending — every chat is walked back to "
                                  "its beginning (or all there is) and has a name.")
                     return
+                # A short-message chat is user-visible damage, while an unresolved
+                # name is cosmetic. Do not let slow LID lookups hold up the retry
+                # window (a live run spent 54 seconds here with 172 short chats
+                # waiting behind it).
+                named = 0
                 # Names get the same second chance as messages. _run_sync()
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
                 # up, so anything it could not map then stayed a bare @lid or a
                 # raw phone number for the whole session.
-                named = self._backfill_names()
+                if not pending:
+                    named = self._backfill_names()
                 if named:
                     wx.CallAfter(self._schedule_set_chats)
 
@@ -13144,7 +13150,9 @@ class MainWindow(wx.Frame):
                 # the next pass, anchored on whatever is now oldest on disk,
                 # so the walk resumes rather than restarting.
                 deep_stored = 0
-                if deep_pending:
+                # Deep history is also lower priority than restoring the first
+                # full page. It resumes as soon as no short chat is waiting.
+                if deep_pending and not pending:
                     window = deep_pending[:self._DEEP_CHATS_PER_PASS]
                     logging.info(
                         "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
