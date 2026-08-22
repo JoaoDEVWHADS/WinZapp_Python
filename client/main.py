@@ -9670,7 +9670,7 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def remove_failed_status_update(self, message_id: str) -> None:
+    def remove_failed_status_update(self, message_id: str, refresh: bool = True) -> None:
         """Remove a definitively rejected own status from memory and the DB."""
         if not message_id:
             return
@@ -9688,7 +9688,7 @@ class MainWindow(wx.Frame):
             self.db.delete_status_update(message_id)
         except Exception:
             logging.exception("[status] Failed to delete rejected status %s", message_id)
-        if removed:
+        if removed and refresh:
             sp = getattr(getattr(self, "navigation_panel", None), "status_panel", None)
             if sp:
                 threading.Thread(target=sp._load_statuses, daemon=True).start()
