@@ -197,3 +197,54 @@ class TestTheLogNamesTheRightSource:
         report = contract_report()
         assert report[("wpp message", "id", problem)] == 1
         assert report[("get-messages", "id", problem)] == 1
+
+
+class TestTheChatContractMatchesTheRealPayload:
+    """Corrected against a live list-chats after the contract shipped wrong.
+
+    The first version modelled `pinned: bool`. The payload has no `pinned` at
+    all — the field is `pin`, and it carries the pin timestamp in milliseconds.
+    Nothing reported it, because a field that never arrives is never checked:
+    "zero findings" says the payload never contradicted the contract, not that
+    the contract describes the payload.
+    """
+
+    def test_pin_accepts_the_timestamp_whatsapp_web_actually_sends(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            observe_payload([{"id": "5511@c.us", "pin": 1783718891426}],
+                            "list-chats")
+
+        assert caplog.text == ""
+
+    def test_pin_also_accepts_the_bool_and_string_forms_both_consumers_parse(
+            self, caplog):
+        with caplog.at_level(logging.WARNING):
+            observe_payload([{"id": "x", "pin": True}], "list-chats")
+            observe_payload([{"id": "x", "pin": "false"}], "list-chats")
+
+        assert caplog.text == ""
+
+    def test_the_shape_of_a_real_lid_chat_passes_clean(self, caplog):
+        """Trimmed from an actual RAW LID CHAT dump — the unmodelled keys must
+        stay silent, exactly as the .passthrough() side does."""
+        chat = {
+            "id": {"server": "lid", "user": "122999491567856",
+                   "_serialized": "122999491567856@lid"},
+            "t": 1786978135,
+            "unreadCount": 0,
+            "archive": False,
+            "pin": 1783718891426,
+            "msgs": None,
+            "isGroup": False,
+            "isUser": True,
+            "name": "Gu",
+            "remoteJid": "122999491567856@lid",
+            "contact": {"name": "Gu", "isMyContact": True},
+            "hasChatBeenOpened": False,
+            "ephemeralDuration": 0,
+        }
+
+        with caplog.at_level(logging.WARNING):
+            observe_payload([chat], "list-chats")
+
+        assert caplog.text == ""

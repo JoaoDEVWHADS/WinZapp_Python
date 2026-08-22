@@ -120,12 +120,15 @@ export const SyncChatSchema = z
   .object({
     id: z.union([z.string(), z.record(z.any())]),
     name: z.string().nullable().optional(),
-    formattedTitle: z.string().nullable().optional(),
     isGroup: z.boolean().optional(),
     unreadCount: z.number().optional(),
     t: z.number().nullable().optional(),
     archive: z.boolean().nullable().optional(),
-    pinned: z.boolean().nullable().optional(),
+    // The pin TIMESTAMP in ms on a live list-chats (1783718891426), a bool on
+    // other paths, and occasionally the string "true"/"false" — which is why
+    // both Python consumers parse it three ways. It was modelled as a boolean
+    // `pinned` here, a field that does not exist in the payload at all.
+    pin: z.union([z.boolean(), z.number(), z.string()]).nullable().optional(),
     msgs: z.null().or(z.array(z.any())).optional(),
   })
   .passthrough();

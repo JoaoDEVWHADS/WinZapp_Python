@@ -66,12 +66,19 @@ _MESSAGE_OPTIONAL = {
 _CHAT_REQUIRED = {"id": (str, dict)}
 _CHAT_OPTIONAL = {
     "name": (str,),
-    "formattedTitle": (str,),
     "isGroup": (bool,),
     "unreadCount": (int,),
     "t": (int,),
     "archive": (bool,),
-    "pinned": (bool,),
+    # Polymorphic in practice, which is why both consumers
+    # (get_remote_chats() in main.py and WebSocketClient.on_chats_update)
+    # parse it three ways: WhatsApp Web sends the pin TIMESTAMP in ms
+    # (1783718891426, confirmed on a live list-chats), older/other paths send a
+    # bool, and some send the string "true"/"false". Typing it bool — as this
+    # contract first did, under the wrong name "pinned" — described a field
+    # that never arrives, and a modelled field that never arrives is never
+    # checked. It cost nothing and told us nothing.
+    "pin": (bool, int, float, str),
     "msgs": (list,),
 }
 
