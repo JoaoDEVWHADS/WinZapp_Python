@@ -857,7 +857,7 @@ class StatusPanel(wx.Panel):
             self._video_player.stop()
         event.Skip()
 
-    def _load_statuses(self):
+    def _load_statuses(self, show_loading: bool = True):
         """
         Build the status list.
 
@@ -871,7 +871,8 @@ class StatusPanel(wx.Panel):
         """
         mw   = self.main_window
         i18n = mw.i18n
-        wx.CallAfter(self._set_list_loading)
+        if show_loading:
+            wx.CallAfter(self._set_list_loading)
         my_statuses, contacts = self._fetch_statuses_from_api()
         api_ok = getattr(self, "_last_status_api_ok", False)
         # A successful StatusV3Store answer is authoritative for own stories.
@@ -983,7 +984,7 @@ class StatusPanel(wx.Panel):
         try:
             url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/statuses"
             headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = requests.get(url, headers=headers, timeout=5)
             if resp.status_code not in (200, 201):
                 self._last_status_api_ok = False
                 return [], []
@@ -2501,12 +2502,25 @@ class StatusPanel(wx.Panel):
             )
 
     def _on_status_sent(self):
+        logging.info("[status_post] Client acknowledged successful status post")
         self._post_panel.Hide()
         self._media_post_panel.Hide()
         self.Layout()
         self._status_list.SetFocus()
-        self.main_window.output(self.main_window.i18n.t("status_posted"))
-        threading.Thread(target=self._load_statuses, daemon=True).start()
+        self.main_window.output(
+            self.main_window.i18n.t("status_posted"), interrupt=True
+        )
+        # Give StatusV3Store a moment to ingest the already-ACKed story.  The
+        # refresh is silent so a slow endpoint never replaces the usable list
+        # with a long-lived "loading" row after a successful post.
+        wx.CallLater(2000, self._refresh_after_status_sent)
+
+    def _refresh_after_status_sent(self):
+        threading.Thread(
+            target=self._load_statuses,
+            kwargs={"show_loading": False},
+            daemon=True,
+        ).start()
 
     # ── Send media status ────────────────────────────────────────────────────
 
