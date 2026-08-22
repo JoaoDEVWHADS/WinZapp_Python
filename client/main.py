@@ -44,15 +44,10 @@ from core.sound_system import (
 )
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
-<<<<<<< HEAD
-from core.websocket_client import WebSocketClient, ack_to_status
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
-=======
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
->>>>>>> upstream/main
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
@@ -13170,14 +13165,9 @@ class MainWindow(wx.Frame):
     # would have abandoned the rest while they were still arriving.  So: retry
     # quickly while passes keep recovering chats, back off when one recovers
     # nothing, and stop at an overall budget so this can never poll forever.
-<<<<<<< HEAD
-    _BACKFILL_FIRST_DELAY = 2      # the first repair must start while the user
-                                   # is still looking at the incomplete list
-=======
     _BACKFILL_FIRST_DELAY = 30     # seconds before the first sweep, and after a
                                    # complete sweep that made progress
     _BACKFILL_CHUNK_DELAY = 5      # pause between chunks in the same full sweep
->>>>>>> upstream/main
     _BACKFILL_MAX_DELAY   = 300    # ceiling once passes stop recovering anything
     _BACKFILL_BUDGET      = 45 * 60  # total wall-clock the backfill may run for
     # Wait long enough for the five-minute stalled-RECENT recovery to run.
@@ -13507,20 +13497,6 @@ class MainWindow(wx.Frame):
                 pending.discard(form)
                 counts.pop(form, None)
 
-<<<<<<< HEAD
-        records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
-        if not api_ok:
-            # The API never really answered — a failed call is the retry loop's
-            # business, not the backfill's.
-            _done()
-            return
-        if not records:
-            if getattr(self, "_history_still_landing", False) or self._server_claims_content(chat):
-                pending.add(remote_jid)
-            else:
-                _done()
-            return
-=======
     def _is_backfill_pending(self, jid: str) -> bool:
         """Whether a conversation is queued under either known address."""
         with self._backfill_state_guard():
@@ -13528,7 +13504,6 @@ class MainWindow(wx.Frame):
             forms = set(self._jid_address_forms(jid))
             forms.update(self._jid_address_forms(self._canonical_backfill_jid(jid)))
             return any(form in pending for form in forms)
->>>>>>> upstream/main
 
     def _completed_backfill_targets(self, window) -> int:
         """Count only this pass's targets, independent of concurrent arrivals."""
@@ -13751,15 +13726,10 @@ class MainWindow(wx.Frame):
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
                 # up, so anything it could not map then stayed a bare @lid or a
                 # raw phone number for the whole session.
-<<<<<<< HEAD
-                if not pending:
-                    named = self._backfill_names()
-=======
                 # Name and deep-history work run once per complete short-chat
                 # sweep. Repeating them between every fast queue chunk would
                 # merely move the old 30-second bottleneck to another endpoint.
                 named = 0 if continuing_short_sweep else self._backfill_names()
->>>>>>> upstream/main
                 if named:
                     wx.CallAfter(self._schedule_set_chats)
 
@@ -13771,13 +13741,7 @@ class MainWindow(wx.Frame):
                 # back on the next sweep, anchored on what is now oldest on
                 # disk, so the walk resumes rather than restarting.
                 deep_stored = 0
-<<<<<<< HEAD
-                # Deep history is also lower priority than restoring the first
-                # full page. It resumes as soon as no short chat is waiting.
-                if deep_pending and not pending:
-=======
                 if deep_pending and not continuing_short_sweep:
->>>>>>> upstream/main
                     window = deep_pending[:self._DEEP_CHATS_PER_PASS]
                     logging.info(
                         "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
@@ -13877,15 +13841,6 @@ class MainWindow(wx.Frame):
                 # from 15 to 90 messages made real progress and must not read as
                 # a wasted pass — that is what backs the delay off.
                 counts_before = {j: self._local_record_count(j) for j in window}
-<<<<<<< HEAD
-                with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
-                    futs = [pool.submit(self._repair_short_chat, c) for c in targets]
-                    for fut in as_completed(futs):
-                        try:
-                            fut.result()
-                        except Exception as exc:
-                            logging.warning("[backfill] chat sync failed: %s", exc)
-=======
                 if targets:
                     with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
                         futs = [pool.submit(self.sync_chat_messages, c) for c in targets]
@@ -13894,7 +13849,6 @@ class MainWindow(wx.Frame):
                                 fut.result()
                             except Exception as exc:
                                 logging.warning("[backfill] chat sync failed: %s", exc)
->>>>>>> upstream/main
 
                 completed = self._completed_backfill_targets(window)
                 grew = sum(1 for j, was in counts_before.items()
@@ -17253,9 +17207,6 @@ class MainWindow(wx.Frame):
                 older_requested = getattr(self, "_older_requested_chats", None)
                 if not isinstance(older_requested, dict):
                     older_requested = self._older_requested_chats = {}
-<<<<<<< HEAD
-                if remote_jid not in older_requested:
-=======
                 # Repeatable, not once-per-install. This used to ask only if
                 # the chat had never been asked, and the map is persisted, so
                 # the first request was the only one it would ever get: any
@@ -17275,7 +17226,6 @@ class MainWindow(wx.Frame):
                 if due:
                     older_requested[remote_jid] = time.time()
                     self._persist_older_requested()
->>>>>>> upstream/main
                     requested = bool(self.request_older_messages(remote_jid))
                     if requested:
                         older_requested[remote_jid] = time.time()
@@ -17454,14 +17404,8 @@ class MainWindow(wx.Frame):
         }
 
         try:
-<<<<<<< HEAD
-            logging.info(f"[fetch_older_messages] Querying URL: {url}")
-            response = requests.get(url, headers=headers, timeout=30)
-
-=======
             response = api_get(url, headers=headers, timeout=30)
             
->>>>>>> upstream/main
             # Alternate JID query fallback (resolves 401/TypeError or Chat not found errors)
             if response.status_code not in (200, 201):
                 alternate_jid = ""
