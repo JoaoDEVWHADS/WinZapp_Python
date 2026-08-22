@@ -596,14 +596,14 @@ class TestRoutesArePatched:
         assert "getPnLidEntry" in controller
         assert "resolvedChatId = alternateId" in controller
         assert "history_sync_on_demand_message_count" in controller
-        assert "oldestMsgId: oldest?.id?.id" in controller
-        assert "oldestMsgFromMe: oldest?.id?.fromMe" in controller
+        assert "out.oldestMsgId = oldest?.id?.id" in controller
+        assert "out.oldestMsgFromMe = oldest?.id?.fromMe" in controller
         assert "oldestMsgTimestampMs" in controller
-        assert "supportInlineResponse: false" in controller
+        assert "out.requestPayloadMode = 'chatId'" in controller
         assert "out.endOfHistory = endType === 1" in controller
         assert "out.moreOnPrimary = endType === 0 || endType === 2" in controller
-        assert "sendPeerDataOperationRequest(kind, request)" in controller
-        assert "sendPeerDataOperationRequest(kind, { chatId: wid })" not in controller
+        assert "sendPeerDataOperationRequest(kind, {" in controller
+        assert "chatId: chatModel.id" in controller
 
 
 class TestDocumentOnlyInterception:

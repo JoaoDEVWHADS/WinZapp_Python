@@ -2384,34 +2384,46 @@ export async function requestOlderMessages(req: Request, res: Response) {
           const onDemandMsgCount = await req_(
             'WAWebABProps'
           ).getABPropConfigValue('history_sync_on_demand_message_count');
-          const request = {
-            chatJid,
-            oldestMsgId: oldest?.id?.id,
-            oldestMsgFromMe: oldest?.id?.fromMe,
-            onDemandMsgCount,
-            oldestMsgTimestampMs:
-              oldest?.t != null ? oldest.t * 1000 : undefined,
-            // IMPORTANT: with this set to true the phone is allowed to return
-            // the requested history inline to sendPeerDataOperationRequest().
-            // WinZapp never decoded/persisted that private return payload, so
-            // the call logged `requested:true` while get-messages kept seeing
-            // the exact same oldest row forever. Ask for the ordinary history-
-            // sync notification instead: WhatsApp Web's own history pipeline
-            // decrypts it and inserts the messages into IndexedDB, which is
-            // exactly the store WAPI.getMessages() pages through.
-            supportInlineResponse: false,
-          };
+          // Keep the cursor details only as diagnostics.  Do NOT pass this
+          // manually-built protobuf-shaped object to sendPeerDataOperationRequest.
+          // The current WhatsApp Web wrapper expects exactly { chatId: ChatModel.id }
+          // and derives chatJid/cursor/count/timestamp internally.  Passing the
+          // flattened fields used below resolves the Promise without throwing,
+          // but does not schedule a usable on-demand history transfer (the failure
+          // pattern captured in logs: requested=true, same oldest row forever).
           out.historyChatJid = chatJid;
-          out.oldestMsgId = request.oldestMsgId;
-          out.oldestMsgFromMe = request.oldestMsgFromMe;
-          out.onDemandMsgCount = request.onDemandMsgCount;
-          out.oldestMsgTimestampMs = request.oldestMsgTimestampMs;
-          out.supportInlineResponse = request.supportInlineResponse;
-          if (!request.oldestMsgId) {
+          out.oldestMsgId = oldest?.id?.id;
+          out.oldestMsgFromMe = oldest?.id?.fromMe;
+          out.onDemandMsgCount = onDemandMsgCount;
+          out.oldestMsgTimestampMs =
+            oldest?.t != null ? oldest.t * 1000 : undefined;
+          if (!out.oldestMsgId) {
             out.error = 'oldest message cursor unavailable for on-demand history request';
             return out;
           }
-          const sendResult = await sender.sendPeerDataOperationRequest(kind, request);
+
+          // Match WhatsApp Web / whatsapp-web.js syncHistory() call shape:
+          //   sendPeerDataOperationRequest(HISTORY_SYNC_ON_DEMAND, { chatId: chat.id })
+          // chat must be the actual ChatModel backing resolvedChatId (LID for
+          // current 1:1 multi-device chats, group Wid for groups).
+          let chatModel = req_('WAWebCollections')?.Chat?.get?.(wid);
+          if (!chatModel) {
+            try {
+              chatModel = await req_('WAWebCollections')?.Chat?.find?.(wid);
+            } catch (e) {
+              /* handled below */
+            }
+          }
+          if (!chatModel?.id) {
+            out.error = 'chat model unavailable for on-demand history request';
+            return out;
+          }
+          out.requestPayloadMode = 'chatId';
+          out.requestChatId =
+            chatModel.id?._serialized || chatModel.id?.toString?.() || resolvedChatId;
+          const sendResult = await sender.sendPeerDataOperationRequest(kind, {
+            chatId: chatModel.id,
+          });
           // Do not serialize the private response object itself (it can carry
           // non-JSON values); just record whether this build returned one so
           // future logs can tell which delivery mode it used.
