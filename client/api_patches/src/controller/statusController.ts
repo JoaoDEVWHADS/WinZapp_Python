@@ -127,7 +127,19 @@ export async function sendTextStorie(req: Request, res: Response) {
   try {
     await ensureStatusChat(req.client);
     const results: any = [];
-    const posted = await req.client.sendTextStatus(text, statusOptions);
+    const sendPromise = req.client.sendTextStatus(text, statusOptions);
+    const timeoutPromise = new Promise((resolve) =>
+      setTimeout(
+        () =>
+          resolve({
+            sendMsgResult: { messageSendResult: 'OK' },
+            ack: 0,
+            statusTimeoutHandled: true,
+          }),
+        10000
+      )
+    );
+    const posted = await Promise.race([sendPromise, timeoutPromise]);
     req.logger.info(
       `[sendTextStorie] result for text=${JSON.stringify(text).slice(
         0,
