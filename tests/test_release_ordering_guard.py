@@ -91,6 +91,55 @@ def test_no_alpha_tags_at_all_is_fine(guard):
     assert guard.find_blocking_alphas("v0.26.0.0beta", []) == []
 
 
+# ── The stable line without a suffix (a.b.c.d), once WinZapp leaves beta ──────
+
+def test_guard_works_on_a_suffixless_stable_line(guard):
+    """The alpha channel outlives the beta suffix: once releases are plain
+    a.b.c.d, the same rule has to keep holding."""
+    tags = ["v1.0.0.0", "v1.0.0.2159alpha"]
+    assert guard.find_blocking_alphas("v1.1.0.0", tags) == []
+    assert guard.find_blocking_alphas("v2.0.0.0", tags) == []
+    assert guard.find_blocking_alphas("v1.0.0.1", tags) == ["v1.0.0.2159alpha"]
+
+
+def test_dropping_the_suffix_alone_does_not_advance_past_alphas(guard):
+    """"Now it's stable" by deleting `beta` keeps the numbers identical, so the
+    alphas published since still outrank it. This is the transition case most
+    likely to be attempted by hand."""
+    tags = ["v0.25.0.2159alpha"]
+    assert guard.find_blocking_alphas("v0.25.0.0", tags) == ["v0.25.0.2159alpha"]
+    # Advancing the numbers is what actually works.
+    assert guard.find_blocking_alphas("v0.26.0.0", tags) == []
+    assert guard.find_blocking_alphas("v1.0.0.0", tags) == []
+
+
+# ── suggest_tag ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("stable_tag,expected", [
+    ("v0.25.0.1beta", "0.25.1.0beta"),   # still on the beta line
+    ("v1.0.0.1",      "1.0.1.0"),        # suffixless stable line
+    ("v0.25.0.0",     "0.25.1.0"),       # dropped the suffix, same numbers
+])
+def test_suggestion_keeps_the_projects_current_scheme(guard, stable_tag, expected):
+    blockers = ["v0.25.0.2159alpha"] if stable_tag.startswith("v0.25") else ["v1.0.0.2159alpha"]
+    assert guard.suggest_tag(stable_tag, blockers) == expected
+
+
+def test_the_suggested_tag_actually_clears_the_guard(guard):
+    """The suggestion has to be right, not just plausible — feed it back in."""
+    tags = HISTORICAL + ["v0.25.0.2159alpha", "v0.25.0.2160alpha"]
+    for rejected in ["v0.25.0.1beta", "v0.25.0.0", "v0.25.0.9beta"]:
+        blockers = guard.find_blocking_alphas(rejected, tags)
+        assert blockers, rejected
+        suggestion = "v" + guard.suggest_tag(rejected, blockers)
+        assert guard.find_blocking_alphas(suggestion, tags) == [], suggestion
+
+
+def test_suggestion_is_based_on_the_highest_blocker(guard):
+    blockers = ["v1.0.0.2159alpha", "v1.2.0.5alpha"]
+    assert guard.suggest_tag("v1.0.0.1", blockers) == "1.2.1.0"
+
+
 # ── main(): exit codes and messages ───────────────────────────────────────────
 
 def _run_main(guard, monkeypatch, tag, tags, capsys):

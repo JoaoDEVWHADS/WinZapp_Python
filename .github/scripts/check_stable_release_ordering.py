@@ -52,6 +52,22 @@ def find_blocking_alphas(stable_tag: str, tags: "list[str]") -> "list[str]":
     )
 
 
+def suggest_tag(stable_tag: str, blockers: "list[str]") -> str:
+    """The nearest tag that WOULD clear *blockers*, keeping *stable_tag*'s style.
+
+    Alphas consume the fourth component, so the fix is always to advance the
+    patch component above the highest blocker and reset the fourth to 0. The
+    original suffix is preserved so the suggestion fits whichever scheme the
+    project is on — `0.25.1.0beta` while it is still beta, plain `1.1.0.0` once
+    the stable line drops the suffix.
+    """
+    _nums, suffix = parse_version(stable_tag.lstrip("vV"))
+    major, minor, patch, _build = max(
+        parse_version(b.lstrip("vV"))[0] for b in blockers
+    )
+    return f"{major}.{minor}.{patch + 1}.0{suffix}"
+
+
 def _git_tags() -> "list[str]":
     out = subprocess.run(
         ["git", "tag", "--list"], capture_output=True, text=True, check=True
@@ -74,9 +90,11 @@ def main() -> int:
     if blockers:
         print(f"::error::Stable release {version} does not sort above already "
               f"published alpha builds: {', '.join(blockers)}. Users on those "
-              f"alphas would never be offered it. Bump the patch component or "
-              f"higher (e.g. 0.25.0.x -> 0.25.1.0), not just the fourth "
-              f"component, and re-cut the release.")
+              f"alphas would never be offered it. Alpha builds consume the "
+              f"fourth component, so advancing only that one (or only dropping "
+              f"a dev/alpha/beta suffix, which leaves the numbers unchanged) is "
+              f"never enough. Re-cut the release as v{suggest_tag(stable_tag, blockers)} "
+              f"or higher.")
         return 1
 
     print(f"[INFO] {version} sorts above all "

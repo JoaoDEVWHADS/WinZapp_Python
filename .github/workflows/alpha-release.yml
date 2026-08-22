@@ -109,6 +109,13 @@ jobs:
       #   base 0.25.0.0beta (client/version.py, kept current by release.yml's
       #   bump-version job) + commit count N  ->  0.25.0.<N>alpha
       #
+      # The suffix on the base is irrelevant to all of this — only major.minor.
+      # patch are read off it — so the scheme keeps working unchanged when the
+      # stable line eventually drops `beta` and ships plain a.b.c.d: base
+      # 1.0.0.0 + N -> 1.0.0.<N>alpha, still newer than 1.0.0.0 and still older
+      # than 1.1.0.0. A base with no fourth component at all (1.0.0) is
+      # rejected below rather than guessed at.
+      #
       #   - Newer than the base stable: (0,25,0,N) > (0,25,0,0) for any N >= 1,
       #     so an alpha is offered to someone running 0.25.0.0beta.
       #   - Newer than the previous alpha: N only ever grows.
