@@ -275,13 +275,17 @@ class TestRefreshHistoryStillLanding:
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
-    def test_an_interrupted_recent_sync_does_not_pin_the_flag(self, monkeypatch):
-        """recentCompleted stays false forever on such a session — keying off it
-        would re-query every short chat on every launch for good."""
+    def test_incomplete_recent_sync_keeps_short_chats_pending(self, monkeypatch):
+        """RECENT may still be landing after the bootstrap queue looks empty.
+
+        The retry loop is time-budgeted, so keeping the chats pending cannot
+        re-query them forever and avoids requiring Home in every conversation.
+        """
         stub = self._stub(
             {"unprocessedChunks": 0, "initialSyncComplete": True, "recentCompleted": False},
             monkeypatch)
-        assert stub.refresh_history_still_landing() is False
+        assert stub.refresh_history_still_landing() is True
+        assert stub._history_still_landing is True
 
     def test_an_unreadable_status_is_treated_as_settled(self, monkeypatch):
         """Better to take a short chat at face value than to re-query 600 of

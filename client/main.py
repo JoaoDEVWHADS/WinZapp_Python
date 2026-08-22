@@ -12851,7 +12851,7 @@ class MainWindow(wx.Frame):
         _note_backfill_state() runs on sync worker threads that must not each
         make their own status call.
 
-        Two signals, because either alone has a blind spot:
+        Three signals, because each one has a blind spot:
 
           * unprocessedChunks > 0 — chunks delivered and waiting to be decoded.
           * initialSyncComplete is not true — a freshly paired session, where
@@ -12860,10 +12860,18 @@ class MainWindow(wx.Frame):
             sync runs there is often nothing in the queue *yet*, and reading
             only the chunk count would conclude that every short conversation
             is genuinely short at exactly the moment that is least true.
+          * recentCompleted is explicitly false — the initial bootstrap can
+            already report complete and have no queued chunks while RECENT
+            history is still being delivered.  That exact state returned 1 or
+            15 messages for dozens of chats, then returned full 200-message
+            pages when the user pressed Home a few minutes later.  Ignoring
+            this flag retired those chats before the automatic backfill began.
 
-        Deliberately not keyed on `recentCompleted`: that flag stays false on a
-        session whose recent sync was interrupted, and treating it as "still
-        landing" would re-query every short chat on every launch forever.
+        An interrupted RECENT sync cannot retry forever: the backfill already
+        has a fixed wall-clock budget (and a hard landing ceiling), while the
+        server-side queue recovery now completes or safely resets stale RECENT
+        batches.  Missing `recentCompleted` remains compatible with older API
+        builds and does not by itself mark history as landing.
         """
         status = self.fetch_history_sync_status()
         if status is None:
@@ -12875,7 +12883,8 @@ class MainWindow(wx.Frame):
         unprocessed = status.get("unprocessedChunks")
         queued = isinstance(unprocessed, int) and unprocessed > 0
         first_sync = status.get("initialSyncComplete") is not True
-        landing = queued or first_sync
+        recent_incomplete = status.get("recentCompleted") is False
+        landing = queued or first_sync or recent_incomplete
         self._history_still_landing = landing
         logging.info(
             "[history-sync] %s: unprocessed=%s initial_complete=%s recent_complete=%s "
