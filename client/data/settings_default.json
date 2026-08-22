@@ -23,6 +23,10 @@
     "status": {
         "messages_set_completed": false
     },
+    "calls": {
+        "alerts_enabled": true,
+        "popup_enabled": true
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,

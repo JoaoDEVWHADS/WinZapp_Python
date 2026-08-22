@@ -918,6 +918,10 @@ class MainWindow(wx.Frame):
         # stream, so it stops only after the final simultaneous call ends.
         self._active_incoming_calls = {}
         self._incoming_call_watchdogs = {}
+        # Modeless call dialogs, keyed by the same call identity as the active
+        # lifecycle maps.  Keeping ownership here lets terminal socket events
+        # close a popup that is no longer relevant.
+        self._incoming_call_dialogs = {}
         # List of deleted, archived, pinned, and muted chats, loaded from DB on prepare_sync()
         self._deleted_chats = set()
         self._archived_chats = set()
@@ -1321,6 +1325,30 @@ class MainWindow(wx.Frame):
     def init_UI(self):
         logging.info("[init_UI] start")
         self.SetMinSize((400, 300))
+
+        # This in-window call surface is the non-intrusive counterpart to the
+        # always-on-top popup. It stays hidden until a call arrives with the
+        # popup option disabled, then becomes the first control the user meets
+        # after returning to WinZapp with Alt+Tab.
+        self.incoming_call_bar = wx.Panel(self)
+        incoming_call_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.incoming_call_label = wx.StaticText(self.incoming_call_bar, label="")
+        self.incoming_call_stop_button = wx.Button(
+            self.incoming_call_bar,
+            label=self.i18n.t("incoming_call_stop_button"),
+        )
+        self.incoming_call_stop_button.Bind(
+            wx.EVT_BUTTON, self._on_stop_incoming_call_bar
+        )
+        incoming_call_sizer.Add(
+            self.incoming_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        incoming_call_sizer.Add(
+            self.incoming_call_stop_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        self.incoming_call_bar.SetSizer(incoming_call_sizer)
+        self.incoming_call_bar.Hide()
+
         self.main_panel = wx.Panel(self)
 
         self.navigation_panel = NavigationPanel(self, self.main_panel)
@@ -1348,6 +1376,7 @@ class MainWindow(wx.Frame):
 
         # Frame sizer
         frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(self.incoming_call_bar, 0, wx.EXPAND)
         frame_sizer.Add(self.main_panel, 1, wx.EXPAND)
         self.SetSizer(frame_sizer)
 
@@ -3489,7 +3518,17 @@ class MainWindow(wx.Frame):
         # Not debounced and deliberately ahead of every early return below:
         # holding a system-global hotkey is only acceptable while this window
         # really is the active one (see _set_bookmark_zero_hotkey).
-        self._set_bookmark_zero_hotkey(bool(event.GetActive()))
+        active = bool(event.GetActive())
+        self._set_bookmark_zero_hotkey(active)
+        if active:
+            # Disabling the popup means "do not interrupt what I am doing",
+            # not "hide the call controls". Once the user deliberately comes
+            # back with Alt+Tab, put keyboard and screen-reader focus directly
+            # on the in-window Desligar button.
+            stop_button = getattr(self, "incoming_call_stop_button", None)
+            call_bar = getattr(self, "incoming_call_bar", None)
+            if stop_button is not None and call_bar is not None and call_bar.IsShown():
+                wx.CallAfter(stop_button.SetFocus)
         if self.background_mode:
             event.Skip()
             return
@@ -3497,7 +3536,6 @@ class MainWindow(wx.Frame):
         if not token:
             event.Skip()
             return
-        active = event.GetActive()
         if self._presence_debounce_timer is not None and self._presence_debounce_timer.IsRunning():
             self._presence_debounce_timer.Stop()
         self._presence_debounce_timer = wx.CallLater(300, self._apply_window_activate, active)
@@ -3738,6 +3776,8 @@ class MainWindow(wx.Frame):
             self._presence_debounce_timer.Stop()
         for identity in list(getattr(self, "_incoming_call_watchdogs", {})):
             self._cancel_incoming_call_watchdog(identity)
+        for identity in list(getattr(self, "_incoming_call_dialogs", {})):
+            self._close_incoming_call_dialog(identity)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
         if getattr(self, "tray_icon", None) is not None:
@@ -3828,17 +3868,94 @@ class MainWindow(wx.Frame):
         self._cancel_incoming_call_watchdog(identity)
         if self._active_incoming_calls.pop(identity, None) is None:
             return
+        close_dialog = getattr(self, "_close_incoming_call_dialog", None)
+        if close_dialog is not None:
+            close_dialog(identity)
         logging.warning("[incoming_call] lifecycle timeout id=%s", identity)
         if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
+        self._sync_incoming_call_bar()
+
+    def _close_incoming_call_dialog(self, identity: str):
+        dialog = getattr(self, "_incoming_call_dialogs", {}).pop(identity, None)
+        if dialog is not None:
+            try:
+                dialog.close_from_call_lifecycle()
+            except Exception:
+                logging.exception("[incoming_call] could not close popup id=%s", identity)
+
+    def _forget_incoming_call_dialog(self, identity: str):
+        """Forget a popup dismissed by the user without ending the call alert."""
+        getattr(self, "_incoming_call_dialogs", {}).pop(identity, None)
+
+    def _show_incoming_call_dialog(self, identity: str, message: str):
+        from ui.dialogs.incoming_call import IncomingCallDialog
+
+        # Keep the call surface visibly inside WinZapp.  When the application
+        # is hidden in the tray, restoring its main frame first prevents the
+        # dialog from looking like an unrelated floating Windows popup.
+        if getattr(self, "_window_hidden", False):
+            self.restore_window()
+        self._close_incoming_call_dialog(identity)
+        dialog = IncomingCallDialog(
+            self,
+            message,
+            on_stop=lambda: self.stop_incoming_call_alert(identity),
+            on_closed=lambda: self._forget_incoming_call_dialog(identity),
+        )
+        self._incoming_call_dialogs[identity] = dialog
+        dialog.show_accessibly()
+
+    def _on_stop_incoming_call_bar(self, _event=None):
+        """Handle the native in-window Desligar button."""
+        self.stop_all_incoming_call_alerts()
+
+    def _sync_incoming_call_bar(self, message: str = ""):
+        """Show the local stop control while a non-popup call alert is active."""
+        bar = getattr(self, "incoming_call_bar", None)
+        label = getattr(self, "incoming_call_label", None)
+        if bar is None or label is None:
+            return
+
+        calls = getattr(self, "_active_incoming_calls", {})
+        call_settings = getattr(self, "settings", {}).get("calls", {})
+        should_show = bool(calls) and not call_settings.get("popup_enabled", True)
+        if should_show:
+            if message:
+                label.SetLabel(message)
+            bar.Show()
+        else:
+            bar.Hide()
+        self.Layout()
+
+    def stop_all_incoming_call_alerts(self):
+        """Stop local call UI/audio, without claiming WhatsApp rejected a call."""
+        for identity in list(getattr(self, "_incoming_call_watchdogs", {})):
+            self._cancel_incoming_call_watchdog(identity)
+        for identity in list(getattr(self, "_incoming_call_dialogs", {})):
+            self._close_incoming_call_dialog(identity)
+        self._active_incoming_calls.clear()
+        if hasattr(self, "call_incoming_sound"):
+            self.call_incoming_sound.stop()
+        self._sync_incoming_call_bar()
+
+    def stop_incoming_call_alert(self, identity: str):
+        """Stop one incoming-call alert locally; the phone keeps ringing."""
+        self._active_incoming_calls.pop(identity, None)
+        self._cancel_incoming_call_watchdog(identity)
+        self._close_incoming_call_dialog(identity)
+        if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
+            self.call_incoming_sound.stop()
+        self._sync_incoming_call_bar()
 
     def on_incoming_call_event(self, event: dict):
         """Announce an incoming call and keep its tone playing until it ends.
 
-        WPPConnect cannot answer a call for WinZapp, but WhatsApp Web's call
-        model still reports enough lifecycle state to provide an accessible
-        alert. Duplicate offer events are expected because the Node bridge has
-        both the public WA-JS event and a direct CallStore fallback.
+        WhatsApp Web's current call API is not reliable enough to reject a call
+        from WinZapp.  The call model still reports enough lifecycle state to
+        provide and locally dismiss an accessible alert. Duplicate offer events
+        are expected because the Node bridge has both the public WA-JS event and
+        a direct CallStore fallback.
         """
         if not isinstance(event, dict):
             return
@@ -3856,6 +3973,9 @@ class MainWindow(wx.Frame):
             if call_id:
                 self._active_incoming_calls.pop(call_id, None)
                 self._cancel_incoming_call_watchdog(call_id)
+                close_dialog = getattr(self, "_close_incoming_call_dialog", None)
+                if close_dialog is not None:
+                    close_dialog(call_id)
             elif peer_jid:
                 ended_ids = [
                     cid for cid, jid in self._active_incoming_calls.items()
@@ -3867,12 +3987,24 @@ class MainWindow(wx.Frame):
                 }
                 for identity in ended_ids:
                     self._cancel_incoming_call_watchdog(identity)
+                    close_dialog = getattr(self, "_close_incoming_call_dialog", None)
+                    if close_dialog is not None:
+                        close_dialog(identity)
             else:
                 self._active_incoming_calls.clear()
                 for identity in list(self._incoming_call_watchdogs):
                     self._cancel_incoming_call_watchdog(identity)
+                for identity in list(getattr(self, "_incoming_call_dialogs", {})):
+                    close_dialog = getattr(self, "_close_incoming_call_dialog", None)
+                    if close_dialog is not None:
+                        close_dialog(identity)
             if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
                 self.call_incoming_sound.stop()
+            self._sync_incoming_call_bar()
+            return
+
+        call_settings = getattr(self, "settings", {}).get("calls", {})
+        if not call_settings.get("alerts_enabled", True):
             return
 
         identity = call_id or peer_jid
@@ -3903,6 +4035,11 @@ class MainWindow(wx.Frame):
         self.output(message, interrupt=True)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.play()
+        if call_settings.get("popup_enabled", True):
+            show_popup = getattr(self, "_show_incoming_call_dialog", None)
+            if show_popup is not None:
+                show_popup(identity, message)
+        self._sync_incoming_call_bar(message)
         logging.info(
             "[incoming_call] ringing id=%s peer=%s video=%s group=%s",
             call_id, peer_jid, bool(event.get("isVideo")), is_group,
@@ -6510,6 +6647,10 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel.refresh_labels()
         if hasattr(self, "status_panel"):
             self.status_panel.refresh_labels()
+        if hasattr(self, "incoming_call_stop_button"):
+            self.incoming_call_stop_button.SetLabel(
+                self.i18n.t("incoming_call_stop_button")
+            )
         # Update frame title (unread indicator + any status suffix)
         self._update_title()
         self.main_panel.Layout()
@@ -15669,17 +15810,20 @@ class MainWindow(wx.Frame):
                 logging.info("[on_presence_update] announce_enabled=%s, is_active_chat=%s, window_active=%s (chat_jid_norm=%s, conv_jid=%s)",
                              announce_enabled, active_match, window_active, chat_jid_norm, conv_jid)
                 if announce_enabled and active_match and window_active:
-                    if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
-                        name = self._resolve_jid_name(canonical, chat_jid_norm)
-                        logging.info("[on_presence_update] resolved name=%s for canonical=%s", name, canonical)
-                        if name:
-                            try:
-                                i18n_key = "typing_text" if new_lkp == "composing" else "recording_text"
-                                msg_text = self.i18n.t(i18n_key).format(name=name)
-                                logging.info("[on_presence_update] speaking: %s", msg_text)
-                                self.speak_output.output(msg_text)
-                            except Exception as e:
-                                logging.error("[on_presence_update] speak error: %s", e)
+                    # Mute/archive suppress background notifications, not the
+                    # live state of a conversation the user deliberately has
+                    # open. The active-chat and active-window gates above are
+                    # the relevant boundary for typing/recording speech.
+                    name = self._resolve_jid_name(canonical, chat_jid_norm)
+                    logging.info("[on_presence_update] resolved name=%s for canonical=%s", name, canonical)
+                    if name:
+                        try:
+                            i18n_key = "typing_text" if new_lkp == "composing" else "recording_text"
+                            msg_text = self.i18n.t(i18n_key).format(name=name)
+                            logging.info("[on_presence_update] speaking: %s", msg_text)
+                            self.speak_output.output(msg_text)
+                        except Exception as e:
+                            logging.error("[on_presence_update] speak error: %s", e)
 
         # Persist the updated pushName map to database metadata.
         if _ppm_updated and hasattr(self, "db") and self.db is not None:
