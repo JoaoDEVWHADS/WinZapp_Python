@@ -27,6 +27,7 @@ import { Logger } from 'winston';
 import { version } from '../package.json';
 import config from './config';
 import { convert } from './mapper/index';
+import { errorHandler } from './middleware/errorHandler';
 import { requestInstrumentation } from './middleware/instrumentation';
 import routes from './routes';
 import { ServerOptions } from './types/ServerOptions';
@@ -109,6 +110,11 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
   });
 
   app.use(routes);
+  // After the routes, and last: Express only reaches a four-argument handler
+  // once everything before it has passed the error along. Controllers that
+  // still catch their own errors are unaffected — this catches what they let
+  // through, and is what new code throws into instead of inventing a status.
+  app.use(errorHandler);
 
   createFolders();
   const http = createServer(app);
