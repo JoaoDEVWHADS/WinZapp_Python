@@ -9726,11 +9726,26 @@ class MainWindow(wx.Frame):
         # them: a chat list where every chat holds a full page but hundreds
         # still show a raw @lid, with nothing left to fix it this session.
         unnamed = len(self._pending_name_resolution())
-        if pending or still_landing or unnamed:
+        # Chats that already hold a full page but whose older history has never
+        # been walked. This was the one reason to run that the condition below
+        # did not ask about, and it is the reason that outlives the others: the
+        # ordinary backfill queue drains, names get resolved, history stops
+        # landing — and a deep walk that may still owe thousands of pages was
+        # never started, because the thread it lives in was never created.
+        #
+        # It bites exactly when the account is in its steady state. Every chat
+        # holds its 200 messages, every name resolves, so `pending`,
+        # `unnamed` and `still_landing` are all zero and the sync ends
+        # announcing success with the older history untouched. Worse, that is
+        # also the state a restart lands in, so the walk had no way to resume
+        # either: the SQLite anchor survives, but nothing ever came back for it.
+        deep_pending = len(self._chats_needing_deep_history())
+        if pending or still_landing or unnamed or deep_pending:
             logging.info(
                 "[backfill] Scheduling backfill: %d chat(s) short of a full page, "
-                "%d still unnamed, history still landing=%s.",
-                pending, unnamed, still_landing)
+                "%d still unnamed, %d awaiting a deeper walk, history still "
+                "landing=%s.",
+                pending, unnamed, deep_pending, still_landing)
             existing = getattr(self, "_backfill_thread", None)
             if existing is None or not existing.is_alive():
                 self._backfill_thread = threading.Thread(
