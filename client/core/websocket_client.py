@@ -4,6 +4,7 @@ import time
 import socketio
 import wx
 import requests
+from core.api_client import api_get, api_post
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
@@ -428,7 +429,7 @@ class WebSocketClient:
         if old_token:
             def _close():
                 try:
-                    requests.post(
+                    api_post(
                         f"{mw.wpp_server}:{mw.wpp_port}/api/{old_token}/close-session",
                         headers={"Authorization": f"Bearer {old_token}", "Content-Type": "application/json"},
                         timeout=5,
@@ -1196,7 +1197,7 @@ class WebSocketClient:
                 "Authorization": f"Bearer {self.main_window.token}",
                 "Content-Type": "application/json",
             }
-            res = requests.get(url, headers=headers, timeout=5)
+            res = api_get(url, headers=headers, timeout=5)
             if res.status_code in (200, 201):
                 res_data = res.json()
                 resp = res_data.get("response", res_data)
@@ -1246,7 +1247,7 @@ class WebSocketClient:
         ]
         for limit_type, value in limits:
             try:
-                requests.post(
+                api_post(
                     url,
                     json={"type": limit_type, "value": value},
                     headers=headers,

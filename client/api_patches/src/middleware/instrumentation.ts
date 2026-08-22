@@ -97,9 +97,21 @@ export function requestInstrumentation(logger: Logger) {
       httpRequestsTotal.inc(labels);
       httpRequestDuration.observe(labels, durationSeconds);
 
+      // Which session this belonged to, so a 10MB log accumulated across runs
+      // and accounts can be filtered down to one of them. Read here rather
+      // than at the top of the middleware because Express only fills
+      // req.params once a route has matched.
+      //
+      // Redacted deliberately: WPPConnect authenticates with
+      // `<session>:<token>` in the path, so `:session` captures the credential
+      // along with the name. Logging it whole would put the token in the API
+      // log — the same mistake the Python side was making 2,360 times a run.
+      const session = String(req.params?.session || '').split(':')[0];
+
       const message =
         `HTTP ${method} ${route} ${statusCode} ` +
-        `${(durationSeconds * 1000).toFixed(1)}ms requestId=${requestId}`;
+        `${(durationSeconds * 1000).toFixed(1)}ms requestId=${requestId}` +
+        (session ? ` session=${session}` : '');
 
       if (aborted || durationSeconds >= SLOW_REQUEST_SECONDS) {
         req.logger.warn(message);

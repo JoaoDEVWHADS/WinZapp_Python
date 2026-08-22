@@ -142,4 +142,34 @@ describe('HTTP instrumentation', () => {
     expect(res.body).toContain('winzapp_http_requests_total');
     expect(res.body).toContain('winzapp_http_request_duration_seconds');
   });
+
+  it('names the session without leaking the token that rides with it', async () => {
+    // WPPConnect authenticates with `<session>:<token>` in the path, so
+    // Express's :session param captures both. The log needs the name (a 10MB
+    // file accumulated across runs and accounts is unusable without it) and
+    // must never carry the credential.
+    const logged: string[] = [];
+    const logger = {
+      child: () => ({
+        warn: (m: string) => logged.push(m),
+        http: (m: string) => logged.push(m),
+      }),
+    } as any;
+    const req: any = {
+      headers: {},
+      method: 'GET',
+      params: { session: 'mysession:$2b$10$supersecrettoken' },
+      route: { path: '/api/:session/list-chats' },
+      baseUrl: '',
+    };
+    const res = new MockResponse();
+
+    requestInstrumentation(logger)(req, res as any, () => undefined);
+    res.send('ok');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const output = logged.join(' | ');
+    expect(output).toContain('session=mysession');
+    expect(output).not.toContain('supersecrettoken');
+  });
 });

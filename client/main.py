@@ -2835,7 +2835,7 @@ class MainWindow(wx.Frame):
     def _raw_session_status(self) -> str:
         """Return WPPConnect's current status-session string ('' on failure)."""
         try:
-            resp = requests.get(
+            resp = api_get(
                 f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session",
                 headers={"Authorization": f"Bearer {self.token}"},
                 timeout=10,
@@ -3031,7 +3031,7 @@ class MainWindow(wx.Frame):
         headers = {"Authorization": f"Bearer {token}"}
         close_ok = False
         try:
-            resp = requests.post(
+            resp = api_post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{token}/close-session",
                 headers=headers, timeout=10,
             )
@@ -3074,7 +3074,7 @@ class MainWindow(wx.Frame):
         # orphan (this account's only) and clear its lockfile first.
         self._kill_orphaned_chrome_for_session()
         try:
-            requests.post(
+            api_post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{token}/start-session",
                 json={"waitQrCode": False}, headers=headers, timeout=15,
             )
@@ -3710,7 +3710,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            requests.post(url, json={"isOnline": is_online}, headers=headers, timeout=5)
+            api_post(url, json={"isOnline": is_online}, headers=headers, timeout=5)
         except Exception:
             pass
 
@@ -4569,7 +4569,7 @@ class MainWindow(wx.Frame):
                     try:
                         pn_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
                         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-                        pn_resp = requests.get(pn_url, headers=headers, timeout=5)
+                        pn_resp = api_get(pn_url, headers=headers, timeout=5)
                         if pn_resp.ok:
                             pn_data = pn_resp.json()
                             phone_obj = pn_data.get("phoneNumber") or {}
@@ -6248,7 +6248,7 @@ class MainWindow(wx.Frame):
         while time.monotonic() < deadline:
             polls += 1
             try:
-                resp = requests.get(url, headers=headers, timeout=5)
+                resp = api_get(url, headers=headers, timeout=5)
                 if resp.status_code in (200, 201):
                     status = resp.json().get("status", "") or ""
                     self._shutdown_audit(
@@ -6365,7 +6365,7 @@ class MainWindow(wx.Frame):
                 )
                 logging.info("[shutdown] close-session sent — waiting for flush")
                 self._shutdown_audit("close-session POSTed — waiting for flush")
-                resp = requests.post(
+                resp = api_post(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=self._WPP_GRACEFUL_STOP_SECONDS,
@@ -6485,7 +6485,7 @@ class MainWindow(wx.Frame):
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         current = (getattr(self, "token", "") or "").split(":")[0]
         try:
-            resp = requests.get(
+            resp = api_get(
                 f"{base}/api/{api_key}/show-all-sessions",
                 headers=headers, timeout=10,
             )
@@ -6510,7 +6510,7 @@ class MainWindow(wx.Frame):
                 continue  # ours — already closed in STEP 1
             # Check the session's real status: only close non-connected ones.
             try:
-                st = requests.get(
+                st = api_get(
                     f"{base}/api/{name}/check-connection-session",
                     headers=headers, timeout=8,
                 )
@@ -6521,7 +6521,7 @@ class MainWindow(wx.Frame):
             except Exception:
                 continue  # unreadable status → leave it alone (fail-safe)
             try:
-                requests.post(
+                api_post(
                     f"{base}/api/{name}/close-session",
                     headers=headers, timeout=8,
                 )
@@ -7676,7 +7676,7 @@ class MainWindow(wx.Frame):
             try:
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/{self.wpp_api_key}/generate-token"
                 import requests
-                response = requests.post(url, timeout=10)
+                response = api_post(url, timeout=10)
                 if response.status_code in (200, 201):
                     data = response.json()
                     hash_token = data.get("token")
@@ -7850,7 +7850,7 @@ class MainWindow(wx.Frame):
             return not skip
         try:
             token = self._get_wa_token() or name
-            requests.post(
+            api_post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{name}/logout-session",
                 headers={"Authorization": f"Bearer {token}"}, timeout=5,
             )
@@ -8161,7 +8161,7 @@ class MainWindow(wx.Frame):
         cached string produced by a browser that may simply still be restoring.
         """
         try:
-            resp = requests.get(
+            resp = api_get(
                 f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/host-device",
                 headers={"Authorization": f"Bearer {self.token}",
                          "Content-Type": "application/json"},
@@ -8304,7 +8304,7 @@ class MainWindow(wx.Frame):
         """
         try:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/reconnect-socket-stream"
-            resp = requests.post(
+            resp = api_post(
                 url,
                 headers={"Authorization": f"Bearer {self.token}"},
                 timeout=10,
@@ -8394,13 +8394,13 @@ class MainWindow(wx.Frame):
             headers = {"Authorization": f"Bearer {self.token}"}
             close_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/close-session"
             try:
-                requests.post(close_url, headers=headers, timeout=15)
+                api_post(close_url, headers=headers, timeout=15)
             except Exception as exc:
                 logging.warning("[_restart_wpp_session] close-session failed: %s", exc)
             time.sleep(2)
             start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
             try:
-                requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=15)
+                api_post(start_url, json={"waitQrCode": False}, headers=headers, timeout=15)
                 logging.info("[_restart_wpp_session] start-session requested.")
             except Exception as exc:
                 logging.warning("[_restart_wpp_session] start-session failed: %s", exc)
@@ -8432,7 +8432,7 @@ class MainWindow(wx.Frame):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/check-connection-session"
         session_down = False
         try:
-            resp = requests.get(
+            resp = api_get(
                 url,
                 headers={"Authorization": f"Bearer {self.token}"},
                 timeout=10,
@@ -8523,7 +8523,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = api_get(url, headers=headers, timeout=10)
             # The local API answered at all — whatever it says below, the
             # request-level failure streak that would otherwise declare an
             # outage is not applicable here.
@@ -8603,7 +8603,7 @@ class MainWindow(wx.Frame):
                     self._set_wa_connected(True, "status-session CONNECTED")
                     try:
                         dev_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/host-device"
-                        dev_resp = requests.get(dev_url, headers=headers, timeout=5)
+                        dev_resp = api_get(dev_url, headers=headers, timeout=5)
                         if dev_resp.status_code in (200, 201):
                             dev_data = dev_resp.json()
                             phoneNumberObj = dev_data.get("response", {}).get("phoneNumber", {})
@@ -8645,7 +8645,7 @@ class MainWindow(wx.Frame):
                     else:
                         try:
                             start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
-                            requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
+                            api_post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
                             logging.info("[check_wa_connection_http] Sent auto-start session command")
                         except Exception as e:
                             logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
@@ -9859,7 +9859,7 @@ class MainWindow(wx.Frame):
                     # fetch inside the page.  Our 5 s timeout doesn't cancel it,
                     # so a probe that "failed" still leaves that loop running and
                     # competing with the real chat-list fetch that follows.
-                    r = requests.post(
+                    r = api_post(
                         url,
                         json={"ignoreGroupMetadata": True},
                         headers=headers,
@@ -11091,7 +11091,7 @@ class MainWindow(wx.Frame):
         try:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-info/{jid}"
             headers = {"Authorization": f"Bearer {self.token}"}
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = api_get(url, headers=headers, timeout=10)
             if resp.ok:
                 body = resp.json()
                 info = body.get("response", body) if isinstance(body, dict) else {}
@@ -11530,7 +11530,7 @@ class MainWindow(wx.Frame):
             response_data = []
             for attempt in range(5):
                 try:
-                    response = requests.get(url, headers=headers, timeout=90)
+                    response = api_get(url, headers=headers, timeout=90)
                     if response.status_code not in (200, 201):
                         logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
                         response_data = []
@@ -13618,7 +13618,7 @@ class MainWindow(wx.Frame):
         url = (f"{self.wpp_server}:{self.wpp_port}"
                f"/api/{self.token}/history-sync-status")
         try:
-            response = requests.get(
+            response = api_get(
                 url,
                 headers={"Authorization": f"Bearer {self.token}",
                          "Content-Type": "application/json"},
@@ -13703,7 +13703,7 @@ class MainWindow(wx.Frame):
         url = (f"{self.wpp_server}:{self.wpp_port}"
                f"/api/{self.token}/unblock-history-sync")
         try:
-            response = requests.post(
+            response = api_post(
                 url,
                 headers={"Authorization": f"Bearer {self.token}",
                          "Content-Type": "application/json"},
@@ -13774,7 +13774,7 @@ class MainWindow(wx.Frame):
         url = (f"{self.wpp_server}:{self.wpp_port}"
                f"/api/{self.token}/request-older-messages/{phone}")
         try:
-            response = requests.post(
+            response = api_post(
                 url,
                 headers={"Authorization": f"Bearer {self.token}",
                          "Content-Type": "application/json"},
@@ -13927,7 +13927,7 @@ class MainWindow(wx.Frame):
             try:
                 # Deliberately longer than the 30s of the normal page: this
                 # request makes WhatsApp Web walk back through up to ten pages.
-                resp = requests.get(url, headers=headers, timeout=90)
+                resp = api_get(url, headers=headers, timeout=90)
             except Exception as exc:
                 logging.warning("[history-gap] %s: request failed at count=%d: %s",
                                 remote_jid, count, exc)
@@ -14056,7 +14056,7 @@ class MainWindow(wx.Frame):
                             alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}"
                             logging.info(f"[sync_chat_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
                             try:
-                                alt_response = requests.get(alt_url, headers=headers, timeout=30)
+                                alt_response = api_get(alt_url, headers=headers, timeout=30)
                                 if alt_response.status_code in (200, 201):
                                     response = alt_response
                                     fetch_jid = alternate_jid
@@ -14375,7 +14375,7 @@ class MainWindow(wx.Frame):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            response = api_get(url, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
                 return None
             body = response.json()
@@ -15043,7 +15043,7 @@ class MainWindow(wx.Frame):
                             "options": {"linkPreview": False}
                         }
                     active_dest = fb_phone
-                    response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
+                    response = api_post(retry_url, json=retry_payload, headers=headers, timeout=25)
                     if response.status_code in (200, 201):
                         logging.info("[send_text_message] legacy retry with %s succeeded", fb_phone)
 
@@ -15252,7 +15252,7 @@ class MainWindow(wx.Frame):
         logging.info("[VOICE_TIMING] POSTing to send-voice-base64 (payload size ~%d bytes b64)",
                      len(audio_b64))
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            response = api_post(url, json=payload, headers=headers, timeout=30)
             logging.info("[VOICE_TIMING] POST returned HTTP %s in %.3fs",
                          response.status_code, _time.perf_counter() - _t_post)
             if response.status_code not in (200, 201):
@@ -15277,7 +15277,7 @@ class MainWindow(wx.Frame):
                     }
                     if quoted_id:
                         retry_payload["quotedMessageId"] = quoted_id
-                    response = requests.post(url, json=retry_payload, headers=headers, timeout=30)
+                    response = api_post(url, json=retry_payload, headers=headers, timeout=30)
                     if response.status_code in (200, 201):
                         logging.info("[send_audio_message] legacy retry with %s succeeded", fb_phone)
                         # fall through to normal response parsing below
@@ -15432,7 +15432,7 @@ class MainWindow(wx.Frame):
             "reaction": emoji
         }
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            response = api_post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
                 # 1500 chars (not 500) — deviceController.ts's reactMessage
                 # now includes a real error message + stack trace in the
@@ -15469,7 +15469,7 @@ class MainWindow(wx.Frame):
             "pin": pin,
         }
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            response = api_post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
                 logging.error("[pin_message] HTTP %s: %s",
                               response.status_code, response.text[:500])
@@ -16608,7 +16608,7 @@ class MainWindow(wx.Frame):
         for attempt in range(max_attempts):
             if progress_callback is None:
                 try:
-                    response = requests.post(url, headers=headers, json=body_data, timeout=timeout)
+                    response = api_post(url, headers=headers, json=body_data, timeout=timeout)
                 except MediaExpiredError:
                     logging.warning("[get_base64_from_media] MediaExpiredError for msg_id=%s", msg_id)
                     raise
@@ -16656,7 +16656,7 @@ class MainWindow(wx.Frame):
             else:
                 # Streaming mode so we can report per-chunk progress
                 try:
-                    response = requests.post(url, headers=headers, json=body_data, stream=True, timeout=timeout)
+                    response = api_post(url, headers=headers, json=body_data, stream=True, timeout=timeout)
                     if response.status_code in (403, 410):
                         raise MediaExpiredError(response.status_code)
                     
@@ -17029,7 +17029,7 @@ class MainWindow(wx.Frame):
                     alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}&direction=before&id={alt_serialized_id}"
                     logging.info(f"[fetch_older_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
                     try:
-                        alt_response = requests.get(alt_url, headers=headers, timeout=30)
+                        alt_response = api_get(alt_url, headers=headers, timeout=30)
                         if alt_response.status_code in (200, 201):
                             response = alt_response
                             logging.info("[fetch_older_messages] Fallback alternate JID query succeeded!")
@@ -17254,7 +17254,7 @@ class MainWindow(wx.Frame):
             payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
             if is_lid:
                 payload["isLid"] = True
-            return requests.post(url, json=payload, headers=headers, timeout=10)
+            return api_post(url, json=payload, headers=headers, timeout=10)
 
         def _do_api():
             try:
@@ -17312,7 +17312,7 @@ class MainWindow(wx.Frame):
                     "Content-Type": "application/json"
                 }
                 logging.info(f"[Self LID Resolution] Querying pn-lid mapping for own JID {my_jid}...")
-                response = requests.get(url, headers=headers, timeout=10)
+                response = api_get(url, headers=headers, timeout=10)
                 if response.status_code in (200, 201):
                     res = response.json() or {}
                     logging.info(f"[Self LID Resolution] Response: {res}")
@@ -17530,7 +17530,7 @@ class MainWindow(wx.Frame):
                     # First, resolve pn-lid mapping
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
                     logging.info(f"[LID Resolution] Querying WPPConnect pn-lid mapping for {lid_jid}...")
-                    response = requests.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
+                    response = api_get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
                     if response.status_code in (200, 201):
                         res = response.json() or {}
                         logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
@@ -17583,7 +17583,7 @@ class MainWindow(wx.Frame):
                     target_jid = canonical_jid if canonical_jid else lid_jid
                     url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
                     logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
-                    resp_profile = requests.get(url_profile, headers=headers, timeout=_REQUEST_TIMEOUT)
+                    resp_profile = api_get(url_profile, headers=headers, timeout=_REQUEST_TIMEOUT)
                     # Check profile response
                     if resp_profile.status_code in (200, 201):
                         res_prof = resp_profile.json() or {}
@@ -17738,7 +17738,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            r = requests.get(url, headers=headers, timeout=10)
+            r = api_get(url, headers=headers, timeout=10)
             logging.info(f"[get_contact_profile] Querying for {original_jid} (using JID: {jid}). Response status: {r.status_code}")
             if r.status_code in (200, 201):
                 res = r.json() or {}
@@ -17793,7 +17793,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            r = requests.get(url, headers=headers, timeout=10)
+            r = api_get(url, headers=headers, timeout=10)
             if r.status_code not in (200, 201):
                 return None
             resp = (r.json() or {}).get("response")
@@ -17823,7 +17823,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            r = requests.get(url, headers=headers, timeout=10)
+            r = api_get(url, headers=headers, timeout=10)
             if r.status_code not in (200, 201):
                 return ""
             resp = (r.json() or {}).get("response")
@@ -17877,7 +17877,7 @@ class MainWindow(wx.Frame):
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
                 logging.info("[subscribe_presence] Subscribing to: %s (isGroup=%s, isLid=%s)", phone, is_group, is_lid)
                 try:
-                    resp = requests.post(url, json={"phone": phone, "isGroup": is_group, "isLid": is_lid}, headers=headers, timeout=10)
+                    resp = api_post(url, json={"phone": phone, "isGroup": is_group, "isLid": is_lid}, headers=headers, timeout=10)
                     logging.info("[subscribe_presence] Response for %s: %s (body: %s)", phone, resp.status_code, resp.text[:200])
                 except Exception as e:
                     logging.error("[subscribe_presence] Error subscribing to %s: %s", phone, e)
@@ -17895,7 +17895,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            r = requests.get(url, headers=headers, timeout=10)
+            r = api_get(url, headers=headers, timeout=10)
             logging.info(f"[get_group_info] status={r.status_code} for {jid}")
             if r.status_code in (200, 201):
                 res_data = r.json() or {}
@@ -17954,7 +17954,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = api_get(url, headers=headers, timeout=10)
             if resp.status_code not in (200, 201):
                 logging.warning("[get_block_list] HTTP %s", resp.status_code)
                 return
@@ -18010,7 +18010,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            resp = requests.post(
+            resp = api_post(
                 url, json={"phone": jid},
                 headers=headers, timeout=10,
             )
@@ -18112,7 +18112,7 @@ class MainWindow(wx.Frame):
                         "type": wpp_type,
                         "isGroup": dest.endswith("@g.us"),
                     }
-                    return requests.post(url, json=payload, headers=headers, timeout=10)
+                    return api_post(url, json=payload, headers=headers, timeout=10)
 
                 def _accepted(resp) -> bool:
                     return mute_response_accepted(
@@ -18298,7 +18298,7 @@ class MainWindow(wx.Frame):
                 api_jid = alt_lid
 
         try:
-            resp = requests.post(
+            resp = api_post(
                 url,
                 json={"phone": api_jid, "value": archive, "isGroup": jid.endswith("@g.us")},
                 headers=headers,
@@ -18410,7 +18410,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(
+                r = api_post(
                     url, json={"phone": [phone], "isGroup": phone.endswith("@g.us")},
                     headers=headers, timeout=10,
                 )
@@ -18428,7 +18428,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(
+                r = api_post(
                     url, json={"phone": [phone], "isGroup": phone.endswith("@g.us")},
                     headers=headers, timeout=10,
                 )
@@ -18462,7 +18462,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/typing"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(
+                r = api_post(
                     url,
                     json={"phone": phone, "value": value, "isGroup": is_group},
                     headers=headers,
@@ -18481,7 +18481,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/recording"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(
+                r = api_post(
                     url,
                     json={"phone": phone, "duration": 0, "value": value, "isGroup": is_group},
                     headers=headers,
@@ -18581,7 +18581,7 @@ class MainWindow(wx.Frame):
                     "state": "true" if pinned else "false",
                     "isGroup": jid.endswith("@g.us"),
                 }
-                resp = requests.post(
+                resp = api_post(
                     url, json=payload,
                     headers={"Authorization": f"Bearer {self.token}"},
                     timeout=10,
@@ -18629,7 +18629,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            requests.post(url, json={"groupId": jid}, headers=headers, timeout=10)
+            api_post(url, json={"groupId": jid}, headers=headers, timeout=10)
         except Exception:
             pass
         # Archive instead of delete so the message history is preserved locally.
@@ -18661,7 +18661,7 @@ class MainWindow(wx.Frame):
             "participants": normalized_participants,
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            r = api_post(url, json=payload, headers=headers, timeout=30)
             if r.status_code in (200, 201):
                 resp = r.json().get("response", {})
                 gid = resp.get("gid", {})
@@ -18693,7 +18693,7 @@ class MainWindow(wx.Frame):
             "phone":   [j if "@" in j else f"{j}@c.us" for j in participant_jids],
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True, ""
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
@@ -18713,7 +18713,7 @@ class MainWindow(wx.Frame):
             "phone": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True, ""
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
@@ -18742,7 +18742,7 @@ class MainWindow(wx.Frame):
         }
         payload = {"groupId": group_jid, "title": title}
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True, ""
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
@@ -18758,7 +18758,7 @@ class MainWindow(wx.Frame):
         }
         payload = {"groupId": group_jid, "description": description}
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True, ""
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
@@ -18877,7 +18877,7 @@ class MainWindow(wx.Frame):
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
             with open(upload_path, "rb") as fh:
-                return requests.post(
+                return api_post(
                     url,
                     headers=headers,
                     data=post_data,
@@ -19007,7 +19007,7 @@ class MainWindow(wx.Frame):
                 return True
 
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return _parse(r)
             # Same legacy fallback as the other send paths.
@@ -19017,7 +19017,7 @@ class MainWindow(wx.Frame):
                                 remote_jid, r.status_code, fb_phone)
                 payload["phone"] = [fb_phone]
                 payload["isLid"] = False
-                r = requests.post(url, json=payload, headers=headers, timeout=15)
+                r = api_post(url, json=payload, headers=headers, timeout=15)
                 if r.status_code in (200, 201):
                     logging.info("[send_contact_attachment] legacy retry with %s succeeded", fb_phone)
                     return _parse(r)
@@ -19081,7 +19081,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code not in (200, 201):
                 logging.error("[edit_message] HTTP %s for %s: %s",
                               r.status_code, full_id, r.text[:300])
@@ -19123,7 +19123,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True
             logging.error("[delete_for_everyone] HTTP %s for %s: %s",
@@ -19159,7 +19159,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = api_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True
             logging.error("[delete_for_me] HTTP %s for %s: %s",
@@ -19328,7 +19328,7 @@ class MainWindow(wx.Frame):
         # survives the retry is treated as real.
         for attempt in range(2):
             try:
-                r = requests.post(url, json=payload, headers=headers, timeout=20)
+                r = api_post(url, json=payload, headers=headers, timeout=20)
                 if r.status_code in (200, 201):
                     logging.info("[forward_message] forwarded %s -> %s (duration expected: %s)%s",
                                  full_id, target_phone, duration_token is not None,
@@ -19482,7 +19482,7 @@ class MainWindow(wx.Frame):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/mark-played"
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         try:
-            r = requests.post(url, json={"messageId": full_id}, headers=headers, timeout=15)
+            r = api_post(url, json={"messageId": full_id}, headers=headers, timeout=15)
             if r.status_code not in (200, 201):
                 logging.warning(
                     "[mark_audio_played] HTTP %s for %s: %s",
