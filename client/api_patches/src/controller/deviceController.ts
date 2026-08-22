@@ -2012,10 +2012,13 @@ export async function requestOlderMessages(req: Request, res: Response) {
         // own UI only offers the "older messages" banner once the recent sync is
         // done, so this refusal keeps us to what the real client would do.
         try {
-          const status = await req_(
-            'WAWebUserPrefsHistorySync'
-          ).getHistorySyncStatus();
-          out.recentCompleted = status?.recentCompleted === true;
+          const historyPrefs = req_('WAWebUserPrefsHistorySync');
+          const status = await historyPrefs.getHistorySyncStatus();
+          out.onDemandAccessGranted =
+            historyPrefs.getHistorySyncCompleteOnDemandAccessGranted();
+          out.recentCompleted =
+            status?.recentCompleted === true ||
+            out.onDemandAccessGranted === true;
         } catch (e) {
           out.recentCompleted = null;
         }
@@ -2026,7 +2029,42 @@ export async function requestOlderMessages(req: Request, res: Response) {
           return out;
         }
 
-        const chat = (window as any).WAPI?.getChat?.(chatId);
+        // One-to-one chats are keyed by @lid in current multi-device builds,
+        // while WinZapp's public API deliberately continues to use the phone
+        // number (@c.us). Resolve to the actual ChatStore key before looking up
+        // the pagination cursor; otherwise getOldestMsgInChatFromDB returns
+        // undefined and the phone treats the request as having no anchor.
+        let resolvedChatId = chatId;
+        if (!(window as any).WPP?.chat?.get(chatId)) {
+          let alternate: any = null;
+          try {
+            const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(
+              chatId
+            );
+            alternate = chatId.endsWith('@c.us')
+              ? mapping?.lid
+              : mapping?.phoneNumber;
+          } catch (e) {
+            /* fall through to the legacy contact model below */
+          }
+          if (!alternate) {
+            const contact = (window as any).WPP?.contact?.get(chatId);
+            alternate = chatId.endsWith('@c.us')
+              ? contact?.lid
+              : chatId.endsWith('@lid')
+              ? contact?.id
+              : null;
+          }
+          const alternateId =
+            typeof alternate === 'string'
+              ? alternate
+              : alternate?._serialized || alternate?.toString?.() || '';
+          if (alternateId && (window as any).WPP?.chat?.get(alternateId)) {
+            resolvedChatId = alternateId;
+          }
+        }
+        out.resolvedChatId = resolvedChatId;
+        const chat = (window as any).WAPI?.getChat?.(resolvedChatId);
         out.endOfHistoryTransferType = chat?.endOfHistoryTransferType ?? null;
         try {
           out.primaryHasMore = req_(
@@ -2038,7 +2076,9 @@ export async function requestOlderMessages(req: Request, res: Response) {
 
         let wid;
         try {
-          wid = (window as any).WPP.whatsapp.WidFactory.createWid(chatId);
+          wid = (window as any).WPP.whatsapp.WidFactory.createWid(
+            resolvedChatId
+          );
         } catch (e) {
           out.error = `invalid chat id: ${e}`;
           return out;
@@ -2057,7 +2097,47 @@ export async function requestOlderMessages(req: Request, res: Response) {
             /* keep the literal */
           }
           out.requestType = kind;
-          await sender.sendPeerDataOperationRequest(kind, { chatId: wid });
+          // Mirror WhatsApp Web's own history-sync-on-demand call site.  The
+          // peer-data sender does not accept a Wid wrapped as `{ chatId }`;
+          // the phone needs the oldest local message as a pagination cursor.
+          const chatRecord = await req_('WAWebApiChatCommon').getChatRecord(
+            wid
+          );
+          const historyChatId = chatRecord?.historyChatId;
+          const chatJid =
+            historyChatId != null
+              ? req_('WAWebWidFactory')
+                  .createWid(historyChatId)
+                  .toJid()
+              : req_('WAWebCommsWapMd').CHAT_JID(wid).toString();
+
+          const inFlight =
+            utils?.inFlightHistorySyncOnDemandRequests?.values?.();
+          if (inFlight && new Set(inFlight).has(chatJid)) {
+            out.requested = false;
+            out.inFlight = true;
+            return out;
+          }
+
+          const oldest = await utils.getOldestMsgInChatFromDB(wid);
+          const onDemandMsgCount = await req_(
+            'WAWebABProps'
+          ).getABPropConfigValue('history_sync_on_demand_message_count');
+          const request = {
+            chatJid,
+            oldestMsgId: oldest?.id?.id,
+            oldestMsgFromMe: oldest?.id?.fromMe,
+            onDemandMsgCount,
+            oldestMsgTimestampMs:
+              oldest?.t != null ? oldest.t * 1000 : undefined,
+            supportInlineResponse: true,
+          };
+          out.historyChatJid = chatJid;
+          out.oldestMsgId = request.oldestMsgId;
+          out.oldestMsgFromMe = request.oldestMsgFromMe;
+          out.onDemandMsgCount = request.onDemandMsgCount;
+          out.oldestMsgTimestampMs = request.oldestMsgTimestampMs;
+          await sender.sendPeerDataOperationRequest(kind, request);
           out.requested = true;
         } catch (e: any) {
           out.error = `send failed: ${e?.message || e}`;
@@ -2342,11 +2422,54 @@ export async function unblockHistorySync(req: Request, res: Response) {
           row.reuploadPending !== true;
         if (!isStalePartialRecent) continue;
         await api.markChunkForReuploadPending(row.msgKey);
+        row.reuploadPending = true;
         out.reuploadRequested.push({
           msgKey: String(row.msgKey),
           chunkOrder: row.chunkOrder,
           progress,
         });
+      }
+      const partialReuploads = rows.filter(
+        (row: any) =>
+          row.syncType === RECENT &&
+          Number(row.progress) < 100 &&
+          row.reuploadPending === true
+      );
+      out.partialReuploadKeys = partialReuploads
+        .map((row: any) => String(row.msgKey))
+        .sort();
+      out.partialReuploadFingerprint = out.partialReuploadKeys.join('|');
+      const recentRows = rows.filter((row: any) => row.syncType === RECENT);
+      const recentOrders = recentRows.map((row: any) => Number(row.chunkOrder));
+      const orphanedCompleteRecent =
+        recentRows.length > 0 &&
+        recentRows.every((row: any) => Number(row.progress) >= 100) &&
+        !recentOrders.includes(1) &&
+        recentRows.every(
+          (row: any) =>
+            Date.now() - Number(row.historySyncStepStartedTs || Date.now()) >=
+            5 * 60_000
+        ) &&
+        Number(api.inFlightChunk?.size || 0) === 0;
+      if (orphanedCompleteRecent) {
+        const historyPrefs = req_('WAWebUserPrefsHistorySync');
+        out.droppedBlockedCompleteChunks = [];
+        for (const row of recentRows) {
+          await api.updateCurrentlyProcessed(
+            row.msgKey,
+            row.syncType,
+            row.chunkOrder
+          );
+          out.droppedBlockedCompleteChunks.push(String(row.msgKey));
+        }
+        const currentStatus = await historyPrefs.getHistorySyncStatus();
+        await historyPrefs.setHistorySyncStatus({
+          ...(currentStatus || {}),
+          recentCompleted: true,
+        });
+        historyPrefs.setHistorySyncCompleteOnDemandAccessGranted(true);
+        out.onDemandAccessGranted = true;
+        out.recentCompleted = true;
       }
 
       if (out.recentCompleted === true) {
@@ -2429,6 +2552,79 @@ export async function unblockHistorySync(req: Request, res: Response) {
     // on the queue being non-empty.
     const clientAny: any = req.client as any;
     const now = Date.now();
+    const partialFingerprint = String(
+      result?.partialReuploadFingerprint || ''
+    );
+    const PARTIAL_REUPLOAD_GRACE_MS = 5 * 60_000;
+
+    if (partialFingerprint) {
+      const previousPartial = clientAny.__winzappPartialHistoryRecovery || {};
+      if (previousPartial.fingerprint === partialFingerprint) {
+        const partialStaleForMs = Math.max(
+          0,
+          now - Number(previousPartial.since || now)
+        );
+        result.partialStaleForMs = partialStaleForMs;
+        if (partialStaleForMs >= PARTIAL_REUPLOAD_GRACE_MS) {
+          const dropped = await req.client.page.evaluate(async () => {
+            const req_ = (window as any).require;
+            const api = req_('WAWebApiHistorySyncNotification');
+            const historyPrefs = req_('WAWebUserPrefsHistorySync');
+            const pb = req_('WAWebProtobufsHistorySync.pb');
+            const RECENT = pb?.HistorySync$HistorySyncType?.RECENT;
+            const table = req_(
+              'WAWebSchemaHistorySyncNotification'
+            ).getHistorySyncNotificationTable();
+            const rows = await table.equals(['processed'], 0, {
+              shouldDecrypt: false,
+            });
+            const partial: string[] = [];
+            const complete: string[] = [];
+            for (const row of rows) {
+              if (row.syncType !== RECENT) continue;
+              await api.updateCurrentlyProcessed(
+                row.msgKey,
+                row.syncType,
+                row.chunkOrder
+              );
+              (Number(row.progress) < 100 ? partial : complete).push(
+                String(row.msgKey)
+              );
+            }
+            const status = await historyPrefs.getHistorySyncStatus();
+            await historyPrefs.setHistorySyncStatus({
+              ...(status || {}),
+              recentCompleted: true,
+            });
+            historyPrefs.setHistorySyncCompleteOnDemandAccessGranted(true);
+            return { partial, complete };
+          });
+          result.droppedStalePartialChunks = dropped.partial;
+          result.droppedBlockedCompleteChunks = dropped.complete;
+          result.onDemandAccessGranted = true;
+          clientAny.__winzappPartialHistoryRecovery = {
+            fingerprint: '',
+            since: now,
+          };
+        }
+      } else {
+        // A persisted reuploadPending row proves a previous process already
+        // requested the retransmission. Preserve that elapsed attempt across
+        // API restarts instead of granting an endless fresh grace period.
+        const requestedNow =
+          Array.isArray(result?.reuploadRequested) &&
+          result.reuploadRequested.length > 0;
+        clientAny.__winzappPartialHistoryRecovery = {
+          fingerprint: partialFingerprint,
+          since: requestedNow ? now : now - PARTIAL_REUPLOAD_GRACE_MS,
+        };
+      }
+    } else {
+      clientAny.__winzappPartialHistoryRecovery = {
+        fingerprint: '',
+        since: now,
+      };
+    }
     const blockedOnRecent =
       !result?.error &&
       result?.recentCompleted !== true &&

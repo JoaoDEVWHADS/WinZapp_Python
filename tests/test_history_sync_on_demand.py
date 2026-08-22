@@ -532,6 +532,23 @@ class TestRoutesArePatched:
         assert "row.reuploadPending !== true" in controller
         assert "api.markChunkForReuploadPending(row.msgKey)" in controller
         assert "Number(result?.reuploadPending || 0) === 0" in controller
+        assert "PARTIAL_REUPLOAD_GRACE_MS = 5 * 60_000" in controller
+        assert "droppedStalePartialChunks" in controller
+        assert "row.reuploadPending !== true" in controller
+        assert "getHistorySyncCompleteOnDemandAccessGranted" in controller
+        assert "setHistorySyncCompleteOnDemandAccessGranted(true)" in controller
+        assert "droppedBlockedCompleteChunks" in controller
+        assert "orphanedCompleteRecent" in controller
+        assert "!recentOrders.includes(1)" in controller
+        assert "getPnLidEntry" in controller
+        assert "resolvedChatId = alternateId" in controller
+        assert "history_sync_on_demand_message_count" in controller
+        assert "oldestMsgId: oldest?.id?.id" in controller
+        assert "oldestMsgFromMe: oldest?.id?.fromMe" in controller
+        assert "oldestMsgTimestampMs" in controller
+        assert "supportInlineResponse: true" in controller
+        assert "sendPeerDataOperationRequest(kind, request)" in controller
+        assert "sendPeerDataOperationRequest(kind, { chatId: wid })" not in controller
 
 
 class TestDocumentOnlyInterception:
