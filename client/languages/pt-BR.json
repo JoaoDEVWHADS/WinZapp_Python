@@ -148,6 +148,7 @@
     "all_files": "Todos os arquivos",
     "audio_convert_failed": "Falha ao converter áudio. FFmpeg ausente ou indisponível no sistema.",
     "downloading_progress": "baixando, {pct}% concluído",
+    "uploading_progress": "enviando, {pct}% concluído",
     "discard_voice_message": "Descartar mensagem de voz",
     "pause_recording": "Pausar gravação",
     "resume_recording": "Continuar gravação",
