@@ -203,6 +203,37 @@ def test_alpha_ordering_against_the_stable_line():
     assert updater.is_newer(alpha_b, next_stable) is False
 
 
+def test_alpha_ordering_once_the_stable_line_drops_the_suffix():
+    """WinZapp ships `0.25.0.0beta` today, but the alpha channel has to keep
+    working when releases become plain `a.b.c.d`. The suffix is optional in
+    parse_version() and the numeric components are compared first, so the same
+    relationships must hold with no suffix at all."""
+    assert updater.parse_version("1.0.0.0") == ((1, 0, 0, 0), "")
+    assert updater.is_newer("1.0.0.2159alpha", "1.0.0.0") is True      # alpha > its base
+    assert updater.is_newer("1.0.0.2160alpha", "1.0.0.2159alpha") is True
+    assert updater.is_newer("1.1.0.0", "1.0.0.2160alpha") is True      # next stable wins
+    assert updater.is_newer("2.0.0.0", "1.0.0.2160alpha") is True
+
+
+def test_alpha_ordering_across_the_beta_to_stable_transition():
+    """Leaving beta by advancing the numbers keeps every alpha user reachable."""
+    alpha_on_beta_line = "0.25.0.2159alpha"
+    assert updater.is_newer("1.0.0.0", alpha_on_beta_line) is True
+    assert updater.is_newer("0.26.0.0", alpha_on_beta_line) is True
+    # Dropping only the suffix does NOT advance past them — that is the case
+    # .github/scripts/check_stable_release_ordering.py exists to catch.
+    assert updater.is_newer("0.25.0.0", alpha_on_beta_line) is False
+
+
+def test_select_release_on_a_suffixless_stable_line():
+    releases = [_release("v1.0.0.2159alpha"), _release("v1.0.0.0")]
+    assert updater.select_release(releases, include_alpha=False)["tag_name"] == "v1.0.0.0"
+    assert updater.select_release(releases, include_alpha=True)["tag_name"] == "v1.0.0.2159alpha"
+    # And the next stable pulls alpha users back onto the stable line.
+    releases.append(_release("v1.1.0.0"))
+    assert updater.select_release(releases, include_alpha=True)["tag_name"] == "v1.1.0.0"
+
+
 def test_a_date_shaped_version_would_break_the_stable_line():
     """Guards the reasoning in alpha-release.yml's version step: a timestamp
     version (2026.08.22.1530) outranks every 0.x stable release, so shipping

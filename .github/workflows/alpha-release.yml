@@ -109,6 +109,13 @@ jobs:
       #   base 0.25.0.0beta (client/version.py, kept current by release.yml's
       #   bump-version job) + commit count N  ->  0.25.0.<N>alpha
       #
+      # The suffix on the base is irrelevant to all of this — only major.minor.
+      # patch are read off it — so the scheme keeps working unchanged when the
+      # stable line eventually drops `beta` and ships plain a.b.c.d: base
+      # 1.0.0.0 + N -> 1.0.0.<N>alpha, still newer than 1.0.0.0 and still older
+      # than 1.1.0.0. A base with no fourth component at all (1.0.0) is
+      # rejected below rather than guessed at.
+      #
       #   - Newer than the base stable: (0,25,0,N) > (0,25,0,0) for any N >= 1,
       #     so an alpha is offered to someone running 0.25.0.0beta.
       #   - Newer than the previous alpha: N only ever grows.
@@ -378,7 +385,27 @@ jobs:
       # does NOT fire release.yml's `release: created` trigger and cause a
       # second, duplicate build (release.yml also skips alpha tags outright,
       # as a second line of defence).
+      # A run cancelled partway through the upload below leaves its draft
+      # behind, and cancellation is routine here (a newer commit supersedes an
+      # in-flight build). Nothing ever collects those, so they'd pile up on the
+      # Releases page — invisible to users, but noise for anyone with push
+      # access. Sweep them before creating this run's own draft, never after.
+      # Scoped to drafts whose tag says "alpha" so a human's unrelated draft
+      # release is never touched.
+      - name: Remove alpha drafts left behind by cancelled runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/releases?per_page=100" \
+            --jq '.[] | select(.draft) | select(.tag_name | ascii_downcase | contains("alpha")) | "\(.id) \(.tag_name)"' \
+          | while read -r id tag; do
+              echo "[INFO] Deleting stale alpha draft $tag (id $id)"
+              gh api --method DELETE "repos/${{ github.repository }}/releases/$id"
+            done
+
       - name: Create draft alpha release and upload assets
+        id: draft_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.ALPHA_VERSION }}
@@ -401,14 +428,21 @@ jobs:
       # Every asset is uploaded by now, so the release is safe to expose. This
       # is deliberately the very last step: until it runs, nothing this workflow
       # produced is visible to the updater.
+      #
+      # Patches the release by its numeric ID (handed back by the step above),
+      # NOT by tag. A draft release has no tag yet — GitHub only creates the tag
+      # when it is published — so anything that resolves a release by tag name
+      # (`gh release edit <tag>`, GET /releases/tags/<tag>) simply does not find
+      # a draft. That is exactly how alpha build #1 failed: everything compiled,
+      # uploaded and verified, and then this last step could not locate the
+      # release it had just created, leaving it stranded as a draft.
       - name: Publish the alpha release
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release edit "v${{ env.ALPHA_VERSION }}" `
-            --repo "${{ github.repository }}" `
-            --draft=false `
-            --prerelease
-          Write-Output "[INFO] Published v${{ env.ALPHA_VERSION }}"
+          gh api --method PATCH \
+            "repos/${{ github.repository }}/releases/${{ steps.draft_release.outputs.id }}" \
+            -F draft=false -F prerelease=true \
+            --jq '"[INFO] Published " + .tag_name + " (draft=" + (.draft|tostring) + ", prerelease=" + (.prerelease|tostring) + ")"'
       # ── END ALPHA-SPECIFIC ──────────────────────────────────────────────────

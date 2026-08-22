@@ -58,40 +58,10 @@ jobs:
       # failure here has to reach `reject-on-test-failure`, which deletes the
       # already-created release and its tag. Otherwise a rejected tag would
       # linger on the Releases page looking like a normal release.
-      # shell: bash (not the Windows default pwsh) — a heredoc is the only way
-      # to embed this script without escaping it into unreadability.
       - name: Reject a stable tag that alphas have already passed
-        shell: bash
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          python - <<'PY'
-          import os, subprocess, sys
-          sys.path.insert(0, "client")
-          from updater import parse_version, is_newer
-
-          tag = os.environ["RELEASE_TAG"].lstrip("vV")
-          if parse_version(tag) is None:
-              print(f"::error::Release tag {tag!r} is not a major.minor.patch.build "
-                    f"version, so the auto-updater can never compare it.")
-              sys.exit(1)
-
-          tags = subprocess.run(
-              ["git", "tag", "--list"], capture_output=True, text=True, check=True
-          ).stdout.split()
-          alphas = [t for t in tags if "alpha" in t.lower()]
-          blockers = [t for t in alphas if not is_newer(tag, t.lstrip("vV"))]
-
-          if blockers:
-              print(f"::error::Stable release {tag} does not sort above already "
-                    f"published alpha builds: {', '.join(sorted(blockers))}. "
-                    f"Users on those alphas would never be offered it. Bump the "
-                    f"patch component or higher (e.g. 0.25.0.x -> 0.25.1.0), not "
-                    f"just the fourth component, and re-cut the release.")
-              sys.exit(1)
-
-          print(f"[INFO] {tag} sorts above all {len(alphas)} published alpha build(s).")
-          PY
+        run: python .github/scripts/check_stable_release_ordering.py
 
   # A release object already exists on GitHub by the time this workflow runs
   # (the `release: created` trigger fires once the release itself is made,
