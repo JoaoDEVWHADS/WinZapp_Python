@@ -46,6 +46,7 @@ from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
+from core.api_client import api_get, api_post
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
@@ -10169,7 +10170,7 @@ class MainWindow(wx.Frame):
         self._last_chat_fetch_disconnected = False
         for attempt, _timeout in enumerate(_TIMEOUTS):
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=_timeout)
+                response = api_post(url, json=payload, headers=headers, timeout=_timeout)
                 if response.status_code not in (200, 201):
                     logging.error(
                         "[get_remote_chats] API error %s (attempt %d/%d): %s",
@@ -14007,9 +14008,14 @@ class MainWindow(wx.Frame):
                     logging.info(f"[sync_chat_messages] Connection lost during sync retry loop for {remote_jid}, aborting sync.")
                     break
                 try:
-                    logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid} (attempt {attempt+1}/{max_retries})")
-                    response = requests.get(url, headers=headers, timeout=30)
-                    logging.info(f"[sync_chat_messages] URL: {url} returned status: {response.status_code}")
+                    logging.info(
+                        "[sync_chat_messages] Fetching %s (attempt %d/%d)",
+                        remote_jid, attempt + 1, max_retries)
+                    # api_get logs the endpoint, the status, the duration and a
+                    # correlation id the Node side reuses — and never the URL,
+                    # which carries <session>:<token> in its path. The two
+                    # lines this replaces printed it in full, twice per chat.
+                    response = api_get(url, headers=headers, timeout=30)
 
                     # Alternate JID query fallback (resolves 401/TypeError or Chat not found errors)
                     both_jid_forms_failed = False
@@ -14992,7 +14998,7 @@ class MainWindow(wx.Frame):
             # original request actually went through server-side, that retry sends
             # a genuine duplicate message to the recipient. A more generous timeout
             # reduces how often that false-timeout/duplicate-send scenario happens.
-            response = requests.post(url, json=payload, headers=headers, timeout=25)
+            response = api_post(url, json=payload, headers=headers, timeout=25)
             active_dest = phone_net
             if response.status_code not in (200, 201):
                 # 1. The @lid destination was refused: fall back to the legacy
@@ -15058,7 +15064,7 @@ class MainWindow(wx.Frame):
                             "linkPreview": False
                         }
                     }
-                    response = requests.post(url, json=payload, headers=headers, timeout=25)
+                    response = api_post(url, json=payload, headers=headers, timeout=25)
 
                 # 3. Final error handling if all retries failed
                 if response.status_code not in (200, 201):
@@ -17000,8 +17006,7 @@ class MainWindow(wx.Frame):
         }
 
         try:
-            logging.info(f"[fetch_older_messages] Querying URL: {url}")
-            response = requests.get(url, headers=headers, timeout=30)
+            response = api_get(url, headers=headers, timeout=30)
             
             # Alternate JID query fallback (resolves 401/TypeError or Chat not found errors)
             if response.status_code not in (200, 201):
