@@ -867,6 +867,7 @@
     "ui_self_reference_eu": "Me",
     "forward_multiselect_hint": "Ctrl+Space: select/deselect contact. Ctrl+Shift+Space: select/deselect all. With nothing selected, forwards to the focused contact.",
     "forward_selected_messages_title": "Forward selected messages",
+    "select_message": "Select",
     "selected": "Selected",
     "selected_suffix": "selected",
     "forward_failed_multiple": "Could not forward the message to: {names}",

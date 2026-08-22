@@ -867,6 +867,7 @@
     "ui_self_reference_eu": "Yo",
     "forward_multiselect_hint": "Ctrl+Espacio: marcar/desmarcar contacto. Ctrl+Shift+Espacio: marcar/desmarcar todos. Sin selección, reenvía al contacto enfocado.",
     "forward_selected_messages_title": "Reenviar mensajes seleccionados",
+    "select_message": "Seleccionar",
     "selected": "Seleccionado",
     "selected_suffix": "seleccionado",
     "forward_failed_multiple": "No se pudo reenviar el mensaje a: {names}",

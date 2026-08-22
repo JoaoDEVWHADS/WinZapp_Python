@@ -4,6 +4,7 @@ import mimetypes
 import os
 import tempfile
 import threading
+import time
 import wx
 import requests
 from ui.accessible import (
@@ -45,6 +46,45 @@ def _post_was_rejected(body) -> bool:
                     return True
         return False
     return resp_data is None
+
+
+def _response_message_ids(body) -> set[str]:
+    """Collect status message ids from arbitrarily nested API responses."""
+    found = set()
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in ("id", "messageId", "stanzaId") and isinstance(child, str):
+                    found.add(child)
+                else:
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(body)
+    return found
+
+
+def _discard_rejected_response(main_window, body) -> None:
+    for message_id in _response_message_ids(body):
+        wx.CallAfter(main_window.remove_failed_status_update, message_id)
+
+
+def _download_status_media(main_window, status: dict, attempts: int = 4) -> bytes:
+    """Wait for pending status media instead of misreporting it as corrupt."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            encoded = main_window.get_base64_from_media(status)
+            if encoded:
+                return base64.b64decode(encoded)
+        except Exception as exc:
+            last_error = exc
+        if attempt + 1 < attempts:
+            time.sleep(1.0)
+    raise ValueError(str(last_error or "empty media response"))
 
 
 def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
@@ -338,6 +378,8 @@ class MyStatusDialog(wx.Dialog):
         is_audio = msg_type == "audioMessage"
         self._play_pause_btn.Show(is_video or is_audio)
         self.Layout()
+        if is_audio:
+            wx.CallAfter(self._on_play_pause_video, None)
 
     # ── Navigation ────────────────────────────────────────────────────────
 
@@ -409,10 +451,7 @@ class MyStatusDialog(wx.Dialog):
     def _download_and_play_video(self, status, status_id: str, msg_type: str):
         suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
-            b64 = self._mw.get_base64_from_media(status)
-            if not b64:
-                raise ValueError("empty media response")
-            content = base64.b64decode(b64)
+            content = _download_status_media(self._mw, status)
             tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
@@ -1335,10 +1374,7 @@ class StatusPanel(wx.Panel):
             caption = str(inner.get("caption") or "")
 
             def _loader(st=status):
-                b64 = self.main_window.get_base64_from_media(st)
-                if not b64:
-                    raise ValueError("empty media response")
-                return base64.b64decode(b64)
+                return _download_status_media(self.main_window, st)
 
             item.update(
                 kind=kind,
@@ -1771,10 +1807,7 @@ class StatusPanel(wx.Panel):
         # fallback and for a sensible temp filename, not correctness.
         suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
-            b64 = mw.get_base64_from_media(status)
-            if not b64:
-                raise ValueError("empty media response")
-            content = base64.b64decode(b64)
+            content = _download_status_media(mw, status)
             tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
@@ -1865,10 +1898,7 @@ class StatusPanel(wx.Panel):
     def _save_status_media_bg(self, status, save_path: str):
         mw = self.main_window
         try:
-            b64 = mw.get_base64_from_media(status)
-            if not b64:
-                raise ValueError("empty media response")
-            content = base64.b64decode(b64)
+            content = _download_status_media(mw, status)
             with open(save_path, "wb") as fh:
                 fh.write(content)
             wx.CallAfter(mw.output, mw.i18n.t("status_media_saved"))
@@ -2350,6 +2380,14 @@ class StatusPanel(wx.Panel):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
+            response_body = None
+            try:
+                response_body = resp.json()
+            except Exception:
+                pass
+            if ok and _post_was_rejected(response_body):
+                ok = False
+                _discard_rejected_response(mw, response_body)
             err_msg = "" if ok else f"HTTP {resp.status_code}: {resp.text[:200]}"
         except Exception as exc:
             ok = False
@@ -2409,6 +2447,7 @@ class StatusPanel(wx.Panel):
                 try:
                     if _post_was_rejected(resp.json()):
                         ok = False
+                        _discard_rejected_response(mw, resp.json())
                 except Exception:
                     pass
         except Exception as exc:
@@ -2560,6 +2599,14 @@ class StatusPanel(wx.Panel):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
+            response_body = None
+            try:
+                response_body = resp.json()
+            except Exception:
+                pass
+            if ok and _post_was_rejected(response_body):
+                ok = False
+                _discard_rejected_response(mw, response_body)
         except Exception:
             ok = False
         if ok:

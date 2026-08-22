@@ -9670,6 +9670,29 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
+    def remove_failed_status_update(self, message_id: str) -> None:
+        """Remove a definitively rejected own status from memory and the DB."""
+        if not message_id:
+            return
+        removed = False
+        for participant in list(getattr(self, "_status_updates", {}).keys()):
+            bucket = self._status_updates.get(participant) or []
+            kept = [m for m in bucket if m.get("key", {}).get("id") != message_id]
+            if len(kept) != len(bucket):
+                removed = True
+                if kept:
+                    self._status_updates[participant] = kept
+                else:
+                    self._status_updates.pop(participant, None)
+        try:
+            self.db.delete_status_update(message_id)
+        except Exception:
+            logging.exception("[status] Failed to delete rejected status %s", message_id)
+        if removed:
+            sp = getattr(getattr(self, "navigation_panel", None), "status_panel", None)
+            if sp:
+                threading.Thread(target=sp._load_statuses, daemon=True).start()
+
     def clear_local_data(self, wipe_metadata: bool = True):
         """Wipe all cached chats, contacts, messages, media, and mapping caches.
 
@@ -15280,6 +15303,17 @@ class MainWindow(wx.Frame):
             return
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         logging.info(f"[on_message_status_update] msg_id={msg_id} status={status} remote_jid={remote_jid}")
+
+        normalized_status = str(status).strip().lower()
+        if remote_jid == "status@broadcast" and normalized_status in {
+            "-1", "error", "failed", "failure", "rejected", "error_unknown"
+        }:
+            logging.warning(
+                "[status] Removing definitively failed local status %s (%s)",
+                msg_id, status,
+            )
+            self.remove_failed_status_update(msg_id)
+            return
 
         # Try all known JID forms (@lid <-> @s.whatsapp.net) to find the chat
         candidates = [remote_jid]

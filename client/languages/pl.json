@@ -867,6 +867,7 @@
     "ui_self_reference_eu": "Ja",
     "forward_multiselect_hint": "Ctrl+Spacja: zaznacz/odznacz kontakt. Ctrl+Shift+Spacja: zaznacz/odznacz wszystkie. Bez zaznaczenia wiadomość trafia do kontaktu w fokusie.",
     "forward_selected_messages_title": "Przekaż zaznaczone wiadomości",
+    "select_message": "Wybierz",
     "selected": "Zaznaczony",
     "selected_suffix": "zaznaczony",
     "forward_failed_multiple": "Nie udało się przekazać wiadomości do: {names}",

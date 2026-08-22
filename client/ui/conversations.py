@@ -3033,6 +3033,14 @@ class ConversationsPanel(wx.Panel):
 
         menu = wx.Menu()
 
+        select_item = menu.Append(wx.ID_ANY, i18n.t("select_message"))
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, idx=index: self._on_menu_select_message(idx),
+            select_item,
+        )
+        menu.AppendSeparator()
+
         if getattr(self, "selected_messages", None):
             mass_menu = wx.Menu()
 
@@ -3093,7 +3101,13 @@ class ConversationsPanel(wx.Panel):
 
         # Copy text (only for text messages)
         _TEXT_TYPES = ("conversation", "extendedTextMessage")
-        if msg_type in _TEXT_TYPES:
+        selected_has_text = any(
+            isinstance(m, dict)
+            and m.get("key", {}).get("id", "") in self.selected_messages
+            and m.get("messageType", "") in _TEXT_TYPES
+            for m in self._sorted_messages
+        )
+        if msg_type in _TEXT_TYPES or selected_has_text:
             copy_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_message_text')}\tCtrl+C")
             self.Bind(
                 wx.EVT_MENU,
@@ -4544,6 +4558,16 @@ class ConversationsPanel(wx.Panel):
             return False
         self.selected_messages.add(msg_id)
         return True
+
+    def _on_menu_select_message(self, idx: int) -> None:
+        """Use the existing multi-selection model from the context menu."""
+        if self._select_message_at(idx):
+            msg_id = self._sorted_messages[idx].get("key", {}).get("id", "")
+            self._refresh_message_rows_by_ids([msg_id])
+            self.selection_sound.play()
+            self.main_window.output(
+                self.main_window.i18n.t("selected"), interrupt=True
+            )
 
     def _all_selectable_message_ids(self) -> list:
         return [
@@ -8021,6 +8045,34 @@ class ConversationsPanel(wx.Panel):
         return (inner.get("caption") or "").strip()
 
     def _on_menu_copy_message(self, msg: dict):
+        if self.selected_messages:
+            lines = []
+            for selected in self._sorted_messages:
+                if not isinstance(selected, dict) or self._is_separator(selected):
+                    continue
+                if selected.get("key", {}).get("id", "") not in self.selected_messages:
+                    continue
+                selected_type = selected.get("messageType", "")
+                selected_obj = selected.get("message") or {}
+                if selected_type == "conversation":
+                    selected_text = selected_obj.get("conversation", "")
+                elif selected_type == "extendedTextMessage":
+                    selected_text = (selected_obj.get("extendedTextMessage") or {}).get("text", "")
+                else:
+                    continue
+                if not selected_text:
+                    continue
+                stamp = datetime.fromtimestamp(
+                    self._extract_timestamp(selected)
+                ).strftime("%d/%m/%Y %H:%M")
+                lines.append(f"{stamp} - {self._sender_label(selected)}: {selected_text}")
+            if lines:
+                try:
+                    pyperclip.copy("\n".join(lines))
+                    self.main_window.output(self.main_window.i18n.t("msg_copied"))
+                except Exception:
+                    self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+                return
         msg_obj  = msg.get("message") or {}
         msg_type = msg.get("messageType", "")
         text = ""
@@ -9396,6 +9448,9 @@ class ConversationsPanel(wx.Panel):
             return
         msg = self._sorted_messages[index]
         if self._is_separator(msg):
+            return
+        if self.selected_messages:
+            self._on_menu_copy_message(msg)
             return
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
