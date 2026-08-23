@@ -454,6 +454,14 @@ class DatabaseBridge:
     def has_message(self, remote_jid: str, message_id: str) -> bool:
         return self._call(self._db.has_message(remote_jid, message_id))
 
+    def get_deleted_message_ids(self, remote_jid: str, message_ids) -> set[str]:
+        return self._call(
+            self._db.get_deleted_message_ids(remote_jid, list(message_ids or []))
+        )
+
+    def get_all_deleted_message_keys(self) -> list[tuple[str, str]]:
+        return self._call(self._db.get_all_deleted_message_keys())
+
     def delete_message(self, remote_jid: str, message_id: str) -> None:
         return self._call(self._db.delete_message(remote_jid, message_id))
 

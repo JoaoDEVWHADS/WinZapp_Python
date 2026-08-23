@@ -641,9 +641,14 @@ class DatabaseManager:
         jids = self._jid_variants(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"""SELECT message_json FROM messages
-               WHERE remote_jid IN ({placeholders})
-               ORDER BY timestamp DESC, message_id
+            f"""SELECT m.message_json FROM messages AS m
+               WHERE m.remote_jid IN ({placeholders})
+                 AND NOT EXISTS (
+                     SELECT 1 FROM deleted_messages AS d
+                     WHERE d.remote_jid = m.remote_jid
+                       AND d.message_id = m.message_id
+                 )
+               ORDER BY m.timestamp DESC, m.message_id
                LIMIT ? OFFSET ?""",
             (*jids, limit, offset),
         )
@@ -663,9 +668,14 @@ class DatabaseManager:
         jids = self._jid_variants(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"""SELECT message_json FROM messages
-               WHERE remote_jid IN ({placeholders})
-               ORDER BY timestamp ASC, message_id
+            f"""SELECT m.message_json FROM messages AS m
+               WHERE m.remote_jid IN ({placeholders})
+                 AND NOT EXISTS (
+                     SELECT 1 FROM deleted_messages AS d
+                     WHERE d.remote_jid = m.remote_jid
+                       AND d.message_id = m.message_id
+                 )
+               ORDER BY m.timestamp ASC, m.message_id
                LIMIT ? OFFSET ?""",
             (*jids, limit, offset),
         )
@@ -683,7 +693,13 @@ class DatabaseManager:
         jids = self._jid_variants(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM messages WHERE remote_jid IN ({placeholders})",
+            f"""SELECT COUNT(*) AS cnt FROM messages AS m
+                WHERE m.remote_jid IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deleted_messages AS d
+                      WHERE d.remote_jid = m.remote_jid
+                        AND d.message_id = m.message_id
+                  )""",
             tuple(jids),
         )
         row = await cursor.fetchone()
@@ -705,8 +721,13 @@ class DatabaseManager:
         jids = self._jid_variants(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"""SELECT message_json FROM messages
-                WHERE remote_jid IN ({placeholders}) AND message_id = ?
+            f"""SELECT m.message_json FROM messages AS m
+                WHERE m.remote_jid IN ({placeholders}) AND m.message_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deleted_messages AS d
+                      WHERE d.remote_jid = m.remote_jid
+                        AND d.message_id = m.message_id
+                  )
                 LIMIT 1""",
             (*jids, message_id),
         )
@@ -754,6 +775,22 @@ class DatabaseManager:
             )
             deleted.update(str(row[0]) for row in await cursor.fetchall())
         return deleted
+
+    async def get_deleted_message_ids(self, remote_jid: str, message_ids) -> set[str]:
+        """Public read-only tombstone lookup used by the in-memory sync layer."""
+        return await self._deleted_message_ids(remote_jid, message_ids)
+
+    async def get_all_deleted_message_keys(self) -> list[tuple[str, str]]:
+        """Return durable tombstones so the live-event layer can warm its cache."""
+        conn = await self._ensure_conn()
+        cursor = await conn.execute(
+            "SELECT remote_jid, message_id FROM deleted_messages"
+        )
+        return [
+            (str(row[0]), str(row[1]))
+            for row in await cursor.fetchall()
+            if row[0] and row[1]
+        ]
 
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
         """Insert one message unless a durable local deletion owns its ID."""
@@ -856,6 +893,30 @@ class DatabaseManager:
         """Update a message's ID from old_id to new_id in the database."""
         async with self._write_lock:
             conn = await self._ensure_conn()
+            deleted = await self._deleted_message_ids(
+                remote_jid, [old_id, new_id]
+            )
+            if old_id in deleted or new_id in deleted:
+                # A send callback may learn the real WhatsApp id after the user
+                # already removed the local pending row. Carry that deletion
+                # forward to the real id rather than allowing the id rename (or
+                # a later Store echo) to resurrect the bubble.
+                variants = self._jid_variants(remote_jid)
+                if old_id in deleted and new_id not in deleted:
+                    await conn.executemany(
+                        """INSERT OR REPLACE INTO deleted_messages
+                           (remote_jid, message_id, deleted_at)
+                           VALUES (?, ?, strftime('%s','now'))""",
+                        [(jid, new_id) for jid in variants],
+                    )
+                jid_ph = ",".join("?" for _ in variants)
+                await conn.execute(
+                    f"DELETE FROM messages WHERE remote_jid IN ({jid_ph}) "
+                    "AND message_id IN (?, ?)",
+                    (*variants, old_id, new_id),
+                )
+                await conn.commit()
+                return
             # First, check if the new_id already exists (to prevent duplicates)
             cursor = await conn.execute(
                 "SELECT 1 FROM messages WHERE remote_jid=? AND message_id=?",
