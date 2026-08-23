@@ -330,6 +330,11 @@ jobs:
     name: Bump version.py in the repository
     runs-on: ubuntu-latest
     needs: build
+    # actions: write is only for the "Trigger a fresh alpha build" step below
+    # (a workflow_dispatch API call, not a push/release GITHUB_TOKEN would
+    # raise itself — so it does not re-trigger this same workflow).
+    permissions:
+      actions: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -347,6 +352,7 @@ jobs:
           echo "[INFO] version.py set to $ver"
 
       - name: Commit version.py bump back to the repository
+        id: commit_version
         uses: stefanzweifel/git-auto-commit-action@v5
         continue-on-error: true
         with:
@@ -355,3 +361,34 @@ jobs:
           branch: main
           commit_user_name: github-actions[bot]
           commit_user_email: github-actions[bot]@users.noreply.github.com
+
+      # Stable releases are cut from release/x.x.x.x branches, which lag
+      # behind main — main can already carry commits/features (and their
+      # alpha builds) that this stable release deliberately doesn't include.
+      # Without this step, the alpha channel's newest build stays pinned to
+      # the OLD version base until the next unrelated push to main, while
+      # this job's own commit above already made client/version.py on main
+      # report the NEW stable's number. Since select_release() in
+      # client/updater.py picks the newest release purely by parsed version
+      # number, alpha users would be pulled onto this stable release the
+      # moment it's tagged — even though it may contain less than what
+      # they're already running, silently dropping features back out.
+      #
+      # Dispatching alpha-release.yml here (its workflow_dispatch trigger,
+      # normally used for manual re-runs) immediately builds current main —
+      # which still has everything the previous alpha had — under the just-
+      # bumped base, producing X.Y.Z.<commit count>alpha. That build number
+      # is never 0, so it outranks this stable's X.Y.Z.0 right away: alpha
+      # users keep whatever main is ahead on instead of losing it, and the
+      # "same new version number, only the fourth component differs" pairing
+      # between a stable release and its immediately-following alpha holds.
+      #
+      # Skipped if the commit above didn't actually land (e.g. a ruleset
+      # rejected the push) — dispatching off a version.py that still holds
+      # the OLD base wouldn't accomplish anything.
+      - name: Trigger a fresh alpha build off the new stable base
+        if: steps.commit_version.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run alpha-release.yml --repo "${{ github.repository }}" --ref main
