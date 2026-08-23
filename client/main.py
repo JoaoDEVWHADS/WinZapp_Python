@@ -9764,6 +9764,12 @@ class MainWindow(wx.Frame):
         # decide whether a chat that came back short is worth re-querying while
         # the rest of its history is still landing.
         self.unblock_history_sync()
+        # Do not hold the entire UI behind RECENT completion. A fresh linked
+        # device exposes chat metadata before its history chunks finish
+        # decoding; the old six-minute gate consequently showed every chat as
+        # empty even while the queue was making healthy progress. Take the
+        # currently available snapshot now and let the existing bounded
+        # backfill revisit short/empty chats as more chunks land.
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
