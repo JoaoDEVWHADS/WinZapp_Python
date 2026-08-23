@@ -17942,6 +17942,26 @@ class MainWindow(wx.Frame):
             self._persist_exhausted_chats()
             self._persist_older_requested()
 
+        # Fast-path: the phone already confirmed end-of-history for this chat
+        # via endOfHistory=True or endOfHistoryTransferType==1.  Background and
+        # poll paths can trust that signal immediately; an explicit user scroll
+        # clears it so the phone can be re-asked once in case new history has
+        # since been added (e.g. restored from backup on the primary device).
+        if remote_jid in getattr(self, "_older_request_confirmed_end", set()):
+            if store_only or not allow_phone_request:
+                logging.info(
+                    "[fetch_older_messages] Phone confirmed end of history for %s "
+                    "(background/poll); signalling exhaustion.", remote_jid,
+                )
+                return []
+            # Explicit user scroll: clear the confirmed-end flag once so we can
+            # challenge the phone again, then fall through to the normal path.
+            logging.info(
+                "[fetch_older_messages] User-scroll: clearing confirmed-end for %s "
+                "and re-challenging the phone.", remote_jid,
+            )
+            self._older_request_confirmed_end.discard(remote_jid)
+
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
         # /get-messages/:phone for @lid JIDs) and as the chat segment of the
