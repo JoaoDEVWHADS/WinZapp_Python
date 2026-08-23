@@ -2053,11 +2053,64 @@ export async function getMessages(req: Request, res: Response) {
           let result = await fetchBatch(null);
           if (!Array.isArray(result)) return result;
 
-          const seen = new Set<string>();
-          for (const m of result) {
-            const k = keyOf(m);
-            if (k) seen.add(String(k));
+          // wa-js uses chat.lastReceivedKey when no explicit id is supplied.
+          // That is not necessarily the end of the conversation: if our last
+          // action was sending messages, every outgoing message after the last
+          // received one is omitted. This reproduced on a real private chat:
+          // two sent extended-text messages at 21:42/21:45 were absent because
+          // the last received call event was at 21:29.
+          //
+          // Avoid an extra IndexedDB query for every chat. ChatModel.t is the
+          // latest activity timestamp; only fetch the after-tail when it is
+          // newer than the newest row returned by the lastReceivedKey-anchored
+          // query. Merge by message id below, so an inclusive boundary cannot
+          // duplicate the anchor.
+          try {
+            const chat =
+              (window as any).WPP?.chat?.get?.(chatId) ||
+              (window as any).WAPI?.getChat?.(chatId);
+            const activityStamp = Number(chat?.t ?? 0) || 0;
+            let newestReturnedStamp = 0;
+            for (const m of result) {
+              newestReturnedStamp = Math.max(newestReturnedStamp, stampOf(m));
+            }
+            const lastReceived = chat?.lastReceivedKey;
+            const tailAnchor =
+              lastReceived?._serialized ||
+              lastReceived?.toString?.() ||
+              '';
+            if (tailAnchor && activityStamp > newestReturnedStamp) {
+              const tail = await (window as any).WAPI.getMessages(chatId, {
+                count: targetCount,
+                direction: 'after',
+                id: String(tailAnchor),
+              });
+              if (Array.isArray(tail) && tail.length > 0) {
+                result.push(...tail);
+                console.log(
+                  `[browser-evaluate] getMessages ${chatId}: merged ${tail.length} ` +
+                    `message(s) after lastReceivedKey`
+                );
+              }
+            }
+          } catch (e) {
+            // The ordinary newest-window query is still valid. Surface this in
+            // the browser log so a changed WhatsApp model cannot hide the tail
+            // fix failing again.
+            console.log(
+              `[browser-evaluate] outgoing-tail query failed for ${chatId}: ${e}`
+            );
           }
+
+          const seen = new Set<string>();
+          result = result.filter((m: any) => {
+            const k = keyOf(m);
+            if (!k) return true;
+            const serialized = String(k);
+            if (seen.has(serialized)) return false;
+            seen.add(serialized);
+            return true;
+          });
 
           // Then page backwards from the oldest message we hold. Bounded by
           // maxPages as well as by targetCount: this runs inside the one

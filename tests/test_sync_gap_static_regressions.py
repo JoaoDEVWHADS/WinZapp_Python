@@ -129,3 +129,15 @@ def test_empty_media_action_slot_is_removed_from_layout():
     assert "self._media_action_slot.Hide()" in init
     assert "slot.Show(visible)" in sync
     assert "outer.Show(slot, visible" in sync
+
+
+def test_get_messages_merges_outgoing_tail_after_last_received_anchor():
+    controller = (
+        ROOT / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+    ).read_text(encoding="utf-8")
+    assert "activityStamp > newestReturnedStamp" in controller
+    assert "direction: 'after'" in controller
+    assert "id: String(tailAnchor)" in controller
+    assert "result.push(...tail)" in controller
+    assert "result = result.filter" in controller
+    assert "seen.has(serialized)" in controller
