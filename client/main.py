@@ -13512,7 +13512,7 @@ class MainWindow(wx.Frame):
         # target count, so immediately following it with another anchored
         # request only duplicates browser work. Deep history is deliberately
         # left to the paced/resumable background walker after completion.
-        worker_cap = 2 if getattr(self, "_history_still_landing", False) else 4
+        worker_cap = 4
         max_workers = min(worker_cap, len(valid_chats))
         logging.info(
             "[sync_remote_chats] Foreground sweep: %d chat(s), one page each "
