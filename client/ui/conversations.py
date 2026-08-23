@@ -1268,7 +1268,32 @@ class ConversationsPanel(wx.Panel):
                 "currentPage": 1,
                 "records": merged,
             }
-            self.populate_messages(preserve_focus=True)
+            # This is the first DB page for a newly opened conversation.  The
+            # async SQLite load must reproduce the same focus semantics the old
+            # synchronous path had: when the user chose "unread or last",
+            # build the list with its default landing row (unread separator or
+            # newest message).  When the composer is the configured target, a
+            # DB completion is a background refresh and must not steal focus
+            # from that field.
+            focus_setting = self.main_window.settings.get(
+                "user_interface", {}
+            ).get("focus_on_open", "message_field")
+            focus_messages = (
+                focus_setting == "unread_or_last"
+                or not self.message_field.IsEnabled()
+            )
+            self.populate_messages(preserve_focus=not focus_messages)
+            if focus_messages:
+                # The ListCtrl already received keyboard focus from
+                # navigate_to_conversation(); populate_messages() has now
+                # selected the correct row.  Reassert focus after the rebuild
+                # so screen readers announce that row, not an empty list.
+                wx.CallAfter(self.messages_list.SetFocus)
+            else:
+                # Native ListCtrl rebuilds can emit transient focus events even
+                # when keyboard focus belongs to the composer.  Put the final
+                # focus back where the user's setting says it belongs.
+                wx.CallAfter(self.message_field.SetFocus)
             self._sync_pending_document_gauge()
         except Exception as exc:
             logging.error(
