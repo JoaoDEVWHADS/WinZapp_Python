@@ -2950,13 +2950,20 @@ class ConversationsPanel(wx.Panel):
                 for em in msg_reactions.values():
                     all_emojis[em] = all_emojis.get(em, 0) + 1
             if all_emojis:
+                # issue #67: mark whichever of these I already sent to THIS
+                # message as checked, and toggling that one off removes it
+                # instead of resending the same emoji — there was previously
+                # no way to remove a reaction from the UI at all.
+                current_emoji = (self._reaction_map.get(msg_id) or {}).get(self._SELF_REACTOR_KEY, "")
                 top_emojis = sorted(all_emojis.items(), key=lambda x: x[1], reverse=True)[:5]
                 most_used_sub = wx.Menu()
                 for em, _cnt in top_emojis:
-                    sub_item = most_used_sub.Append(wx.ID_ANY, em)
+                    sub_item = most_used_sub.AppendCheckItem(wx.ID_ANY, em)
+                    is_current = em == current_emoji
+                    sub_item.Check(is_current)
                     self.Bind(
                         wx.EVT_MENU,
-                        lambda e, m=msg, em=em: self._send_reaction(m, em),
+                        lambda e, m=msg, em=em, cur=is_current: self._send_reaction(m, "" if cur else em),
                         sub_item,
                     )
                 menu.AppendSubMenu(most_used_sub, i18n.t("most_used_reactions"))
@@ -9803,6 +9810,12 @@ class ConversationsPanel(wx.Panel):
             ("🥰", "🥰"),
         ]
 
+        msg_id = msg.get("key", {}).get("id", "")
+        # issue #67: show which reaction (if any) I already sent to this
+        # message, and let activating it again remove it — there was
+        # previously no way to remove a reaction from the UI at all.
+        current_emoji = (self._reaction_map.get(msg_id) or {}).get(self._SELF_REACTOR_KEY, "")
+
         dlg = wx.Dialog(
             self.main_window,
             title=i18n.t("react_dialog_title"),
@@ -9812,13 +9825,21 @@ class ConversationsPanel(wx.Panel):
         panel = wx.Panel(dlg)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        hint_label = wx.StaticText(panel, label=i18n.t("react_dialog_hint"))
+        hint_label = wx.StaticText(
+            panel,
+            label=i18n.t("react_dialog_hint_remove") if current_emoji else i18n.t("react_dialog_hint"),
+        )
         sizer.Add(hint_label, 0, wx.ALL, 8)
 
         emoji_list = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         emoji_list.InsertColumn(0, i18n.t("react_dialog_title"), width=240)
-        for emoji, display in EMOJIS:
+        emoji_list.EnableCheckBoxes(True)
+        current_idx = -1
+        for idx, (emoji, display) in enumerate(EMOJIS):
             emoji_list.Append((display,))
+            if emoji == current_emoji:
+                emoji_list.CheckItem(idx, True)
+                current_idx = idx
         sizer.Add(emoji_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         cancel_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
@@ -9834,7 +9855,10 @@ class ConversationsPanel(wx.Panel):
         def _on_emoji_activated(event):
             idx = event.GetIndex()
             if 0 <= idx < len(EMOJIS):
-                selected_emoji[0] = EMOJIS[idx][0]
+                # Activating the reaction already checked (i.e. the one I
+                # already sent) removes it instead of resending the same
+                # emoji — the only way to clear a reaction previously.
+                selected_emoji[0] = "" if idx == current_idx else EMOJIS[idx][0]
                 dlg.EndModal(wx.ID_OK)
 
         def _on_emoji_selected(event):
@@ -9846,16 +9870,19 @@ class ConversationsPanel(wx.Panel):
         dlg.Bind(wx.EVT_CHAR_HOOK, lambda e: dlg.EndModal(wx.ID_CANCEL) if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip())
 
         # A pre-populated list must never leave focus/selection pointing at
-        # nothing — mirrors the conversation list's own convention.
+        # nothing — mirrors the conversation list's own convention. Land on
+        # the currently-sent reaction when there is one, same reasoning as
+        # every other "open on the relevant row" dialog in this app.
         if emoji_list.GetItemCount() > 0:
-            emoji_list.Focus(0)
-            emoji_list.Select(0)
+            start = current_idx if current_idx >= 0 else 0
+            emoji_list.Focus(start)
+            emoji_list.Select(start)
         emoji_list.SetFocus()
         dlg.CentreOnParent()
         result = dlg.ShowModal()
         dlg.Destroy()
 
-        if result == wx.ID_OK and selected_emoji[0]:
+        if result == wx.ID_OK and selected_emoji[0] is not None:
             emoji = selected_emoji[0]
             msg_key = msg.get("key", {})
             threading.Thread(
@@ -10039,9 +10066,14 @@ class ConversationsPanel(wx.Panel):
             return
 
         # Update in-memory reaction map — replaces our own previous reaction
-        # on this message rather than adding another count.
+        # on this message rather than adding another count. An empty emoji
+        # means the reaction was removed (see _on_menu_react's checked-item
+        # toggle) — drop our own entry rather than leaving the stale emoji
+        # badge on the message.
         if emoji:
             self._reaction_map.setdefault(orig_id, {})[self._SELF_REACTOR_KEY] = emoji
+        else:
+            self._reaction_map.get(orig_id, {}).pop(self._SELF_REACTOR_KEY, None)
 
         # Re-render the original message row if currently visible
         for i, m in enumerate(self._sorted_messages):

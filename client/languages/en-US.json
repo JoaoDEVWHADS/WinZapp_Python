@@ -356,6 +356,7 @@
     "react_to_message": "React",
     "react_dialog_title": "React to message",
     "react_dialog_hint": "Reaction emojis. Select one to react.",
+    "react_dialog_hint_remove": "Reaction emojis. The checked one is your current reaction — select it again to remove it.",
     "most_used_reactions": "Most used reactions",
     "reactions_label": "Reactions",
     "total_label": "total",
