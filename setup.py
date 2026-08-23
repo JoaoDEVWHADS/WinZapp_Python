@@ -114,26 +114,14 @@ def run_setup_api() -> None:
     """Invoke setup_api.py to clone WPPConnect Server and apply custom patches."""
     _log("Running setup_api.py to clone WPPConnect Server and apply WinZapp patches...")
     setup_api_script = os.path.join(ROOT_DIR, "setup_api.py")
-    env = dict(os.environ)
-    if os.path.isdir(NODE_DIR):
-        env["PATH"] = f"{NODE_DIR}{os.pathsep}{env.get('PATH', '')}"
-    git_cmd_dir = os.path.join(GIT_DIR, "cmd")
-    if os.path.isdir(git_cmd_dir):
-        env["PATH"] = f"{git_cmd_dir}{os.pathsep}{env.get('PATH', '')}"
-    res = subprocess.run([sys.executable, setup_api_script], cwd=ROOT_DIR, env=env)
+    res = subprocess.run([sys.executable, setup_api_script], cwd=ROOT_DIR)
     if res.returncode != 0:
         _log("ERROR: setup_api.py failed!")
         sys.exit(res.returncode)
 
 
-
 def build_wppconnect_api(node_exe: str) -> None:
-    """Run `npm install` and `npm run build` in client/api/ if not already compiled."""
-    server_dist = os.path.join(API_DIR, "dist", "server.js")
-    if os.path.isfile(server_dist):
-        _log("WPPConnect API already compiled (dist/server.js exists). Skipping redundant build.")
-        return
-
+    """Run `npm install` and `npm run build` in client/api/ using the portable Node.js."""
     _log("Building WPPConnect API in client/api/...")
     
     # Resolve npm executable / cli script

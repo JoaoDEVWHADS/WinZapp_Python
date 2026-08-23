@@ -76,41 +76,50 @@ def ensure_python_venv() -> None:
 
 
 def ensure_msys2_gcc() -> None:
-    """Check MSYS2 GCC installation and configure PATH on Windows."""
+    """Check MSYS2 GCC installation and auto-install via pacman if missing on Windows."""
     if sys.platform != "win32":
         return
 
     _log("Checking MSYS2 GCC compiler configuration...")
+    msys2_default_gcc = r"C:\msys64\ucrt64\bin"
     gcc_exe = shutil.which("gcc")
+
     if gcc_exe:
         _log(f"GCC compiler found in PATH: {gcc_exe}")
         return
 
-    # Check common MSYS2 toolchain paths on Windows (runners and local dev)
-    msys2_candidates = [
-        r"C:\msys64\mingw64\bin",
-        r"C:\msys64\ucrt64\bin",
-        r"C:\msys64\clang64\bin",
-        r"C:\msys64\usr\bin",
-    ]
+    if os.path.isdir(msys2_default_gcc):
+        os.environ["PATH"] = f"{msys2_default_gcc};{os.environ.get('PATH', '')}"
+        _log(f"Added MSYS2 GCC to PATH: {msys2_default_gcc}")
+        return
 
-    for candidate in msys2_candidates:
-        if os.path.isdir(candidate):
-            candidate_gcc = os.path.join(candidate, "gcc.exe")
-            if os.path.isfile(candidate_gcc):
-                os.environ["PATH"] = f"{candidate};{os.environ.get('PATH', '')}"
-                _log(f"Added MSYS2 GCC to PATH: {candidate}")
-                return
+    pacman_exe = r"C:\msys64\usr\bin\pacman.exe"
+    if not os.path.isfile(pacman_exe):
+        _log("MSYS2 not found at C:\\msys64. Downloading MSYS2 base installer...")
+        import urllib.request
+        msys_url = "https://github.com/msys2/msys2-installer/releases/download/nightly-x86_64/msys2-base-x86_64-latest.sfx.exe"
+        tmp_sfx = os.path.join(ROOT_DIR, "msys2_installer.exe")
+        try:
+            urllib.request.urlretrieve(msys_url, tmp_sfx)
+            _log("Extracting MSYS2 base to C:\\msys64...")
+            subprocess.run([tmp_sfx, "-y", "-oC:\\"], check=True)
+        except Exception as exc:
+            _log(f"WARNING: Could not auto-download MSYS2 installer: {exc}")
+        finally:
+            if os.path.exists(tmp_sfx):
+                try: os.remove(tmp_sfx)
+                except: pass
 
-    # If directory exists, add mingw64 or ucrt64 anyway
-    for candidate in msys2_candidates[:2]:
-        if os.path.isdir(candidate):
-            os.environ["PATH"] = f"{candidate};{os.environ.get('PATH', '')}"
-            _log(f"Added MSYS2 directory to PATH: {candidate}")
+    if os.path.isfile(pacman_exe):
+        _log("Installing MSYS2 GCC compiler packages (gcc & binutils)...")
+        cmd = [pacman_exe, "-S", "--noconfirm", "--needed", "mingw-w64-ucrt-x86_64-gcc", "mingw-w64-ucrt-x86_64-binutils"]
+        res = subprocess.run(cmd, check=False)
+        if res.returncode == 0 and os.path.isdir(msys2_default_gcc):
+            os.environ["PATH"] = f"{msys2_default_gcc};{os.environ.get('PATH', '')}"
+            _log(f"MSYS2 GCC installed successfully and added to PATH: {msys2_default_gcc}")
             return
 
-    _log("INFO: GCC compiler not found in standard paths (optional for pure Python builds).")
-
+    _log("WARNING: GCC compiler not found. If building custom C extensions, please install MSYS2 GCC.")
 
 
 def run_setup() -> None:
