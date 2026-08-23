@@ -2203,6 +2203,25 @@ class StatusPanel(wx.Panel):
         try:
             with open(ogg_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
+        except Exception as exc:
+            # try/finally with no except let this propagate. Harmless while
+            # this method was a thread target on its own, but
+            # _send_all_media_statuses_bg() now calls it inside a loop: the
+            # exception tore out of the loop, so the files after this one were
+            # never even attempted AND the aggregate failure dialog at the end
+            # of that loop was never reached — the batch just stopped, in
+            # total silence, on a background thread. Report it like the
+            # image/video path already does (_send_media_status_bg) and let
+            # the batch carry on.
+            logging.error("[status audio] Failed to read/encode %s: %s", ogg_path, exc)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
         finally:
             try:
                 os.unlink(ogg_path)
@@ -2375,21 +2394,33 @@ class StatusPanel(wx.Panel):
         failure — that used to flood the screen with "status_error" dialogs
         one after another. Failures are still logged individually by the
         helpers; only the popup is deferred to a single summary here.
+
+        Every call is additionally wrapped: a helper that raises instead of
+        returning False would otherwise tear out of this loop, skipping every
+        remaining file AND the summary dialog below — the batch would just
+        stop, silently, on a background thread. That really happened via
+        _send_status_voice_bg()'s try/finally-with-no-except; it is fixed at
+        the source too, but the loop shouldn't depend on each helper
+        remembering to catch everything.
         """
         mw = self.main_window
         failures = 0
         for path in paths:
             ext = os.path.splitext(path)[1].lower()
-            if ext in (".mp3", ".ogg", ".wav", ".m4a", ".aac"):
-                # A picked audio file goes through the real voice-status
-                # path (transcodes to OGG/Opus via ffmpeg first) — same
-                # endpoint a recorded voice status uses, not the image/
-                # video one below, which has no audio branch at all. Voice
-                # notes don't carry a caption in the official client either,
-                # so it's intentionally dropped here.
-                ok = self._send_status_voice_bg(path, report_result=False)
-            else:
-                ok = self._send_media_status_bg(path, caption, report_result=False)
+            try:
+                if ext in (".mp3", ".ogg", ".wav", ".m4a", ".aac"):
+                    # A picked audio file goes through the real voice-status
+                    # path (transcodes to OGG/Opus via ffmpeg first) — same
+                    # endpoint a recorded voice status uses, not the image/
+                    # video one below, which has no audio branch at all. Voice
+                    # notes don't carry a caption in the official client either,
+                    # so it's intentionally dropped here.
+                    ok = self._send_status_voice_bg(path, report_result=False)
+                else:
+                    ok = self._send_media_status_bg(path, caption, report_result=False)
+            except Exception:
+                logging.exception("[status] Unexpected failure sending %s as status", path)
+                ok = False
             if not ok:
                 failures += 1
         if failures:
