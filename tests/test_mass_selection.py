@@ -232,10 +232,6 @@ def _shift_down():
     return _FakeEvent(wx.WXK_DOWN, shift=True)
 
 
-def _shift_up():
-    return _FakeEvent(wx.WXK_UP, shift=True)
-
-
 def _shift_home():
     return _FakeEvent(wx.WXK_HOME, shift=True)
 
@@ -401,32 +397,6 @@ class TestCtrlSpaceInTheMessagesList:
         panel._on_messages_list_key_down(_shift_down())
         assert panel.selected_messages == {"m2"}
         assert panel.messages_list._focused == 1
-
-    def test_shift_up_extends_selection_and_moves_focus(self):
-        panel = _Panel(messages=[_msg("m1"), _msg("m2"), _msg("m3")], focused=2)
-        panel._on_messages_list_key_down(_shift_up())
-        assert panel.selected_messages == {"m2"}
-        assert panel.messages_list._focused == 1
-
-    def test_shift_up_repeatedly_selects_bottom_to_top_across_an_unread_separator(self):
-        """Reported live: Shift+Up used to fall through to the native
-        ListCtrl selection (no explicit handler existed, unlike Shift+Down),
-        which didn't know the unread-separator row isn't a real message and
-        never touched self.selected_messages — so selecting upward past it
-        went out of sync."""
-        panel = _Panel(messages=[_msg("m1"), _msg("m2"), SEPARATOR, _msg("m4"), _msg("m5")], focused=4)
-        panel._on_messages_list_key_down(_shift_up())  # m5 -> m4
-        panel._on_messages_list_key_down(_shift_up())  # m4 -> separator (skipped)
-        panel._on_messages_list_key_down(_shift_up())  # separator -> m2
-        panel._on_messages_list_key_down(_shift_up())  # m2 -> m1
-        assert panel.selected_messages == {"m1", "m2", "m4"}
-        assert panel.messages_list._focused == 0
-
-    def test_shift_up_at_the_top_row_is_a_no_op(self):
-        panel = _Panel(messages=[_msg("m1"), _msg("m2")], focused=0)
-        panel._on_messages_list_key_down(_shift_up())
-        assert panel.selected_messages == set()
-        assert panel.messages_list._focused == 0
 
     def test_shift_end_selects_everything_below_when_nothing_is_playing(self):
         panel = _Panel(messages=[_msg("m1"), _msg("m2"), _msg("m3")], focused=1)

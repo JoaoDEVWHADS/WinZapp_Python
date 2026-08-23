@@ -118,6 +118,7 @@ class WebSocketClient:
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
         self.sio.on("incomingcall", self.on_wpp_incoming_call)
+        self.sio.on("media-upload-progress", self.on_media_upload_progress)
         # These two handlers existed but were never registered — contact
         # name/photo updates and presence changes only ever reached the app
         # through onpresencechanged and the 5-minute contacts poll, so a
@@ -169,29 +170,27 @@ class WebSocketClient:
 
     def _recheck_connection_after_connect(self):
         try:
+            # Remember whether WhatsApp itself was already considered online
+            # before this Socket.IO transport reconnected. A short local
+            # socket blip leaves this True because on_disconnect() is debounced;
+            # that is exactly the case where a 177-chat full resync is wasteful.
+            was_wa_connected = bool(getattr(self.main_window, "_wa_connected", False))
+            was_sync_complete = bool(getattr(self.main_window, "_sync_completed", False))
             self.main_window.check_wa_connection_http()
             if getattr(self.main_window, "_wa_connected", False):
                 if hasattr(self.main_window, "message_queue"):
                     self.main_window.message_queue.flush()
-                # Every Socket.IO (re)connect — not only the ones where
-                # check_wa_connection_http() above also flips _wa_connected
-                # from False to True — gets a catch-up sync opportunity.
-                # WPPConnect's HTTP status can stay "CONNECTED" throughout a
-                # purely transport-level Socket.IO drop (a brief network
-                # blip too short for the 30s health check to ever see it as
-                # down), so live messages.upsert events emitted during that
-                # gap are simply gone — nothing else re-delivers them. This
-                # is the client-side half of the "connection looks perfectly
-                # stable yet a message silently never arrives, and F5 fixes
-                # it" reports: was a live delivery gap, not a bug in how an
-                # arrived message got processed. _sync_completed is reset so
-                # trigger_sync_if_needed() is willing to run again; the
-                # existing cooldown/backoff in that method still protects
-                # against a flaky connection reconnecting every few seconds
-                # turning this into a sync storm.
-                self.main_window._sync_completed = False
-                if hasattr(self.main_window, "trigger_sync_if_needed"):
-                    self.main_window.trigger_sync_if_needed()
+                if (was_wa_connected and was_sync_complete
+                        and hasattr(self.main_window, "catch_up_after_socket_reconnect")):
+                    # WhatsApp never went offline: recover only chats whose
+                    # activity changed while live socket events were unavailable.
+                    self.main_window.catch_up_after_socket_reconnect()
+                else:
+                    # A genuine WhatsApp disconnect or an incomplete startup
+                    # still needs the full correctness-oriented sync.
+                    self.main_window._sync_completed = False
+                    if hasattr(self.main_window, "trigger_sync_if_needed"):
+                        self.main_window.trigger_sync_if_needed()
         except Exception:
             logging.exception("[WebSocketClient] _recheck_connection_after_connect error")
 
@@ -202,10 +201,11 @@ class WebSocketClient:
         # a brief hiccup against the local WPPConnect server) — declaring the
         # app offline immediately for every one of those used to flicker the
         # title/tray between connected/disconnected and, once
-        # _recheck_connection_after_connect() saw the reconnect, force a full
-        # resync every time — even though WhatsApp itself never actually went
-        # down and outgoing sends (which go over the REST API, not this
-        # socket) were never actually blocked. Wait _DISCONNECT_CONFIRM_SECONDS
+        # _recheck_connection_after_connect() saw the reconnect, used to force
+        # a full resync every time — even though WhatsApp itself never actually
+        # went down and outgoing sends (which go over the REST API, not this
+        # socket) were never actually blocked. Brief reconnects now use the
+        # targeted chat catch-up instead. Wait _DISCONNECT_CONFIRM_SECONDS
         # and only declare it if the socket is STILL down by then; a genuine
         # outage is still caught either by this (a little later) or by the
         # 30-second health check regardless.
@@ -1251,16 +1251,34 @@ class WebSocketClient:
             ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
             ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
         ]
-        for limit_type, value in limits:
-            try:
-                api_post(
-                    url,
-                    json={"type": limit_type, "value": value},
-                    headers=headers,
-                    timeout=10,
-                )
-            except Exception:
-                pass
+        pending = list(limits)
+        # sessionLogged can arrive before wa-js has finished injecting. In
+        # that window setLimit exists at the HTTP layer but returns 500 because
+        # the page-side method is not ready yet. Retry the pending limits while
+        # the session settles instead of silently losing both settings.
+        for attempt in range(6):
+            failed = []
+            for limit_type, value in pending:
+                try:
+                    response = api_post(
+                        url,
+                        json={"type": limit_type, "value": value},
+                        headers=headers,
+                        timeout=10,
+                    )
+                    if response.status_code not in (200, 201):
+                        failed.append((limit_type, value))
+                except Exception:
+                    failed.append((limit_type, value))
+            if not failed:
+                return
+            pending = failed
+            if attempt < 5:
+                time.sleep(2)
+        logging.warning(
+            "[WebSocketClient] Could not apply WPP limits after retries: %s",
+            ", ".join(limit_type for limit_type, _ in pending),
+        )
 
     def on_wpp_status_find(self, data):
         try:
@@ -1274,7 +1292,7 @@ class WebSocketClient:
             if session and session != self.instance_name:
                 return
                 
-            if status in ("disconnectedMobile", "notLogged"):
+            if status in ("disconnectedMobile", "notLogged", "UNPAIRED", "UNPAIRED_IDLE"):
                 # Handle permanent WhatsApp logout / disconnection.
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):
@@ -1396,6 +1414,17 @@ class WebSocketClient:
             # diagnosable from the logs instead of a message just vanishing
             # with no trace of why.
             logging.exception("[WebSocketClient] on_wpp_message_received error")
+
+    def on_media_upload_progress(self, data):
+        if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            return
+        try:
+            upload_id = str(data.get("uploadId") or "")
+            progress = float(data.get("progress"))
+            if upload_id and 0 <= progress <= 1:
+                wx.CallAfter(self.main_window.on_media_upload_progress, upload_id, progress)
+        except (TypeError, ValueError):
+            return
 
     def on_wpp_reaction(self, data):
         try:
@@ -1639,14 +1668,25 @@ class WebSocketClient:
                 }
             }
         elif msg_type in ("audio", "ptt"):
+            media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
+            audio_mimetype = wpp_msg.get("mimetype") or media_data.get("mimetype") or ""
+            audio_file_name = (
+                wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title")
+                or media_data.get("filename") or media_data.get("fileName") or media_data.get("title")
+                or ""
+            )
             seconds_val = _media_seconds(wpp_msg)
-            message_content = {
-                "audioMessage": {
-                    "url": wpp_msg.get("clientUrl", ""),
-                    "seconds": seconds_val,
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
-                }
+            audio_message = {
+                "url": wpp_msg.get("clientUrl", ""),
+                "seconds": seconds_val,
+                "mediaKey": _safe_media_key(wpp_msg.get("mediaKey")),
             }
+            if audio_mimetype:
+                audio_message["mimetype"] = audio_mimetype
+            if audio_file_name:
+                audio_message["fileName"] = audio_file_name
+
+            message_content = {"audioMessage": audio_message}
             # Preserve the PTT/voice-note flag: WPPConnect reports voice notes
             # with type="ptt", but that raw type is later mapped to
             # "audioMessage" (see type_mapping below) and the flag would be

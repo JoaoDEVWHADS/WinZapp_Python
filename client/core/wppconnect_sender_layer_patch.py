@@ -226,6 +226,13 @@ PATCHED_SEND_FILE = (
     "                    try {\n"
     "                        const chunks = window.__winzappFileTransfers.get(id);\n"
     "                        const file = new File(chunks, options.filename || 'file', { type: mime });\n"
+    "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                        if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+    "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                                ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                                : getUploadLimit(type, origin, isVcard);\n"
+    "                        }\n"
     "                        const result = await WPP.chat.sendFileMessage(to, file, {\n"
     "                            waitForAck: true,\n"
     "                            ...options,\n"
@@ -252,6 +259,13 @@ PATCHED_SEND_FILE = (
     "        else {\n"
     "            sendResult = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ to, base64, options }) => {\n"
     "                try {\n"
+    "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+    "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                            : getUploadLimit(type, origin, isVcard);\n"
+    "                    }\n"
     "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n"
     "                        waitForAck: true,\n"
     "                        ...options,\n"
@@ -286,10 +300,33 @@ ALL_PATCHES = (
 )
 
 
+_BROWSER_DOCUMENT_LIMIT_PATCH = (
+    "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+    "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                            : getUploadLimit(type, origin, isVcard);\n"
+    "                    }\n"
+)
+
+
 def patch_sender_layer_source(source: str) -> str:
     """Apply the current patch and migrate the short-lived chunked variant."""
     for original, patched in ALL_PATCHES:
         source = source.replace(original, patched)
+
+    if "WPP.whatsapp?.MediaGatingUtils" not in source:
+        source = source.replace(
+            "                    const result = await WPP.chat.sendFileMessage(to, file, {\n",
+            _BROWSER_DOCUMENT_LIMIT_PATCH.replace("                    ", "                        ")
+            + "                        const result = await WPP.chat.sendFileMessage(to, file, {\n",
+        )
+        source = source.replace(
+            "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n",
+            _BROWSER_DOCUMENT_LIMIT_PATCH
+            + "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n",
+        )
 
     intermediate_marker = "        if (base64.length > 8 * 1024 * 1024) {\n"
     if intermediate_marker not in source:
