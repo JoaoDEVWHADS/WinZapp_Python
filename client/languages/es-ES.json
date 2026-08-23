@@ -725,7 +725,7 @@
     "incoming_call_popup_title": "Llamada entrante",
     "incoming_call_stop_button": "&Detener",
     "incoming_call_close_button": "&Cerrar ventana",
-    "emoji_button": "Emoji (Ctrl+.)",
+    "emoji_button": "Emoji",
     "emoji_picker_title": "Seleccionar emoji",
     "emoji_picker_hint": "Elige una categoría y navega por la lista. Enter inserta y cierra. Ctrl+Enter añade un emoji y mantiene el panel abierto.",
     "emoji_picker_search": "&Buscar emoji",

@@ -33,6 +33,7 @@ from ui.accessible import (
     AccessibleSaveAs,
     AccessibleConversationDataButton,
     AccessibleAddAttachmentButton,
+    AccessibleEmojiButton,
     AccessibleDiscardVoiceMessage,
     AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
@@ -632,6 +633,7 @@ class ConversationsPanel(wx.Panel):
         self._emoji_btn = wx.Button(
             self.conversation_panel, label=i18n.t("emoji_button")
         )
+        self._emoji_btn.SetAccessible(AccessibleEmojiButton())
         self._emoji_btn.Bind(wx.EVT_BUTTON, self._on_open_emoji_picker)
         conv_sizer.Add(self._emoji_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -665,6 +667,16 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self.send_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self.send_message_btn.Hide()
 
+        # ── Add attachment button (before Record voice — see issue #68: adding
+        # attachments is more frequent, and Record voice reads last, matching
+        # where most other messaging apps place it) ────────────────────────
+        self._add_attachment_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("add_attachment")
+        )
+        self._add_attachment_btn.SetAccessible(AccessibleAddAttachmentButton())
+        self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
+        conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
         self.record_voice_message_btn = wx.Button(
             self.conversation_panel, label=i18n.t("record_voice_message")
         )
@@ -673,14 +685,6 @@ class ConversationsPanel(wx.Panel):
         )
         self.record_voice_message_btn.Bind(wx.EVT_BUTTON, self.on_record_voice_message)
         conv_sizer.Add(self.record_voice_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-
-        # ── Add attachment button (moved closer to message input area) ─────────
-        self._add_attachment_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("add_attachment")
-        )
-        self._add_attachment_btn.SetAccessible(AccessibleAddAttachmentButton())
-        self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
-        conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         # ── Attachment staging panel (hidden until files are chosen) ─────────
         self._attachment_panel = wx.Panel(self.conversation_panel)

@@ -109,6 +109,20 @@ class AccessibleAddAttachmentButton(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+A")
 
 
+class AccessibleEmojiButton(wx.Accessible):
+    """Reports Ctrl+. as the keyboard shortcut for the Emoji button.
+
+    The label used to bake the shortcut into its own text ("Emoji (Ctrl+.)"),
+    which NVDA's "report shortcut key" (Shift+Numpad2) cannot separate from
+    the name the way it can for Add Attachment/Record Voice Message above —
+    both expose their shortcut through this same MSAA property instead of
+    their label.
+    """
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+.")
+
+
 class AccessibleDiscardVoiceMessage(wx.Accessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
 
