@@ -2060,26 +2060,25 @@ export async function getMessages(req: Request, res: Response) {
           // two sent extended-text messages at 21:42/21:45 were absent because
           // the last received call event was at 21:29.
           //
-          // Avoid an extra IndexedDB query for every chat. ChatModel.t is the
-          // latest activity timestamp; only fetch the after-tail when it is
-          // newer than the newest row returned by the lastReceivedKey-anchored
-          // query. Merge by message id below, so an inclusive boundary cannot
-          // duplicate the anchor.
+          // ChatModel.t cannot guard this query: on the affected live chat it
+          // was stale at the same 21:29 boundary even though WhatsApp's own UI
+          // displayed the later messages. Query the after-tail for every
+          // private chat with a lastReceivedKey; groups do not have this split
+          // and avoid the extra IndexedDB read. Merge by id below.
           try {
             const chat =
               (window as any).WPP?.chat?.get?.(chatId) ||
               (window as any).WAPI?.getChat?.(chatId);
-            const activityStamp = Number(chat?.t ?? 0) || 0;
-            let newestReturnedStamp = 0;
-            for (const m of result) {
-              newestReturnedStamp = Math.max(newestReturnedStamp, stampOf(m));
-            }
             const lastReceived = chat?.lastReceivedKey;
             const tailAnchor =
               lastReceived?._serialized ||
               lastReceived?.toString?.() ||
               '';
-            if (tailAnchor && activityStamp > newestReturnedStamp) {
+            const isPrivateChat =
+              chatId.endsWith('@lid') ||
+              chatId.endsWith('@c.us') ||
+              chatId.endsWith('@s.whatsapp.net');
+            if (tailAnchor && isPrivateChat) {
               const tail = await (window as any).WAPI.getMessages(chatId, {
                 count: targetCount,
                 direction: 'after',

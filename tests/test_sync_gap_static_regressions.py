@@ -135,7 +135,8 @@ def test_get_messages_merges_outgoing_tail_after_last_received_anchor():
     controller = (
         ROOT / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
     ).read_text(encoding="utf-8")
-    assert "activityStamp > newestReturnedStamp" in controller
+    assert "const isPrivateChat" in controller
+    assert "if (tailAnchor && isPrivateChat)" in controller
     assert "direction: 'after'" in controller
     assert "id: String(tailAnchor)" in controller
     assert "result.push(...tail)" in controller
