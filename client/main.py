@@ -9124,6 +9124,14 @@ class MainWindow(wx.Frame):
             # since none of those status calls are inside a try/finally and a
             # thread that dies mid-sync never reaches its own clear-status line.
             self._initial_sync_running = False
+            # Group-participant/contact lookups discovered while the message
+            # sweep was running were deliberately deferred so they could not
+            # compete with get-messages on the single browser page. Re-scan
+            # only after a successful sync has fully returned (including the
+            # optional media phase); this resolver is background/paced and no
+            # longer delays the sync-complete path.
+            if getattr(self, "_sync_completed", False):
+                self.scan_all_cached_messages_for_mentions()
             # Re-stamp on the way out, not only on the way in. The stamp made
             # at the top of this method is what trigger_sync_if_needed()
             # measures its cooldown from, so a round that takes longer than
@@ -9766,11 +9774,12 @@ class MainWindow(wx.Frame):
             )
         self.chats = self.normalize_chats(self.chats)
 
-        # Quick initial contacts fetch — may be incomplete on first QR pairing
-        # because WhatsApp delivers contacts to the WPPConnect concurrently
-        # with messages.  We'll do a second, definitive fetch after messages are
-        # synced (by then the API has received all contacts from WhatsApp).
-        self.get_remote_contacts()
+        # Do not block the foreground message sweep on an early /all-contacts
+        # snapshot. On fresh pairings that snapshot is explicitly provisional,
+        # and on a real account it took almost ten seconds while adding nothing
+        # the chat list needs immediately: list-chats already carries name and
+        # pushName metadata. A single definitive contacts fetch still runs after
+        # messages are synced, when WhatsApp has had time to populate it fully.
 
         # Show the contact list immediately from get_remote_chats() metadata
         # (name, pushName, unreadCount) so the user is not staring at a blank
@@ -12847,6 +12856,22 @@ class MainWindow(wx.Frame):
                     if not name or name == "Contato sem nome" or is_phone_like(name):
                         phone_jids_to_resolve.append(jid)
 
+        # Message sync is the most expensive consumer of the single browser
+        # page. Starting pn-lid/contact HTTP lookups from every fetched group
+        # page makes those lookups compete with get-messages and turns normal
+        # pages into multi-second tails. The initial sync already has a
+        # dedicated post-message LID pass plus the paced name backfill, while
+        # sender pushNames and remoteJidAlt mappings above are learned locally.
+        # Defer only the network resolution until those later phases.
+        if getattr(self, "_initial_sync_running", False):
+            if lids_to_resolve or phone_jids_to_resolve:
+                logging.debug(
+                    "[Contact Resolution] Deferring %d LID(s) and %d phone JID(s) "
+                    "while the initial message sweep owns the browser page.",
+                    len(set(lids_to_resolve)), len(set(phone_jids_to_resolve)),
+                )
+            return
+
         # Outside the `mentioned` branch on purpose: the sender collected above
         # must still be resolved for a message that mentions nobody.
         if lids_to_resolve:
@@ -13254,23 +13279,19 @@ class MainWindow(wx.Frame):
                     lst.Select(0)
                     lst.EnsureVisible(0)
 
-    # Deep-sync for the most-recent chats.  The boot sync normally fetches only
-    # messages_page_size (200) newest messages per chat, so scrolling up in a
-    # conversation quickly exhausts local history and stalls on
-    # fetch_older_messages() network round-trips.  Give the N most-recent chats
-    # (the ones the user is most likely to open first) a deeper window instead;
-    # the rest still sync the regular page target.  The server bounds a plain
-    # (un-anchored) get-messages to maxPages=10 pages of `count` each, so a
-    # count beyond ~10x a page cannot loop.
-    _DEEP_SYNC_TOP_N = 10
-    _DEEP_SYNC_COUNT = 1000
+    # Keep the foreground sweep page-sized. A WPPConnect message is a rich
+    # object; asking the browser/Puppeteer bridge for 1000/1050 of them in one
+    # response caused 50-65 second CDP transfers on real accounts. Older
+    # history is filled by the durable background walker and by interactive
+    # scroll, both of which are resumable and priority-aware.
+    _DEEP_SYNC_TOP_N = 0
+    _DEEP_SYNC_COUNT = 1000  # Legacy attribute retained for compatibility.
 
     def sync_remote_chats(self):
         chats = list(self.chats.values())
         if not chats:
             return
-            
-        # Filter out invalid JIDs (like '0' or empty entries) to prevent API errors
+
         valid_chats = []
         for c in chats:
             jid = c.get("remoteJid", "")
@@ -13279,53 +13300,42 @@ class MainWindow(wx.Frame):
                 valid_chats.append(c)
             else:
                 logging.warning(f"[sync_remote_chats] Skipping invalid JID from sync: {jid}")
-                
+
         if not valid_chats:
             return
-            
-        # Sort chats by most recent active timestamp
+
         try:
-            valid_chats = sorted(valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True)
+            valid_chats = sorted(
+                valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True
+            )
         except Exception:
             pass
 
-        # Tag the N most-recent chats for a deeper history window so the
-        # conversations the user is most likely to open first keep reading from
-        # the local DB while scrolling up, instead of stalling on
-        # fetch_older_messages() network round-trips.
-        deep_ids = {c.get("remoteJid", "") for c in valid_chats[:self._DEEP_SYNC_TOP_N]}
-        deep_ids.discard("")
-        if deep_ids:
-            logging.info(
-                "[sync_remote_chats] Deep-syncing %d most-recent chat(s) at "
-                "count=%d (page target=%d).",
-                len(deep_ids), self._DEEP_SYNC_COUNT, self.history_page_target(),
-            )
-
-        # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
-        # concurrent requests fine; cap at 6 workers to avoid overloading it.
-        #
-        # A plain newest-window query can legitimately answer with only 1, 3 or
-        # 15 rows while WhatsApp Web is materialising history.  Do not postpone
-        # the anchored follow-up until the whole account has been swept: that
-        # left every short group/private chat incomplete until the user opened
-        # it and pressed Home.  The repair path performs that same anchored page
-        # immediately, while this chat already owns a worker slot.
-        # RECENT decoding and get-messages both execute through one Puppeteer
-        # page. Keep the foreground sweep gentle until the phone finishes;
-        # otherwise six workers starve the decoder and make the phone remain on
-        # "keep the app open" for minutes.
+        # The first sweep has one job: make every conversation usable quickly.
+        # Do exactly one page-sized get-messages request per chat. The local
+        # WPPConnect patch already pages inside a no-anchor request up to its
+        # target count, so immediately following it with another anchored
+        # request only duplicates browser work. Deep history is deliberately
+        # left to the paced/resumable background walker after completion.
         worker_cap = 2 if getattr(self, "_history_still_landing", False) else 6
         max_workers = min(worker_cap, len(valid_chats))
+        logging.info(
+            "[sync_remote_chats] Foreground sweep: %d chat(s), one page each "
+            "(target=%d, workers=%d).",
+            len(valid_chats), self.history_page_target(), max_workers,
+        )
+
         failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            def _job(c):
+            futs = {}
+            for c in valid_chats:
                 copy = c.copy()
-                if c.get("remoteJid", "") in deep_ids:
-                    copy["_sync_limit"] = self._DEEP_SYNC_COUNT
-                return copy
-
-            futs = {pool.submit(self._repair_short_chat, _job(c)): c for c in valid_chats}
+                # _sync_limit used to be written into the chat dict by the
+                # removed boot deep-sync path, so older databases can still
+                # carry a persisted 1000-message tag. Never let that stale
+                # transient field resurrect the 50-65 second request.
+                copy.pop("_sync_limit", None)
+                futs[pool.submit(self.sync_chat_messages, copy)] = c
             for fut in as_completed(futs):
                 try:
                     fut.result()
@@ -13333,6 +13343,7 @@ class MainWindow(wx.Frame):
                     failed_count += 1
                     jid = futs[fut].get("remoteJid", "?")
                     logging.warning("[sync_remote_chats] failed for %s: %s", jid, exc)
+
         with self._sync_failures_lock:
             unfetched = sorted(self._sync_failed_chats)
             self._sync_failed_chats = set()
@@ -13755,39 +13766,17 @@ class MainWindow(wx.Frame):
         return gained
 
     def _repair_short_chat(self, chat: dict) -> None:
-        """Retry a short chat, then page it exactly like pressing Home does.
+        """Re-query one short chat without doubling browser traffic.
 
-        The old backfill only repeated sync_chat_messages(), an unanchored
-        newest-window query. A chat whose browser store exposed 1 or 15 rows
-        therefore returned the same 1 or 15 forever. The conversation view's
-        Home path succeeds because it follows that query with an anchored
-        ``fetch_older_messages`` call. Short-chat repair must use the same path.
+        ``sync_chat_messages`` performs the newest-window request. The local
+        get-messages endpoint already walks anchored store pages internally to
+        fill that requested count. Issuing a second anchored request
+        immediately afterwards repeats the same negative lookup on settled
+        accounts. If more history materialises later, the adaptive backfill
+        revisits this chat on a later pass; interactive scrolling has its own
+        priority-aware anchored path and is unaffected.
         """
         self.sync_chat_messages(chat)
-        if getattr(self, "_history_still_landing", False):
-            # The first page is enough to make the conversation usable. An
-            # anchored second request for every short chat doubles the browser
-            # traffic exactly while RECENT is decoding; the backfill performs
-            # the anchored repair after more history has landed.
-            return
-        raw_jid = self._normalize_jid(chat.get("remoteJid", ""))
-        jid, _live = self._resolve_backfill_target(raw_jid)
-        if not jid:
-            return
-        count = self._local_record_count(jid)
-        if count <= 0 or count >= self.history_page_target():
-            return
-        anchor = self._oldest_stored_message(jid)
-        if anchor:
-            # Background repair may walk pages that are already present in the
-            # linked-device store, but it must never issue an on-demand request
-            # to the primary phone.  A live account showed 94 such requests for
-            # 91 chats in 145 seconds, starving the one conversation the user
-            # was actively trying to scroll.  Phone history is interactive and
-            # is requested only by the open conversation's scroll path.
-            self.fetch_older_messages(
-                jid, anchor, store_only=False, allow_phone_request=False
-            )
 
     def _backfill_empty_chats(self):
         """Re-fetch messages for chats whose history WhatsApp Web had not loaded.
@@ -13834,6 +13823,22 @@ class MainWindow(wx.Frame):
                     logging.info("[backfill] Offline — waiting before retrying.")
                     delay = retry_delay
                     continue
+
+                interactive_history_jid = getattr(
+                    self, "_interactive_history_jid", ""
+                )
+                if interactive_history_jid:
+                    if getattr(self, "_backfill_paused_for_history_jid", "") != interactive_history_jid:
+                        logging.info(
+                            "[backfill] Pausing background history work while the user "
+                            "waits for older messages in %s.", interactive_history_jid,
+                        )
+                        self._backfill_paused_for_history_jid = interactive_history_jid
+                    delay = self._BACKFILL_FIRST_DELAY
+                    continue
+                if getattr(self, "_backfill_paused_for_history_jid", ""):
+                    logging.info("[backfill] Interactive history wait ended; resuming background work.")
+                    self._backfill_paused_for_history_jid = ""
 
                 attempt += 1
                 # Re-read the queue once per pass (not once per chat): it is
@@ -14208,6 +14213,20 @@ class MainWindow(wx.Frame):
             logging.info("[history-sync] unblock endpoint unavailable: %s", exc)
             return None
 
+    def _begin_interactive_history_request(self, remote_jid: str) -> str:
+        """Give one open conversation priority over background sync traffic."""
+        jid = self._normalize_jid(remote_jid)
+        self._interactive_history_jid = jid
+        logging.info("[history-scroll] Interactive history priority acquired for %s.", jid)
+        return jid
+
+    def _end_interactive_history_request(self, remote_jid: str) -> None:
+        """Release scroll priority without clearing a newer conversation's request."""
+        jid = self._normalize_jid(remote_jid)
+        if getattr(self, "_interactive_history_jid", "") == jid:
+            self._interactive_history_jid = ""
+            logging.info("[history-scroll] Interactive history priority released for %s.", jid)
+
     def request_older_messages(self, remote_jid: str, timeout: int = 60) -> bool:
         """Ask the phone for history older than what this device holds.
 
@@ -14224,6 +14243,13 @@ class MainWindow(wx.Frame):
         if not getattr(self, "_wa_connected", False):
             return False
         jid = self._normalize_jid(remote_jid)
+        interactive_jid = getattr(self, "_interactive_history_jid", "")
+        if interactive_jid and jid != interactive_jid:
+            logging.info(
+                "[history-sync] Deferring older-message request for %s while "
+                "interactive scroll has priority for %s.", jid, interactive_jid,
+            )
+            return False
         if not hasattr(self, "_older_request_temporarily_blocked"):
             self._older_request_temporarily_blocked = set()
         self._older_request_temporarily_blocked.discard(jid)
@@ -14499,8 +14525,14 @@ class MainWindow(wx.Frame):
             phone = remote_jid
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        if chat.get("_sync_limit"):
-            limit = int(chat["_sync_limit"])
+        # _sync_limit is a transient legacy hint from the old boot deep-sync
+        # implementation. Consume/remove it so it can never be persisted back
+        # into self.chats/SQLite. More importantly, never honour it during the
+        # foreground initial sweep: old databases may still contain
+        # _sync_limit=1000 from previous versions.
+        sync_limit = chat.pop("_sync_limit", None)
+        if sync_limit and not getattr(self, "_initial_sync_running", False):
+            limit = int(sync_limit)
         # A private chat's raw WhatsApp window can contain ciphertext, pin and
         # reaction events that intentionally do not become rows in the UI.  Ask
         # for a small raw margin so those internal records do not consume the
@@ -17364,6 +17396,13 @@ class MainWindow(wx.Frame):
         stored = 0
         for _ in range(self._DEEP_PAGES_PER_VISIT):
             if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
+                break
+            interactive_jid = getattr(self, "_interactive_history_jid", "")
+            if interactive_jid and self._normalize_jid(remote_jid) != interactive_jid:
+                logging.info(
+                    "[deep-backfill] Yielding %s while the user scrolls %s.",
+                    remote_jid, interactive_jid,
+                )
                 break
             if remote_jid in getattr(self, "_exhausted_chats", set()):
                 break

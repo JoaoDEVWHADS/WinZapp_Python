@@ -537,3 +537,12 @@ class TestAskingThePhoneAgain:
         stub.deep_backfill_chat("chat@g.us")
 
         assert stub.requested == ["chat@g.us", "chat@g.us"]
+
+class TestInteractiveHistoryPriority:
+    def test_background_deep_walk_yields_to_open_conversation_scroll(self):
+        stub = _make([[_msg(3), _msg(4)]], oldest=_msg(5))
+        stub._interactive_history_jid = "active@s.whatsapp.net"
+        stub._normalize_jid = lambda jid: jid
+
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+        assert stub.calls == []
