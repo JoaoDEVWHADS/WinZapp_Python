@@ -11,7 +11,7 @@ returns ``wx.ID_OK``.
 """
 
 import wx
-from core.utils import format_number
+from core.utils import format_number, contact_dedup_key
 
 
 class AttachContactDialog(wx.Dialog):
@@ -64,18 +64,47 @@ class AttachContactDialog(wx.Dialog):
         dlg_sizer.Add(panel, 1, wx.EXPAND)
         self.SetSizer(dlg_sizer)
 
-        # Populate
+        # Populate — main_window.contacts intentionally holds more than one
+        # entry per real person (the same contact is bridged under @lid,
+        # @c.us and/or @s.whatsapp.net, and Brazilian numbers additionally
+        # under both their 8- and 9-digit mobile form — see
+        # core.utils.contact_dedup_key()), so iterating it directly showed
+        # every contact twice, once per JID variant, each formatted
+        # differently (issue #70). Collapse to one row per real person,
+        # preferring whichever variant is a phone JID — an @lid isn't a real
+        # phone number and can't produce a valid vCard when the contact is
+        # actually sent — and sort alphabetically for predictable
+        # keyboard/screen-reader navigation instead of dict-insertion order.
         contacts = self._mw.contacts
-        if not contacts:
+        best_by_key: dict[str, dict] = {}
+        for jid, contact in contacts.items():
+            if not jid or jid.endswith("@g.us"):
+                continue
+            key = contact_dedup_key(self._mw, jid)
+            entry = {**contact, "remoteJid": jid}
+            existing = best_by_key.get(key)
+            if existing is None or (
+                existing["remoteJid"].endswith("@lid") and not jid.endswith("@lid")
+            ):
+                best_by_key[key] = entry
+
+        if not best_by_key:
             self._list.Append((i18n.t("no_contacts"), ""))
         else:
-            for jid, contact in contacts.items():
-                name = contact.get("name") or contact.get("pushName") or format_number(jid)
-                self._list.Append((name, format_number(jid)))
-                self._contacts_list.append({**contact, "remoteJid": jid})
-            if self._list.GetItemCount() > 0:
-                self._list.Focus(0)
-                self._list.Select(0)
+            rows = [
+                (
+                    entry.get("name") or entry.get("pushName")
+                    or format_number(entry["remoteJid"]),
+                    entry,
+                )
+                for entry in best_by_key.values()
+            ]
+            rows.sort(key=lambda r: r[0].lower())
+            for name, entry in rows:
+                self._list.Append((name, format_number(entry["remoteJid"])))
+                self._contacts_list.append(entry)
+            self._list.Focus(0)
+            self._list.Select(0)
 
     # ── Events ──────────────────────────────────────────────────────────────
 
