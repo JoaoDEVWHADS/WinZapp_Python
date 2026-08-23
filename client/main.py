@@ -1090,7 +1090,7 @@ class MainWindow(wx.Frame):
             self._check_hotkey_first_run()
 
         # Handle API execution configuration
-        if self.wpp_custom_api:
+        if not self._local_api_selected():
             logging.info("MainWindow: Custom API enabled — preserving all local API files, cache, and remote session state.")
         else:
             # Check API modules and start WPPConnect Server synchronously BEFORE init_UI
@@ -5621,10 +5621,6 @@ class MainWindow(wx.Frame):
         fallback still gets its turn. Returns True when a shell is present
         afterwards.
         """
-        if not self._local_api_selected():
-            logging.info("[headless-shell] Remote/unconfigured API — skipping installation.")
-            return False
-
         existing = self.find_headless_shell()
         if existing:
             logging.info("[headless-shell] Already installed: %s", existing)
@@ -5710,9 +5706,6 @@ class MainWindow(wx.Frame):
         the browser, so "the API is fully set up" was true for an install with
         no browser at all — see ensure_headless_shell_installed().
         """
-        if not self._local_api_selected():
-            logging.info("[api-setup] Remote/unconfigured API — skipping Node/npm/browser setup.")
-            return
         self._ensure_api_modules_installed()
         self.ensure_headless_shell_installed()
 

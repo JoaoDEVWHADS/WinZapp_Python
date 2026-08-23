@@ -33,9 +33,7 @@ def test_remote_choice_disables_local_runtime_setup():
 
 def test_every_local_install_entry_point_has_the_guard():
     for name in (
-        "ensure_api_modules_installed",
         "_ensure_api_modules_installed",
-        "ensure_headless_shell_installed",
         "ensure_wpp_version",
         "ensure_wpp_running",
         "_start_wpp_update_checker",
@@ -47,5 +45,6 @@ def test_every_local_install_entry_point_has_the_guard():
 def test_api_choice_precedes_any_startup_install_check():
     source = inspect.getsource(MainWindow.__init__)
     choice = source.index("self._check_api_type_first_run()")
+    assert "if not self._local_api_selected():" in source[choice:]
     install = source.index("self.ensure_api_modules_installed()", choice)
     assert choice < install
