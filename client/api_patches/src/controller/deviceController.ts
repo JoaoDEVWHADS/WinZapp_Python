@@ -1811,6 +1811,30 @@ export async function getMessages(req: Request, res: Response) {
           console.log(
             `[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`
           );
+
+          // Resolve chatId to active ChatModel in browser (LID vs phone)
+          let targetChatId = chatId;
+          if (!(window as any).WPP?.chat?.get?.(chatId)) {
+            try {
+              const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(chatId);
+              const alt = chatId.endsWith('@c.us') ? mapping?.lid : mapping?.phoneNumber;
+              const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+              if (altId && (window as any).WPP?.chat?.get?.(altId)) {
+                targetChatId = altId;
+              }
+            } catch (e) {}
+            if (targetChatId === chatId) {
+              try {
+                const contact = (window as any).WPP?.contact?.get?.(chatId);
+                const alt = chatId.endsWith('@c.us') ? contact?.lid : (chatId.endsWith('@lid') ? contact?.id : null);
+                const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+                if (altId && (window as any).WPP?.chat?.get?.(altId)) {
+                  targetChatId = altId;
+                }
+              } catch (e) {}
+            }
+          }
+
           const getMsgSafe = async (msgId: string) => {
             try {
               if (!msgId) return null;
@@ -1864,15 +1888,10 @@ export async function getMessages(req: Request, res: Response) {
             }
           };
 
-          // Ensure the chat is loaded. (There is deliberately no
-          // "loadEarlierMessages" call here any more: WPP.chat has no such
-          // method — the guard `if (WPP.chat.loadEarlierMessages)` was simply
-          // always false, so this block only ever did the find(). Pulling more
-          // history is not something the page can do on its own; it needs an
-          // on-demand request to the phone — see requestOlderMessages below.)
+          // Ensure the chat is loaded.
           try {
             if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
-              await (window as any).WPP.chat.find(chatId);
+              await (window as any).WPP.chat.find(targetChatId);
             }
           } catch (e) {
             // Ignore
@@ -1899,7 +1918,7 @@ export async function getMessages(req: Request, res: Response) {
               `[browser-evaluate] Anchor not found in store. Fetching current messages to find oldest...`
             );
             const currentMsgs = await (window as any).WPP.chat.getMessages(
-              chatId,
+              targetChatId,
               { count: 100 }
             );
             console.log(
@@ -1928,7 +1947,7 @@ export async function getMessages(req: Request, res: Response) {
                 attempts + 1
               }/${maxAttempts} from oldestId=${oldestId}...`
             );
-            const loaded = await (window as any).WPP.chat.getMessages(chatId, {
+            const loaded = await (window as any).WPP.chat.getMessages(targetChatId, {
               count: 100,
               direction: 'before',
               id: oldestId,
@@ -1975,7 +1994,7 @@ export async function getMessages(req: Request, res: Response) {
                 `[browser-evaluate] Anchor not found, and no originalOldestId resolved. Fetching default messages...`
               );
               const currentMsgs = await (window as any).WPP.chat.getMessages(
-                chatId,
+                targetChatId,
                 { count: 100 }
               );
               if (currentMsgs && currentMsgs.length > 0) {
@@ -1996,7 +2015,7 @@ export async function getMessages(req: Request, res: Response) {
           let result: any[] = [];
           try {
             if ((window as any).WPP?.chat?.getMessages) {
-              const rawMsgs = await (window as any).WPP.chat.getMessages(chatId, {
+              const rawMsgs = await (window as any).WPP.chat.getMessages(targetChatId, {
                 count: targetCount,
                 direction: 'before',
                 id: queryId,
@@ -2019,7 +2038,7 @@ export async function getMessages(req: Request, res: Response) {
             console.log(`[browser-evaluate] WPP.chat.getMessages failed in anchor query: ${e}`);
           }
           if (!result || result.length === 0) {
-            result = await (window as any).WAPI.getMessages(chatId, {
+            result = await (window as any).WAPI.getMessages(targetChatId, {
               count: targetCount,
               direction: 'before',
               id: queryId,
