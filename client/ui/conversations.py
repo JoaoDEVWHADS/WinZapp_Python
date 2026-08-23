@@ -9644,11 +9644,17 @@ class ConversationsPanel(wx.Panel):
             # WhatsApp ID, MainWindow._on_message_sent() transfers this
             # tombstone to the real ID instead of resurrecting the bubble.
             self.main_window.message_queue.cancel(pending_local_id)
+            self._outgoing_virtual_messages.pop(pending_local_id, None)
             self._media_upload_progress.pop(pending_local_id, None)
             self._media_transfer_started.discard(pending_local_id)
             self._hide_media_transfer_gauge()
+            if for_everyone:
+                pending_revokes = getattr(self.main_window, "_pending_revokes_for_everyone", None)
+                if pending_revokes is None:
+                    pending_revokes = self.main_window._pending_revokes_for_everyone = set()
+                pending_revokes.add(pending_local_id)
             self.remove_messages_by_id(
-                {msg_id or pending_local_id}, focus_previous=True
+                {msg_id, pending_local_id} if msg_id else {pending_local_id}, focus_previous=True
             )
         elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
@@ -9726,9 +9732,15 @@ class ConversationsPanel(wx.Panel):
         # can scroll it out while it keeps playing in the background), so
         # this must not be gated on the row actually being found below.
         self._stop_playback_for_removed_messages(msg_ids)
+        for mid in msg_ids:
+            self._outgoing_virtual_messages.pop(mid, None)
+            self._media_upload_progress.pop(mid, None)
+            self._media_transfer_started.discard(mid)
         indices = sorted(
             i for i, m in enumerate(self._sorted_messages)
-            if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids
+            if isinstance(m, dict) and (
+                m.get("key", {}).get("id") in msg_ids or m.get("_local_id") in msg_ids
+            )
         )
         # Even when the row is not in the currently rendered page, keep
         # removing it from the full in-memory state and SQLite. Phone-side
@@ -9757,7 +9769,9 @@ class ConversationsPanel(wx.Panel):
                 self._unread_sep_idx -= 1
         for i in range(len(self._all_sorted_messages) - 1, -1, -1):
             m = self._all_sorted_messages[i]
-            if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids:
+            if isinstance(m, dict) and (
+                m.get("key", {}).get("id") in msg_ids or m.get("_local_id") in msg_ids
+            ):
                 self._all_sorted_messages.pop(i)
                 if i < self._messages_offset:
                     self._messages_offset -= 1
@@ -9770,6 +9784,7 @@ class ConversationsPanel(wx.Panel):
             self.conversation["messages"]["messages"]["records"] = [
                 m for m in records
                 if m.get("key", {}).get("id") not in msg_ids
+                and m.get("_local_id") not in msg_ids
             ]
             jid = self.conversation.get("remoteJid", "")
             remember_deleted = getattr(

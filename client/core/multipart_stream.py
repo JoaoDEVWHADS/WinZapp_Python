@@ -91,8 +91,10 @@ class StreamingMultipartBody:
             return
         try:
             self.progress_callback(max(0.0, min(1.0, float(progress))))
-        except Exception:
-            # UI reporting must not abort the actual send.
+        except Exception as exc:
+            if type(exc).__name__ == "MessageCancelled" or getattr(exc, "_is_cancellation", False) or "Cancelled" in type(exc).__name__:
+                raise
+            # Non-cancellation UI reporting errors must not abort the actual send.
             pass
 
     def __iter__(self) -> Iterator[bytes]:

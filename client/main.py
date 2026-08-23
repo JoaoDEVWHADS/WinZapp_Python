@@ -4555,10 +4555,13 @@ class MainWindow(wx.Frame):
         if not remote_jid:
             return
 
-        if msg_id and self._is_message_tombstoned(remote_jid, msg_id):
+        local_id = msg.get("_local_id") or ""
+        if (msg_id and self._is_message_tombstoned(remote_jid, msg_id)) or (
+            local_id and self._is_message_tombstoned(remote_jid, local_id)
+        ):
             logging.info(
-                "[on_new_message] ignoring tombstoned live message %s in %s",
-                msg_id, remote_jid,
+                "[on_new_message] ignoring tombstoned live message %s (local=%s) in %s",
+                msg_id, local_id, remote_jid,
             )
             return
 
@@ -5032,6 +5035,26 @@ class MainWindow(wx.Frame):
             except (TypeError, ValueError):
                 pass
 
+        # Check if the WinZapp window is currently active/focused
+        window_active = (
+            not getattr(self, "_window_hidden", False)
+            and self.IsShown()
+            and not self.IsIconized()
+            and self.IsActive()
+        )
+
+        cp = getattr(self, "conversations_panel", None)
+        current_jid = (
+            cp.conversation.get("remoteJid", "")
+            if cp is not None and cp.conversation is not None
+            else ""
+        )
+        is_current_conv = bool(current_jid and current_jid == remote_jid)
+
+        if self.is_chat_archived(remote_jid):
+            if not (window_active and is_current_conv):
+                return
+
         # A reply to one of my own messages or an explicit @-mention always
         # breaks through a muted chat's suppression, everywhere (background
         # toast or foreground sound/speech) — the user still needs to know
@@ -5042,12 +5065,13 @@ class MainWindow(wx.Frame):
         # focused (setting off) — see the two mute checks below.
         muted = self.is_chat_muted(remote_jid)
         priority = muted and self._is_reply_or_mention_of_me(msg, remote_jid)
-        if muted and not priority and self.settings.get("general", {}).get(
-            "keep_muted_chats_silent_when_open", True
-        ):
-            return
-        if self.is_chat_archived(remote_jid):
-            return
+        if muted and not priority:
+            if not (window_active and is_current_conv):
+                return
+            if self.settings.get("general", {}).get(
+                "keep_muted_chats_silent_when_open", True
+            ):
+                return
 
         from core.notification_manager import (
             format_notification_title, format_notification_body,
@@ -5056,24 +5080,8 @@ class MainWindow(wx.Frame):
 
         body  = format_notification_body(msg, self, self.i18n)
 
-        # Check if the WinZapp window is currently active/focused
-        window_active = (
-            not getattr(self, "_window_hidden", False)
-            and self.IsShown()
-            and not self.IsIconized()
-            and self.IsActive()
-        )
-
         if window_active:
             speech = self.settings.get("speech_content", {})
-            # Determine if the incoming message is for the currently-open conversation
-            cp = getattr(self, "conversations_panel", None)
-            current_jid = (
-                cp.conversation.get("remoteJid", "")
-                if cp is not None and cp.conversation is not None
-                else ""
-            )
-            is_current_conv = (current_jid == remote_jid)
 
             # Muted + not the open conversation: stay silent even with the
             # window active (the "keep silent when open" setting only ever
@@ -16336,6 +16344,15 @@ class MainWindow(wx.Frame):
             # tombstone to that id too so the later own-message echo cannot
             # recreate the bubble under its new key.
             self._remember_deleted_message_ids(remote_jid, [real_id])
+            pending_revokes = getattr(self, "_pending_revokes_for_everyone", None)
+            if isinstance(pending_revokes, set) and local_id in pending_revokes:
+                pending_revokes.discard(local_id)
+                threading.Thread(
+                    target=lambda: self.delete_message_for_everyone(
+                        remote_jid, {"id": real_id, "fromMe": True}
+                    ),
+                    daemon=True,
+                ).start()
         if real_id and remote_jid:
             def _bg_update_db():
                 try:

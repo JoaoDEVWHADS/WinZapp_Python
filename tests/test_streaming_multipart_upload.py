@@ -73,3 +73,30 @@ def test_requests_keeps_the_streaming_body_unbuffered(tmp_path):
     ).prepare()
     assert prepared.body is body
     assert prepared.headers["Content-Length"] == str(body.content_length)
+
+
+def test_cancellation_aborts_streaming_body_iteration(tmp_path):
+    import pytest
+
+    class MessageCancelled(Exception):
+        pass
+
+    path = tmp_path / "large_cancel.zip"
+    path.write_bytes(b"c" * (500 * 1024))
+
+    def _progress(progress):
+        if progress > 0.1:
+            raise MessageCancelled("local_cancel_123")
+
+    body = StreamingMultipartBody(
+        file_path=str(path),
+        filename=path.name,
+        mime_type="application/zip",
+        fields={"type": "document"},
+        progress_callback=_progress,
+        chunk_size=32 * 1024,
+    )
+
+    with pytest.raises(MessageCancelled):
+        list(body)
+
