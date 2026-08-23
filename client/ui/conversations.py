@@ -627,6 +627,7 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT,       self.on_change_message_field)
         self.message_field.Bind(wx.EVT_TEXT_ENTER, self.on_send_message)
         self.message_field.Bind(wx.EVT_KEY_DOWN,   self._on_message_field_key_down)
+        self.message_field.Bind(wx.EVT_CHAR,       self._on_message_field_char)
         self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
@@ -3733,12 +3734,45 @@ class ConversationsPanel(wx.Panel):
                 self._mention_list.SetSelection(0)
             return  # consume — don't let the field handle ↓
         if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and event.ShiftDown():
-            pos = self.message_field.GetInsertionPoint()
-            text = self.message_field.GetValue()
-            self.message_field.ChangeValue(text[:pos] + "\n" + text[pos:])
-            self.message_field.SetInsertionPoint(pos + 1)
+            # WriteText() inserts at the control's own insertion point (and
+            # over any active selection) and lets the native control manage
+            # the caret itself — necessary because on Windows a multiline
+            # wx.TextCtrl stores line breaks internally as \r\n while
+            # GetInsertionPoint()/SetInsertionPoint() count positions in that
+            # native representation, not the \n-only positions GetValue()
+            # reports. The previous approach (rebuild the whole value with a
+            # plain "\n", then SetInsertionPoint(pos + 1)) assumed one
+            # inserted character, but Windows silently expands it to two —
+            # so the caret landed one character short, between the \r and
+            # the \n. NVDA then kept announcing everything typed next as
+            # still on the previous line (issue #48).
+            self.message_field.WriteText("\n")
             self.on_change_message_field(None)
             return  # consume — don't send and don't double-insert
+        event.Skip()
+
+    @staticmethod
+    def _is_phantom_nvda_char(event) -> bool:
+        """True for the bogus U+00FF character NVDA's laptop-layout object
+        navigation gestures (Windows+NVDA+Left/Right and others — issue #71)
+        leak into whatever wx.TextCtrl happens to be focused.
+
+        Reported live: each press of Windows+NVDA+Left/Right inserted one
+        literal 'ÿ' into the message field, even though no text key was
+        pressed and the same gestures type nothing in other applications.
+        NVDA's own keyboard hook is supposed to swallow these combinations
+        entirely; when the OS still emits a WM_CHAR for one anyway (observed
+        specifically for Windows-key gestures NVDA intercepts), it carries
+        the character U+00FF — not a value any real keyboard layout produces
+        by pressing the Windows key plus an arrow. That makes it safe to
+        veto unconditionally rather than trying to special-case NVDA's own
+        modifier state, which wx never sees.
+        """
+        return event.GetUnicodeKey() == 0xFF
+
+    def _on_message_field_char(self, event):
+        if self._is_phantom_nvda_char(event):
+            return  # veto — do not insert, do not Skip()
         event.Skip()
 
     def _on_text_field_paste(self, event):

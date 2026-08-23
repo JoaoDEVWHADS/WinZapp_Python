@@ -68,7 +68,13 @@ class TestShiftEnterInsertsNewline:
             stub._on_message_field_key_down(event)
 
             assert stub.message_field.GetValue() == "hello\n world"
-            assert stub.message_field.GetInsertionPoint() == 6
+            # Native position, not the "\n"-counted one GetValue() implies:
+            # wxMSW stores the line break as \r\n internally, so the caret
+            # sits 2 native characters after where the plain-\n insertion
+            # started, not 1 — see issue #48's fix for why this distinction
+            # matters (the old manual SetInsertionPoint(pos + 1) landed one
+            # short, between the \r and the \n).
+            assert stub.message_field.GetInsertionPoint() == 7
             assert not event.skipped
             assert stub._on_text_changed_mention_check_calls == 1
         finally:
@@ -87,6 +93,30 @@ class TestShiftEnterInsertsNewline:
 
             assert stub.message_field.GetValue() == "hello"
             assert event.skipped
+        finally:
+            frame.Destroy()
+
+    def test_typing_after_shift_enter_lands_on_the_new_line(self, wx_app):
+        """The actual symptom in issue #48: after Shift+Enter, continuing to
+        type kept landing on the PREVIOUS line, splitting the \\r\\n Windows
+        silently expands a lone "\\n" into and producing a spurious EXTRA line
+        break — confirmed against the old ChangeValue()+SetInsertionPoint()
+        code, which turned this exact scenario into
+        "hello\\nXYZ\\n world" instead of "hello\\nXYZ world". The old test
+        only checked the value WE fed back into SetInsertionPoint(), so it
+        never caught this — it needs a second WriteText() simulating the
+        user's next keystrokes to actually observe where they land."""
+        frame = wx.Frame(None)
+        try:
+            stub = _Stub(frame)
+            stub.message_field.SetValue("hello world")
+            stub.message_field.SetInsertionPoint(5)  # after "hello"
+
+            event = _FakeKeyEvent(wx.WXK_RETURN, shift_down=True)
+            stub._on_message_field_key_down(event)
+            stub.message_field.WriteText("XYZ")
+
+            assert stub.message_field.GetValue() == "hello\nXYZ world"
         finally:
             frame.Destroy()
 
