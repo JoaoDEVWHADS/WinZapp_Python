@@ -10057,6 +10057,16 @@ class ConversationsPanel(wx.Panel):
             for i, m in enumerate(self._sorted_messages):
                 if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
                     self.messages_list.SetItemText(i, self._render_message_line(m))
+                    # The Reactions button only ever refreshes on focus
+                    # change (_update_reactions_button() is called from the
+                    # list's EVT_LIST_ITEM_FOCUSED handler) — a reaction
+                    # landing on the message the user already has focused
+                    # left the button in whatever state it was in before,
+                    # requiring the user to move focus away and back just to
+                    # make it appear. Refresh it here too when this is the
+                    # row currently focused.
+                    if i == self.messages_list.GetFocusedItem():
+                        self._update_reactions_button(i)
                     break
 
         # Persist so populate_messages()/refresh_active_conversation_messages()
@@ -10168,6 +10178,10 @@ class ConversationsPanel(wx.Panel):
         for i, m in enumerate(self._sorted_messages):
             if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
                 self.messages_list.SetItemText(i, self._render_message_line(m))
+                # See apply_incoming_reaction()'s identical call for why this
+                # is needed in addition to the focus-driven refresh.
+                if i == self.messages_list.GetFocusedItem():
+                    self._update_reactions_button(i)
                 break
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
