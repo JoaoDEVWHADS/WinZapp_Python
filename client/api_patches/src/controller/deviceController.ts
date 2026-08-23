@@ -1814,25 +1814,24 @@ export async function getMessages(req: Request, res: Response) {
 
           // Resolve chatId to active ChatModel in browser (LID vs phone)
           let targetChatId = chatId;
-          if (!(window as any).WPP?.chat?.get?.(chatId)) {
+          let altChatId: string | null = null;
+          try {
+            const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(chatId);
+            const alt = chatId.endsWith('@c.us') ? mapping?.lid : mapping?.phoneNumber;
+            const aId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+            if (aId) altChatId = aId;
+          } catch (e) {}
+          if (!altChatId) {
             try {
-              const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(chatId);
-              const alt = chatId.endsWith('@c.us') ? mapping?.lid : mapping?.phoneNumber;
-              const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
-              if (altId && (window as any).WPP?.chat?.get?.(altId)) {
-                targetChatId = altId;
-              }
+              const contact = (window as any).WPP?.contact?.get?.(chatId);
+              const alt = chatId.endsWith('@c.us') ? contact?.lid : (chatId.endsWith('@lid') ? contact?.id : null);
+              const aId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+              if (aId) altChatId = aId;
             } catch (e) {}
-            if (targetChatId === chatId) {
-              try {
-                const contact = (window as any).WPP?.contact?.get?.(chatId);
-                const alt = chatId.endsWith('@c.us') ? contact?.lid : (chatId.endsWith('@lid') ? contact?.id : null);
-                const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
-                if (altId && (window as any).WPP?.chat?.get?.(altId)) {
-                  targetChatId = altId;
-                }
-              } catch (e) {}
-            }
+          }
+
+          if (!(window as any).WPP?.chat?.get?.(chatId) && altChatId && (window as any).WPP?.chat?.get?.(altChatId)) {
+            targetChatId = altChatId;
           }
 
           const getMsgSafe = async (msgId: string) => {
@@ -1843,15 +1842,38 @@ export async function getMessages(req: Request, res: Response) {
                 : null;
               if (m) return m;
 
-              // Fallback 1: replace @c.us with @s.whatsapp.net or vice versa
+              // Fallback 1: Swap fromMe prefix (true_ <-> false_)
+              if (msgId.startsWith('true_')) {
+                const inverted = msgId.replace(/^true_/, 'false_');
+                m = await (window as any).WPP.chat.getMessageById(inverted);
+                if (m) return m;
+              } else if (msgId.startsWith('false_')) {
+                const inverted = msgId.replace(/^false_/, 'true_');
+                m = await (window as any).WPP.chat.getMessageById(inverted);
+                if (m) return m;
+              }
+
+              // Fallback 2: Domain swaps (@c.us <-> @s.whatsapp.net <-> @lid)
               if (msgId.includes('@c.us')) {
                 m = await (window as any).WPP.chat.getMessageById(
                   msgId.replace(/@c\.us/g, '@s.whatsapp.net')
                 );
                 if (m) return m;
               }
+              if (targetChatId && !msgId.includes(targetChatId)) {
+                const parts = msgId.split('_');
+                if (parts.length >= 3) {
+                  const withChat = `${parts[0]}_${targetChatId}_${parts.slice(2).join('_')}`;
+                  m = await (window as any).WPP.chat.getMessageById(withChat);
+                  if (m) return m;
+                  const invPrefix = parts[0] === 'true' ? 'false' : 'true';
+                  const withChatInv = `${invPrefix}_${targetChatId}_${parts.slice(2).join('_')}`;
+                  m = await (window as any).WPP.chat.getMessageById(withChatInv);
+                  if (m) return m;
+                }
+              }
 
-              // Fallback 2: strip participant suffix for group messages (first 3 parts: prefix_chatId_id)
+              // Fallback 3: strip participant suffix for group messages
               const parts = msgId.split('_');
               if (parts.length > 3) {
                 const strippedId = parts.slice(0, 3).join('_');
@@ -1859,17 +1881,13 @@ export async function getMessages(req: Request, res: Response) {
                 if (m) return m;
               }
 
-              // Fallback 3: search Store.Msg.models by raw message ID or prefix match (group messages with participant suffix)
+              // Fallback 4: search Store.Msg.models or chat.msgs.models by raw message ID
               const rawId = parts.length > 2 ? parts[2] : msgId;
-              if (
-                (window as any).Store &&
-                (window as any).Store.Msg &&
-                (window as any).Store.Msg.models
-              ) {
-                const models = (window as any).Store.Msg.models;
-                const found = models.find((item: any) => {
+              const searchModels = (models: any[]) => {
+                if (!Array.isArray(models)) return null;
+                return models.find((item: any) => {
                   if (!item || !item.id) return false;
-                  const ser = item.id._serialized || '';
+                  const ser = item.id._serialized || (typeof item.id === 'string' ? item.id : '');
                   const itemId = item.id.id || '';
                   return (
                     itemId === rawId ||
@@ -1877,6 +1895,15 @@ export async function getMessages(req: Request, res: Response) {
                     (rawId && ser.includes(rawId))
                   );
                 });
+              };
+
+              if ((window as any).Store?.Msg?.models) {
+                const found = searchModels((window as any).Store.Msg.models);
+                if (found) return found;
+              }
+              const chatObj = (window as any).WPP?.chat?.get?.(targetChatId);
+              if (chatObj?.msgs?.models) {
+                const found = searchModels(chatObj.msgs.models);
                 if (found) return found;
               }
               return null;
@@ -1898,11 +1925,14 @@ export async function getMessages(req: Request, res: Response) {
           }
 
           // 1. Check if the target anchor message exists in the browser Store.
+          let resolvedAnchorId = id;
           let anchorExists = false;
           if (id) {
             const msg = await getMsgSafe(id);
             if (msg) {
               anchorExists = true;
+              resolvedAnchorId = msg.id?._serialized || msg.id || id;
+              console.log(`[browser-evaluate] Anchor resolved to canonical: ${resolvedAnchorId}`);
             }
           }
 
@@ -1922,8 +1952,9 @@ export async function getMessages(req: Request, res: Response) {
                   const retryMsg = await getMsgSafe(id);
                   if (retryMsg) {
                     anchorExists = true;
+                    resolvedAnchorId = retryMsg.id?._serialized || retryMsg.id || id;
                     console.log(
-                      `[browser-evaluate] Anchor found after loadEarlierMsgs() call ${i + 1}`
+                      `[browser-evaluate] Anchor found after loadEarlierMsgs() call ${i + 1}: ${resolvedAnchorId}`
                     );
                     break;
                   }
@@ -1972,6 +2003,7 @@ export async function getMessages(req: Request, res: Response) {
               const checkMsg = await getMsgSafe(id);
               if (checkMsg) {
                 anchorExists = true;
+                resolvedAnchorId = checkMsg.id?._serialized || checkMsg.id || id;
                 break;
               }
               attempts++;
@@ -1979,9 +2011,9 @@ export async function getMessages(req: Request, res: Response) {
           }
 
           // 4. Resolve queryId
-          let queryId = id;
+          let queryId = resolvedAnchorId || id;
           if (id && !anchorExists) {
-            queryId = originalOldestId || id;
+            queryId = originalOldestId || resolvedAnchorId || id;
           }
 
           console.log(
@@ -2012,6 +2044,65 @@ export async function getMessages(req: Request, res: Response) {
           } catch (e) {
             console.log(`[browser-evaluate] WPP.chat.getMessages failed in anchor query: ${e}`);
           }
+
+          // Fallback A: Try querying with swapped fromMe prefix if 0 messages returned
+          if ((!result || result.length === 0) && typeof queryId === 'string') {
+            try {
+              let altQueryId = '';
+              if (queryId.startsWith('true_')) altQueryId = queryId.replace(/^true_/, 'false_');
+              else if (queryId.startsWith('false_')) altQueryId = queryId.replace(/^false_/, 'true_');
+              if (altQueryId && (window as any).WPP?.chat?.getMessages) {
+                const rawMsgs = await (window as any).WPP.chat.getMessages(targetChatId, {
+                  count: targetCount,
+                  direction: 'before',
+                  id: altQueryId,
+                });
+                if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                  result = rawMsgs
+                    .map((m: any) =>
+                      (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                        ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                        : m
+                    )
+                    .map((m: any) =>
+                      (window as any).WAPI?.processMessageObj
+                        ? (window as any).WAPI.processMessageObj(m, true, true)
+                        : m
+                    );
+                  console.log(`[browser-evaluate] Swapped fromMe query succeeded with ${result.length} msgs`);
+                }
+              }
+            } catch (e) {}
+          }
+
+          // Fallback B: Try querying with raw hex message ID only
+          if ((!result || result.length === 0) && typeof queryId === 'string' && queryId.includes('_')) {
+            try {
+              const parts = queryId.split('_');
+              const rawIdOnly = parts.length > 2 ? parts[2] : queryId;
+              if (rawIdOnly && rawIdOnly !== queryId && (window as any).WPP?.chat?.getMessages) {
+                const rawMsgs = await (window as any).WPP.chat.getMessages(targetChatId, {
+                  count: targetCount,
+                  direction: 'before',
+                  id: rawIdOnly,
+                });
+                if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                  result = rawMsgs
+                    .map((m: any) =>
+                      (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                        ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                        : m
+                    )
+                    .map((m: any) =>
+                      (window as any).WAPI?.processMessageObj
+                        ? (window as any).WAPI.processMessageObj(m, true, true)
+                        : m
+                    );
+                  console.log(`[browser-evaluate] RawId query succeeded with ${result.length} msgs`);
+                }
+              }
+            } catch (e) {}
+          }
           if (!result || result.length === 0) {
             try {
               result = await (window as any).WAPI.getMessages(targetChatId, {
@@ -2023,6 +2114,82 @@ export async function getMessages(req: Request, res: Response) {
               console.log(`[browser-evaluate] WAPI.getMessages fallback failed: ${e}`);
             }
           }
+
+          // Fallback C: Direct extraction from ChatModel / Store.Msg.models by timestamp
+          if (!result || result.length === 0) {
+            try {
+              const anchorMsg = await getMsgSafe(id);
+              const anchorT = anchorMsg?.t;
+              const chatObj = (window as any).WPP?.chat?.get?.(targetChatId) || (window as any).WAPI?.getChat?.(targetChatId);
+              if (chatObj && typeof chatObj.loadEarlierMsgs === 'function') {
+                for (let k = 0; k < 5; k++) {
+                  await chatObj.loadEarlierMsgs();
+                }
+              }
+              const models = chatObj?.msgs?.models || (window as any).Store?.Msg?.models || [];
+              if (Array.isArray(models) && models.length > 0) {
+                const targetPrefix = targetChatId.split('@')[0];
+                const filtered = models.filter((m: any) => {
+                  if (!m || !m.id) return false;
+                  const chatOfMsg = m.id.remote?._serialized || m.id.remote || '';
+                  if (chatOfMsg && !chatOfMsg.includes(targetPrefix)) return false;
+                  if (anchorT && typeof m.t === 'number') {
+                    return m.t < anchorT;
+                  }
+                  return true;
+                });
+                if (filtered.length > 0) {
+                  filtered.sort((a: any, b: any) => (b.t || 0) - (a.t || 0));
+                  const slice = filtered.slice(0, targetCount);
+                  result = slice.map((m: any) =>
+                    (window as any).WAPI?.processMessageObj
+                      ? (window as any).WAPI.processMessageObj(m, true, true)
+                      : m
+                  );
+                  console.log(`[browser-evaluate] Timestamp filter fallback returned ${result.length} msgs`);
+                }
+              }
+            } catch (e) {
+              console.log(`[browser-evaluate] Timestamp filter fallback failed: ${e}`);
+            }
+          }
+          // Fallback D: If 0 messages found and chat has an alternate LID/Phone JID, retry query on alternate JID
+          if ((!result || result.length === 0) && altChatId && altChatId !== targetChatId) {
+            try {
+              console.log(`[browser-evaluate] Retrying getMessages on alternate JID: ${altChatId}`);
+              try {
+                if ((window as any).WPP?.chat?.find) {
+                  await (window as any).WPP.chat.find(altChatId);
+                }
+              } catch (e) {}
+              let altQuery = queryId;
+              if (typeof altQuery === 'string' && altQuery.includes(targetChatId)) {
+                altQuery = altQuery.replace(targetChatId, altChatId);
+              }
+              const rawMsgs = await (window as any).WPP.chat.getMessages(altChatId, {
+                count: targetCount,
+                direction: 'before',
+                id: altQuery,
+              });
+              if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                result = rawMsgs
+                  .map((m: any) =>
+                    (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                      ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                      : m
+                  )
+                  .map((m: any) =>
+                    (window as any).WAPI?.processMessageObj
+                      ? (window as any).WAPI.processMessageObj(m, true, true)
+                      : m
+                  );
+                console.log(`[browser-evaluate] Alternate JID query returned ${result.length} msgs`);
+              }
+            } catch (e) {
+              console.log(`[browser-evaluate] Alternate JID query failed: ${e}`);
+            }
+          }
+
           console.log(
             `[browser-evaluate] Final getMessages returned ${
               result ? result.length : 0
