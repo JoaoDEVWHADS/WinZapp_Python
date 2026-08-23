@@ -20,8 +20,9 @@ def test_async_db_apply_restores_unread_or_last_landing_semantics():
     src = _method_source("_apply_conversation_db_load")
     assert 'get("focus_on_open", "message_field")' in src
     assert 'focus_setting == "unread_or_last"' in src
-    assert "self.populate_messages(preserve_focus=not focus_messages)" in src
+    assert "self.populate_messages(preserve_focus=False)" in src
     assert "wx.CallAfter(self.messages_list.SetFocus)" in src
+
 
 
 def test_async_db_apply_does_not_steal_message_field_focus():
