@@ -213,6 +213,7 @@
     "message_data_status_label": "Status",
     "reply_message": "Responder",
     "copy_message_text": "Copiar",
+    "select_message": "Selecionar",
     "copy_file": "Copiar arquivo",
     "delete_message": "Apagar mensagem",
     "delete_messages_bulk_title": "Apagar mensagens selecionadas",

@@ -1156,6 +1156,126 @@ class ConversationsPanel(wx.Panel):
         )
         self.conversation_panel.Layout()
 
+    def _queue_conversation_db_load(self, conversation: dict, jid: str) -> None:
+        """Load the opening page off the wx thread while preserving raw DB offsets."""
+        if not jid:
+            return
+        try:
+            configured_limit = int(
+                self.main_window.settings.get("user_interface", {}).get(
+                    "messages_page_size", 200
+                )
+            )
+        except (TypeError, ValueError):
+            configured_limit = 200
+        unread_count = int(conversation.get("unreadCount") or 0)
+        visible_limit = db_fetch_limit(configured_limit, unread_count)
+
+        def _load():
+            try:
+                db_msgs, raw_offset = self._read_db_visible_page(
+                    jid, visible_limit, offset=0, priority_ui=True
+                )
+                db = self.main_window.db
+                if hasattr(db, "get_message_count_async"):
+                    total = db.get_message_count_async(jid).result(timeout=30)
+                else:
+                    total = db.get_message_count(jid)
+                wx.CallAfter(
+                    self._apply_conversation_db_load,
+                    jid, db_msgs, total, raw_offset,
+                )
+            except Exception as exc:
+                logging.error(
+                    "[navigate_to_conversation] Background DB load failed for %s: %s",
+                    jid, exc,
+                )
+                current_records = (
+                    conversation.get("messages", {}).get("messages", {}).get("records", [])
+                )
+                wx.CallAfter(
+                    self._apply_conversation_db_load,
+                    jid, [], len(current_records or []), 0,
+                )
+
+        threading.Thread(target=_load, daemon=True, name="conversation-db-load").start()
+
+    def _apply_conversation_db_load(
+        self, jid: str, db_msgs, total: int, raw_offset: int
+    ) -> None:
+        """Apply a completed opening-page read only if that chat is still open."""
+        current = self.conversation
+        if current is None or current.get("remoteJid", "") != jid:
+            return
+        if getattr(self, "_last_open_jid", "") != jid:
+            return
+        try:
+            self._db_raw_history_offsets[jid] = int(raw_offset or 0)
+            fetched = list(db_msgs or [])
+            fetched.reverse()
+            current_records = (
+                current.get("messages", {}).get("messages", {}).get("records", [])
+            )
+            live_by_id = {}
+            live_without_id = []
+            for msg in current_records:
+                if not isinstance(msg, dict):
+                    continue
+                mid = str((msg.get("key") or {}).get("id") or "")
+                if mid:
+                    live_by_id[mid] = msg
+                else:
+                    live_without_id.append(msg)
+
+            merged = []
+            seen_ids = set()
+            for msg in fetched:
+                if not isinstance(msg, dict):
+                    continue
+                mid = str((msg.get("key") or {}).get("id") or "")
+                chosen = live_by_id.pop(mid, msg) if mid else msg
+                if mid:
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                merged.append(chosen)
+            for mid, msg in live_by_id.items():
+                if mid not in seen_ids:
+                    seen_ids.add(mid)
+                    merged.append(msg)
+            merged.extend(live_without_id)
+
+            db_ids = set(seen_ids)
+            for local_id, pending in list(self._outgoing_virtual_messages.items()):
+                pending_jid = str((pending.get("key") or {}).get("remoteJid") or "")
+                if pending_jid != jid:
+                    continue
+                real_id = str((pending.get("key") or {}).get("id") or "")
+                if real_id and real_id != local_id and real_id in db_ids:
+                    self._outgoing_virtual_messages.pop(local_id, None)
+                    self._media_upload_progress.pop(local_id, None)
+                    continue
+                if not any(
+                    isinstance(m, dict) and m.get("_local_id") == local_id
+                    for m in merged
+                ):
+                    merged.append(pending)
+
+            merged.sort(key=lambda m: self._extract_timestamp(m) or 0)
+            current.setdefault("messages", {})["messages"] = {
+                "total": max(int(total or 0), len(merged)),
+                "pages": 1,
+                "currentPage": 1,
+                "records": merged,
+            }
+            self.populate_messages(preserve_focus=True)
+            self._sync_pending_document_gauge()
+        except Exception as exc:
+            logging.error(
+                "[navigate_to_conversation] Failed to apply DB page for %s: %s",
+                jid, exc,
+            )
+
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
@@ -1213,51 +1333,9 @@ class ConversationsPanel(wx.Panel):
             self._search_field.SetValue("")
         self.conversation = conversation
         
-        # Load up to 200 messages from local DB when opening conversation to support fast startup
-        try:
-            _conv_jid = conversation.get("remoteJid", "")
-            if _conv_jid:
-                configured_limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
-                unread_count = int(conversation.get("unreadCount") or 0)
-                visible_limit = db_fetch_limit(configured_limit, unread_count)
-                db_msgs, raw_offset = self._read_db_visible_page(
-                    _conv_jid, visible_limit, offset=0
-                )
-                self._db_raw_history_offsets[_conv_jid] = raw_offset
-                db_msgs.reverse()
-                # SQLite cannot contain an attachment that is still uploading:
-                # it has only a local UUID until send-file returns. Merge the
-                # stable optimistic row back after every DB reload. Once the
-                # real message appears in SQLite, retire the optimistic copy.
-                db_ids = {
-                    str((m.get("key") or {}).get("id") or "")
-                    for m in db_msgs if isinstance(m, dict)
-                }
-                for local_id, pending in list(self._outgoing_virtual_messages.items()):
-                    pending_jid = str((pending.get("key") or {}).get("remoteJid") or "")
-                    if pending_jid != _conv_jid:
-                        continue
-                    real_id = str((pending.get("key") or {}).get("id") or "")
-                    if real_id and real_id != local_id and real_id in db_ids:
-                        self._outgoing_virtual_messages.pop(local_id, None)
-                        self._media_upload_progress.pop(local_id, None)
-                        continue
-                    if not any(m.get("_local_id") == local_id for m in db_msgs):
-                        db_msgs.append(pending)
-                db_msgs.sort(key=lambda m: self._extract_timestamp(m) or 0)
-                if "messages" not in conversation:
-                    conversation["messages"] = {}
-                conversation["messages"]["messages"] = {
-                    "total": self.main_window.db.get_message_count(_conv_jid),
-                    "pages": 1,
-                    "currentPage": 1,
-                    "records": db_msgs
-                }
-        except Exception as e:
-            logging.error(f"[navigate_to_conversation] Failed to load messages from DB: {e}")
-
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
+        self._queue_conversation_db_load(conversation, _conv_jid)
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
@@ -1345,8 +1423,13 @@ class ConversationsPanel(wx.Panel):
             ).start()
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
-        self.populate_messages()
-        self._sync_pending_document_gauge()
+        if _conv_jid:
+            self._all_sorted_messages = []
+            self._sorted_messages = []
+            self.messages_list.DeleteAllItems()
+        else:
+            self.populate_messages()
+            self._sync_pending_document_gauge()
 
         # Re-show audio controls only if the playing audio message is focused.
         if (self._current_audio_id is not None
@@ -1403,7 +1486,7 @@ class ConversationsPanel(wx.Panel):
         def _start_mark_as_read():
             threading.Thread(
                 target=self.main_window.mark_conversation_as_read,
-                args=(jid,),
+                args=(jid, True),
                 daemon=True,
             ).start()
         wx.CallAfter(_start_mark_as_read)
@@ -3185,6 +3268,14 @@ class ConversationsPanel(wx.Panel):
 
         menu = wx.Menu()
 
+        select_item = menu.Append(wx.ID_ANY, i18n.t("select_message"))
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, idx=index: self._on_menu_select_message(idx),
+            select_item,
+        )
+        menu.AppendSeparator()
+
         if getattr(self, "selected_messages", None):
             mass_menu = wx.Menu()
 
@@ -4027,8 +4118,11 @@ class ConversationsPanel(wx.Panel):
                 logging.info(f"[mention] get_group_info({jid}) attempt {attempt+1}/{max_retries} → {len(participants)} participants")
                 if participants:
                     my_jid = getattr(self.main_window, "my_jid", "") or ""
-                    # Build initial cache first so UI is populated instantly
+                    # Build the initial cache without spawning one HTTP thread
+                    # per unresolved LID. Resolve the unresolved participants in
+                    # one paced batch after the foreground sync is idle.
                     cache = []
+                    unresolved_lids = []
                     for p in participants:
                         if not isinstance(p, dict):
                             continue
@@ -4037,11 +4131,23 @@ class ConversationsPanel(wx.Panel):
                             continue
                         if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
                             continue  # skip self
-                        name = self._get_participant_name(p_jid, p)
+                        if (p_jid.endswith("@lid")
+                                and p_jid not in getattr(self.main_window, "_lid_to_phone", {})):
+                            unresolved_lids.append(p_jid)
+                        name = self._get_participant_name(
+                            p_jid, p, resolve_missing=False
+                        )
                         cache.append((name, p_jid))
                     cache.sort(key=lambda x: x[0].lower())
                     logging.info(f"[mention] cache built: {[n for n,_ in cache]}")
                     wx.CallAfter(self._set_group_participants_cache, cache)
+                    if unresolved_lids:
+                        threading.Thread(
+                            target=self._resolve_group_participant_batch_when_idle,
+                            args=(jid, list(dict.fromkeys(unresolved_lids))),
+                            daemon=True,
+                            name="group-participant-lids",
+                        ).start()
                     return
             except Exception as e:
                 logging.error(f"[mention] _fetch_group_participants error on attempt {attempt+1}: {e}", exc_info=True)
@@ -4049,6 +4155,30 @@ class ConversationsPanel(wx.Panel):
             if attempt < max_retries - 1:
                 logging.info(f"[mention] Empty participants response, retrying in {delay}s...")
                 time.sleep(delay)
+
+    def _resolve_group_participant_batch_when_idle(self, jid: str, lids: list[str]):
+        """Resolve one group's missing LIDs without competing with initial sync."""
+        while getattr(self.main_window, "_initial_sync_running", False):
+            if not self.conversation or self.conversation.get("remoteJid") != jid:
+                return
+            time.sleep(0.5)
+        if not self.conversation or self.conversation.get("remoteJid") != jid:
+            return
+        self.main_window.resolve_lid_jids_via_api(lids, yield_to_sync=True)
+        if not self.conversation or self.conversation.get("remoteJid") != jid:
+            return
+
+        def _refresh():
+            if not self.conversation or self.conversation.get("remoteJid") != jid:
+                return
+            refreshed = [
+                (self._get_participant_name(p_jid, resolve_missing=False), p_jid)
+                for _old_name, p_jid in self._group_participants_cache
+            ]
+            refreshed.sort(key=lambda x: x[0].lower())
+            self._set_group_participants_cache(refreshed)
+
+        wx.CallAfter(_refresh)
 
     def _set_group_participants_cache(self, cache: list):
         """Main-thread callback: store cache and refresh suggestions if active."""
@@ -4506,7 +4636,8 @@ class ConversationsPanel(wx.Panel):
         return result
 
     def _read_db_visible_page(self, remote_jid: str, visible_limit: int,
-                              offset: int = 0, exclude_ids=None):
+                              offset: int = 0, exclude_ids=None,
+                              priority_ui: bool = False):
         """Read raw SQLite chunks until one visible, new page is available.
 
         Returns ``(raw_records, next_raw_offset)``.  The offset deliberately
@@ -4519,9 +4650,15 @@ class ConversationsPanel(wx.Panel):
         seen = set(exclude_ids or ())
         visible_new = 0
         while visible_new < target:
-            batch = self.main_window.db.get_messages(
-                remote_jid, limit=chunk_size, offset=next_offset
-            )
+            db = self.main_window.db
+            if priority_ui and hasattr(db, "get_messages_async"):
+                batch = db.get_messages_async(
+                    remote_jid, limit=chunk_size, offset=next_offset
+                ).result(timeout=30)
+            else:
+                batch = db.get_messages(
+                    remote_jid, limit=chunk_size, offset=next_offset
+                )
             if not batch:
                 break
             raw_records.extend(batch)
@@ -4857,6 +4994,16 @@ class ConversationsPanel(wx.Panel):
             return False
         self.selected_messages.add(msg_id)
         return True
+
+    def _on_menu_select_message(self, idx: int) -> None:
+        """Select the focused message using the existing bulk-selection model."""
+        if self._select_message_at(idx):
+            msg_id = self._sorted_messages[idx].get("key", {}).get("id", "")
+            self._refresh_message_rows_by_ids([msg_id])
+            self.selection_sound.play()
+            self.main_window.output(
+                self.main_window.i18n.t("selected"), interrupt=True
+            )
 
     def _all_selectable_message_ids(self) -> list:
         return [
@@ -5576,8 +5723,26 @@ class ConversationsPanel(wx.Panel):
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
         mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
-        clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
-        guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
+        clean_mime = mimetype.split(";")[0].strip().lower() if mimetype else ""
+        # A few audio MIME aliases are either absent from Python's mimetypes
+        # table or map to a non-user-facing extension.  Resolve these before
+        # falling back to the platform table so Save As keeps the real format.
+        canonical_ext = {
+            "audio/m4a": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/mp4": ".m4a",
+            "audio/ogg": ".ogg",
+            "audio/x-ogg": ".ogg",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/aac": ".aac",
+            "audio/flac": ".flac",
+            "audio/x-flac": ".flac",
+            "audio/opus": ".opus",
+            "audio/webm": ".webm",
+            "audio/mpeg": ".mp3",
+        }.get(clean_mime, "")
+        guessed_ext = canonical_ext or (mimetypes.guess_extension(clean_mime) if clean_mime else "")
         if not guessed_ext and "/" in clean_mime:
             guessed_ext = f".{clean_mime.split('/')[-1]}"
 
@@ -5594,11 +5759,19 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
 
         if msg_type == "audioMessage" and is_ptt:
-            # Recorded voice messages: default to .ogg
-            default_file = f"{i18n.t('default_filename_voice_message')}_{time_str or msg_id}.ogg"
+            ext = guessed_ext or ".ogg"
+            default_file = f"{i18n.t('default_filename_voice_message')}_{time_str or msg_id}{ext}"
         elif file_name:
-            # Preserve original filename and extension
-            if "." in file_name and not file_name.endswith("."):
+            # WPPConnect's filenameFromMimeType() treats MIME as authoritative:
+            # if a supplied filename has a different extension, replace only
+            # the extension instead of mislabelling the original bytes.
+            current_root, current_ext = os.path.splitext(file_name)
+            if msg_type == "audioMessage" and guessed_ext:
+                if current_ext.lower() != guessed_ext.lower():
+                    default_file = f"{current_root or file_name}{guessed_ext}"
+                else:
+                    default_file = file_name
+            elif current_ext:
                 default_file = file_name
             elif guessed_ext:
                 default_file = f"{file_name}{guessed_ext}"
@@ -5614,7 +5787,7 @@ class ConversationsPanel(wx.Panel):
             ext = guessed_ext or ".mp4"
             default_file = f"{i18n.t('default_filename_video')}_{time_str or msg_id}{ext}"
         elif msg_type == "audioMessage":
-            ext = guessed_ext or ".mp3"
+            ext = guessed_ext or ""
             default_file = f"{i18n.t('default_filename_audio')}_{time_str or msg_id}{ext}"
         else:
             ext = guessed_ext or ".bin"
@@ -8395,6 +8568,35 @@ class ConversationsPanel(wx.Panel):
         return (inner.get("caption") or "").strip()
 
     def _on_menu_copy_message(self, msg: dict):
+        if self.selected_messages:
+            lines = []
+            for selected in self._sorted_messages:
+                if not isinstance(selected, dict) or self._is_separator(selected):
+                    continue
+                if selected.get("key", {}).get("id", "") not in self.selected_messages:
+                    continue
+                selected_type = selected.get("messageType", "")
+                selected_obj = selected.get("message") or {}
+                if selected_type == "conversation":
+                    selected_text = selected_obj.get("conversation", "")
+                elif selected_type == "extendedTextMessage":
+                    selected_text = (selected_obj.get("extendedTextMessage") or {}).get("text", "")
+                else:
+                    continue
+                if not selected_text:
+                    continue
+                stamp = datetime.fromtimestamp(
+                    self._extract_timestamp(selected)
+                ).strftime("%d/%m/%Y %H:%M")
+                lines.append(f"{stamp} - {self._sender_label(selected)}: {selected_text}")
+            if lines:
+                try:
+                    pyperclip.copy("\n".join(lines))
+                    self.main_window.output(self.main_window.i18n.t("msg_copied"))
+                except Exception:
+                    self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+                return
+
         msg_obj  = msg.get("message") or {}
         msg_type = msg.get("messageType", "")
         text = ""
@@ -8537,7 +8739,10 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
         self.message_field.SetFocus()
 
-    def _get_participant_name(self, participant_jid: str, msg: dict | None = None) -> str:
+    def _get_participant_name(
+        self, participant_jid: str, msg: dict | None = None,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return a display name for a group participant."""
         mw = self.main_window
         if mw._is_self_jid(participant_jid):
@@ -8623,6 +8828,14 @@ class ConversationsPanel(wx.Panel):
                     mw.register_jid_mapping(participant_jid, phone)
         if phone:
             return format_number(phone)
+        # During the foreground message sweep, never start extra participant
+        # lookups. Group metadata can expose dozens of LIDs at once; one thread
+        # per participant used to create a pn-lid storm that fought get-messages
+        # for the same Puppeteer page. _fetch_group_participants() batches those
+        # once the foreground sync is out of the way.
+        if not resolve_missing or getattr(mw, "_initial_sync_running", False):
+            return participant_jid.rsplit("@", 1)[0]
+
         # No phone mapping for this @lid yet. Unlike a group opened via
         # ConversationDataDialog (which proactively resolves every unmapped
         # participant's @lid before showing the list), a participant
@@ -8694,6 +8907,45 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
+        # The target may be older than the rendered page but still be present
+        # in the local database.  The old code incorrectly reported an error.
+        jid = (self.conversation or {}).get("remoteJid", "")
+        try:
+            quoted = self.main_window.db.get_message(jid, quoted_id)
+        except Exception:
+            logging.exception("[goto quoted] Database lookup failed")
+            quoted = None
+        if quoted:
+            records = (
+                (self.conversation.get("messages") or {}).get("messages") or {}
+            ).get("records") or []
+            records = self._deduplicate_messages(list(records) + [quoted])
+            records.sort(key=self._extract_timestamp)
+            self.conversation.setdefault("messages", {}).setdefault(
+                "messages", {}
+            )["records"] = records
+            self.populate_messages(preserve_focus=True)
+            for i, candidate in enumerate(self._sorted_messages):
+                if (
+                    not self._is_separator(candidate)
+                    and candidate.get("key", {}).get("id") == quoted_id
+                ):
+                    self.messages_list.Focus(i)
+                    self.messages_list.Select(i, True)
+                    self.messages_list.EnsureVisible(i)
+                    self.messages_list.SetFocus()
+                    return
+            # Pagination keeps the newest configured page.  An older quoted
+            # target can therefore still fall just outside it; expose that one
+            # row at the top without starting a server-side history request.
+            self._all_sorted_messages.insert(0, quoted)
+            self._sorted_messages.insert(0, quoted)
+            self.messages_list.InsertItem(0, self._render_message_line(quoted))
+            self.messages_list.Focus(0)
+            self.messages_list.Select(0, True)
+            self.messages_list.EnsureVisible(0)
+            self.messages_list.SetFocus()
+            return
         if self._goto_quoted_status(quoted_id, ctx):
             return
         self._show_quoted_not_found_error()
@@ -9441,9 +9693,12 @@ class ConversationsPanel(wx.Panel):
             i for i, m in enumerate(self._sorted_messages)
             if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids
         )
-        if not indices:
-            return
-        earliest = indices[0]
+        # Even when the row is not in the currently rendered page, keep
+        # removing it from the full in-memory state and SQLite. Phone-side
+        # reconciliation and a just-deleted row racing a refresh can both
+        # target an ID that is temporarily outside _sorted_messages; returning
+        # here used to leave the durable DB copy behind.
+        earliest = indices[0] if indices else -1
         _preserved_msg_id = self._focused_msg_id() if focus_previous else ""
         _preserved_idx = self.messages_list.GetFocusedItem() if focus_previous else -1
         _preserved_was_separator = (
@@ -9479,13 +9734,37 @@ class ConversationsPanel(wx.Panel):
                 m for m in records
                 if m.get("key", {}).get("id") not in msg_ids
             ]
-            for mid in msg_ids:
+            jid = self.conversation.get("remoteJid", "")
+            db = getattr(self.main_window, "db", None)
+            if jid and db is not None:
                 try:
-                    self.main_window.db.delete_message(
-                        self.conversation.get("remoteJid", ""), mid
-                    )
+                    submit_batch = getattr(db, "delete_messages_batch_async", None)
+                    if callable(submit_batch):
+                        fut = submit_batch(jid, set(msg_ids))
+
+                        def _delete_done(done):
+                            try:
+                                done.result()
+                            except Exception:
+                                logging.exception(
+                                    "[conversations] batch delete failed for %s", jid
+                                )
+
+                        fut.add_done_callback(_delete_done)
+                    else:
+                        # Compatibility path for old/test DB facades. Production
+                        # DatabaseBridge always takes the async batch branch, so
+                        # wx never waits here.
+                        delete_batch = getattr(db, "delete_messages_batch", None)
+                        if callable(delete_batch):
+                            threading.Thread(
+                                target=delete_batch, args=(jid, set(msg_ids)), daemon=True
+                            ).start()
+                        else:
+                            for mid in msg_ids:
+                                db.delete_message(jid, mid)
                 except Exception:
-                    logging.exception("[conversations] delete_message failed for %s", mid)
+                    logging.exception("[conversations] failed to queue batch delete for %s", jid)
 
             # The chat list's preview text and sort position both fall back to
             # chat["lastMessage"]/["t"] — without recomputing them here, a
@@ -9496,7 +9775,7 @@ class ConversationsPanel(wx.Panel):
                 self.main_window._recompute_chat_last_message(jid)
                 self.main_window._schedule_set_chats()
 
-        if focus_previous:
+        if focus_previous and indices:
             count = self.messages_list.GetItemCount()
             if count > 0:
                 new_focus = -1
@@ -11088,10 +11367,7 @@ class ConversationsPanel(wx.Panel):
         remote_jid = self.conversation.get("remoteJid", "")
         if not remote_jid:
             return
-        # Same reason as on_send_message(): a caption pasted from a rich
-        # source carries U+2028/U+2029, which look like nothing here and
-        # arrive as paragraph breaks on the recipient's side.
-        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
+        caption = self._consume_attachment_caption()
 
         _VTYPE = {
             "image":    "imageMessage",
@@ -11209,6 +11485,11 @@ class ConversationsPanel(wx.Panel):
 
     # ── Contact message helpers ──────────────────────────────────────────────
 
+    def _consume_attachment_caption(self) -> str:
+        """Return the staged caption and clear it for the next attachment."""
+        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
+        self._caption_field.Clear()
+        return caption
     def _location_maps_url(self, msg: dict) -> str | None:
         """Build an openable Google Maps URL from a locationMessage/
         liveLocationMessage's coordinates, or None if it carries none.

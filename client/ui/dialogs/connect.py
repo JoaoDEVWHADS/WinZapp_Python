@@ -601,19 +601,36 @@ class Connect:
             api_key = self.main_window.wpp_api_key
 
             def _generate_hash(raw: str) -> str:
-                """Call generate-token and return 'raw:hash'. Raises on failure."""
+                """Generate ``raw:hash`` without letting a cold Node API block pairing."""
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
-                res = api_post(url, timeout=10)
-                if res.status_code in (200, 201):
-                    hash_token = res.json().get("token") or ""
-                    if hash_token:
-                        return f"{raw}:{hash_token}"
-                    raise RuntimeError(
-                        f"generate-token returned empty hash (HTTP {res.status_code})"
-                    )
-                raise RuntimeError(
-                    f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
-                )
+                last_exc = None
+                for attempt, timeout in enumerate((3, 5), start=1):
+                    try:
+                        res = api_post(url, timeout=timeout)
+                        if res.status_code in (200, 201):
+                            hash_token = res.json().get("token") or ""
+                            if hash_token:
+                                return f"{raw}:{hash_token}"
+                    except Exception as exc:
+                        last_exc = exc
+                        logging.info(
+                            "[generate_hash] HTTP attempt %d failed (%s); "
+                            "using local-compatible fallback if needed.",
+                            attempt, exc,
+                        )
+
+                try:
+                    import hashlib
+                    import hmac
+                    hash_token = hmac.new(
+                        api_key.encode("utf-8"),
+                        raw.encode("utf-8"),
+                        hashlib.sha256,
+                    ).hexdigest()
+                    logging.info("[generate_hash] Generated local HMAC fallback.")
+                    return f"{raw}:{hash_token}"
+                except Exception as exc:
+                    raise last_exc or exc
 
             if _instance_exists:
                 # Re-generate hash if the stored token has no colon (legacy or corrupt).
