@@ -7816,7 +7816,7 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 selected = -1
             if selected == index:
-                self._update_media_transfer_gauge(progress)
+                self._sync_pending_document_gauge()
             else:
                 self._hide_media_transfer_gauge()
             # Also repaint the message row with a textual percentage. Native
@@ -7868,7 +7868,10 @@ class ConversationsPanel(wx.Panel):
             return
         local_id = target.get("_local_id", "")
         progress = self._media_upload_progress.get(local_id, 0.0)
-        self._update_media_transfer_gauge(progress)
+        if progress < 1.0:
+            self._update_media_transfer_gauge(progress)
+        else:
+            self._hide_media_transfer_gauge()
 
     def _sync_media_action_slot_visibility(self):
         """Remove the complete action row whenever none of its children show."""
