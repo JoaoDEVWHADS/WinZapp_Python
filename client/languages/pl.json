@@ -213,6 +213,8 @@
     "reply_message": "Odpowiedz",
     "copy_message_text": "Kopiuj",
     "copy_file": "Kopiuj plik",
+    "select_message": "Zaznacz wiadomość",
+    "unselect_message": "Odznacz wiadomość",
     "delete_message": "Usuń wiadomość",
     "delete_messages_bulk_title": "Usuń zaznaczone wiadomości",
     "forward_message": "Przekaż dalej",

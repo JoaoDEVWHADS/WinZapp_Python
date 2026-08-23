@@ -3154,6 +3154,18 @@ class ConversationsPanel(wx.Panel):
 
         menu.AppendSeparator()
 
+        # Select / Unselect message (Ctrl+Space) — mirrors the label to
+        # whether msg is already in self.selected_messages, same toggle
+        # _toggle_message_selection() applies for the Ctrl+Space shortcut.
+        is_selected = msg_id in self.selected_messages
+        select_label = i18n.t("unselect_message") if is_selected else i18n.t("select_message")
+        select_item = menu.Append(wx.ID_ANY, f"{select_label}\tCtrl+Space")
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, m=msg: self._toggle_message_selection(m),
+            select_item,
+        )
+
         # Delete message — Delete key
         del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_message')}\tDelete")
         self.Bind(
@@ -4510,6 +4522,26 @@ class ConversationsPanel(wx.Panel):
 
     # ── Selection helpers (messages list) ───────────────────────────────────
 
+    def _toggle_message_selection(self, msg: dict) -> None:
+        """Toggle *msg*'s membership in self.selected_messages, refresh its
+        row, and play/announce the change. Shared by Ctrl+Space
+        (_on_messages_list_key_down) and the "Selecionar mensagem"/
+        "Desselecionar mensagem" context menu item."""
+        if self._is_separator(msg):
+            return
+        msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id:
+            return
+        if msg_id in self.selected_messages:
+            self.selected_messages.remove(msg_id)
+            self._refresh_message_rows_by_ids([msg_id])
+            self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+        else:
+            self.selected_messages.add(msg_id)
+            self._refresh_message_rows_by_ids([msg_id])
+            self.selection_sound.play()
+            self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+
     def _select_message_at(self, idx: int) -> bool:
         """Add the message at *idx* to self.selected_messages, if it's a real
         (non-separator) message with an id. Returns whether it was added."""
@@ -4667,19 +4699,7 @@ class ConversationsPanel(wx.Panel):
 
         if ctrl and not shift and key == wx.WXK_SPACE:
             if idx >= 0 and idx < len(self._sorted_messages):
-                msg = self._sorted_messages[idx]
-                if not self._is_separator(msg):
-                    msg_id = msg.get("key", {}).get("id", "")
-                    if msg_id:
-                        if msg_id in self.selected_messages:
-                            self.selected_messages.remove(msg_id)
-                            self._refresh_message_rows_by_ids([msg_id])
-                            self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
-                        else:
-                            self.selected_messages.add(msg_id)
-                            self._refresh_message_rows_by_ids([msg_id])
-                            self.selection_sound.play()
-                            self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                self._toggle_message_selection(self._sorted_messages[idx])
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
             if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:

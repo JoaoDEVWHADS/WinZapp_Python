@@ -213,6 +213,8 @@
     "reply_message": "Responder",
     "copy_message_text": "Copiar",
     "copy_file": "Copiar archivo",
+    "select_message": "Seleccionar mensaje",
+    "unselect_message": "Deseleccionar mensaje",
     "delete_message": "Eliminar mensaje",
     "delete_messages_bulk_title": "Eliminar mensajes seleccionados",
     "forward_message": "Reenviar",

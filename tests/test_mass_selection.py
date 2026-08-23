@@ -164,6 +164,7 @@ class _Panel:
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)
 
     _select_message_at = ConversationsPanel._select_message_at
+    _toggle_message_selection = ConversationsPanel._toggle_message_selection
     _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
     _select_chat_at = ConversationsPanel._select_chat_at
     _all_chat_jids = ConversationsPanel._all_chat_jids
@@ -485,6 +486,33 @@ class TestCtrlSpaceInTheMessagesList:
         panel._on_messages_list_key_down(_ctrl_shift_space())
         assert panel.selected_messages == set()
         assert panel.main_window.announced == ["all_selected", "all_unselected"]
+
+
+class TestToggleMessageSelection:
+    """_toggle_message_selection() is the shared logic behind both Ctrl+Space
+    and the "Selecionar mensagem"/"Desselecionar mensagem" context menu item
+    — this exercises it directly, the way the menu item's handler calls it."""
+
+    def test_selects_an_unselected_message(self):
+        panel = _Panel(messages=[_msg("m1")])
+        panel._toggle_message_selection(panel._sorted_messages[0])
+        assert panel.selected_messages == {"m1"}
+        assert panel.main_window.announced == ["selected"]
+        assert panel.selection_sound.plays == 1
+
+    def test_unselects_an_already_selected_message(self):
+        panel = _Panel(messages=[_msg("m1")])
+        panel.selected_messages = {"m1"}
+        panel._toggle_message_selection(panel._sorted_messages[0])
+        assert panel.selected_messages == set()
+        assert panel.main_window.announced == ["unselected"]
+        assert panel.selection_sound.plays == 0
+
+    def test_a_sentinel_row_is_a_no_op(self):
+        panel = _Panel(messages=[SEPARATOR])
+        panel._toggle_message_selection(panel._sorted_messages[0])
+        assert panel.selected_messages == set()
+        assert panel.main_window.announced == []
 
 
 @pytest.fixture
