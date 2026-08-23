@@ -2226,6 +2226,25 @@ export async function getMessages(req: Request, res: Response) {
             // ending at "now", and the final page can overshoot.
             result = result.slice(result.length - targetCount);
           }
+
+          // Proactive On-Demand Sync: If the chat currently holds fewer messages
+          // than targetCount in local IndexedDB, automatically ask the primary phone
+          // for the older history chunk so the full 200 messages arrive without waiting.
+          if (result.length < targetCount && result.length > 0) {
+            try {
+              const req_ = (window as any).require;
+              const sender = req_?.('WAWebSendNonMessageDataRequest');
+              const wid = (window as any).WPP?.whatsapp?.WidFactory?.createWid?.(targetChatId);
+              let chatModel = req_?.('WAWebCollections')?.Chat?.get?.(wid);
+              if (sender?.sendPeerDataOperationRequest && chatModel?.id) {
+                sender.sendPeerDataOperationRequest(3, { chatId: chatModel.id }).catch(() => {});
+                console.log(`[browser-evaluate] Proactively requested older history from phone for ${targetChatId}`);
+              }
+            } catch (e) {
+              // Ignore background trigger failures
+            }
+          }
+
           console.log(
             `[browser-evaluate] getMessages ${chatId}: ${result.length} msg(s) after ${pages} extra page(s)`
           );
