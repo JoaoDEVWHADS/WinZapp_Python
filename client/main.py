@@ -2625,6 +2625,49 @@ class MainWindow(wx.Frame):
         """
         return bool(self.settings.get("general", {}).get("announce_sync_events", True))
 
+    def _announce_sync_complete(self, run_id=None):
+        """Emit the sync-complete sound and TTS once for one successful run."""
+        if run_id is not None and run_id != getattr(self, "_sync_run_id", run_id):
+            logging.info(
+                "[sync-announce] Ignoring stale completion callback for run %s "
+                "(current=%s).", run_id, getattr(self, "_sync_run_id", None))
+            return
+        if run_id is not None and getattr(
+                self, "_sync_completion_announced_run_id", None) == run_id:
+            return
+
+        try:
+            self._set_status("")
+        except Exception:
+            logging.exception("[sync-announce] Failed to clear sync status text")
+        if not self._announce_sync_events_enabled():
+            logging.info("[sync-announce] Completion announcements disabled by settings.")
+            return
+
+        if run_id is not None:
+            self._sync_completion_announced_run_id = run_id
+
+        sound_ok = True
+        try:
+            self.sync_complete_sound.play()
+        except Exception:
+            sound_ok = False
+            logging.exception("[sync-announce] Sync-complete sound failed")
+
+        tts_ok = None
+        if not self.background_mode:
+            try:
+                self.output(self.i18n.t("sync_complete"), interrupt=True)
+                tts_ok = True
+            except Exception:
+                tts_ok = False
+                logging.exception("[sync-announce] Sync-complete TTS failed")
+
+        logging.info(
+            "[sync-announce] Completion announced for run %s "
+            "(sound_ok=%s, tts=%s, background=%s).",
+            run_id, sound_ok, tts_ok, self.background_mode)
+
     def _search_normalization_mode(self) -> str:
         """Settings > Geral > "Normalização Unicode nas pesquisas": one of
         "off" (default), "nfd" or "nfkd" — see normalize_for_search().
@@ -17497,7 +17540,10 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[history] Could not persist older_history_requested: %s", exc)
 
-    def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
+    def fetch_older_messages(
+        self, remote_jid, oldest_msg, store_only: bool = False,
+        allow_phone_request: bool = True,
+    ):
         """Fetch older messages from server starting before the oldest_msg.
 
         `store_only` writes the page to SQLite without growing the chat's
@@ -17610,6 +17656,13 @@ class MainWindow(wx.Frame):
                 # it must not do is leave the chat in _exhausted_chats, or the
                 # early-return at the top of this method would refuse to look
                 # again even after the messages have landed.
+                if not wpp_messages and not allow_phone_request:
+                    logging.info(
+                        "[fetch_older_messages] No local history left for %s; "
+                        "background repair will not request history from the phone.",
+                        remote_jid,
+                    )
+                    return None
                 if not wpp_messages:
                     if not hasattr(self, "_exhausted_chats"):
                         self._exhausted_chats = set()
