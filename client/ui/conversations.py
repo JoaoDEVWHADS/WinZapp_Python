@@ -300,6 +300,11 @@ class ConversationsPanel(wx.Panel):
         # has no real WhatsApp id (and therefore no DB row) until it finishes.
         # Keep those rows independently so switching chats cannot erase them.
         self._outgoing_virtual_messages: dict = {}
+        # SQLite paginates raw WhatsApp records, while this panel displays only
+        # user-visible messages. Keep the raw cursor independently per chat;
+        # using len(_all_sorted_messages) as OFFSET repeats/skips pages whenever
+        # reactions, albums and protocol notifications are filtered out.
+        self._db_raw_history_offsets: dict = {}
 
         # ── Unread separator ────────────────────────────────────────────────
         # Index in _sorted_messages of the unread-separator sentinel, or -1
@@ -1214,14 +1219,11 @@ class ConversationsPanel(wx.Panel):
             if _conv_jid:
                 configured_limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
                 unread_count = int(conversation.get("unreadCount") or 0)
-                limit = db_fetch_limit(configured_limit, unread_count)
-                # Keep the configured limit as a visible-row limit. Private
-                # chats also store non-displayable WhatsApp events (ciphertext,
-                # reactions, pin updates), so read a raw margin and let
-                # populate_messages() filter first and paginate afterwards.
-                if not _conv_jid.endswith("@g.us"):
-                    limit += 50
-                db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)
+                visible_limit = db_fetch_limit(configured_limit, unread_count)
+                db_msgs, raw_offset = self._read_db_visible_page(
+                    _conv_jid, visible_limit, offset=0
+                )
+                self._db_raw_history_offsets[_conv_jid] = raw_offset
                 db_msgs.reverse()
                 # SQLite cannot contain an attachment that is still uploading:
                 # it has only a local UUID until send-file returns. Merge the
@@ -4503,6 +4505,40 @@ class ConversationsPanel(wx.Panel):
         result.reverse()
         return result
 
+    def _read_db_visible_page(self, remote_jid: str, visible_limit: int,
+                              offset: int = 0, exclude_ids=None):
+        """Read raw SQLite chunks until one visible, new page is available.
+
+        Returns ``(raw_records, next_raw_offset)``.  The offset deliberately
+        counts every database row, including records the UI filters out.
+        """
+        target = max(1, int(visible_limit))
+        chunk_size = max(200, target)
+        raw_records = []
+        next_offset = max(0, int(offset))
+        seen = set(exclude_ids or ())
+        visible_new = 0
+        while visible_new < target:
+            batch = self.main_window.db.get_messages(
+                remote_jid, limit=chunk_size, offset=next_offset
+            )
+            if not batch:
+                break
+            raw_records.extend(batch)
+            next_offset += len(batch)
+            for msg in batch:
+                if not self._is_displayable_message(msg):
+                    continue
+                msg_id = str((msg.get("key") or {}).get("id") or "")
+                if msg_id and msg_id in seen:
+                    continue
+                if msg_id:
+                    seen.add(msg_id)
+                visible_new += 1
+            if len(batch) < chunk_size:
+                break
+        return raw_records, next_offset
+
     def _load_older_messages(self):
         """Load older messages from the local database, or fall back to the server if none remain locally."""
         if not self.conversation or not self._all_sorted_messages:
@@ -4515,12 +4551,28 @@ class ConversationsPanel(wx.Panel):
             limit = int(
                 self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
             )
-            # Count separator objects to get the actual database message count currently in memory.
-            loaded_db_count = sum(1 for m in self._all_sorted_messages if not self._is_separator(m))
-            logging.info(f"[_load_older_messages] Querying local DB for {remote_jid} with count={loaded_db_count}")
-            
-            # Fetch from local DB
-            local_msgs = self.main_window.db.get_messages(remote_jid, limit=limit, offset=loaded_db_count)
+            known_ids = {
+                str((m.get("key") or {}).get("id") or "")
+                for m in self._all_sorted_messages
+                if isinstance(m, dict) and not self._is_separator(m)
+            }
+            raw_offset = self._db_raw_history_offsets.get(remote_jid)
+            if raw_offset is None:
+                # Compatibility fallback for a panel created before this cursor
+                # existed. A fresh navigation always initializes it precisely.
+                raw_offset = sum(
+                    1 for m in self._all_sorted_messages
+                    if not self._is_separator(m)
+                )
+            logging.info(
+                "[_load_older_messages] Querying local DB for %s with raw offset=%d",
+                remote_jid, raw_offset,
+            )
+
+            local_msgs, next_raw_offset = self._read_db_visible_page(
+                remote_jid, limit, offset=raw_offset, exclude_ids=known_ids
+            )
+            self._db_raw_history_offsets[remote_jid] = next_raw_offset
             logging.info(f"[_load_older_messages] Local DB returned {len(local_msgs) if local_msgs else 0} messages")
             
             if local_msgs:
@@ -4612,6 +4664,20 @@ class ConversationsPanel(wx.Panel):
                 logging.info(f"[_load_older_messages_from_server thread] Launching fetch_older_messages for {phone_jid_val}")
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
                 logging.info(f"[_load_older_messages_from_server thread] fetch_older_messages returned {len(fetched) if fetched is not None else 'None'}")
+                if fetched is None:
+                    fetched = self.main_window.wait_for_older_messages(
+                        phone_jid_val,
+                        oldest_msg,
+                        should_continue=lambda: bool(
+                            self.conversation
+                            and self.conversation.get("remoteJid") == phone_jid_val
+                        ),
+                    )
+                    logging.info(
+                        "[_load_older_messages_from_server thread] "
+                        "wait_for_older_messages returned %s",
+                        len(fetched) if fetched is not None else "None",
+                    )
                 if fetched is not None:
                     if fetched:
                         wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)

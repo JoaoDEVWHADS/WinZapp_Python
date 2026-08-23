@@ -17780,6 +17780,64 @@ class MainWindow(wx.Frame):
             logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
             return None
 
+    def wait_for_older_messages(
+        self, remote_jid, oldest_msg, timeout: float = 300.0,
+        poll_interval: float = 2.0, retry_request_every: float = 10.0,
+        should_continue=None,
+    ):
+        """Wait for interactive phone history to materialise in the web store."""
+        jid = self._normalize_jid(remote_jid)
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        delay = max(0.5, float(poll_interval))
+        retry_delay = max(delay, float(retry_request_every))
+        next_interactive_retry = time.monotonic() + retry_delay
+        logging.info(
+            "[history-scroll] Waiting up to %.0fs for phone history for %s.",
+            timeout, jid,
+        )
+        while time.monotonic() < deadline:
+            if callable(should_continue):
+                try:
+                    if not should_continue():
+                        logging.info(
+                            "[history-scroll] Cancelled wait for %s because the "
+                            "conversation is no longer active.", jid,
+                        )
+                        return None
+                except Exception:
+                    return None
+            if not getattr(self, "_wa_connected", False) or getattr(
+                self, "offline_mode", False
+            ):
+                return None
+            time.sleep(delay)
+            page = self.fetch_older_messages(
+                jid, oldest_msg, store_only=False, allow_phone_request=False
+            )
+            if page is not None:
+                logging.info(
+                    "[history-scroll] Phone history became available for %s "
+                    "(%d message(s)).", jid, len(page),
+                )
+                return page
+            now = time.monotonic()
+            if now >= next_interactive_retry:
+                next_interactive_retry = now + retry_delay
+                page = self.fetch_older_messages(
+                    jid, oldest_msg, store_only=False, allow_phone_request=True
+                )
+                if page is not None:
+                    logging.info(
+                        "[history-scroll] Interactive retry produced history for "
+                        "%s (%d message(s)).", jid, len(page),
+                    )
+                    return page
+        logging.warning(
+            "[history-scroll] Timed out waiting for phone history for %s; "
+            "the chat remains re-queryable.", jid,
+        )
+        return None
+
     def save_audio_locally(self, msg, audio_content):
         """Encrypt and write a voice message to disk. Returns whether it worked."""
         voice_messages_dir = data_path("voice_messages")
