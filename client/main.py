@@ -1121,6 +1121,21 @@ class MainWindow(wx.Frame):
         # on every other route). False means "the local API is up but WhatsApp
         # is not connected" — the state the app used to mistake for online.
         self._wa_connected = False
+        # Timestamp of the most recent WPPConnect Socket.IO event that could
+        # only have been emitted by a genuinely live WhatsApp session (a new
+        # message, an ack, a chats/presence update — see
+        # _note_live_wpp_event() and check_whatsapp_reachable()). WinZapp's
+        # Socket.IO client talks to the LOCAL WPPConnect server over
+        # loopback, which stays up regardless of the machine's own internet
+        # route — so these events keep flowing even while an unrelated
+        # network-path issue (a switched Wi-Fi/mobile connection, a stale
+        # negative DNS cache entry) makes the app's own outbound reachability
+        # probe fail. Reported live: messages kept arriving in an open group
+        # (sound and all) for several minutes while the app insisted it was
+        # offline, because check_whatsapp_reachable() trusted only that
+        # separate probe and never considered the traffic it was watching
+        # arrive in real time as proof of connectivity.
+        self._last_live_wpp_event_ts = 0.0
         # Set once the first real WhatsApp connection of this session is
         # confirmed, so the "connected" sound plays on connection to WhatsApp
         # and not merely on connection to the local API.
@@ -8472,6 +8487,24 @@ class MainWindow(wx.Frame):
         finally:
             self._restarting_wpp_session = False
 
+    # A live WPPConnect Socket.IO event this recent is treated as direct
+    # proof of connectivity — see _note_live_wpp_event() and the top of
+    # check_whatsapp_reachable(). Set well above the ~15-20s cadence
+    # chats-update/presence events already show on an active account, so a
+    # single missed tick can't cause a false "still online" reading right as
+    # a real outage begins.
+    _LIVE_WPP_EVENT_FRESHNESS_SECONDS = 45.0
+
+    def _note_live_wpp_event(self):
+        """Record that a WPPConnect Socket.IO event was just received.
+
+        Called by WebSocketClient for events that could only have been
+        emitted by a genuinely live, connected WhatsApp session (new
+        messages, delivery acks, chats/presence updates). Safe to call from
+        any thread — a plain float write.
+        """
+        self._last_live_wpp_event_ts = time.time()
+
     def check_whatsapp_reachable(self) -> bool:
         """Decide whether WhatsApp traffic can actually flow right now.
 
@@ -8481,8 +8514,21 @@ class MainWindow(wx.Frame):
         the app used to announce itself connected, start a sync and fire the
         send queue with no internet at all.
 
-        Two sources are combined:
+        Three sources are combined, checked in order of directness:
 
+        * A WPPConnect Socket.IO event received within the last
+          _LIVE_WPP_EVENT_FRESHNESS_SECONDS — undeniable proof traffic is
+          flowing right now, checked first and short-circuits everything
+          else. WinZapp's Socket.IO client talks to the LOCAL WPPConnect
+          server over loopback, which stays up regardless of the machine's
+          own internet route, so it keeps delivering events even when the
+          probe below is the one that's actually broken (observed live: a
+          switched Wi-Fi/mobile network left this machine's own outbound
+          reachability check failing — the classic symptom of a stale
+          negative DNS cache entry surviving a network change — for several
+          minutes while messages kept arriving, sound and all, in an open
+          group the whole time; the app insisted it was offline throughout
+          because this signal didn't exist yet).
         * ``/check-connection-session``, which reports the session as
           Disconnected when WhatsApp Web itself has gone down inside the
           browser.  (It only reports a failure when the underlying call
@@ -8494,6 +8540,10 @@ class MainWindow(wx.Frame):
         before they count — see the session-probe branch below for why the
         first one is not proof of anything.
         """
+        last_live = getattr(self, "_last_live_wpp_event_ts", 0.0)
+        if last_live and (time.time() - last_live) < self._LIVE_WPP_EVENT_FRESHNESS_SECONDS:
+            self._offline_probe_strikes = 0
+            return True
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/check-connection-session"
         session_down = False
         try:
