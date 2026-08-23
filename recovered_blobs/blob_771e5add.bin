@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.23.1053"
+=======
+__version__ = "2026.08.23.0850"
+>>>>>>> b03e2016 (fix(sync): wait for confirmed phone history completion)
