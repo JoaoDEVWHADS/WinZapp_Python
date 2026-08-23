@@ -24,7 +24,7 @@ from sound_lib.effects import Tempo
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
-from core.audio_transcode import transcode_m4a_to_wav
+from core.audio_transcode import transcode_audio_to_wav
 from core.sound_system import load_sound
 from ui.accessible import (
     AccessibleSearchConversations,
@@ -5442,7 +5442,7 @@ class ConversationsPanel(wx.Panel):
             tmp.close()
             self._audio_temp_file = tmp.name
             if actual_ext == ".m4a":
-                wav_path = transcode_m4a_to_wav(
+                wav_path = transcode_audio_to_wav(
                     self.main_window._find_api_ffmpeg(),
                     self._audio_temp_file,
                 )
@@ -5483,9 +5483,35 @@ class ConversationsPanel(wx.Panel):
         try:
             self._audio_stream, self._audio_tempo_ctrl = _open_stream()
         except Exception as e:
-            logging.exception(f"[UI Audio Playback] Error creating stream: {e}")
-            self._stop_audio()
-            return
+            # Both the decode+Tempo stream and the plain direct stream failed
+            # (_open_stream()'s own fallback) — e.g. an OGG whose codec isn't
+            # Opus, or whose bassopus.dll plugin failed to register, which
+            # BASS rejects for both attempts with error 41 "unsupported file
+            # format". Re-encode through ffmpeg to PCM WAV, which sidesteps
+            # BASS's codec support entirely, and retry once from that file
+            # rather than giving up on the message.
+            logging.info(
+                "[UI Audio Playback] Direct stream also failed (%s); "
+                "trying ffmpeg WAV fallback for %s", e, self._audio_temp_file,
+            )
+            wav_path = transcode_audio_to_wav(
+                self.main_window._find_api_ffmpeg(),
+                self._audio_temp_file,
+            )
+            if wav_path is None:
+                logging.exception(f"[UI Audio Playback] Error creating stream: {e}")
+                self._stop_audio()
+                return
+            os.unlink(self._audio_temp_file)
+            self._audio_temp_file = wav_path
+            try:
+                self._audio_stream, self._audio_tempo_ctrl = _open_stream()
+            except Exception as e2:
+                logging.exception(
+                    f"[UI Audio Playback] Error creating stream from converted WAV: {e2}"
+                )
+                self._stop_audio()
+                return
 
         # ── Start playback ───────────────────────────────────────────────────
         # When Tempo FX is active the decode stream has no audio output of its
