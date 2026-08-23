@@ -19,6 +19,7 @@ attributes they touch — same approach as tests/test_message_bookmarks.py.
 
 import os
 import threading
+from datetime import datetime
 
 import pytest
 import wx
@@ -170,6 +171,13 @@ class _Panel:
     _all_chat_jids = ConversationsPanel._all_chat_jids
     _refresh_message_rows_by_ids = ConversationsPanel._refresh_message_rows_by_ids
     _render_message_line = lambda self, msg, index=None, total=None: msg.get("key", {}).get("id", "")
+    _extract_timestamp = ConversationsPanel._extract_timestamp
+
+    def _sender_label(self, msg):
+        """Fake — the real one resolves contact names via lid/phone caches
+        and group participant lookups, well beyond what _on_mass_copy_messages
+        itself needs to be tested."""
+        return "Eu" if msg.get("key", {}).get("fromMe") else "Gabriel Haberkamp"
 
     def __init__(self, chats=(), messages=(), focused=-1):
         self.main_window = _FakeMainWindow()
@@ -234,16 +242,21 @@ def _saveable_msg(msg_id, jid="grupo@g.us", msg_type="documentMessage"):
     return {"key": {"id": msg_id, "remoteJid": jid}, "message": {}, "messageType": msg_type}
 
 
-def _text_msg(msg_id, text="hello", jid="grupo@g.us", extended=False):
+def _text_msg(msg_id, text="hello", jid="grupo@g.us", extended=False, from_me=False, ts=None):
+    key = {"id": msg_id, "remoteJid": jid, "fromMe": from_me}
     if extended:
-        return {
-            "key": {"id": msg_id, "remoteJid": jid}, "messageType": "extendedTextMessage",
+        msg = {
+            "key": key, "messageType": "extendedTextMessage",
             "message": {"extendedTextMessage": {"text": text}},
         }
-    return {
-        "key": {"id": msg_id, "remoteJid": jid}, "messageType": "conversation",
-        "message": {"conversation": text},
-    }
+    else:
+        msg = {
+            "key": key, "messageType": "conversation",
+            "message": {"conversation": text},
+        }
+    if ts is not None:
+        msg["messageTimestamp"] = ts
+    return msg
 
 
 SEPARATOR = {"_type": "unread_separator", "count": 3}
@@ -987,29 +1000,82 @@ def fake_clipboard(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def fixed_datetime_format(monkeypatch):
+    """Pins core.locale_format.get_datetime_format() (which otherwise reads
+    the real machine's Windows regional settings) to a fixed pattern, so
+    _on_mass_copy_messages's output doesn't depend on the test runner's
+    locale."""
+    monkeypatch.setattr(
+        "ui.conversations.get_datetime_format", lambda fallback: "%d/%m/%Y %H:%M"
+    )
+
+
+def _expected_line(ts, sender, text):
+    stamp = datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M")
+    return f"{stamp} - {sender}: {text}"
+
+
 class TestMassCopyMessages:
-    def test_joins_selected_text_messages_one_per_line(self, fake_clipboard):
-        msgs = [_text_msg("m1", "primeira"), _text_msg("m2", "segunda", extended=True)]
+    def test_formats_date_sender_and_text_whatsapp_export_style(self, fake_clipboard, fixed_datetime_format):
+        ts = 1755972565  # 2025-08-23 18:29 local
+        msgs = [_text_msg("m1", "Isso eu acho que nem no oficial tem", ts=ts, from_me=False)]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == [
+            _expected_line(ts, "Gabriel Haberkamp", "Isso eu acho que nem no oficial tem")
+        ]
+
+    def test_own_messages_use_the_self_reference_label(self, fake_clipboard, fixed_datetime_format):
+        ts = 1755972625
+        msgs = [_text_msg("m1", "ouch, eu ja tinha feito isso", ts=ts, from_me=True)]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == [_expected_line(ts, "Eu", "ouch, eu ja tinha feito isso")]
+
+    def test_joins_selected_text_messages_one_per_line(self, fake_clipboard, fixed_datetime_format):
+        msgs = [
+            _text_msg("m1", "primeira", ts=1755972565),
+            _text_msg("m2", "segunda", extended=True, ts=1755972625),
+        ]
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_copy_messages(None)
-        assert fake_clipboard == ["primeira\nsegunda"]
+        expected = "\n".join([
+            _expected_line(1755972565, "Gabriel Haberkamp", "primeira"),
+            _expected_line(1755972625, "Gabriel Haberkamp", "segunda"),
+        ])
+        assert fake_clipboard == [expected]
         assert panel.main_window.announced == ["messages_copied_bulk"]
         assert panel.selected_messages == set()
 
-    def test_keeps_list_order_not_set_order(self, fake_clipboard):
-        msgs = [_text_msg(f"m{i}", f"text{i}") for i in range(5)]
+    def test_a_message_with_no_timestamp_omits_the_date_time_prefix(self, fake_clipboard, fixed_datetime_format):
+        msgs = [_text_msg("m1", "sem horário")]  # ts=None
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == ["Gabriel Haberkamp: sem horário"]
+
+    def test_keeps_list_order_not_set_order(self, fake_clipboard, fixed_datetime_format):
+        msgs = [_text_msg(f"m{i}", f"text{i}", ts=1755972565 + i) for i in range(5)]
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m4", "m0", "m2"}
         panel._on_mass_copy_messages(None)
-        assert fake_clipboard == ["text0\ntext2\ntext4"]
+        expected = "\n".join([
+            _expected_line(1755972565, "Gabriel Haberkamp", "text0"),
+            _expected_line(1755972567, "Gabriel Haberkamp", "text2"),
+            _expected_line(1755972569, "Gabriel Haberkamp", "text4"),
+        ])
+        assert fake_clipboard == [expected]
 
-    def test_skips_non_text_message_types(self, fake_clipboard):
-        msgs = [_text_msg("m1", "only this"), _saveable_msg("m2"), SEPARATOR]
+    def test_skips_non_text_message_types(self, fake_clipboard, fixed_datetime_format):
+        msgs = [_text_msg("m1", "only this", ts=1755972565), _saveable_msg("m2"), SEPARATOR]
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_copy_messages(None)
-        assert fake_clipboard == ["only this"]
+        assert fake_clipboard == [_expected_line(1755972565, "Gabriel Haberkamp", "only this")]
 
     def test_nothing_copyable_announces_and_touches_no_clipboard(self, fake_clipboard):
         panel = _Panel(messages=[_saveable_msg("m1")])
@@ -1020,12 +1086,16 @@ class TestMassCopyMessages:
         # Nothing copyable is left as-is, not silently cleared.
         assert panel.selected_messages == {"m1"}
 
-    def test_ctrl_c_copies_the_whole_selection_when_bulk_shortcuts_enabled(self, fake_clipboard):
-        msgs = [_text_msg("m1", "a"), _text_msg("m2", "b")]
+    def test_ctrl_c_copies_the_whole_selection_when_bulk_shortcuts_enabled(self, fake_clipboard, fixed_datetime_format):
+        msgs = [_text_msg("m1", "a", ts=1755972565), _text_msg("m2", "b", ts=1755972566)]
         panel = _Panel(messages=msgs, focused=0)
         panel.selected_messages = {"m1", "m2"}
         panel._on_accel_copy_message(_FakeEvent(ord("C"), ctrl=True))
-        assert fake_clipboard == ["a\nb"]
+        expected = "\n".join([
+            _expected_line(1755972565, "Gabriel Haberkamp", "a"),
+            _expected_line(1755972566, "Gabriel Haberkamp", "b"),
+        ])
+        assert fake_clipboard == [expected]
 
     def test_ctrl_c_copies_only_the_focused_message_when_bulk_shortcuts_disabled(self, fake_clipboard):
         panel = _Panel(messages=[_text_msg("m1", "a"), _text_msg("m2", "b")], focused=1)

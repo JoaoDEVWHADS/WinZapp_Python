@@ -11247,15 +11247,20 @@ class ConversationsPanel(wx.Panel):
 
     def _on_mass_copy_messages(self, event):
         """Copy every selected plain-text message to the clipboard as one
-        block of text, one message per line — other message types (media,
-        location, contact cards, ...) are silently skipped, same as how
-        _on_menu_copy_message only ever handles "conversation"/
-        "extendedTextMessage". Order follows _sorted_messages, not set
-        iteration order, same as the other mass message actions."""
+        WhatsApp-export-style block of text, one line per message formatted
+        "<date> <time> - <sender>: <text>" — the date/time pattern follows
+        the user's Windows regional format (core.locale_format) with a
+        fallback to the active language's own datetime_fmt, same as every
+        other timestamp _format_date() renders elsewhere in this panel.
+        Other message types (media, location, contact cards, ...) are
+        silently skipped, same as how _on_menu_copy_message only ever
+        handles "conversation"/"extendedTextMessage". Order follows
+        _sorted_messages, not set iteration order, same as the other mass
+        message actions."""
         if not self.selected_messages: return
         i18n = self.main_window.i18n
         _TEXT_TYPES = ("conversation", "extendedTextMessage")
-        texts = []
+        lines = []
         for m in self._sorted_messages:
             if self._is_separator(m) or m.get("key", {}).get("id") not in self.selected_messages:
                 continue
@@ -11267,15 +11272,24 @@ class ConversationsPanel(wx.Panel):
                 msg_obj.get("conversation", "") if msg_type == "conversation"
                 else (msg_obj.get("extendedTextMessage") or {}).get("text", "")
             )
-            if text:
-                texts.append(text)
+            if not text:
+                continue
+            sender = self._sender_label(m)
+            ts = self._extract_timestamp(m)
+            if ts:
+                timestamp = datetime.fromtimestamp(ts).strftime(
+                    get_datetime_format(i18n.t("datetime_fmt"))
+                )
+                lines.append(f"{timestamp} - {sender}: {text}")
+            else:
+                lines.append(f"{sender}: {text}")
 
-        if not texts:
+        if not lines:
             self.main_window.output(i18n.t("copy_selected_nothing_to_copy"), interrupt=True)
             return
 
         try:
-            pyperclip.copy("\n".join(texts))
+            pyperclip.copy("\n".join(lines))
         except Exception:
             self.main_window.output(i18n.t("msg_copy_error"), interrupt=True)
             return
