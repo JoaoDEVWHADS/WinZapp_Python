@@ -2052,12 +2052,23 @@ export async function getMessages(req: Request, res: Response) {
             (m && m.id && (m.id._serialized || m.id)) || null;
           const stampOf = (m: any) => Number(m?.t ?? m?.timestamp ?? 0) || 0;
 
-          const fetchBatch = async (anchor: string | null) =>
-            (window as any).WAPI.getMessages(chatId, {
+          const fetchBatch = async (anchor: string | null) => {
+            if ((window as any).WPP?.chat?.getMessages) {
+              try {
+                const opts: any = { count: targetCount, direction: 'before' };
+                if (anchor) opts.id = anchor;
+                const r = await (window as any).WPP.chat.getMessages(chatId, opts);
+                if (Array.isArray(r) && r.length > 0) return r;
+              } catch (err) {
+                console.log(`[browser-evaluate] WPP.chat.getMessages fallback: ${err}`);
+              }
+            }
+            return (window as any).WAPI.getMessages(chatId, {
               count: targetCount,
               direction: 'before',
               id: anchor,
             });
+          };
 
           // First page: no anchor, so wa-js anchors on the chat's last received
           // message and hands back the newest window it can.
