@@ -2328,6 +2328,7 @@ class MainWindow(wx.Frame):
                 i18n.t("about_translation_thanks"),
                 i18n.t("about_main_contributors"),
                 i18n.t("about_community_thanks"),
+                i18n.t("about_translation_thanks_pl"),
                 "",
                 i18n.t("about_current_version").format(version=__version__),
                 i18n.t("about_license"),
