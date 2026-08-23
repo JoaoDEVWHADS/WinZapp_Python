@@ -121,7 +121,12 @@ def run_setup_api() -> None:
 
 
 def build_wppconnect_api(node_exe: str) -> None:
-    """Run `npm install` and `npm run build` in client/api/ using the portable Node.js."""
+    """Run `npm install` and `npm run build` in client/api/ if not already compiled."""
+    server_dist = os.path.join(API_DIR, "dist", "server.js")
+    if os.path.isfile(server_dist):
+        _log("WPPConnect API already compiled (dist/server.js exists). Skipping redundant build.")
+        return
+
     _log("Building WPPConnect API in client/api/...")
     
     # Resolve npm executable / cli script
