@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.22.1906"
+=======
+__version__ = "2026.08.22.1743"
+>>>>>>> 61448b36 (fix(deviceController,main): update sync behavior, client version, and tests)
