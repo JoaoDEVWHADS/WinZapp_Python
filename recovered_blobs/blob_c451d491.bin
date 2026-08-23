@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.23.1053"
+=======
+__version__ = "2026.08.23.0909"
+>>>>>>> 66305b91 (fix(api): include sent messages after last received anchor)
