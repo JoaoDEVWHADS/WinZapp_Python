@@ -627,6 +627,8 @@
     "ui_selected_announce_position_label": "Anunciar selecionado em:",
     "ui_selected_announce_position_start": "No início da mensagem / conversa",
     "ui_selected_announce_position_end": "No fim da mensagem / conversa",
+    "ui_show_yesterday_label": "Mostrar mensagens do dia anterior com data omitida (ontem)",
+    "yesterday_at": "Ontem às {time}",
     "restart_required_message": "Algumas alterações só terão efeito depois de reiniciar o WinZapp.",
     "tab_accessibility": "Acessibilidade",
     "accessibility_extended_sr_compat_label": "Ativar a compatibilidade estendida com o leitor de ecrã (anúncios adicionais, como mensagens novas na conversa ativa, transferências, a escrever/a gravar áudio, entre outros)",

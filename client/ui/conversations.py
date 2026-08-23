@@ -51,7 +51,7 @@ from core.locale_format import get_date_format, get_time_format, get_datetime_fo
 from core.video_player import VideoPlayer
 from app_paths import data_path
 from core.message_queue import PendingMessage
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Compiled URL regex used for link extraction from message text
 _URL_RE = re.compile(r'https?://\S+|www\.\S+')
@@ -6271,9 +6271,22 @@ class ConversationsPanel(wx.Panel):
                 ts_val //= 1000
             dt    = datetime.fromtimestamp(ts_val)
             today = datetime.now()
+            i18n  = self.main_window.i18n
             if dt.date() == today.date():
-                return dt.strftime(get_time_format(self.main_window.i18n.t("time_fmt")))
-            return dt.strftime(get_datetime_format(self.main_window.i18n.t("datetime_fmt")))
+                return dt.strftime(get_time_format(i18n.t("time_fmt")))
+            # Settings > Interface do usuário > "Mostrar mensagens do dia
+            # anterior com data omitida (ontem)" (default on). A message from
+            # yesterday (any time up to 23:59) announces as "ontem às HH:MM"
+            # instead of the full date — still through get_time_format() so
+            # it respects the user's own time format either way.
+            if dt.date() == today.date() - timedelta(days=1):
+                show_yesterday = self.main_window.settings.get("user_interface", {}).get(
+                    "show_yesterday_label", True
+                )
+                if show_yesterday:
+                    time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
+                    return i18n.t("yesterday_at").format(time=time_str)
+            return dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
         except Exception:
             return ""
 

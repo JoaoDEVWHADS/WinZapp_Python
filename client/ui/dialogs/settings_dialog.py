@@ -463,6 +463,13 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(selected_announce_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._show_yesterday_label_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_yesterday_label")
+        )
+        ui_sizer.Add(
+            self._show_yesterday_label_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -930,6 +937,10 @@ class SettingsDialog(wx.Dialog):
         else:
             self._selected_announce_end_rb.SetValue(True)
 
+        show_yesterday_label = self.main_window.settings.get("user_interface", {}).get(
+            "show_yesterday_label", True
+        )
+        self._show_yesterday_label_cb.SetValue(bool(show_yesterday_label))
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1643,6 +1654,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "selected_announcement_position"
         ] = "start" if self._selected_announce_start_rb.GetValue() else "end"
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_yesterday_label"
+        ] = self._show_yesterday_label_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
