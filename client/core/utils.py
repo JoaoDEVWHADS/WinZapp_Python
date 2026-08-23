@@ -623,6 +623,36 @@ def format_number(string_number):
     # Generic international (also covers "55" matches of the wrong length)
     return f"+{cc} {local}" if local else f"+{cc}"
 
+
+def contact_dedup_key(main_window, jid: str) -> str:
+    """Canonical key identifying *the same person* across JID formats.
+
+    The same contact can be stored in main_window.contacts under @lid, @c.us
+    or @s.whatsapp.net (and with the Brazilian 8- vs 9-digit mobile variant),
+    so keying a dedup on the raw JID string lets the same person appear more
+    than once — reported live in the "attach a contact" picker as every
+    contact showing up twice, once in international format and once in
+    Brazilian formatting (issue #70). Collapse all the formats the app
+    already knows how to unify: device suffix stripped, @c.us →
+    @s.whatsapp.net, @lid bridged to its phone number, and the 55-prefixed
+    9th digit dropped. Groups keep their full unique JID.
+    """
+    normalize_jid = getattr(main_window, "_normalize_jid", None)
+    norm = normalize_jid(jid) if normalize_jid else jid
+    if norm.endswith("@g.us"):
+        return norm
+    if norm.endswith("@lid"):
+        lid_map = getattr(main_window, "_lid_to_phone", {}) or {}
+        phone = lid_map.get(norm, "")
+        if phone:
+            norm = phone
+    local = norm.split("@", 1)[0]
+    # Brazilian mobile 8/9-digit interchangeability: 5511999999999 ↔ 551199999999
+    if local.startswith("55") and len(local) == 13 and local[4] == "9":
+        local = local[:4] + local[5:]
+    return local
+
+
 def parse_bool_flag(value):
     """Interpret a WPPConnect boolean-ish field, or None when it says nothing.
 

@@ -178,7 +178,8 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
                   "_STORE_SNAPSHOT_TOLERANCE_RATIO",
                   "_STORE_SNAPSHOT_TOLERANCE_MIN",
                   "_STORE_SNAPSHOT_MIN_RATIO",
-                  "_BROKEN_STORE_REPAIR_ROUNDS", "_BACKFILL_CHUNK"):
+                  "_BROKEN_STORE_REPAIR_ROUNDS", "_DEEP_SYNC_TOP_N",
+                  "_DEEP_SYNC_COUNT", "_BACKFILL_CHUNK"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
@@ -265,11 +266,12 @@ class TestTheGrowthGuard:
         assert stub.message_sync_ran == 1
 
     def test_the_documented_late_filling_store_still_settles(self):
-        """Three zero readings trigger recovery before a very late answer."""
+        """The shape the code has a live capture of: nothing for five
+        attempts, then the whole list."""
         stub = _make([0, 0, 0, 0, 0, 498, 498], wa_web=937, local_chats=931)
         stub._run_sync()
         assert stub.restarted is False
-        assert stub._sync_completed is False
+        assert stub._sync_completed is True
 
     def test_a_reconnection_with_a_warm_cache_settles_on_the_first_answer(self):
         stub = _make([931], wa_web=937, local_chats=931)

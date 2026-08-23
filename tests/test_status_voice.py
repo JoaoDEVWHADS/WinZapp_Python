@@ -175,16 +175,12 @@ class TestSendMediaStatusUsesThePathField:
             status_code = 200
             text = ""
 
-            @staticmethod
-            def json():
-                return {"status": "success", "response": {}}
-
         def fake_post(url, json=None, headers=None, timeout=None):
             posted["url"] = url
             posted["json"] = json
             return _Resp()
 
-        monkeypatch.setattr(status_panel_module, "api_post", fake_post)
+        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_media_status_bg(img, "legenda")
@@ -205,16 +201,12 @@ class TestSendMediaStatusUsesThePathField:
             status_code = 200
             text = ""
 
-            @staticmethod
-            def json():
-                return {"status": "success", "response": {}}
-
         def fake_post(url, json=None, headers=None, timeout=None):
             posted["url"] = url
             posted["json"] = json
             return _Resp()
 
-        monkeypatch.setattr(status_panel_module, "api_post", fake_post)
+        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_media_status_bg(vid, "")
@@ -242,8 +234,8 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         stub = _Stub()
         audio = _touch(tmp_path, "note.mp3")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([audio], "ignored caption")
 
@@ -253,8 +245,8 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         stub = _Stub()
         img = _touch(tmp_path, "pic.png")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([img], "legenda")
 
@@ -265,12 +257,45 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         img   = _touch(tmp_path, "pic.png")
         audio = _touch(tmp_path, "note.ogg")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([img, audio], "")
 
         assert calls == [("media", img), ("voice", audio)]
+
+    def test_batch_failures_produce_a_single_aggregated_dialog(self, tmp_path, monkeypatch):
+        """The exact bug: posting several files where more than one fails must
+        show ONE summary MessageBox, not one blocking dialog per failure."""
+        stub = _Stub()
+        img1 = _touch(tmp_path, "pic1.png")
+        img2 = _touch(tmp_path, "pic2.png")
+        img3 = _touch(tmp_path, "pic3.png")
+        boxes = []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                             lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        results = iter([True, False, False])
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: next(results))
+
+        stub._send_all_media_statuses_bg([img1, img2, img3], "")
+
+        assert len(boxes) == 1, "one popup per batch, not one per failed file"
+        assert stub.status_sent_calls == 0  # not routed through the per-file success path in this test
+
+    def test_batch_all_succeed_shows_no_dialog(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img1 = _touch(tmp_path, "pic1.png")
+        img2 = _touch(tmp_path, "pic2.png")
+        boxes = []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                             lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: True)
+
+        stub._send_all_media_statuses_bg([img1, img2], "")
+
+        assert boxes == []
 
 
 class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
@@ -279,9 +304,8 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
         wav = _touch(tmp_path, "recorded.wav")
         ogg = _touch(tmp_path, "recorded.wav.ogg")
         stub.main_window._convert_result = ogg
-        monkeypatch.setattr(status_panel_module, "api_post",
-                             lambda *a, **k: type("R", (), {"status_code": 200, "text": "",
-                                                            "json": lambda self: {"status": "success", "response": {}}})())
+        monkeypatch.setattr(status_panel_module.requests, "post",
+                             lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})())
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_status_voice_bg(wav, is_temp_file=True)
@@ -295,9 +319,8 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
         picked = _touch(tmp_path, "my_song.mp3")
         ogg = _touch(tmp_path, "my_song.mp3.ogg")
         stub.main_window._convert_result = ogg
-        monkeypatch.setattr(status_panel_module, "api_post",
-                             lambda *a, **k: type("R", (), {"status_code": 200, "text": "",
-                                                            "json": lambda self: {"status": "success", "response": {}}})())
+        monkeypatch.setattr(status_panel_module.requests, "post",
+                             lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})())
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_status_voice_bg(picked)  # is_temp_file not passed -> False
@@ -315,16 +338,12 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
             status_code = 200
             text = ""
 
-            @staticmethod
-            def json():
-                return {"status": "success", "response": {}}
-
         def fake_post(url, json=None, headers=None, timeout=None):
             posted["url"] = url
             posted["json"] = json
             return _Resp()
 
-        monkeypatch.setattr(status_panel_module, "api_post", fake_post)
+        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_status_voice_bg(wav, is_temp_file=True)
@@ -337,7 +356,7 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
         stub = _Stub(convert_result=None)  # ffmpeg missing/failed
         wav = _touch(tmp_path, "recorded.wav")
         posted = []
-        monkeypatch.setattr(status_panel_module, "api_post", lambda *a, **k: posted.append(1))
+        monkeypatch.setattr(status_panel_module.requests, "post", lambda *a, **k: posted.append(1))
         monkeypatch.setattr(status_panel_module.wx, "MessageBox", lambda *a, **kw: None)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 

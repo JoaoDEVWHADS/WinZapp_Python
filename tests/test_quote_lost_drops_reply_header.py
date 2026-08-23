@@ -58,9 +58,6 @@ def _make_panel(msg):
     panel = ConversationsPanel.__new__(ConversationsPanel)
     panel._sorted_messages = [msg]
     panel._played_sent_local_ids = set()
-    panel._media_upload_progress = {}
-    panel._media_transfer_started = set()
-    panel._sync_pending_document_gauge = lambda *a, **kw: None
     panel.messages_list = _FakeList()
     panel.conversation = {"remoteJid": "j@c.us"}
     panel.main_window = _FakeMainWindow()

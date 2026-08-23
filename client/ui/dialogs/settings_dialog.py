@@ -1192,7 +1192,7 @@ class SettingsDialog(wx.Dialog):
         dlg = wx.FileDialog(
             self,
             message=i18n.t("select_soundpack_zip_dialog_title"),
-            wildcard=i18n.t("soundpack_zip_file_filter"),
+            wildcard="Sound Packs (*.zip)|*.zip",
             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
         )
         if dlg.ShowModal() != wx.ID_OK:

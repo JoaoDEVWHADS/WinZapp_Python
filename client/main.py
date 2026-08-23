@@ -45,7 +45,7 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
-from core.websocket_client import WebSocketClient, ack_to_status
+from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
@@ -53,7 +53,6 @@ from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path, accounts_root
 from core.message_queue import MessageQueue, PendingMessage
-from core.multipart_stream import StreamingMultipartBody
 import wx
 import wx.adv
 if sys.platform == "win32":
@@ -74,8 +73,6 @@ import logging
 _http_session = requests.Session()
 _orig_get = requests.get
 _orig_post = requests.post
-
-
 
 def _patched_get(*args, **kwargs):
     return _http_session.get(*args, **kwargs)
@@ -1006,12 +1003,6 @@ class MainWindow(wx.Frame):
         # expresses: _sync_completed goes back to False on an incomplete sync
         # and _initial_sync_running is cleared as soon as the thread exits.
         self._sync_ever_started = False
-        # WebSocket messages can arrive in the tiny window between the socket
-        # becoming live and the first sync thread actually starting.  They used
-        # to be dropped on the assumption that the initial history sync would
-        # re-deliver them.  That assumption is exactly what breaks when history
-        # sync is incomplete/stalled, so keep a small bounded replay buffer.
-        self._early_live_messages = []
         # High-water mark of what list-chats has answered with this session,
         # across sync rounds. Session-scoped on purpose — see the evidence
         # comment in _run_sync()'s retry loop: it is the one number that
@@ -1048,8 +1039,6 @@ class MainWindow(wx.Frame):
         # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
         # from presence.update events. Loaded from DB on prepare_sync() and saved whenever updated.
         self._presence_pushname_map = {}
-        self._contact_resolution_lock = threading.Lock()
-        self._contact_resolution_inflight = set()
         # Incoming call IDs currently ringing. The sound is one shared looping
         # stream, so it stops only after the final simultaneous call ends.
         self._active_incoming_calls = {}
@@ -1071,17 +1060,6 @@ class MainWindow(wx.Frame):
         # Check if we should ask the user to choose between local and custom/remote API (first run)
         self._check_api_type_first_run()
 
-        # The first-run question can open Connection settings and change all
-        # values read above. Refresh them before deciding whether a local
-        # runtime is needed, otherwise the pre-dialog defaults can wrongly
-        # trigger Node/npm/Chromium installation for a remote API.
-        conn = self.settings.get("connection", {})
-        self.wpp_server = conn.get("wpp_server", "http://127.0.0.1")
-        self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
-        self.wpp_api_key = conn.get("wpp_api_key", "wz-local-api-key")
-        self.wpp_custom_api = bool(conn.get("wpp_custom_api", False))
-        self.wpp_port = self._resolve_wpp_port(conn)
-
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever).
         # These must run BEFORE the WPPConnect API is started so the user never
         # sees a "starting WPPConnect" dialog stacked on top of setup prompts —
@@ -1092,7 +1070,7 @@ class MainWindow(wx.Frame):
             self._check_hotkey_first_run()
 
         # Handle API execution configuration
-        if not self._local_api_selected():
+        if self.wpp_custom_api:
             logging.info("MainWindow: Custom API enabled — preserving all local API files, cache, and remote session state.")
         else:
             # Check API modules and start WPPConnect Server synchronously BEFORE init_UI
@@ -1143,6 +1121,21 @@ class MainWindow(wx.Frame):
         # on every other route). False means "the local API is up but WhatsApp
         # is not connected" — the state the app used to mistake for online.
         self._wa_connected = False
+        # Timestamp of the most recent WPPConnect Socket.IO event that could
+        # only have been emitted by a genuinely live WhatsApp session (a new
+        # message, an ack, a chats/presence update — see
+        # _note_live_wpp_event() and check_whatsapp_reachable()). WinZapp's
+        # Socket.IO client talks to the LOCAL WPPConnect server over
+        # loopback, which stays up regardless of the machine's own internet
+        # route — so these events keep flowing even while an unrelated
+        # network-path issue (a switched Wi-Fi/mobile connection, a stale
+        # negative DNS cache entry) makes the app's own outbound reachability
+        # probe fail. Reported live: messages kept arriving in an open group
+        # (sound and all) for several minutes while the app insisted it was
+        # offline, because check_whatsapp_reachable() trusted only that
+        # separate probe and never considered the traffic it was watching
+        # arrive in real time as proof of connectivity.
+        self._last_live_wpp_event_ts = 0.0
         # Set once the first real WhatsApp connection of this session is
         # confirmed, so the "connected" sound plays on connection to WhatsApp
         # and not merely on connection to the local API.
@@ -1707,6 +1700,7 @@ class MainWindow(wx.Frame):
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
         self._ID_FORCE_REINSTALL_ZIP = wx.NewIdRef()
         self._ID_FORCE_REINSTALL_WPP = wx.NewIdRef()
+        self._ID_WHATS_NEW     = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
 
         menubar = wx.MenuBar()
@@ -1841,6 +1835,7 @@ class MainWindow(wx.Frame):
         help_menu.Append(self._ID_FORCE_REINSTALL_ZIP, self.i18n.t("menu_force_reinstall_zip"))
         help_menu.Append(self._ID_FORCE_REINSTALL_WPP, self.i18n.t("menu_force_reinstall_wpp"))
         help_menu.AppendSeparator()
+        help_menu.Append(self._ID_WHATS_NEW, self.i18n.t("menu_whats_new"))
         help_menu.Append(self._ID_ABOUT, self.i18n.t("menu_about"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
 
@@ -1856,6 +1851,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_wpp, id=self._ID_FORCE_REINSTALL_WPP)
+        self.Bind(wx.EVT_MENU, self._on_whats_new,     id=self._ID_WHATS_NEW)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _on_account_hotkey_char(self, event):
@@ -2306,8 +2302,33 @@ class MainWindow(wx.Frame):
             help_menu.FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
                 self.i18n.t("menu_force_reinstall_wpp")
             )
+            help_menu.FindItemById(self._ID_WHATS_NEW).SetItemLabel(
+                self.i18n.t("menu_whats_new")
+            )
             help_menu.FindItemById(self._ID_ABOUT).SetItemLabel(
                 self.i18n.t("menu_about")
+            )
+
+    def _on_whats_new(self, event=None):
+        """Help > Novidades: show the full local changelog for the user's
+        current language — same WhatsNewDialog the auto-updater's "Quais as
+        novidades?" button uses, but with the whole file rather than only
+        the entries between two versions. When no changelog_<lang>.txt ships
+        with this build (e.g. right after a version with no changelog file
+        yet, like this one), show a small "no changelog" dialog instead of a
+        blank/empty window."""
+        from updater import load_changelog_text, WhatsNewDialog
+        i18n = self.i18n
+        changelog = load_changelog_text(i18n.language)
+        if changelog.strip():
+            dlg = WhatsNewDialog(self, changelog)
+            dlg.ShowModal()
+            dlg.Destroy()
+        else:
+            wx.MessageBox(
+                i18n.t("whats_new_none_message"),
+                i18n.t("whats_new_none_title"),
+                wx.OK | wx.ICON_INFORMATION,
             )
 
     def _on_about(self, event=None):
@@ -2322,6 +2343,7 @@ class MainWindow(wx.Frame):
                 i18n.t("about_translation_thanks"),
                 i18n.t("about_main_contributors"),
                 i18n.t("about_community_thanks"),
+                i18n.t("about_translation_thanks_pl"),
                 "",
                 i18n.t("about_current_version").format(version=__version__),
                 i18n.t("about_license"),
@@ -2588,61 +2610,6 @@ class MainWindow(wx.Frame):
         offline toggle's own feedback are unaffected).
         """
         return bool(self.settings.get("general", {}).get("announce_sync_events", True))
-
-    def _announce_sync_complete(self, run_id=None):
-        """Emit the sync-complete sound and TTS once for one successful run.
-
-        This is intentionally a UI-thread callback.  Sound and speech are
-        isolated from each other: a playback/device failure cannot suppress the
-        screen-reader announcement, and a TTS failure cannot prevent the sound.
-        ``run_id`` also rejects a stale callback if a newer sync has already
-        started before wx drains its queue.
-        """
-        if run_id is not None and run_id != getattr(self, "_sync_run_id", run_id):
-            logging.info(
-                "[sync-announce] Ignoring stale completion callback for run %s "
-                "(current=%s).", run_id, getattr(self, "_sync_run_id", None))
-            return
-        if run_id is not None and getattr(
-                self, "_sync_completion_announced_run_id", None) == run_id:
-            return
-
-        try:
-            self._set_status("")
-        except Exception:
-            # Status/tray failures must not swallow the audible completion
-            # notification — they are independent output channels.
-            logging.exception("[sync-announce] Failed to clear sync status text")
-        if not self._announce_sync_events_enabled():
-            logging.info("[sync-announce] Completion announcements disabled by settings.")
-            return
-
-        if run_id is not None:
-            self._sync_completion_announced_run_id = run_id
-
-        sound_ok = True
-        try:
-            self.sync_complete_sound.play()
-        except Exception:
-            sound_ok = False
-            logging.exception("[sync-announce] Sync-complete sound failed")
-
-        tts_ok = None
-        if not self.background_mode:
-            try:
-                # Completion is a state transition, not ordinary queued speech.
-                # Interrupting prevents a busy screen-reader queue from making
-                # the announcement appear to have been lost.
-                self.output(self.i18n.t("sync_complete"), interrupt=True)
-                tts_ok = True
-            except Exception:
-                tts_ok = False
-                logging.exception("[sync-announce] Sync-complete TTS failed")
-
-        logging.info(
-            "[sync-announce] Completion announced for run %s "
-            "(sound_ok=%s, tts=%s, background=%s).",
-            run_id, sound_ok, tts_ok, self.background_mode)
 
     def _search_normalization_mode(self) -> str:
         """Settings > Geral > "Normalização Unicode nas pesquisas": one of
@@ -3574,9 +3541,6 @@ class MainWindow(wx.Frame):
     def _start_wpp_update_checker(self, force: bool = False):
         if self.background_mode:
             return
-        if not self._local_api_selected():
-            logging.info("[wpp-update] Remote/unconfigured API — skipping local server update check.")
-            return
         updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
         if not updates_enabled and not force:
             return
@@ -3599,9 +3563,6 @@ class MainWindow(wx.Frame):
         a broken/corrupted API install without waiting for a real version
         bump upstream.
         """
-        if not self._local_api_selected():
-            logging.info("[wpp-update] Remote/unconfigured API — force reinstall ignored.")
-            return
         if self._wpp_update_checker is None:
             from updater import WppUpdateChecker
             self._wpp_update_checker = WppUpdateChecker(self)
@@ -3614,9 +3575,6 @@ class MainWindow(wx.Frame):
         both WppUpdateChecker call sites already dispatch here via
         wx.CallAfter, so this can call ShowModal() directly.
         """
-        if not self._local_api_selected():
-            logging.info("[wpp-update] Remote/unconfigured API — local update ignored.")
-            return
         logging.info("[wpp_update] Stopping WPPConnect Server before update to %s...", target_tag)
         if not self.background_mode:
             self.output(self.i18n.t("wpp_update_in_progress"), interrupt=True)
@@ -4333,7 +4291,7 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
-
+        
         def _bg_delete_chat():
             try:
                 self.db.delete_chat(lid_jid)
@@ -4341,7 +4299,7 @@ class MainWindow(wx.Frame):
                 logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
         threading.Thread(target=_bg_delete_chat, daemon=True).start()
 
-
+        
         # Redirect active conversation if it was the merged LID chat, or refresh if it is the destination phone chat
         if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
             active_jid = self.conversations_panel.conversation.get("remoteJid", "")
@@ -4492,19 +4450,11 @@ class MainWindow(wx.Frame):
         # carry this straight into the stored record.
         arrived_at = msg.pop("_arrived_at", None)
         # See _live_events_ready() for why this must be checked before
-        # touching self.chats/self.db at all. Do NOT drop these events: when
-        # history sync is slow or incomplete, there may be no later REST page
-        # that re-delivers them. Buffer them until start_sync() latches the
-        # live path on; normal message-id dedup makes overlap with the sync
-        # harmless.
+        # touching self.chats/self.db at all. Safe to drop unconditionally:
+        # the sync that is either about to start or already running fetches
+        # the complete current chat/message state regardless, so nothing
+        # arriving this early is ever actually lost.
         if not self._live_events_ready():
-            pending = getattr(self, "_early_live_messages", None)
-            if pending is None:
-                pending = self._early_live_messages = []
-            pending.append(msg)
-            # Bound memory if a broken session never gets as far as start_sync.
-            if len(pending) > 500:
-                del pending[:-500]
             return
         key        = msg.get("key", {})
         from_me    = key.get("fromMe", False)
@@ -4708,7 +4658,7 @@ class MainWindow(wx.Frame):
                                 if not phone_val.endswith("@s.whatsapp.net") and not phone_val.endswith("@c.us"):
                                     phone_val = f"{phone_val}@s.whatsapp.net"
                                 phone_val = self._normalize_jid(phone_val)
-
+                                
                                 # Register mapping and merge on the main thread
                                 def _main_thread_merge():
                                     self.register_jid_mapping(lid_jid, phone_val)
@@ -4844,7 +4794,7 @@ class MainWindow(wx.Frame):
                 # resync overwrites this record with the API's copy anyway.
                 if key.get("participant"):
                     pending_msg["key"]["participant"] = key.get("participant")
-
+                
                 # Remove any existing record with the same real ID (e.g. from API
                 # sync) *including* pending_msg itself (its key was just updated
                 # to msg_id), then re-append it at the end.  The old filter kept
@@ -4854,22 +4804,22 @@ class MainWindow(wx.Frame):
                     records[:] = [r for r in records
                                   if r.get("key", {}).get("id") != msg_id]
                 records.append(pending_msg)
-
+                
                 def _bg_insert_pending():
                     try:
                         self.db.insert_message(remote_jid, pending_msg)
                     except Exception as e:
                         logging.error(f"[on_new_message] Failed to insert pending message to DB: {e}")
                 self._msg_bg_executor.submit(_bg_insert_pending)
-
+                
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
                     if len(self._own_sent_ids) > 500:
                         self._own_sent_ids.discard(next(iter(self._own_sent_ids)))
-
+                
                 if hasattr(self, "conversations_panel"):
                     wx.CallAfter(self.conversations_panel._mark_message_sent, local_id, real_id=msg_id)
-
+                
                 self._schedule_save(dirty_jid=remote_jid)
                 self._schedule_set_chats()
                 return
@@ -5003,27 +4953,7 @@ class MainWindow(wx.Frame):
             "keep_muted_chats_silent_when_open", True
         ):
             return
-
-        # Determine focus/current-conversation BEFORE applying archive
-        # suppression. Archived chats should stay silent in the background, but
-        # if the user deliberately opened one, it must behave exactly like any
-        # other active conversation: current-message sound + optional TTS. The
-        # previous unconditional return here suppressed both private and group
-        # archived chats even while they were visibly open.
-        window_active = (
-            not getattr(self, "_window_hidden", False)
-            and self.IsShown()
-            and not self.IsIconized()
-            and self.IsActive()
-        )
-        cp = getattr(self, "conversations_panel", None)
-        current_jid = (
-            cp.conversation.get("remoteJid", "")
-            if cp is not None and cp.conversation is not None
-            else ""
-        )
-        is_current_conv = (current_jid == remote_jid)
-        if self.is_chat_archived(remote_jid) and not (window_active and is_current_conv):
+        if self.is_chat_archived(remote_jid):
             return
 
         from core.notification_manager import (
@@ -5033,8 +4963,24 @@ class MainWindow(wx.Frame):
 
         body  = format_notification_body(msg, self, self.i18n)
 
+        # Check if the WinZapp window is currently active/focused
+        window_active = (
+            not getattr(self, "_window_hidden", False)
+            and self.IsShown()
+            and not self.IsIconized()
+            and self.IsActive()
+        )
+
         if window_active:
             speech = self.settings.get("speech_content", {})
+            # Determine if the incoming message is for the currently-open conversation
+            cp = getattr(self, "conversations_panel", None)
+            current_jid = (
+                cp.conversation.get("remoteJid", "")
+                if cp is not None and cp.conversation is not None
+                else ""
+            )
+            is_current_conv = (current_jid == remote_jid)
 
             # Muted + not the open conversation: stay silent even with the
             # window active (the "keep silent when open" setting only ever
@@ -5599,8 +5545,6 @@ class MainWindow(wx.Frame):
 
     def find_headless_shell(self):
         """Path to chrome-headless-shell inside client/api/.cache, or None."""
-        if not self._local_api_selected():
-            return None
         cache_dir = resource_path("api", ".cache")
         if not os.path.isdir(cache_dir):
             return None
@@ -5631,10 +5575,6 @@ class MainWindow(wx.Frame):
         fallback still gets its turn. Returns True when a shell is present
         afterwards.
         """
-        if not self._local_api_selected():
-            logging.info("[headless-shell] Remote/unconfigured API — installation ignored.")
-            return False
-
         existing = self.find_headless_shell()
         if existing:
             logging.info("[headless-shell] Already installed: %s", existing)
@@ -5669,23 +5609,14 @@ class MainWindow(wx.Frame):
             "PUPPETEER_CACHE_DIR": resource_path("api", ".cache"),
         }
         creation_flags = 0
-        startup_info = None
-        if sys.platform == "win32":
-            if hasattr(subprocess, "CREATE_NO_WINDOW"):
-                creation_flags = subprocess.CREATE_NO_WINDOW
-            if hasattr(subprocess, "STARTUPINFO"):
-                startup_info = subprocess.STARTUPINFO()
-                startup_info.dwFlags |= getattr(
-                    subprocess, "STARTF_USESHOWWINDOW", 0
-                )
-                startup_info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags = subprocess.CREATE_NO_WINDOW
         try:
             proc = subprocess.Popen(
                 npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=creation_flags,
-                startupinfo=startup_info,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -5720,9 +5651,6 @@ class MainWindow(wx.Frame):
         the browser, so "the API is fully set up" was true for an install with
         no browser at all — see ensure_headless_shell_installed().
         """
-        if not self._local_api_selected():
-            logging.info("[api-setup] Remote/unconfigured API — Node/npm/browser setup ignored.")
-            return
         self._ensure_api_modules_installed()
         self.ensure_headless_shell_installed()
 
@@ -5761,10 +5689,6 @@ class MainWindow(wx.Frame):
         In background mode dialogs are never shown; if the setup is incomplete
         the process exits silently.
         """
-        if not self._local_api_selected():
-            logging.info("[api-setup] Remote/unconfigured API — refusing local installation.")
-            return
-
         import sys
         import shutil
         if sys.platform == "win32":
@@ -6045,7 +5969,7 @@ class MainWindow(wx.Frame):
           - api/package.json is absent (setup not done yet)
           - WPP_MINIMUM_VERSION is not defined in the .env
         """
-        if self.background_mode or not self._local_api_selected():
+        if self.background_mode:
             return
 
         dist_main = resource_path("api", "dist", "main.js")
@@ -6180,13 +6104,15 @@ class MainWindow(wx.Frame):
         return port
 
     def _is_wpp_running(self):
-        """Return True if WPPConnect is actively responding on the configured server/port."""
+        """Return True if the WPPConnect is already listening on the configured server/port."""
         import urllib.parse
         try:
-            url = f"{self.wpp_server}:{self.wpp_port}/"
-            res = requests.get(url, timeout=1)
-            return res.status_code < 500
-        except Exception:
+            parsed = urllib.parse.urlparse(self.wpp_server)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or self.wpp_port
+            with _socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
             return False
 
     def _start_wpp_background(self):
@@ -6200,10 +6126,6 @@ class MainWindow(wx.Frame):
         is spawned using the non-elevated linked token via CreateProcessWithTokenW
         so that PostgreSQL's initdb can start (it refuses to run as root/admin).
         """
-        if not self._local_api_selected():
-            logging.info("[api-start] Remote/unconfigured API — bundled server launch ignored.")
-            return
-
         import sys
         import shutil
 
@@ -6216,26 +6138,7 @@ class MainWindow(wx.Frame):
             else:
                 node_exe = shutil.which("node") or "node"
 
-        start_js = resource_path("api", "start.js")
-        # api/start.js is runtime state and older installs preserve it across
-        # API repairs. Refresh it from the immutable api_patches copy before
-        # every local launch so fixes such as hidden/non-detached Chrome reach
-        # existing users without requiring them to delete/reinstall the API.
-        pristine_start_js = resource_path("api_patches", "start.js")
-        if os.path.isfile(pristine_start_js) and os.path.isdir(os.path.dirname(start_js)):
-            try:
-                with open(pristine_start_js, "rb") as src:
-                    pristine_bytes = src.read()
-                current_bytes = b""
-                if os.path.isfile(start_js):
-                    with open(start_js, "rb") as current:
-                        current_bytes = current.read()
-                if current_bytes != pristine_bytes:
-                    with open(start_js, "wb") as target:
-                        target.write(pristine_bytes)
-                    logging.info("[startup] Refreshed api/start.js from api_patches.")
-            except Exception as exc:
-                logging.warning("[startup] Could not refresh api/start.js: %s", exc)
+        start_js  = resource_path("api",  "start.js")
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs WPPConnect separately
         try:
@@ -6296,26 +6199,13 @@ class MainWindow(wx.Frame):
             # is therefore not needed and would prevent Node.js from writing session
             # tokens/cache to the installation directory, breaking admin users.
             creation_flags = 0
-            startup_info = None
-            if sys.platform == "win32":
-                if hasattr(subprocess, "CREATE_NO_WINDOW"):
-                    creation_flags = subprocess.CREATE_NO_WINDOW
-                # CREATE_NO_WINDOW covers node.exe itself. STARTUPINFO is kept
-                # as a second Windows-level guard and is inherited by ordinary
-                # descendants; start.js separately forces Puppeteer's Chrome
-                # child to be hidden and non-detached.
-                if hasattr(subprocess, "STARTUPINFO"):
-                    startup_info = subprocess.STARTUPINFO()
-                    startup_info.dwFlags |= getattr(
-                        subprocess, "STARTF_USESHOWWINDOW", 0
-                    )
-                    startup_info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creation_flags = subprocess.CREATE_NO_WINDOW
 
             self.wpp_process = subprocess.Popen(
                 [node_exe, "--max-old-space-size=4096", start_js],
                 cwd=cwd,
                 creationflags=creation_flags,
-                startupinfo=startup_info,
                 stdout=log_fh,
                 stderr=log_fh,
             )
@@ -6620,13 +6510,6 @@ class MainWindow(wx.Frame):
             except Exception:
                 logging.exception("[shutdown] orphaned-session sweep failed (non-fatal)")
 
-        # A remote or not-yet-configured API has no local Node process owned by
-        # WinZapp. Never inspect/kill a local process merely because it happens
-        # to listen on the same numeric port as the remote configuration.
-        if not self._local_api_selected():
-            self._shutdown_audit("remote/unconfigured API — local Node teardown ignored")
-            return
-
         pid = None
         if proc and proc.poll() is None:
             pid = proc.pid
@@ -6788,10 +6671,6 @@ class MainWindow(wx.Frame):
         start.js) startup can take well over 2 minutes, hence the 5-minute
         budget below.
         """
-        if not self._local_api_selected():
-            logging.info("[api-start] Remote/unconfigured API — not starting local WPPConnect.")
-            return
-
         if self._is_wpp_running():
             # ADOPT path: the shared Node is already listening (spawned by another
             # account, or left running from a previous session). We won't spawn it,
@@ -6819,19 +6698,12 @@ class MainWindow(wx.Frame):
         dist_server = resource_path("api",  "dist", "server.js")
 
         # All three files are required to start the bundled API.
-        missing_files = []
-        if not os.path.isfile(node_exe):
-            missing_files.append(f"node_exe: {node_exe}")
-        if not os.path.isfile(start_js):
-            missing_files.append(f"start_js: {start_js}")
-        if not os.path.isfile(dist_server):
-            missing_files.append(f"dist_server: {dist_server}")
-
-        if missing_files:
-            logging.warning(
-                "[ensure_wpp_running] Skipping automatic API start — missing required files: %s",
-                ", ".join(missing_files)
-            )
+        # If any is missing (setup incomplete or not yet run), skip silently —
+        # ensure_api_modules_installed() already handled the missing node.exe
+        # case; dist/server.js absence means setup was cancelled or not done yet.
+        if not (os.path.isfile(node_exe)
+                and os.path.isfile(start_js)
+                and os.path.isfile(dist_server)):
             return
 
         self._wpp_log_path = None
@@ -7105,34 +6977,6 @@ class MainWindow(wx.Frame):
         self.settings.setdefault("general", {})["language"] = lang
         self.save_settings()
 
-    def _api_type_choice_required(self) -> bool:
-        """Require a choice when an inherited/default local API is absent."""
-        general = self.settings.get("general", {})
-        if not general.get("api_type_first_run_asked", False):
-            return True
-        connection = self.settings.get("connection", {})
-        if bool(connection.get("wpp_custom_api", False)):
-            return False
-        return not os.path.isfile(resource_path("api", "start.js"))
-
-    def _local_api_selected(self) -> bool:
-        """Return True only after an explicit first-run choice of local API.
-
-        ``wpp_custom_api`` defaults to False for compatibility, so that value
-        alone cannot distinguish "local was selected" from "the preference is
-        still absent/unconfigured". The first-run marker is the second half of
-        the decision and prevents background startup or an early helper call
-        from downloading Node, npm packages, or Chromium before the question.
-        """
-        if (self._api_type_choice_required()
-                and not getattr(self, "_api_type_confirmed_this_run", False)):
-            return False
-        general = self.settings.get("general", {})
-        if not general.get("api_type_first_run_asked", False):
-            return False
-        connection = self.settings.get("connection", {})
-        return not bool(connection.get("wpp_custom_api", False))
-
     def _check_api_type_first_run(self):
         """
         Check if we need to ask the user to choose between local and custom/remote API on first launch.
@@ -7140,7 +6984,8 @@ class MainWindow(wx.Frame):
         if self.background_mode:
             return
 
-        if not self._api_type_choice_required():
+        gen = self.settings.get("general", {})
+        if gen.get("api_type_first_run_asked", False):
             return
 
         msg = self.i18n.t("api_type_ask_message")
@@ -7154,7 +6999,6 @@ class MainWindow(wx.Frame):
 
         if result == wx.YES:
             # User wants local API (default)
-            self._api_type_confirmed_this_run = True
             self.settings.setdefault("connection", {})["wpp_custom_api"] = False
             self.wpp_custom_api = False
             self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
@@ -7162,7 +7006,6 @@ class MainWindow(wx.Frame):
             self._persist_global_settings()
         elif result == wx.NO:
             # User wants to specify a custom/remote API
-            self._api_type_confirmed_this_run = True
             self.settings.setdefault("connection", {})["wpp_custom_api"] = True
             self.wpp_custom_api = True
             self.save_settings()
@@ -8125,7 +7968,7 @@ class MainWindow(wx.Frame):
         logging.info("[prepare_sync] DatabaseBridge open — loading metadata")
         # Load persistent metadata from database with fallback/bootstrap from settings.json
         settings_dirty = False
-
+        
         # 1. presence_pushname_map
         if self.db.get_metadata("presence_pushname_map") is None and "presence_pushname_map" in self.settings:
             self._presence_pushname_map = dict(self.settings.pop("presence_pushname_map", {}))
@@ -8133,7 +7976,7 @@ class MainWindow(wx.Frame):
             settings_dirty = True
         else:
             self._presence_pushname_map = dict(self.db.get_metadata_json("presence_pushname_map", {}))
-
+            
         # 2. deleted_chats
         if self.db.get_metadata("deleted_chats") is None and "deleted_chats" in self.settings:
             self._deleted_chats = set(self.settings.pop("deleted_chats", []))
@@ -8141,7 +7984,7 @@ class MainWindow(wx.Frame):
             settings_dirty = True
         else:
             self._deleted_chats = set(self.db.get_metadata_json("deleted_chats", []))
-
+            
         # 3. archived_chats
         if self.db.get_metadata("archived_chats") is None and "archived_chats" in self.settings:
             self._archived_chats = set(self.settings.pop("archived_chats", []))
@@ -8149,7 +7992,7 @@ class MainWindow(wx.Frame):
             settings_dirty = True
         else:
             self._archived_chats = set(self.db.get_metadata_json("archived_chats", []))
-
+            
         # 4. pinned_chats
         if self.db.get_metadata("pinned_chats") is None and "pinned_chats" in self.settings:
             self._pinned_chats = set(self.settings.pop("pinned_chats", []))
@@ -8157,7 +8000,7 @@ class MainWindow(wx.Frame):
             settings_dirty = True
         else:
             self._pinned_chats = set(self.db.get_metadata_json("pinned_chats", []))
-
+            
         # 5. muted_chats
         if self.db.get_metadata("muted_chats") is None and "muted_chats" in self.settings:
             self._muted_chats = dict(self.settings.pop("muted_chats", {}))
@@ -8177,36 +8020,24 @@ class MainWindow(wx.Frame):
         # to its beginning, so an in-memory-only set would make every relaunch
         # re-walk an account that is already complete — hundreds of pointless
         # round-trips through the one Puppeteer page, for ever.
-        # Semantics v3: elapsed time is never end-of-history evidence.  Older
-        # builds persisted chats as exhausted after a 15-minute unanswered
-        # on-demand request even when WhatsApp's transfer type explicitly said
-        # more messages remained on the primary.  Clear those conclusions once.
-        _history_exhaustion_v3 = self.db.get_metadata("history_exhaustion_semantics_v3")
-        if _history_exhaustion_v3 != "1":
-            self._exhausted_chats = set()
-            self._older_requested_chats = {}
-            try:
-                self.db.set_metadata_json("exhausted_chats", [])
-                self.db.set_metadata_json("older_history_requested", {})
-                self.db.set_metadata("history_exhaustion_semantics_v3", "1")
-            except Exception as exc:
-                logging.warning("[history] Could not migrate exhaustion cache: %s", exc)
+        self._exhausted_chats = set(self.db.get_metadata_json("exhausted_chats", []))
+        # …and the timestamps of the older-history requests that justify those
+        # entries. Persisted for the reason _OLDER_REQUEST_GRACE explains: a
+        # durable "this chat is finished" may only be written once the phone has
+        # had longer than its reply window to answer, and nothing in a single
+        # session can establish that. Tolerates the legacy list form (the set
+        # this used to be) by treating those entries as asked long ago, which is
+        # true — they were written by an earlier run.
+        _asked = self.db.get_metadata_json("older_history_requested", {})
+        if isinstance(_asked, dict):
+            self._older_requested_chats = {
+                jid: float(ts) for jid, ts in _asked.items()
+                if isinstance(ts, (int, float))
+            }
+        elif isinstance(_asked, list):
+            self._older_requested_chats = {jid: 0.0 for jid in _asked}
         else:
-            self._exhausted_chats = set(
-                self.db.get_metadata_json("exhausted_chats", []))
-            # Timestamps are persisted only after /request-older-messages says
-            # the phone request actually went out.
-            _asked = self.db.get_metadata_json("older_history_requested", {})
-            if isinstance(_asked, dict):
-                self._older_requested_chats = {
-                    jid: float(ts) for jid, ts in _asked.items()
-                    if isinstance(ts, (int, float))
-                }
-            else:
-                self._older_requested_chats = {}
-        # Explicit end signals are session-local; if a durable exhausted entry
-        # exists it already captures them.
-        self._older_request_confirmed_end = set()
+            self._older_requested_chats = {}
 
         # 7. my_jid / my_lid — previously only ever set at runtime by an
         # online host-device/self-LID lookup (check_wa_connection_http(),
@@ -8456,8 +8287,7 @@ class MainWindow(wx.Frame):
         never paired has an empty database and needs the pairing dialog now, not
         a poll cycle later, so that path is never gated on this.
         """
-        import connection_state as cs
-        if status not in cs.UNLINKED_STATES:
+        if status not in ("notLogged", "QRCODE"):
             self._logout_strikes = 0
             self._logout_first_seen = None
             return False
@@ -8657,6 +8487,24 @@ class MainWindow(wx.Frame):
         finally:
             self._restarting_wpp_session = False
 
+    # A live WPPConnect Socket.IO event this recent is treated as direct
+    # proof of connectivity — see _note_live_wpp_event() and the top of
+    # check_whatsapp_reachable(). Set well above the ~15-20s cadence
+    # chats-update/presence events already show on an active account, so a
+    # single missed tick can't cause a false "still online" reading right as
+    # a real outage begins.
+    _LIVE_WPP_EVENT_FRESHNESS_SECONDS = 45.0
+
+    def _note_live_wpp_event(self):
+        """Record that a WPPConnect Socket.IO event was just received.
+
+        Called by WebSocketClient for events that could only have been
+        emitted by a genuinely live, connected WhatsApp session (new
+        messages, delivery acks, chats/presence updates). Safe to call from
+        any thread — a plain float write.
+        """
+        self._last_live_wpp_event_ts = time.time()
+
     def check_whatsapp_reachable(self) -> bool:
         """Decide whether WhatsApp traffic can actually flow right now.
 
@@ -8666,8 +8514,21 @@ class MainWindow(wx.Frame):
         the app used to announce itself connected, start a sync and fire the
         send queue with no internet at all.
 
-        Two sources are combined:
+        Three sources are combined, checked in order of directness:
 
+        * A WPPConnect Socket.IO event received within the last
+          _LIVE_WPP_EVENT_FRESHNESS_SECONDS — undeniable proof traffic is
+          flowing right now, checked first and short-circuits everything
+          else. WinZapp's Socket.IO client talks to the LOCAL WPPConnect
+          server over loopback, which stays up regardless of the machine's
+          own internet route, so it keeps delivering events even when the
+          probe below is the one that's actually broken (observed live: a
+          switched Wi-Fi/mobile network left this machine's own outbound
+          reachability check failing — the classic symptom of a stale
+          negative DNS cache entry surviving a network change — for several
+          minutes while messages kept arriving, sound and all, in an open
+          group the whole time; the app insisted it was offline throughout
+          because this signal didn't exist yet).
         * ``/check-connection-session``, which reports the session as
           Disconnected when WhatsApp Web itself has gone down inside the
           browser.  (It only reports a failure when the underlying call
@@ -8679,6 +8540,10 @@ class MainWindow(wx.Frame):
         before they count — see the session-probe branch below for why the
         first one is not proof of anything.
         """
+        last_live = getattr(self, "_last_live_wpp_event_ts", 0.0)
+        if last_live and (time.time() - last_live) < self._LIVE_WPP_EVENT_FRESHNESS_SECONDS:
+            self._offline_probe_strikes = 0
+            return True
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/check-connection-session"
         session_down = False
         try:
@@ -8809,8 +8674,7 @@ class MainWindow(wx.Frame):
                 # Any status other than the two unlinked ones clears the logout
                 # tally, so only *consecutive* readings can ever confirm one —
                 # see _LOGOUT_CONFIRM_STRIKES.
-                import connection_state as cs
-                if status not in cs.UNLINKED_STATES:
+                if status not in ("notLogged", "QRCODE"):
                     self._logout_strikes = 0
                     self._resume_fail_strikes = 0
                     self._last_strike_ts = 0.0
@@ -8912,13 +8776,13 @@ class MainWindow(wx.Frame):
                     # mid-boot status that must NOT flip the UI to "offline".
                     self._set_wa_connected(
                         False, f"status-session {status}",
-                        confirmed=status in cs.UNLINKED_STATES,
+                        confirmed=status in ("notLogged", "QRCODE"),
                     )
                     logging.info(
                         "[check_wa_connection_http] Session is in active state '%s' — skipping /start-session to avoid browser conflict.",
                         status,
                     )
-                    if status in cs.UNLINKED_STATES:
+                    if status in ("notLogged", "QRCODE"):
                         self._wa_connected = False
 
                         def _logout_with_warning():
@@ -9121,14 +8985,6 @@ class MainWindow(wx.Frame):
         # coming to re-fetch anything, so live events are the only source of
         # new data there is — dropping them would be strictly worse.
         self._sync_ever_started = True
-        # Replay anything the WebSocket delivered before this first sync began.
-        # Schedule it on the UI thread just like ordinary socket delivery.
-        # Clear first so a re-entrant/new event cannot be replayed twice.
-        early_live = list(getattr(self, "_early_live_messages", []))
-        if early_live:
-            self._early_live_messages.clear()
-            for early_msg in early_live:
-                wx.CallAfter(self.on_new_message, early_msg)
         self._last_sync_attempt_ts = time.time()
         try:
             self._run_sync()
@@ -9586,16 +9442,7 @@ class MainWindow(wx.Frame):
             # already produced cannot be explained by the store still warming
             # up, which is what makes it evidence at all.
             evidence_count = getattr(self, "_chat_list_high_water", 0)
-            # A returning account can legitimately start at zero while the
-            # page warms up, so the local cache alone is not evidence on the
-            # first reading.  Once zero repeats, however, ask the page itself.
-            # If IndexedDB says chats exist, a repeatedly empty list-chats is a
-            # broken in-memory store, not a reason to wait through the full
-            # 30-attempt (~3 minute) extension observed in production.
-            stable_zero_with_cache = (
-                server_count == 0 and last_count == 0 and local_chat_count > 0
-            )
-            if evidence_count > server_count or stable_zero_with_cache:
+            if evidence_count > server_count:
                 # Re-read rather than caching one reading for the round: the
                 # count can still be filling in, and only a later, higher
                 # answer can turn a wrongly-innocent verdict into the right
@@ -9604,8 +9451,6 @@ class MainWindow(wx.Frame):
                 latest = self._wa_web_chat_count()
                 if latest is not None:
                     wa_web_count = max(wa_web_count or 0, latest)
-                if stable_zero_with_cache:
-                    evidence_count = max(evidence_count, local_chat_count)
 
             # WA-JS can answer correctly once and then collapse to [] while
             # IndexedDB and the rest of the page remain healthy.  The captured
@@ -9824,12 +9669,6 @@ class MainWindow(wx.Frame):
         # decide whether a chat that came back short is worth re-querying while
         # the rest of its history is still landing.
         self.unblock_history_sync()
-        # Do not hold the entire UI behind RECENT completion. A fresh linked
-        # device exposes chat metadata before its history chunks finish
-        # decoding; the old six-minute gate consequently showed every chat as
-        # empty even while the queue was making healthy progress. Take the
-        # currently available snapshot now and let the existing bounded
-        # backfill revisit short/empty chats as more chunks land.
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -9877,7 +9716,7 @@ class MainWindow(wx.Frame):
 
         # Resolve all unresolved @lid JIDs in our chat list via WPPConnect API
         unresolved_lids = [
-            jid for jid in self.chats.keys()
+            jid for jid in self.chats.keys() 
             if jid.endswith("@lid") and jid not in getattr(self, "_lid_to_phone", {})
         ]
         if unresolved_lids:
@@ -9912,6 +9751,29 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
 
+        # Same bundling as the "synchronizing" announcement above — status,
+        # sound and speech for this stage transition all happen in one
+        # wx.CallAfter so they land together instead of the sound/speech
+        # (previously fired directly on this background thread) visibly
+        # outrunning the queued status-text clear.
+        def _announce_messages_synced():
+            self._set_status("")
+            # Only announce completion when the chat list really came from the
+            # server — otherwise this is a partial sync that is about to be
+            # retried, and saying "conversations synchronized" over the few
+            # chats the socket delivered is exactly what makes the failure
+            # invisible to the user. …and only when that list had settled:
+            # announcing "conversations synchronized" over a chat list the
+            # server was still filling in is precisely what made the
+            # 3-or-4-conversations failure look like a success, right before
+            # the sync restarted itself.
+            if chat_list_ok and chat_list_settled:
+                if self._announce_sync_events_enabled():
+                    self.sync_complete_sound.play()
+                    if not self.background_mode:
+                        self.output(self.i18n.t("sync_complete"))
+        wx.CallAfter(_announce_messages_synced)
+
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
@@ -9930,25 +9792,6 @@ class MainWindow(wx.Frame):
                 and chat_list_ok and chat_list_settled):
             self._sync_completed = True
             self._sync_retry_count = 0
-            _completed_run_id = getattr(self, "_sync_run_id", None)
-            if getattr(self, "_history_still_landing", False):
-                # The chat sweep is usable, but the phone is still feeding
-                # RECENT chunks into WhatsApp Web. Announcing completion here
-                # is observably false: thousands of messages can arrive after
-                # the sound while the phone still says "keep the app open".
-                self._sync_complete_announcement_pending_run_id = (
-                    _completed_run_id
-                )
-                logging.info(
-                    "[start_sync] Sync run %s has a usable snapshot; "
-                    "deferring completion announcement until RECENT settles.",
-                    _completed_run_id,
-                )
-            else:
-                logging.info(
-                    "[start_sync] Sync run %s completed; scheduling completion "
-                    "sound/TTS.", _completed_run_id)
-                wx.CallAfter(self._announce_sync_complete, _completed_run_id)
         else:
             self._sync_completed = False
             self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
@@ -10033,12 +9876,6 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if not self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
-        elif getattr(self, "_history_still_landing", False):
-            # Media extraction shares the same single Puppeteer page as the
-            # history decoder. Starting it during RECENT made both operations
-            # take seconds per request and delayed the phone-side completion.
-            logging.info("[start_sync] Phase 2 media auto-download deferred — RECENT history is still landing.")
-            self._media_sync_deferred = True
         elif not getattr(self, "_sync_completed", False):
             # An incomplete chat-list round will be retried by the health
             # checker. Scanning every cached media record on each such round
@@ -10217,29 +10054,6 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def remove_failed_status_update(self, message_id: str, refresh: bool = True) -> None:
-        """Remove a definitively rejected own status from memory and the DB."""
-        if not message_id:
-            return
-        removed = False
-        for participant in list(getattr(self, "_status_updates", {}).keys()):
-            bucket = self._status_updates.get(participant) or []
-            kept = [m for m in bucket if m.get("key", {}).get("id") != message_id]
-            if len(kept) != len(bucket):
-                removed = True
-                if kept:
-                    self._status_updates[participant] = kept
-                else:
-                    self._status_updates.pop(participant, None)
-        try:
-            self.db.delete_status_update(message_id)
-        except Exception:
-            logging.exception("[status] Failed to delete rejected status %s", message_id)
-        if removed and refresh:
-            sp = getattr(getattr(self, "navigation_panel", None), "status_panel", None)
-            if sp:
-                threading.Thread(target=sp._load_statuses, daemon=True).start()
-
     def clear_local_data(self, wipe_metadata: bool = True):
         """Wipe all cached chats, contacts, messages, media, and mapping caches.
 
@@ -10277,14 +10091,14 @@ class MainWindow(wx.Frame):
             self._resolving_lids.clear()
         else:
             self._resolving_lids = set()
-
+            
         try:
             if hasattr(self, "db") and self.db is not None:
                 self.db.save_full_state({"chats": {}, "contacts": {}}, clear_metadata=wipe_metadata)
                 logging.info("[clear_local_data] Database cleared successfully.")
         except Exception as e:
             logging.error(f"[clear_local_data] Failed to clear database: {e}")
-
+            
         # Clear local downloaded media files to prevent cross-account leakage
         for subdir in ("media", "voice_messages"):
             path = data_path(subdir)
@@ -10895,7 +10709,7 @@ class MainWindow(wx.Frame):
 
                     # Check if the JID starts with "0@" (official WhatsApp/system account)
                     is_system = jid.startswith("0@")
-
+                    
                     # Parse and clean pin values to prevent bool() truthiness bug on non-standard fields
                     pin_val = chat.get("pin")
                     if isinstance(pin_val, str):
@@ -10915,7 +10729,7 @@ class MainWindow(wx.Frame):
                             is_pinned = pin_val
                         elif isinstance(pin_val, (int, float)):
                             is_pinned = pin_val > 1000000
-
+                        
 
 
                     if is_pinned:
@@ -11247,7 +11061,7 @@ class MainWindow(wx.Frame):
                     .setdefault("records", [])
                 )
                 _merge_records(dst_records, src_records)
-
+                
                 # Merge unread counts (take max, not sum, to avoid duplicating counts across LID and phone entries)
                 unread_dst = int(chats[alt_jid].get("unreadCount") or 0)
                 unread_src = int(lid_chat.get("unreadCount") or 0)
@@ -11257,7 +11071,7 @@ class MainWindow(wx.Frame):
                 lid_chat["remoteJid"] = alt_jid
                 chats[alt_jid] = lid_chat
             del chats[lid_jid]
-
+            
             # Redirect active conversation if it was the merged LID chat
             if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
                 active_jid = self.conversations_panel.conversation.get("remoteJid", "")
@@ -11842,7 +11656,7 @@ class MainWindow(wx.Frame):
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json"
             }
-
+            
             response_data = []
             for attempt in range(5):
                 try:
@@ -11913,7 +11727,7 @@ class MainWindow(wx.Frame):
                 logging.info(f"[get_remote_contacts] First 50 named contacts: {', '.join(names_with_values[:50])}")
             else:
                 logging.info("[get_remote_contacts] No filtered contacts have a name or pushName field set in the API response.")
-
+            
             contacts = {}
             for contact in filtered_contacts:
                 jid = self._normalize_jid(contact.get("remoteJid") or contact.get("id", ""))
@@ -11925,7 +11739,7 @@ class MainWindow(wx.Frame):
                     contact["remoteJid"] = jid
                     contact["name"] = name
                     contact["pushName"] = name
-
+                    
                     if jid not in self.contacts:
                         logging.debug(f"[get_remote_contacts] Adding contact: {name} ({jid})")
                         self.contacts[jid] = contact
@@ -11976,64 +11790,10 @@ class MainWindow(wx.Frame):
                         elapsed = 0
                         self.get_remote_contacts()
                         self.get_block_list()
-                    # Snapshot activity before list-chats merges its newest
-                    # metadata. WPPConnect has a known class of missed-event
-                    # races when reopening an existing session; relying on the
-                    # WebSocket alone can therefore leave a conversation frozen
-                    # until some later event happens to repaint it. The upstream
-                    # recommendation is events + periodic message queries.
-                    before_activity = {
-                        self._normalize_jid(j): int((c or {}).get("t", 0) or 0)
-                        for j, c in self.chats.items()
-                        if isinstance(c, dict)
-                    }
-                    before_unread = {
-                        self._normalize_jid(j): int((c or {}).get("unreadCount", 0) or 0)
-                        for j, c in self.chats.items()
-                        if isinstance(c, dict)
-                    }
                     result = self.get_remote_chats(dict(self.chats), persist_full=False,
                                                    notify_errors=False)
                     if result is not None:
                         self.chats = result
-
-                        # Recover messages whose live event was missed. Only
-                        # chats whose server-side activity timestamp advanced
-                        # are queried, plus the currently open conversation;
-                        # cap each poll so a busy account cannot turn this
-                        # safety net into another bulk initial sync.
-                        changed = []
-                        seen_changed = set()
-                        cp = getattr(self, "conversations_panel", None)
-                        open_jid = self._normalize_jid(
-                            getattr(cp, "_last_open_jid", "") or ""
-                        )
-                        if open_jid and open_jid in result:
-                            changed.append(result[open_jid].copy())
-                            seen_changed.add(open_jid)
-                        for jid, current in result.items():
-                            if len(changed) >= 6:
-                                break
-                            if not isinstance(current, dict):
-                                continue
-                            normalized = self._normalize_jid(jid)
-                            if normalized in seen_changed:
-                                continue
-                            now_t = int(current.get("t", 0) or 0)
-                            old_t = int(before_activity.get(normalized, 0) or 0)
-                            now_unread = int(current.get("unreadCount", 0) or 0)
-                            old_unread = int(before_unread.get(normalized, 0) or 0)
-                            if now_t > old_t or now_unread > old_unread:
-                                changed.append(current.copy())
-                                seen_changed.add(normalized)
-                        for current in changed:
-                            try:
-                                self.sync_chat_messages(current)
-                            except Exception as sync_exc:
-                                logging.warning(
-                                    "[periodic_message_catchup] failed for %s: %s",
-                                    current.get("remoteJid", ""), sync_exc,
-                                )
                     wx.CallAfter(self._schedule_set_chats)
                     # Phone-side clears/deletions — active conversation only,
                     # one extra cheap GET per cycle, nothing at all when no
@@ -12243,7 +12003,7 @@ class MainWindow(wx.Frame):
                 continue
             _seen_render_jids.add(render_jid)
 
-
+    
             records_wrapper = chat.get("messages") or {}
             records = []
             if isinstance(records_wrapper, dict):
@@ -12334,7 +12094,7 @@ class MainWindow(wx.Frame):
                 if not name:
                     msg_push = self.find_name_through_messages(chat)
                     name = msg_push or get_valid_name(chat.get("name", ""))
-
+            
             # Treat placeholders as empty to trigger phone number fallback
             if name and (self._is_bad_contact_name(name) or name == self.i18n.t("unknown_contact")):
                 name = ""
@@ -12366,7 +12126,7 @@ class MainWindow(wx.Frame):
                                     name = format_number(numeric)
                                 else:
                                     name = self.i18n.t("unknown_contact")
-
+            
             # Name-resolution tracing. DEBUG, not INFO, and with lazy %-args
             # rather than an f-string, because both halves of that mattered:
             # this runs once per chat inside _compute_chat_lists(), which the
@@ -12915,25 +12675,10 @@ class MainWindow(wx.Frame):
             threading.Thread(target=resolve_in_bg, daemon=True).start()
 
         if phone_jids_to_resolve:
-            # A group page can contain the same mention in dozens of messages.
-            # Claim each normalized JID once until its lookup finishes: the API
-            # has one browser page, and duplicate contact lookups were starving
-            # the message-sync workers for 10-15 seconds at a time.
-            unique_phone_jids = list(dict.fromkeys(phone_jids_to_resolve))
-            with self._contact_resolution_lock:
-                claimed_phone_jids = []
-                for p_jid in unique_phone_jids:
-                    normalized = self._normalize_jid(p_jid)
-                    if normalized in self._contact_resolution_inflight:
-                        continue
-                    self._contact_resolution_inflight.add(normalized)
-                    claimed_phone_jids.append(p_jid)
-            if not claimed_phone_jids:
-                return
-            logging.info(f"[Contact Resolution] Resolving mentioned phone JIDs: {claimed_phone_jids}")
+            logging.info(f"[Contact Resolution] Found unresolved mentioned phone JIDs in message: {phone_jids_to_resolve}")
             def resolve_phones_in_bg():
                 updated_contacts = {}
-                for p_jid in claimed_phone_jids:
+                for p_jid in phone_jids_to_resolve:
                     try:
                         res = self.get_contact_profile(p_jid)
                         if res:
@@ -12950,10 +12695,6 @@ class MainWindow(wx.Frame):
                                     updated_contacts[normalized] = self.contacts[normalized]
                     except Exception as e:
                         logging.error(f"[Contact Resolution] Error resolving {p_jid}: {e}")
-                    finally:
-                        normalized = self._normalize_jid(p_jid)
-                        with self._contact_resolution_lock:
-                            self._contact_resolution_inflight.discard(normalized)
                 if updated_contacts:
                     try:
                         self.db.upsert_contacts_batch(updated_contacts)
@@ -12969,7 +12710,7 @@ class MainWindow(wx.Frame):
         def _scan():
             time.sleep(3)  # Wait for startup to stabilize
             logging.info("[Mentions Scan] Starting scan of all cached messages...")
-
+            
             lids_to_resolve = set()
             phones_to_resolve = set()
             # Mappings learned by this scan, so the single end-of-scan refresh
@@ -13045,7 +12786,7 @@ class MainWindow(wx.Frame):
                                     name = (contact.get("name") or contact.get("pushName") or "").strip()
                                 if not name or name == "Contato sem nome" or is_phone_like(name):
                                     phones_to_resolve.add(jid)
-
+                                    
             # Add the group senders that the pushName pass above could not
             # name, up to the cap, so mentions never lose their slot to them.
             sender_lids = {j for j in sender_lids if self._needs_sender_resolution(j)}
@@ -13061,7 +12802,7 @@ class MainWindow(wx.Frame):
             if lids_to_resolve:
                 logging.info(f"[Mentions Scan] Found {len(lids_to_resolve)} unresolved LIDs.")
                 self.resolve_lid_jids_via_api(list(lids_to_resolve))
-
+                
             # Declared out here, not inside the `if` below: the end-of-scan
             # refresh reads it, and that refresh has to run whether or not there
             # were any mentioned phone JIDs to resolve.
@@ -13107,7 +12848,7 @@ class MainWindow(wx.Frame):
             if updated_contacts or mapped:
                 wx.CallAfter(self._schedule_set_chats)
                 wx.CallAfter(self._schedule_refresh_active_messages)
-
+            
             logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
 
         threading.Thread(target=_scan, daemon=True).start()
@@ -13313,11 +13054,22 @@ class MainWindow(wx.Frame):
                     lst.Select(0)
                     lst.EnsureVisible(0)
 
+    # Deep-sync for the most-recent chats.  The boot sync normally fetches only
+    # messages_page_size (200) newest messages per chat, so scrolling up in a
+    # conversation quickly exhausts local history and stalls on
+    # fetch_older_messages() network round-trips.  Give the N most-recent chats
+    # (the ones the user is most likely to open first) a deeper window instead;
+    # the rest still sync the regular page target.  The server bounds a plain
+    # (un-anchored) get-messages to maxPages=10 pages of `count` each, so a
+    # count beyond ~10x a page cannot loop.
+    _DEEP_SYNC_TOP_N = 10
+    _DEEP_SYNC_COUNT = 1000
+
     def sync_remote_chats(self):
         chats = list(self.chats.values())
         if not chats:
             return
-
+            
         # Filter out invalid JIDs (like '0' or empty entries) to prevent API errors
         valid_chats = []
         for c in chats:
@@ -13327,34 +13079,41 @@ class MainWindow(wx.Frame):
                 valid_chats.append(c)
             else:
                 logging.warning(f"[sync_remote_chats] Skipping invalid JID from sync: {jid}")
-
+                
         if not valid_chats:
             return
-
+            
         # Sort chats by most recent active timestamp
         try:
             valid_chats = sorted(valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True)
         except Exception:
             pass
 
+        # Tag the N most-recent chats for a deeper history window so the
+        # conversations the user is most likely to open first keep reading from
+        # the local DB while scrolling up, instead of stalling on
+        # fetch_older_messages() network round-trips.
+        deep_ids = {c.get("remoteJid", "") for c in valid_chats[:self._DEEP_SYNC_TOP_N]}
+        deep_ids.discard("")
+        if deep_ids:
+            logging.info(
+                "[sync_remote_chats] Deep-syncing %d most-recent chat(s) at "
+                "count=%d (page target=%d).",
+                len(deep_ids), self._DEEP_SYNC_COUNT, self.history_page_target(),
+            )
+
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
-        #
-        # A plain newest-window query can legitimately answer with only 1, 3 or
-        # 15 rows while WhatsApp Web is materialising history.  Do not postpone
-        # the anchored follow-up until the whole account has been swept: that
-        # left every short group/private chat incomplete until the user opened
-        # it and pressed Home.  The repair path performs that same anchored page
-        # immediately, while this chat already owns a worker slot.
-        # RECENT decoding and get-messages both execute through one Puppeteer
-        # page. Keep the foreground sweep gentle until the phone finishes;
-        # otherwise six workers starve the decoder and make the phone remain on
-        # "keep the app open" for minutes.
-        worker_cap = 2 if getattr(self, "_history_still_landing", False) else 6
-        max_workers = min(worker_cap, len(valid_chats))
+        max_workers = min(6, len(valid_chats))
         failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(self._repair_short_chat, c): c for c in valid_chats}
+            def _job(c):
+                copy = c.copy()
+                if c.get("remoteJid", "") in deep_ids:
+                    copy["_sync_limit"] = self._DEEP_SYNC_COUNT
+                return copy
+
+            futs = {pool.submit(self.sync_chat_messages, _job(c)): c for c in valid_chats}
             for fut in as_completed(futs):
                 try:
                     fut.result()
@@ -13392,8 +13151,6 @@ class MainWindow(wx.Frame):
     _BACKFILL_CHUNK_DELAY = 5      # pause between chunks in the same full sweep
     _BACKFILL_MAX_DELAY   = 300    # ceiling once passes stop recovering anything
     _BACKFILL_BUDGET      = 45 * 60  # total wall-clock the backfill may run for
-    # Wait long enough for the five-minute stalled-RECENT recovery to run.
-    _RECENT_HISTORY_WAIT = 6 * 60
     # Renewal ceiling for a session whose history is still arriving — a fresh
     # pairing delivers and decodes for far longer than the ordinary budget.
     _BACKFILL_LANDING_BUDGET = 4 * 60 * 60
@@ -13447,49 +13204,6 @@ class MainWindow(wx.Frame):
         except (AttributeError, TypeError, ValueError):
             return 200
 
-    def wait_for_recent_history_before_message_sync(self) -> None:
-        """Wait for WhatsApp Web RECENT store before reading chats.
-
-        On a newly linked device, list-chats becomes ready before RECENT
-        history does. Querying conversations in that window records arbitrary
-        prefixes (1/15/100/124/137) and even empty lists. Reopening appears to
-        fix it only because the browser store has decoded more in the meantime.
-
-        The health recovery runs on every poll. This bounded wait still lets
-        the later backfill handle history arriving after the ceiling.
-        """
-        deadline = time.monotonic() + self._RECENT_HISTORY_WAIT
-        last_signature = None
-        while time.monotonic() < deadline:
-            if self._should_abort_sync_for_offline():
-                return
-            status = self.fetch_history_sync_status()
-            if not isinstance(status, dict):
-                return
-            if status.get("recentCompleted") is not False:
-                logging.info(
-                    "[history-sync] RECENT history is ready before message sync."
-                )
-                return
-            signature = (
-                status.get("unprocessedChunks"),
-                tuple(sorted((status.get("chunkStatus") or {}).values())),
-            )
-            if signature != last_signature:
-                logging.info(
-                    "[history-sync] Waiting for RECENT history before reading "
-                    "conversations (unprocessed=%s).",
-                    status.get("unprocessedChunks"),
-                )
-                last_signature = signature
-            self.unblock_history_sync()
-            time.sleep(10)
-        logging.warning(
-            "[history-sync] RECENT history did not settle within %ss; "
-            "continuing with automatic backfill enabled.",
-            self._RECENT_HISTORY_WAIT,
-        )
-
     def refresh_history_still_landing(self, context: str = "") -> bool:
         """Note whether more history is still on its way into WhatsApp Web.
 
@@ -13500,7 +13214,7 @@ class MainWindow(wx.Frame):
         _note_backfill_state() runs on sync worker threads that must not each
         make their own status call.
 
-        Three signals, because each one has a blind spot:
+        Two signals, because either alone has a blind spot:
 
           * unprocessedChunks > 0 — chunks delivered and waiting to be decoded.
           * initialSyncComplete is not true — a freshly paired session, where
@@ -13509,38 +13223,22 @@ class MainWindow(wx.Frame):
             sync runs there is often nothing in the queue *yet*, and reading
             only the chunk count would conclude that every short conversation
             is genuinely short at exactly the moment that is least true.
-          * recentCompleted is explicitly false — the initial bootstrap can
-            already report complete and have no queued chunks while RECENT
-            history is still being delivered.  That exact state returned 1 or
-            15 messages for dozens of chats, then returned full 200-message
-            pages when the user pressed Home a few minutes later.  Ignoring
-            this flag retired those chats before the automatic backfill began.
 
-        An interrupted RECENT sync cannot retry forever: the backfill already
-        has a fixed wall-clock budget (and a hard landing ceiling), while the
-        server-side queue recovery now completes or safely resets stale RECENT
-        batches.  Missing `recentCompleted` remains compatible with older API
-        builds and does not by itself mark history as landing.
+        Deliberately not keyed on `recentCompleted`: that flag stays false on a
+        session whose recent sync was interrupted, and treating it as "still
+        landing" would re-query every short chat on every launch forever.
         """
         status = self.fetch_history_sync_status()
         if status is None:
-            # An unavailable status endpoint is not positive evidence that the
-            # phone finished RECENT. Treating one timeout as settled made the
-            # client announce completion while WhatsApp still displayed
-            # "keep the app open". Preserve the last known state; before the
-            # first successful check, choose the safe state.
-            landing = bool(getattr(self, "_history_still_landing", True))
-            self._history_still_landing = landing
-            logging.warning(
-                "[history-sync] %s: status unavailable; preserving landing=%s.",
-                context or "check", landing,
-            )
-            return landing
+            # No endpoint / no answer. Assume settled: one wasted retry per
+            # short chat is a far better failure than re-querying hundreds of
+            # them for the whole backfill budget.
+            self._history_still_landing = False
+            return False
         unprocessed = status.get("unprocessedChunks")
         queued = isinstance(unprocessed, int) and unprocessed > 0
         first_sync = status.get("initialSyncComplete") is not True
-        recent_incomplete = status.get("recentCompleted") is False
-        landing = queued or first_sync or recent_incomplete
+        landing = queued or first_sync
         self._history_still_landing = landing
         logging.info(
             "[history-sync] %s: unprocessed=%s initial_complete=%s recent_complete=%s "
@@ -13828,41 +13526,6 @@ class MainWindow(wx.Frame):
             logging.info("[backfill] Name resolution bridged %d new LID(s).", gained)
         return gained
 
-    def _repair_short_chat(self, chat: dict) -> None:
-        """Retry a short chat, then page it exactly like pressing Home does.
-
-        The old backfill only repeated sync_chat_messages(), an unanchored
-        newest-window query. A chat whose browser store exposed 1 or 15 rows
-        therefore returned the same 1 or 15 forever. The conversation view's
-        Home path succeeds because it follows that query with an anchored
-        ``fetch_older_messages`` call. Short-chat repair must use the same path.
-        """
-        self.sync_chat_messages(chat)
-        if getattr(self, "_history_still_landing", False):
-            # The first page is enough to make the conversation usable. An
-            # anchored second request for every short chat doubles the browser
-            # traffic exactly while RECENT is decoding; the backfill performs
-            # the anchored repair after more history has landed.
-            return
-        raw_jid = self._normalize_jid(chat.get("remoteJid", ""))
-        jid, _live = self._resolve_backfill_target(raw_jid)
-        if not jid:
-            return
-        count = self._local_record_count(jid)
-        if count <= 0 or count >= self.history_page_target():
-            return
-        anchor = self._oldest_stored_message(jid)
-        if anchor:
-            # Background repair may walk pages that are already present in the
-            # linked-device store, but it must never issue an on-demand request
-            # to the primary phone.  A live account showed 94 such requests for
-            # 91 chats in 145 seconds, starving the one conversation the user
-            # was actively trying to scroll.  Phone history is interactive and
-            # is requested only by the open conversation's scroll path.
-            self.fetch_older_messages(
-                jid, anchor, store_only=False, allow_phone_request=False
-            )
-
     def _backfill_empty_chats(self):
         """Re-fetch messages for chats whose history WhatsApp Web had not loaded.
 
@@ -13917,26 +13580,9 @@ class MainWindow(wx.Frame):
                 # sweep, not once per chunk. Large queues now move through
                 # several chunks quickly and do not need to hammer this status
                 # endpoint between each one.
-                landing_now = getattr(self, "_history_still_landing", False)
-                if not attempted:
-                    landing_now = self.refresh_history_still_landing(
-                        context=f"backfill pass {attempt}"
-                    )
-                if not landing_now:
-                    pending_announcement = getattr(
-                        self, "_sync_complete_announcement_pending_run_id", None
-                    )
-                    if pending_announcement is not None:
-                        self._sync_complete_announcement_pending_run_id = None
-                        logging.info(
-                            "[history-sync] RECENT settled; announcing sync run %s complete.",
-                            pending_announcement,
-                        )
-                        wx.CallAfter(
-                            self._announce_sync_complete, pending_announcement
-                        )
-                    self._start_deferred_media_sync()
-                if not attempted and landing_now:
+                if (not attempted
+                        and self.refresh_history_still_landing(
+                            context=f"backfill pass {attempt}")):
                     # Two things can stall the queue, and both are silent: a
                     # chunk the processing loop will never accept parked at the
                     # head of it, and a loop that simply stopped scheduling
@@ -13977,11 +13623,6 @@ class MainWindow(wx.Frame):
                     logging.info("[backfill] Nothing pending — every chat is walked back to "
                                  "its beginning (or all there is) and has a name.")
                     return
-                # A short-message chat is user-visible damage, while an unresolved
-                # name is cosmetic. Do not let slow LID lookups hold up the retry
-                # window (a live run spent 54 seconds here with 172 short chats
-                # waiting behind it).
-                named = 0
                 # Names get the same second chance as messages. _run_sync()
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
                 # up, so anything it could not map then stayed a bare @lid or a
@@ -14151,10 +13792,10 @@ class MainWindow(wx.Frame):
     # looks like it worked and simply found short conversations. That is
     # exactly the shape of the "only 15-20 messages per group" reports.
     #
-    # WinZapp also exposes a staged recovery: restart the progressive loop,
-    # then WhatsApp Web's own backend worker, and finally reload the page if the
-    # exact same RECENT queue remains frozen. The status logging stays here so
-    # the next report contains the evidence rather than just the symptom.
+    # There is nothing WinZapp can do about it at runtime, so these two
+    # methods only observe and log. What they buy is that the next report of
+    # this comes with the answer already in log.log instead of needing a
+    # CDP session against the live page to find.
 
     def fetch_history_sync_status(self, timeout: int = 30):
         """Raw /history-sync-status payload, or None when it can't be read."""
@@ -14262,16 +13903,6 @@ class MainWindow(wx.Frame):
             payload = body.get("response") if isinstance(body, dict) else None
             if not isinstance(payload, dict):
                 return None
-            if payload.get("backendRestarted"):
-                logging.warning(
-                    "[history-sync] RECENT history queue stayed frozen; "
-                    "restarted WhatsApp Web's backend worker."
-                )
-            if payload.get("pageReloaded"):
-                logging.warning(
-                    "[history-sync] RECENT history queue survived the backend "
-                    "restart; reloaded WhatsApp Web for a clean bootstrap."
-                )
             removed = payload.get("removed") or []
             if removed:
                 logging.warning(
@@ -14294,22 +13925,28 @@ class MainWindow(wx.Frame):
             return None
 
     def request_older_messages(self, remote_jid: str, timeout: int = 60) -> bool:
-        """Ask the primary phone for the next on-demand history chunk.
+        """Ask the phone for history older than what this device holds.
 
-        ``True`` means the request was accepted *or is already in flight*.  It
-        never means the history has arrived yet. End-of-history and request
-        eligibility come from the named ChatModel state returned by the API;
-        numeric value 2 is INCOMPLETE in current WhatsApp Web builds.
+        Fire-and-forget by nature: the phone answers with a history-sync chunk
+        minutes later, never in this response, so a True here means "the
+        request went out", not "there are new messages now".
+
+        The 60 s timeout is not generosity — a timeout here returns False, and
+        the caller in fetch_older_messages() reads False as "the request never
+        went out" and drops the chat into _exhausted_chats, which stops it from
+        ever being re-queried. Timing out early therefore writes off exactly the
+        chats that still have history coming.
+
+        That used to be bounded by the session, because _exhausted_chats died
+        with the process. It no longer is: the set is persisted, so the write-off
+        outlives the run and takes the user's own scroll-up with it. What keeps
+        the two apart now is _OLDER_REQUEST_GRACE — the write-off is only made
+        durable once this request has had far longer than its reply window to be
+        answered. See that constant.
         """
         if not getattr(self, "_wa_connected", False):
             return False
         jid = self._normalize_jid(remote_jid)
-        # Per-chat because deep backfill can ask for several conversations at
-        # once. A refusal while RECENT history is still landing is temporary
-        # and must never become proof that this chat has no older history.
-        if not hasattr(self, "_older_request_temporarily_blocked"):
-            self._older_request_temporarily_blocked = set()
-        self._older_request_temporarily_blocked.discard(jid)
         # Same @lid-preferred addressing sync_chat_messages() uses, so a chat
         # the store only knows under its @lid still resolves.
         lid = getattr(self, "_phone_to_lid", {}).get(jid, "")
@@ -14335,106 +13972,23 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
             payload = body.get("response") if isinstance(body, dict) else None
-            if not hasattr(self, "_older_request_confirmed_end"):
-                self._older_request_confirmed_end = set()
-            if response.status_code in (200, 201) and isinstance(payload, dict):
-                # WhatsApp's enum is the only durable end-of-history signal:
-                #   0 = complete, but MORE remain on primary
-                #   1 = complete, NO MORE remain on primary
-                #   2 = on-demand complete, but MORE remain on primary
-                # primaryHasMore can be false for type 2 on current builds, so
-                # never use that helper as exhaustion evidence.
-                if payload.get("endOfHistory") is True \
-                        or payload.get("endOfHistoryTransferType") == 1:
-                    self._older_request_confirmed_end.add(jid)
-                    logging.info(
-                        "[history-sync] Primary phone confirmed end of history for "
-                        "%s (end_type=%s).", jid,
-                        payload.get("endOfHistoryTransferType"),
-                    )
-                    return False
-
-                if payload.get("initialHistoryIncomplete") is True:
-                    self._older_request_temporarily_blocked.add(jid)
-                    logging.info(
-                        "[history-sync] Initial history for %s is incomplete; "
-                        "not issuing an invalid on-demand request.", jid,
-                    )
-                    return False
-
-                if payload.get("requested") or payload.get("inFlight"):
-                    self._older_request_confirmed_end.discard(jid)
-                    logging.info(
-                        "[history-sync] Older-history request %s for %s "
-                        "(end_type=%s, more_on_primary=%s, primary_has_more=%s, "
-                        "payload_mode=%s, sender_returned=%s).",
-                        "already in flight" if payload.get("inFlight") else "sent",
-                        jid, payload.get("endOfHistoryTransferType"),
-                        payload.get("moreOnPrimary"), payload.get("primaryHasMore"),
-                        payload.get("requestPayloadMode"),
-                        payload.get("senderReturnedValue"),
-                    )
-                    return True
-
-            error_text = ""
-            if isinstance(payload, dict):
-                error_text = str(payload.get("error") or "")
-                if payload.get("recentCompleted") is False:
-                    self._older_request_temporarily_blocked.add(jid)
-            if "recent history sync is not complete" in error_text.lower():
-                self._older_request_temporarily_blocked.add(jid)
+            if response.status_code in (200, 201) and isinstance(payload, dict) \
+                    and payload.get("requested"):
+                logging.info(
+                    "[history-sync] Requested older messages from the phone for "
+                    "%s (primary_has_more=%s).", jid, payload.get("primaryHasMore"),
+                )
+                return True
             logging.info(
                 "[history-sync] Older-message request for %s did not go out "
-                "(status=%s, payload=%s, temporary=%s).", jid, response.status_code,
+                "(status=%s, payload=%s).", jid, response.status_code,
                 payload if payload else response.text[:200],
-                jid in self._older_request_temporarily_blocked,
             )
             return False
         except Exception as exc:
             logging.warning(
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
             return False
-
-    def _start_deferred_media_sync(self) -> None:
-        """Start the media phase once RECENT no longer competes for the page."""
-        if not getattr(self, "_media_sync_deferred", False):
-            return
-        if getattr(self, "_media_sync_running", False):
-            return
-        self._media_sync_deferred = False
-
-        def _run():
-            self._media_sync_running = True
-            announced = False
-            try:
-                wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-                if not self.background_mode and self._announce_sync_events_enabled():
-                    announced = True
-                    wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
-                count = self.sync_media_for_all_chats()
-                logging.info(
-                    "[history-sync] Deferred media phase downloaded %d file(s).",
-                    count,
-                )
-                if announced:
-                    if getattr(self, "_wa_connected", False) and not getattr(
-                        self, "offline_mode", False
-                    ):
-                        wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
-                    else:
-                        wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
-            except Exception:
-                logging.exception("[history-sync] Deferred media phase failed")
-                if announced:
-                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
-            finally:
-                self._media_sync_running = False
-                wx.CallAfter(self._set_status, "")
-                wx.CallAfter(self.set_chats)
-
-        threading.Thread(
-            target=_run, daemon=True, name="deferred-media-sync"
-        ).start()
 
     def sync_media_for_all_chats(self) -> int:
         """Download every not-yet-stored media file across all chats.
@@ -14522,28 +14076,10 @@ class MainWindow(wx.Frame):
     def _normalize_fetched_messages(self, raw_messages, remote_jid: str) -> list:
         """WPPConnect get-messages payload -> WinZapp's canonical message dicts."""
         out = []
-        target_jid = self._normalize_jid(remote_jid)
-        aliases = {target_jid}
-        lid = self._normalize_jid(
-            getattr(self, "_phone_to_lid", {}).get(target_jid, "")
-        )
-        phone = self._normalize_jid(
-            getattr(self, "_lid_to_phone", {}).get(target_jid, "")
-        )
-        aliases.update(jid for jid in (lid, phone) if jid)
         for wm in raw_messages or []:
             if isinstance(wm, dict) and self.ws:
                 try:
                     normalized = self.ws._normalize_wpp_message(wm)
-                    # A private chat may be queried through its @lid alias even
-                    # though WinZapp stores it under the canonical phone JID.
-                    # Canonicalize before the per-chat filter; otherwise valid
-                    # fetched messages are silently discarded.
-                    key = normalized.get("key") or {}
-                    message_jid = self._normalize_jid(key.get("remoteJid", ""))
-                    if target_jid and message_jid in aliases:
-                        key["remoteJid"] = target_jid
-                        normalized["key"] = key
                     prune_message_record(normalized)
                     out.append(normalized)
                 except Exception as e:
@@ -14608,12 +14144,12 @@ class MainWindow(wx.Frame):
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
-
+        
         user_part = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
         if not user_part or user_part == "0" or len(user_part) < 5:
             logging.warning(f"[sync_chat_messages] Aborting sync for invalid JID: {remote_jid}")
             return
-
+            
         # Formata o JID corretamente para o WPPConnect.
         #
         # Prefer the @lid when the cache knows one. Measured against a live
@@ -14633,13 +14169,9 @@ class MainWindow(wx.Frame):
             phone = remote_jid
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        # A private chat's raw WhatsApp window can contain ciphertext, pin and
-        # reaction events that intentionally do not become rows in the UI.  Ask
-        # for a small raw margin so those internal records do not consume the
-        # configured number of *visible* messages (e.g. 193/199 instead of 200).
-        # Groups already deliver a full visible page and keep their exact limit.
-        fetch_limit = limit if remote_jid.endswith("@g.us") else limit + 50
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={fetch_limit}"
+        if chat.get("_sync_limit"):
+            limit = int(chat["_sync_limit"])
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -15606,10 +15138,10 @@ class MainWindow(wx.Frame):
             phone_net = remote_jid
             if phone_net.endswith("@s.whatsapp.net"):
                 phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
-
+            
             mentioned = self._canonical_mention_jids(mentioned_jids)
             mentioned_clean = [m.replace("@s.whatsapp.net", "@c.us") if m.endswith("@s.whatsapp.net") else m for m in mentioned]
-
+            
             payload = {
                 "phone": [phone_net],
                 "message": text,
@@ -16170,7 +15702,7 @@ class MainWindow(wx.Frame):
                     os.makedirs(voice_messages_dir, exist_ok=True)
                     local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
                     real_audio_path = os.path.join(voice_messages_dir, f"{real_id}.msv")
-
+                    
                     if os.path.isfile(local_audio_path):
                         import shutil
                         shutil.copy2(local_audio_path, real_audio_path)
@@ -16195,23 +15727,8 @@ class MainWindow(wx.Frame):
         if audio_path and hasattr(self, "message_sent_sound"):
             self.message_sent_sound.play()
 
-        send_status = None
-        _ack_by_local_id = getattr(self, "_media_send_ack_by_local_id", None)
-        if isinstance(_ack_by_local_id, dict):
-            raw_ack = _ack_by_local_id.pop(local_id, None)
-            if raw_ack is not None:
-                send_status = ack_to_status(raw_ack)
-
         if hasattr(self, "conversations_panel"):
-            if send_status is None:
-                self.conversations_panel._mark_message_sent(
-                    local_id, real_id=real_id, quote_lost=quote_lost
-                )
-            else:
-                self.conversations_panel._mark_message_sent(
-                    local_id, real_id=real_id, quote_lost=quote_lost,
-                    send_status=send_status,
-                )
+            self.conversations_panel._mark_message_sent(local_id, real_id=real_id, quote_lost=quote_lost)
 
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
@@ -16272,17 +15789,6 @@ class MainWindow(wx.Frame):
             return
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         logging.info(f"[on_message_status_update] msg_id={msg_id} status={status} remote_jid={remote_jid}")
-
-        normalized_status = str(status).strip().lower()
-        if remote_jid == "status@broadcast" and normalized_status in {
-            "-1", "error", "failed", "failure", "rejected", "error_unknown"
-        }:
-            logging.warning(
-                "[status] Removing definitively failed local status %s (%s)",
-                msg_id, status,
-            )
-            self.remove_failed_status_update(msg_id)
-            return
 
         # Try all known JID forms (@lid <-> @s.whatsapp.net) to find the chat
         candidates = [remote_jid]
@@ -16829,40 +16335,12 @@ class MainWindow(wx.Frame):
                         except Exception as e:
                             logging.error("[on_presence_update] speak error: %s", e)
 
-        # Persist the updated pushName map without ever making the wx handler
-        # wait for SQLite. Presence events can fire rapidly while sync/backfill
-        # is busy; this exact synchronous write was one of the watchdog stacks.
+        # Persist the updated pushName map to database metadata.
         if _ppm_updated and hasattr(self, "db") and self.db is not None:
-            snapshot = dict(self._presence_pushname_map)
             try:
-                submit = getattr(self.db, "set_metadata_json_async", None)
-                if callable(submit):
-                    fut = submit("presence_pushname_map", snapshot)
-
-                    def _presence_db_done(done):
-                        try:
-                            done.result()
-                        except Exception as db_err:
-                            logging.warning(
-                                "[on_presence_update] Failed to save presence_pushname_map: %s",
-                                db_err,
-                            )
-
-                    fut.add_done_callback(_presence_db_done)
-                else:
-                    # Compatibility fallback for alternate DB implementations:
-                    # still keep the synchronous call off the MainThread.
-                    def _save_presence_metadata():
-                        try:
-                            self.db.set_metadata_json("presence_pushname_map", snapshot)
-                        except Exception as db_err:
-                            logging.warning(
-                                "[on_presence_update] Failed to save presence_pushname_map: %s",
-                                db_err,
-                            )
-                    self._msg_bg_executor.submit(_save_presence_metadata)
+                self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
             except Exception as db_err:
-                logging.warning("[on_presence_update] Failed to queue presence_pushname_map save: %s", db_err)
+                logging.warning("[on_presence_update] Failed to save presence_pushname_map: %s", db_err)
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
@@ -17108,6 +16586,41 @@ class MainWindow(wx.Frame):
                 normalized, old_count, unread_count, previous_unread,
             )
             return
+        elif (
+            read_at_t is None
+            and unread_count > old_count
+            and not _remote_read
+            and getattr(self, "_new_since_read", {}).get(normalized)
+        ):
+            # Once the read_at_t entry that protected a chat has been
+            # consumed and popped (see the `elif read_at_t is not None`
+            # branch below, which pops it after its own clamp), a LATER
+            # chats-update for the same chat can still arrive reporting a
+            # higher unreadCount than what was actually read locally —
+            # WhatsApp Web's own total, which that same branch already
+            # documents as sometimes still counting messages already read
+            # locally but not yet acknowledged by the server. Without this
+            # guard that inflated total was accepted verbatim (there is no
+            # other elif left to catch it), which is what pulled an
+            # already-read message back into "unread" (first_unread_index()
+            # draws the separator by counting backwards from unreadCount, so
+            # a count too high by N drags N already-read messages along with
+            # it). _new_since_read is only ever set together with the local
+            # unreadCount increment in on_new_message(), so a nonzero entry
+            # here means old_count is itself locally verified, not merely
+            # "whatever the last sync happened to say" — clamp to it exactly
+            # like the read_at_t-present branch does, rather than rejecting
+            # the update outright (a chat truly gaining more unread than
+            # tracked locally, e.g. from another device, still updates).
+            unread_count = min(unread_count, self._new_since_read[normalized])
+            logging.info(
+                "[unread] %s: %s -> %s (previous=%s, open=%s, read_ack=%s).",
+                normalized, old_count, unread_count, previous_unread, _open_now, read_at_t,
+            )
+            chat["unreadCount"] = unread_count
+            self._schedule_save(dirty_jid=normalized)
+            self._schedule_set_chats()
+            return
         elif read_at_t is not None:
             incoming_t = int(chat.get("t", 0) or 0)
             if incoming_t <= read_at_t:
@@ -17336,7 +16849,7 @@ class MainWindow(wx.Frame):
                         time.sleep(3)
                         continue
                     return ""
-
+                
                 resp_text = response.text or ""
                 logging.info(
                     "[get_base64_from_media] WPPConnect server status=%d for msg_id=%s, body_snippet=%s",
@@ -17374,7 +16887,7 @@ class MainWindow(wx.Frame):
                     response = api_post(url, headers=headers, json=body_data, stream=True, timeout=timeout)
                     if response.status_code in (403, 410):
                         raise MediaExpiredError(response.status_code)
-
+                    
                     # Check for transient session not active errors before streaming
                     if response.status_code in (400, 500):
                         # Read small error response
@@ -17400,7 +16913,7 @@ class MainWindow(wx.Frame):
                             response.status_code, msg_id,
                         )
                         return ""
-
+                    
                     total = int(response.headers.get("content-length", 0))
                     downloaded = 0
                     chunks: list = []
@@ -17528,19 +17041,8 @@ class MainWindow(wx.Frame):
                 count_before = self.db.get_message_count(remote_jid)
             except Exception:
                 count_before = None
-            page = self.fetch_older_messages(
-                remote_jid, anchor, store_only=True, allow_phone_request=False
-            )
+            page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
             if not page:
-                # Waiting for the phone must not require _exhausted_chats just
-                # to drain the deep-backfill queue. Pause this anchor for two
-                # minutes instead; user scroll-up does not consult this cooldown
-                # and remains free to retry as soon as history lands.
-                if remote_jid not in getattr(self, "_exhausted_chats", set()):
-                    stalled[remote_jid] = (
-                        anchor_identity,
-                        time.monotonic() + self._DEEP_STALL_RETRY_SECONDS,
-                    )
                 break
             next_anchor = self._oldest_stored_message(remote_jid)
             next_identity = self._anchor_identity(next_anchor)
@@ -17563,20 +17065,36 @@ class MainWindow(wx.Frame):
                     anchor_identity,
                     time.monotonic() + self._DEEP_STALL_RETRY_SECONDS,
                 )
-                # Deep/background backfill is intentionally passive at the
-                # linked-device boundary.  It may drain pages that are already
-                # in WhatsApp Web's store, but it must never call
-                # request_older_messages().  In a real account that old branch
-                # launched 94 phone-history requests for 91 chats while the
-                # user was waiting on one open conversation, delaying its page
-                # by roughly 145 seconds.  Interactive scroll owns the scarce
-                # on-demand channel and will request this chat when the user
-                # actually opens/scrolls it.
+                requested = False
+                older_requested = getattr(self, "_older_requested_chats", None)
+                if not isinstance(older_requested, dict):
+                    older_requested = self._older_requested_chats = {}
+                # Repeatable, not once-per-install. This used to ask only if
+                # the chat had never been asked, and the map is persisted, so
+                # the first request was the only one it would ever get: any
+                # later end-of-IndexedDB sent nothing, and a conversation that
+                # needs several on-demand cycles stayed truncated for good.
+                #
+                # Gated by the same grace that governs writing a chat off, so
+                # asking again is never cheaper than waiting for the answer
+                # already outstanding. Resetting the clock also has a second,
+                # deliberate effect: fetch_older_messages() only PERSISTS
+                # exhaustion once a full grace has passed since the last ask,
+                # so a chat we are still actively asking about can no longer be
+                # written off permanently while a request is in flight.
+                asked_at = older_requested.get(remote_jid)
+                due = (asked_at is None
+                       or (time.time() - asked_at) >= self._OLDER_REQUEST_GRACE)
+                if due:
+                    older_requested[remote_jid] = time.time()
+                    self._persist_older_requested()
+                    requested = bool(self.request_older_messages(remote_jid))
                 logging.warning(
                     "[deep-backfill] Page for %s did not advance the oldest "
-                    "database anchor (%s; %d new row(s)). Pausing passive "
-                    "background paging; no phone-history request was sent.",
+                    "database anchor (%s; %d new row(s)). Pausing this anchor "
+                    "instead of counting duplicates%s.",
                     remote_jid, anchor_identity, added,
+                    " and requesting older history from the phone" if requested else "",
                 )
                 break
             stalled.pop(remote_jid, None)
@@ -17614,13 +17132,26 @@ class MainWindow(wx.Frame):
                 active.append(jid)
         return active + waiting
 
-    # On-demand history is asynchronous.  Retry an empty browser-store page
-    # periodically, but NEVER turn elapsed time into "end of conversation".
-    # Current WhatsApp builds expose a six-state ChatModel enum. The API maps it
-    # to explicit booleans; raw numeric value 2 now means INCOMPLETE.
-    _OLDER_REQUEST_RETRY = 30
-    # Compatibility alias for older tests/plugins that imported this name.
-    _OLDER_REQUEST_GRACE = _OLDER_REQUEST_RETRY
+    # How long request_older_messages() gets to be answered before an empty
+    # page is durable evidence that a chat really has no more history.
+    #
+    # The request is fire-and-forget: the phone replies with a history-sync
+    # chunk minutes later, never in the response (see that method's own
+    # docstring). The backfill revisits a chat about 30 seconds after the ask,
+    # so the second empty page — which is what writes the chat off — arrives an
+    # order of magnitude sooner than the answer it is judging. That was
+    # survivable while _exhausted_chats died with the process; now that it is
+    # persisted, a write-off made inside that window is permanent, and
+    # fetch_older_messages()' early return means the user scrolling up in that
+    # conversation gets nothing, in every future session.
+    #
+    # Set well past "minutes later" on purpose. Waiting costs a handful of
+    # empty round-trips per chat; being wrong costs the conversation's history
+    # for good. _older_requested_chats is persisted alongside the exhausted
+    # set, so in practice the bar is cleared on the next launch rather than
+    # inside one session: one extra walk of an already-complete account buys
+    # evidence that outlived the reply window.
+    _OLDER_REQUEST_GRACE = 15 * 60
 
     def _persist_exhausted_chats(self):
         """Write the exhausted-chat set to DB metadata. Best effort — losing it
@@ -17651,7 +17182,6 @@ class MainWindow(wx.Frame):
         """
         self._exhausted_chats = set()
         self._older_requested_chats = {}
-        self._older_request_confirmed_end = set()
         self._persist_exhausted_chats()
         self._persist_older_requested()
 
@@ -17659,9 +17189,10 @@ class MainWindow(wx.Frame):
         """Write the "already asked the phone for older history" map to DB
         metadata. Best effort, same as _persist_exhausted_chats().
 
-        Persisted so a restart does not hammer the primary phone immediately
-        after an on-demand request.  It is only a retry throttle; elapsed time
-        is never treated as proof that the conversation ended.
+        Persisted for one reason only: it is what lets an empty page be told
+        apart from an empty page *that has already outlived the phone's reply
+        window*. Kept in memory alone — as it was — that distinction cannot
+        survive the session, and the exhausted set it gates is durable.
         """
         try:
             if getattr(self, "db", None) is not None:
@@ -17671,16 +17202,8 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[history] Could not persist older_history_requested: %s", exc)
 
-    def fetch_older_messages(
-        self, remote_jid, oldest_msg, store_only: bool = False,
-        allow_phone_request: bool = True,
-    ):
-        """Fetch older messages from server starting before ``oldest_msg``.
-
-        ``allow_phone_request`` is deliberately true only for user-initiated
-        scrolling.  Background sync/backfill may consume pages already present
-        in WhatsApp Web's IndexedDB, but must not flood the primary phone with
-        hundreds of HISTORY_SYNC_ON_DEMAND requests.
+    def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
+        """Fetch older messages from server starting before the oldest_msg.
 
         `store_only` writes the page to SQLite without growing the chat's
         in-memory record list. The scroll-up path needs that list to grow —
@@ -17693,23 +17216,10 @@ class MainWindow(wx.Frame):
         """
         remote_jid = self._normalize_jid(remote_jid)
 
-        # Deep backfill may trust a durable exhaustion result, but a user
-        # explicitly scrolling upward must always be able to challenge that
-        # cache. This also gives a late (> grace window) phone reply a recovery
-        # path instead of making the early return permanent.
+        # Check if history is already marked as exhausted in-memory
         if remote_jid in getattr(self, "_exhausted_chats", set()):
-            if store_only:
-                logging.info(
-                    "[fetch_older_messages] History marked exhausted for %s; "
-                    "skipping background deep-backfill query.", remote_jid)
-                return []
-            logging.info(
-                "[fetch_older_messages] User requested older history for %s; "
-                "clearing cached exhaustion and retrying the API.", remote_jid)
-            self._exhausted_chats.discard(remote_jid)
-            self._older_requested_chats.pop(remote_jid, None)
-            self._persist_exhausted_chats()
-            self._persist_older_requested()
+            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
+            return []
 
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
@@ -17721,16 +17231,8 @@ class MainWindow(wx.Frame):
         # Handle group JIDs (@g.us) vs user JIDs (@c.us / @s.whatsapp.net)
         if remote_jid.endswith("@g.us"):
             phone = remote_jid
-        elif remote_jid.endswith("@lid"):
-            phone = remote_jid
         else:
-            known_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-            phone = (
-                known_lid
-                or self._resolve_jid_for_msg_key(remote_jid).replace(
-                    "@s.whatsapp.net", "@c.us"
-                )
-            )
+            phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
@@ -17757,17 +17259,9 @@ class MainWindow(wx.Frame):
                     # Primary query used resolved phone JID, so fallback to original LID JID
                     alternate_jid = remote_jid
                 else:
-                    cus_form = (
-                        remote_jid.split("@")[0] + "@c.us"
-                        if remote_jid.endswith("@s.whatsapp.net")
-                        else remote_jid
-                    )
-                    if cus_form != phone:
-                        alternate_jid = cus_form
-                    else:
-                        alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-                        if alt_lid and alt_lid != phone:
-                            alternate_jid = alt_lid
+                    alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+                    if alt_lid:
+                        alternate_jid = alt_lid
 
                 if alternate_jid and alternate_jid != phone:
                     alt_serialized_id = serialized_id
@@ -17791,7 +17285,7 @@ class MainWindow(wx.Frame):
                 wpp_messages = body.get("response", []) if isinstance(body, dict) else []
                 if not isinstance(wpp_messages, list):
                     wpp_messages = []
-
+                
                 # No messages left locally — but "locally" is the operative
                 # word. WhatsApp only pushes a bounded window of history to a
                 # linked device and keeps the rest on the phone, so running
@@ -17805,77 +17299,54 @@ class MainWindow(wx.Frame):
                 # it must not do is leave the chat in _exhausted_chats, or the
                 # early-return at the top of this method would refuse to look
                 # again even after the messages have landed.
-                confirmed_end_of_history = False
                 if not wpp_messages:
                     if not hasattr(self, "_exhausted_chats"):
                         self._exhausted_chats = set()
                     if not hasattr(self, "_older_requested_chats"):
                         self._older_requested_chats = {}
-                    if not hasattr(self, "_older_request_confirmed_end"):
-                        self._older_request_confirmed_end = set()
-
-                    # A previous endpoint response may already have carried the
-                    # authoritative type-1 end signal.  Only that signal may
-                    # make exhaustion durable.
-                    if remote_jid in self._older_request_confirmed_end:
-                        self._exhausted_chats.add(remote_jid)
-                        confirmed_end_of_history = True
-                        self._persist_exhausted_chats()
+                    asked_at = self._older_requested_chats.get(remote_jid)
+                    asked_now = asked_at is None
+                    requested = False
+                    if asked_now:
+                        asked_at = time.time()
+                        self._older_requested_chats[remote_jid] = asked_at
+                        self._persist_older_requested()
+                        requested = self.request_older_messages(remote_jid)
+                    waited = max(0.0, time.time() - asked_at)
+                    if requested:
+                        logging.info(
+                            "[fetch_older_messages] No local history left for %s — "
+                            "asked the phone for older messages; leaving the chat "
+                            "re-queryable so the reply can be picked up.", remote_jid,
+                        )
                     else:
-                        asked_at = self._older_requested_chats.get(remote_jid)
-                        now = time.time()
-                        due = (asked_at is None or
-                               (now - asked_at) >= self._OLDER_REQUEST_RETRY)
-                        requested = False
-
-                        if not allow_phone_request:
-                            # Reaching the edge of the linked-device store during
-                            # background sync is not an invitation to ask the phone.
-                            # Leave the chat pending so an explicit user scroll can
-                            # request it with priority.
-                            logging.info(
-                                "[fetch_older_messages] Background paging reached "
-                                "the browser-store edge for %s; deferring the phone "
-                                "request to interactive scroll.", remote_jid)
-                        elif due:
-                            requested = bool(self.request_older_messages(remote_jid))
-                            # request_older_messages() can learn the explicit end
-                            # signal even though its bool return is False.
-                            if remote_jid in self._older_request_confirmed_end:
-                                self._exhausted_chats.add(remote_jid)
-                                confirmed_end_of_history = True
-                                self._older_requested_chats.pop(remote_jid, None)
-                                self._persist_exhausted_chats()
-                                self._persist_older_requested()
-                            elif requested:
-                                self._older_requested_chats[remote_jid] = now
-                                self._persist_older_requested()
-
-                        if confirmed_end_of_history:
-                            logging.info(
-                                "[fetch_older_messages] Primary phone confirmed "
-                                "end of history for %s.", remote_jid)
-                        elif requested:
-                            logging.info(
-                                "[fetch_older_messages] No browser-store history "
-                                "left for %s — on-demand phone history requested; "
-                                "keeping scroll-up re-queryable.", remote_jid)
-                        elif allow_phone_request and not due:
-                            waited = max(0.0, now - float(asked_at or now))
-                            logging.info(
-                                "[fetch_older_messages] Waiting for on-demand "
-                                "history for %s (%.0fs since request); will retry "
-                                "without ever inferring end from timeout.",
-                                remote_jid, waited)
-                        elif allow_phone_request:
-                            temporary = remote_jid in getattr(
-                                self, "_older_request_temporarily_blocked", set())
-                            logging.info(
-                                "[fetch_older_messages] Phone history request for "
-                                "%s did not go out%s; keeping the chat re-queryable.",
-                                remote_jid,
-                                " because recent history is still syncing"
-                                if temporary else "")
+                        # In-memory always, so the chat leaves the deep-backfill
+                        # queue at the same rate it always did. Persisted only
+                        # once the phone has genuinely had its chance: the
+                        # request above is answered by a history-sync chunk
+                        # minutes later, and _exhausted_chats is now durable, so
+                        # a write-off made 30 seconds after the ask (the backfill
+                        # pass cadence) used to become permanent — the chat was
+                        # early-returned at the top of this method for ever,
+                        # which also silently killed the user scrolling up in it.
+                        # `waited` clears the bar on the next session rather than
+                        # inside this one, since _older_requested_chats is
+                        # persisted too: one extra walk of an already-complete
+                        # account, in exchange for never writing a chat off on
+                        # evidence younger than the reply it is waiting for.
+                        self._exhausted_chats.add(remote_jid)
+                        durable = waited >= self._OLDER_REQUEST_GRACE
+                        if durable:
+                            self._persist_exhausted_chats()
+                        logging.info(
+                            "[fetch_older_messages] Marked history as exhausted for %s "
+                            "(%s). The phone was asked %.0fs ago; older-message request "
+                            "%s.",
+                            remote_jid,
+                            "persisted" if durable else "this session only",
+                            waited,
+                            "just attempted and failed" if asked_now else "sent earlier",
+                        )
 
                 fetched_messages = []
                 for wm in wpp_messages:
@@ -17886,18 +17357,8 @@ class MainWindow(wx.Frame):
                             fetched_messages.append(normalized)
                         except Exception:
                             pass
-
+                
                 if fetched_messages:
-                    # Any newly retrievable older page fulfils the previous
-                    # phone request. Forget its timestamp so, when this new
-                    # window is eventually exhausted too, another on-demand
-                    # request may be issued instead of treating the old request
-                    # as proof that the whole conversation ended.
-                    if remote_jid in getattr(self, "_older_requested_chats", {}):
-                        self._older_requested_chats.pop(remote_jid, None)
-                        self._persist_older_requested()
-                    getattr(self, "_older_request_temporarily_blocked", set()).discard(remote_jid)
-                    getattr(self, "_older_request_confirmed_end", set()).discard(remote_jid)
                     if store_only:
                         # Straight to disk, nothing kept resident. Deliberately
                         # not routed through the branch below even for the
@@ -17932,15 +17393,7 @@ class MainWindow(wx.Frame):
                                 self.save_data(self.chats, self.contacts)
                     return fetched_messages
                 else:
-                    # `None` means "temporarily no page" to the UI.  Returning
-                    # [] here used to make _load_older_messages_from_server()
-                    # set _reached_server_start permanently even when the phone
-                    # request had merely been refused while RECENT history was
-                    # still syncing (the exact state captured in logs.zip).
-                    # [] is reserved for WhatsApp's explicit type-1 end signal.
-                    # None keeps the UI/background walker alive while the primary
-                    # still has older history or the request is pending.
-                    return [] if confirmed_end_of_history else None
+                    return []
             else:
                 err_msg = response.text[:300]
                 try:
@@ -17958,87 +17411,6 @@ class MainWindow(wx.Frame):
         except Exception as e:
             logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
             return None
-
-    def wait_for_older_messages(
-        self, remote_jid, oldest_msg, timeout: float = 300.0,
-        poll_interval: float = 2.0, retry_request_every: float = 10.0,
-        should_continue=None,
-    ):
-        """Wait for interactive on-demand history to materialise.
-
-        The phone answers asynchronously. Previously the UI cleared its loading
-        flag immediately and required the user to hammer Home until a later call
-        happened to see the new IndexedDB page. Keep one daemon worker polling
-        the browser store instead.
-
-        A request can also be temporarily refused while RECENT history is still
-        finishing. Therefore this loop retries the *interactive* request at a
-        modest cadence; fetch_older_messages() still applies its accepted-request
-        throttle, so an already in-flight request is not duplicated. Background
-        sync never enters this path.
-
-        Returns a message list, ``[]`` for explicit end-of-history, or ``None``
-        when the wait expired, was cancelled, or disconnected.
-        """
-        jid = self._normalize_jid(remote_jid)
-        deadline = time.monotonic() + max(1.0, float(timeout))
-        delay = max(0.5, float(poll_interval))
-        retry_delay = max(delay, float(retry_request_every))
-        next_interactive_retry = time.monotonic() + retry_delay
-        logging.info(
-            "[history-scroll] Waiting up to %.0fs for phone history for %s.",
-            timeout, jid,
-        )
-        while time.monotonic() < deadline:
-            if callable(should_continue):
-                try:
-                    if not should_continue():
-                        logging.info(
-                            "[history-scroll] Cancelled wait for %s because the "
-                            "conversation is no longer active.", jid,
-                        )
-                        return None
-                except Exception:
-                    return None
-            if not getattr(self, "_wa_connected", False) or getattr(
-                self, "offline_mode", False
-            ):
-                return None
-            time.sleep(delay)
-
-            # Most polls are read-only: check whether the asynchronous chunk has
-            # reached WhatsApp Web's store without generating a phone request.
-            page = self.fetch_older_messages(
-                jid, oldest_msg, store_only=False, allow_phone_request=False
-            )
-            if page is not None:
-                logging.info(
-                    "[history-scroll] Phone history became available for %s "
-                    "(%d message(s)).", jid, len(page),
-                )
-                return page
-
-            # If the first request was refused because RECENT sync was not done,
-            # try again from this sole interactive worker. If a request is already
-            # accepted, _older_requested_chats prevents a duplicate until the
-            # normal retry window has elapsed.
-            now = time.monotonic()
-            if now >= next_interactive_retry:
-                next_interactive_retry = now + retry_delay
-                page = self.fetch_older_messages(
-                    jid, oldest_msg, store_only=False, allow_phone_request=True
-                )
-                if page is not None:
-                    logging.info(
-                        "[history-scroll] Interactive retry produced history for "
-                        "%s (%d message(s)).", jid, len(page),
-                    )
-                    return page
-        logging.warning(
-            "[history-scroll] Timed out waiting for phone history for %s; "
-            "the chat remains re-queryable.", jid,
-        )
-        return None
 
     def save_audio_locally(self, msg, audio_content):
         """Encrypt and write a voice message to disk. Returns whether it worked."""
@@ -18108,52 +17480,52 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
-        # WPPConnect/WA Web can know the same 1:1 chat by LID and by phone JID.
-        # A /send-seen call may return HTTP 2xx while markIsRead is a no-op for
-        # the alias that is not currently backing the ChatModel.  Read receipts
-        # are idempotent, so send to every known identity rather than trying the
-        # alternate only after an HTTP error.
-        normalized_remote = self._normalize_jid(remote_jid)
-        candidates = []
+        # Prefer @lid JID for WPPConnect if mapped
+        target_phone = remote_jid
+        if not target_phone.endswith("@lid"):
+            alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(remote_jid), "")
+            if alt_lid:
+                target_phone = alt_lid
 
-        def _add_seen_candidate(jid):
-            if not jid:
-                return
-            jid = self._normalize_jid(jid)
-            if jid.endswith("@s.whatsapp.net"):
-                jid = jid.rsplit("@", 1)[0] + "@c.us"
-            if jid not in candidates:
-                candidates.append(jid)
+        if target_phone.endswith("@s.whatsapp.net"):
+            target_phone = target_phone.rsplit("@", 1)[0] + "@c.us"
+        
+        is_lid_target = target_phone.endswith("@lid")
 
-        _add_seen_candidate(normalized_remote)
-        if normalized_remote.endswith("@lid"):
-            _add_seen_candidate(getattr(self, "_lid_to_phone", {}).get(normalized_remote, ""))
-        elif not normalized_remote.endswith("@g.us"):
-            # Mapping keys are normalized to @s.whatsapp.net.  If the caller
-            # happened to supply @c.us, normalize_jid above converts it first.
-            _add_seen_candidate(getattr(self, "_phone_to_lid", {}).get(normalized_remote, ""))
-
-        def _send_seen(phone: str) -> "requests.Response | None":
+        def _send_seen(phone: str, is_lid: bool) -> "requests.Response | None":
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
-            if phone.endswith("@lid"):
+            if is_lid:
                 payload["isLid"] = True
             return api_post(url, json=payload, headers=headers, timeout=10)
 
         def _do_api():
-            for phone in candidates:
-                try:
-                    resp = _send_seen(phone)
-                    if not resp.ok:
-                        logging.warning(
-                            "[mark_as_read] API response %s for %s: %s",
-                            resp.status_code, phone, resp.text[:200],
-                        )
-                except Exception as exc:
-                    # Keep trying the other alias even if one identity errors.
-                    logging.warning("[mark_as_read] Request failed for %s: %s", phone, exc)
+            try:
+                resp = _send_seen(target_phone, is_lid_target)
+                if not resp.ok:
+                    logging.warning("[mark_as_read] API response %s for %s: %s",
+                                     resp.status_code, target_phone, resp.text[:200])
+                    # If it failed, try the alternate format (LID <-> phone) as fallback
+                    fallback_phone = remote_jid
+                    if fallback_phone.endswith("@lid"):
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(fallback_phone, "")
+                        if phone_jid: fallback_phone = phone_jid
+                    else:
+                        alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(fallback_phone), "")
+                        if alt_lid: fallback_phone = alt_lid
 
+                    if fallback_phone.endswith("@s.whatsapp.net"):
+                        fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
+
+                    if fallback_phone != target_phone:
+                        logging.info("[mark_as_read] Retrying /send-seen using fallback JID: %s", fallback_phone)
+                        resp2 = _send_seen(fallback_phone, fallback_phone.endswith("@lid"))
+                        if not resp2.ok:
+                            logging.warning("[mark_as_read] Fallback /send-seen also failed %s for %s: %s",
+                                             resp2.status_code, fallback_phone, resp2.text[:200])
+            except Exception as exc:
+                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
         threading.Thread(target=_do_api, daemon=True).start()
 
     def mark_conversation_as_unread(self, remote_jid: str):
@@ -18164,7 +17536,7 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self.set_chats)
 
     # ── WPPConnect — profile / group info ─────────────────────────────────
-
+    
     def resolve_self_lid(self):
         """Query WPPConnect API for own PN-LID mapping so self-mentions resolve correctly."""
         my_jid = getattr(self, "my_jid", "")
@@ -18238,7 +17610,7 @@ class MainWindow(wx.Frame):
                                 except Exception as _e:
                                     pass
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
-
+                            
                             # 3. If another phone JID was mapped to our LID, delete it
                             bad_phones = [k for k, v in self._phone_to_lid.items() if v == normalized_lid and k != normalized_phone]
                             for bad_phone in bad_phones:
@@ -18285,7 +17657,7 @@ class MainWindow(wx.Frame):
             return
         if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
             return
-
+            
         # Guard against corrupt self-mappings.
         # Special case: if lid_jid is definitively our own LID (my_lid), we know
         # phone_jid is also ours — phone number format differences can make
@@ -18300,29 +17672,29 @@ class MainWindow(wx.Frame):
             if not (self._is_self_jid(lid_jid) and self._is_self_jid(phone_jid)):
                 logging.warning(f"[LID Mapping] Blocked corrupt self-mapping attempt: {lid_jid} <-> {phone_jid}")
                 return
-
+            
         if not hasattr(self, "_lid_to_phone"):
             self._lid_to_phone = {}
         if not hasattr(self, "_phone_to_lid"):
             self._phone_to_lid = {}
-
+            
         current_phone = self._lid_to_phone.get(lid_jid)
         if current_phone != phone_jid:
             self._lid_to_phone[lid_jid] = phone_jid
             self._phone_to_lid[phone_jid] = lid_jid
             logging.info(f"[LID Mapping] Registered JID mapping: {lid_jid} <-> {phone_jid}")
-
+            
             # If it was in the unresolvable set, remove it
             if hasattr(self, "_unresolvable_lids") and lid_jid in self._unresolvable_lids:
                 self._unresolvable_lids.discard(lid_jid)
-
+            
             # Update the contact name display mappings in contacts if possible
             if phone_jid in self.contacts and self.contacts[phone_jid]:
                 if lid_jid not in self.contacts or self.contacts[lid_jid].get("name") in (None, "", "Contato sem nome"):
                     self.contacts[lid_jid] = self.contacts[phone_jid].copy()
                     self.contacts[lid_jid]["id"] = lid_jid
                     self.contacts[lid_jid]["remoteJid"] = lid_jid
-
+            
             if save:
                 # Save the mapping to SQLite incrementally
                 try:
@@ -18346,7 +17718,7 @@ class MainWindow(wx.Frame):
             # runs on its own background thread and can outlive that check —
             # bail rather than crash self.db.upsert_contacts_batch() below.
             return
-
+            
         updated_contacts = {}
         # A single timeout is routine while WPPConnect is busy with the initial
         # history sync, so don't throw away the rest of the batch over one —
@@ -18357,7 +17729,7 @@ class MainWindow(wx.Frame):
         for lid_jid in jids:
             if not lid_jid.endswith("@lid"):
                 continue
-
+                
             if not getattr(self, "_wa_connected", False):
                 logging.warning("[LID Resolution] WhatsApp is not connected. Aborting loop.")
                 break
@@ -18369,24 +17741,24 @@ class MainWindow(wx.Frame):
                 self._unresolvable_lids = set()
             if not hasattr(self, "_resolving_lids"):
                 self._resolving_lids = set()
-
+                
             if not hasattr(self, "_unresolvable_names"):
                 self._unresolvable_names = set()
-
+                
             query_pn = lid_jid not in getattr(self, "_lid_to_phone", {}) and lid_jid not in self._unresolvable_lids
-
+            
             contact = self.contacts.get(lid_jid, {})
             has_name = contact.get("name") or contact.get("pushName")
             query_name = not has_name and lid_jid not in self._unresolvable_names
-
+            
             if not query_pn and not query_name:
                 continue
-
+                
             with self._lid_resolution_lock:
                 if lid_jid in self._resolving_lids:
                     continue
                 self._resolving_lids.add(lid_jid)
-
+                
             # Set when the API never actually answered (timeout, connection
             # reset, dead session).  Such a failure says nothing about whether
             # this LID is resolvable, so it must not feed the blacklists below.
@@ -18397,7 +17769,7 @@ class MainWindow(wx.Frame):
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
                 }
-
+                
                 if query_pn:
                     # First, resolve pn-lid mapping
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
@@ -18423,7 +17795,7 @@ class MainWindow(wx.Frame):
                                     self.db.set_lid_mapping(lid_jid, canonical_jid)
                                 except Exception as exc:
                                     logging.warning("[LID Resolution] set_lid_mapping failed: %s", exc)
-
+                        
                         # Try to resolve contact name/pushname directly from pn-lid mapping response
                         contact_obj = res_data.get("contact") or {}
                         res_name = contact_obj.get("name") or contact_obj.get("pushname") or contact_obj.get("pushName") or contact_obj.get("displayName")
@@ -18433,11 +17805,11 @@ class MainWindow(wx.Frame):
                             self.contacts[lid_jid]["name"] = res_name
                             self.contacts[lid_jid]["pushName"] = res_name
                             updated_contacts[lid_jid] = self.contacts[lid_jid]
-
+                            
                             if not hasattr(self, "_presence_pushname_map"):
                                 self._presence_pushname_map = {}
                             self._presence_pushname_map[lid_jid] = res_name
-
+                            
                             if canonical_jid:
                                 if canonical_jid not in self.contacts:
                                     self.contacts[canonical_jid] = {}
@@ -18445,10 +17817,10 @@ class MainWindow(wx.Frame):
                                 self.contacts[canonical_jid]["pushName"] = res_name
                                 updated_contacts[canonical_jid] = self.contacts[canonical_jid]
                                 self._presence_pushname_map[canonical_jid] = res_name
-
+                            
                             # Resolved the name successfully, no need to query profile
                             query_name = False
-
+                
                 if query_name:
                     # Fetch profile info for name caching
                     # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
@@ -18462,7 +17834,7 @@ class MainWindow(wx.Frame):
                         res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
                         if not isinstance(res_data, dict):
                             res_data = {}
-
+                            
                         # Resolve JID mapping from contact details
                         profile_pn_jid = None
                         id_obj = res_data.get("id") or {}
@@ -18480,7 +17852,7 @@ class MainWindow(wx.Frame):
                             profile_pn_jid = res_data.get("pnJid")
                         if not profile_pn_jid:
                             profile_pn_jid = res_data.get("phone")
-
+                            
                         if profile_pn_jid:
                             profile_canonical = self._normalize_jid(profile_pn_jid)
                             if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
@@ -18505,12 +17877,12 @@ class MainWindow(wx.Frame):
                             self.contacts[lid_jid]["name"] = name
                             self.contacts[lid_jid]["pushName"] = name
                             updated_contacts[lid_jid] = self.contacts[lid_jid]
-
+                            
                             # Also save to presence pushname map to ensure UI functions find it
                             if not hasattr(self, "_presence_pushname_map"):
                                 self._presence_pushname_map = {}
                             self._presence_pushname_map[lid_jid] = name
-
+                            
                             # Also copy to phone contact cache if mapped
                             if canonical_jid:
                                 if canonical_jid not in self.contacts:
@@ -18618,7 +17990,7 @@ class MainWindow(wx.Frame):
                 res_data = res.get("response", {})
                 if not isinstance(res_data, dict):
                     res_data = {}
-
+                
                 # If queried directly with @lid, check if we got back a canonical @s.whatsapp.net JID
                 if original_jid.endswith("@lid") and jid.endswith("@lid"):
                     canonical_jid = self._normalize_jid(res_data.get("id", {}).get("_serialized") or res_data.get("id") or "")
@@ -18630,7 +18002,7 @@ class MainWindow(wx.Frame):
                             self._phone_to_lid = {}
                         self._lid_to_phone[original_jid] = canonical_jid
                         self._phone_to_lid[canonical_jid] = original_jid
-
+                        
                         # Trigger UI refresh and save mapped JIDs
                         wx.CallAfter(self._schedule_set_chats)
                         try:
@@ -18716,19 +18088,19 @@ class MainWindow(wx.Frame):
         """Subscribe to presence events for a contact via WPPConnect API (non-blocking)."""
         if not jid or jid.endswith("@newsletter"):
             return
-
+        
         if not hasattr(self, "_subscribed_presence_cache"):
             self._subscribed_presence_cache = {}
-
+            
         jids_to_subscribe = [jid]
         phone_to_lid = getattr(self, "_phone_to_lid", {})
         lid_to_phone = getattr(self, "_lid_to_phone", {})
-
+        
         if jid in phone_to_lid:
             jids_to_subscribe.append(phone_to_lid[jid])
         elif jid in lid_to_phone:
             jids_to_subscribe.append(lid_to_phone[jid])
-
+            
         now = time.time()
         targets = []
         for target_jid in set(jids_to_subscribe):
@@ -18736,10 +18108,10 @@ class MainWindow(wx.Frame):
             if now - last_sub > 10.0:  # Throttle duplicate subscriptions within 10 seconds
                 self._subscribed_presence_cache[target_jid] = now
                 targets.append(target_jid)
-
+                
         if not targets:
             return
-
+            
         def _api():
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             for target_jid in targets:
@@ -19316,15 +18688,15 @@ class MainWindow(wx.Frame):
             return jid
         if jid.endswith(("@g.us", "@broadcast")):
             return jid.replace("@s.whatsapp.net", "@c.us")
-
+        
         normalized = jid.replace("@c.us", "@s.whatsapp.net")
         lid = getattr(self, "_phone_to_lid", {}).get(normalized, "")
         if lid:
             return lid.replace("@s.whatsapp.net", "@lid")
-
+            
         if jid.endswith("@lid"):
             return jid
-
+            
         return jid.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
@@ -19641,8 +19013,7 @@ class MainWindow(wx.Frame):
 
     def send_media_attachment(
         self, remote_jid: str, file_path: str,
-        media_type: str, caption: str = "", quoted: dict = None,
-        progress_callback=None, upload_id: str = "",
+        media_type: str, caption: str = "", quoted: dict = None
     ) -> bool:
         """
         Upload a file as a media message via multipart/form-data.
@@ -19673,7 +19044,7 @@ class MainWindow(wx.Frame):
             if prepared is None:
                 return {
                     "ok": False,
-                    "error": self.i18n.t("media_audio_convert_failed"),
+                    "error": "Não foi possível converter o áudio OGG para Opus.",
                     "retry": False,
                 }
             upload_path, mime = prepared
@@ -19691,7 +19062,7 @@ class MainWindow(wx.Frame):
             if prepared is None:
                 return {
                     "ok": False,
-                    "error": self.i18n.t("media_video_convert_failed"),
+                    "error": "Não foi possível converter o vídeo para um formato aceito pelo WhatsApp.",
                     "retry": False,
                 }
             upload_path, mime = prepared
@@ -19718,7 +19089,6 @@ class MainWindow(wx.Frame):
             "filename": filename,
             "caption":  caption,
             "type":     _wpp_type,
-            "uploadId": upload_id,
         }
         if quoted:
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
@@ -19750,28 +19120,14 @@ class MainWindow(wx.Frame):
                 post_data["isGroup"] = "true"
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
-            # requests' built-in ``files=`` multipart encoder eagerly reads
-            # the complete file while preparing the request. That made the UI
-            # callback jump to 100% before the HTTP upload had even started, so
-            # the document progress bar was effectively never visible. Stream
-            # the multipart body itself so progress follows chunks consumed by
-            # urllib3 on the real request.
-            body = StreamingMultipartBody(
-                file_path=upload_path,
-                filename=filename,
-                mime_type=mime,
-                fields=post_data,
-                progress_callback=progress_callback,
-            )
-            upload_headers = dict(headers)
-            upload_headers["Content-Type"] = body.content_type
-            upload_headers["Content-Length"] = str(body.content_length)
-            return api_post(
-                url,
-                headers=upload_headers,
-                data=body,
-                timeout=timeout,
-            )
+            with open(upload_path, "rb") as fh:
+                return api_post(
+                    url,
+                    headers=headers,
+                    data=post_data,
+                    files={"file": (filename, fh, mime)},
+                    timeout=timeout,
+                )
 
         try:
             r = _post(phone_val)
@@ -19792,24 +19148,13 @@ class MainWindow(wx.Frame):
                 if isinstance(resp, list) and resp:
                     resp = resp[0]
                 msg_id = ""
-                raw_ack = None
                 if isinstance(resp, dict):
-                    raw_ack = resp.get("ack")
                     msg_id = resp.get("id") or resp.get("key", {}).get("id") or ""
                     if isinstance(msg_id, dict):
                         msg_id = msg_id.get("_serialized", "")
                     if msg_id:
                         parts = msg_id.split("_")
                         msg_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
-                if upload_id and isinstance(raw_ack, int) and not isinstance(raw_ack, bool):
-                    # sendFile() returns the real WhatsApp ACK. Keep it by the
-                    # stable local upload id so _on_message_sent can make the
-                    # row status and the document gauge transition atomically.
-                    # This also closes the race where socket onAck arrives just
-                    # before the local bubble has been renamed to the real id.
-                    if not hasattr(self, "_media_send_ack_by_local_id"):
-                        self._media_send_ack_by_local_id = {}
-                    self._media_send_ack_by_local_id[upload_id] = raw_ack
                 if msg_id:
                     return msg_id
                 return {"ok": True, "error": "ID not found in response"}
@@ -19865,10 +19210,6 @@ class MainWindow(wx.Frame):
                     os.unlink(converted_video_path)
                 except OSError:
                     pass
-
-    def on_media_upload_progress(self, upload_id: str, progress: float):
-        if hasattr(self, "conversations_panel"):
-            self.conversations_panel.update_media_upload_progress(upload_id, progress)
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
@@ -20494,7 +19835,18 @@ class MainWindow(wx.Frame):
         everyone, remote-mirrored deletion). Both the preview and the sort
         key (_chat_last_ts) fall back to these fields whenever they are newer
         than anything left in records, so without this a deleted message kept
-        the chat pinned at its old position with its old preview text forever."""
+        the chat pinned at its old position with its old preview text forever.
+
+        Also drops chat["_last_reaction"] when the message it points to is
+        one of the ones just removed (issue #72). A reaction is deliberately
+        never added to `records` itself (see _track_last_reaction()), so
+        deleting its target message left nothing here for the ordinary
+        "did the last message disappear" check to catch — _last_msg_preview()
+        kept showing "you reacted with X to <deleted message>" as the chat's
+        latest activity forever, since the only guard it has is a timestamp
+        comparison against whatever real message remains, and a reaction
+        newer than every remaining message passes that unconditionally.
+        """
         chat = self.chats.get(jid)
         if not chat:
             return
@@ -20518,6 +19870,16 @@ class MainWindow(wx.Frame):
         else:
             chat["lastMessage"] = None
             chat["t"] = 0
+
+        last_reaction = chat.get("_last_reaction")
+        if last_reaction:
+            target_id = last_reaction.get("target_id", "")
+            still_present = any(
+                isinstance(m, dict) and m.get("key", {}).get("id") == target_id
+                for m in records
+            )
+            if not still_present:
+                chat.pop("_last_reaction", None)
 
         if hasattr(self, "db") and self.db is not None:
             try:
@@ -20682,21 +20044,21 @@ class MainWindow(wx.Frame):
                             name = self.conversations_panel._get_participant_name(jid)
                         else:
                             name = ""
-
+                    
                     lid_local = jid.rsplit("@", 1)[0]
                     _lid_map = getattr(self, "_lid_to_phone", {})
                     phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
                     phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
-
+                    
                     placeholder = None
                     if f"@{lid_local}" in content:
                         placeholder = lid_local
                     elif phone and f"@{phone}" in content:
                         placeholder = phone
-
+                        
                     if not placeholder:
                         continue
-
+                        
                     if name and name != placeholder and name != jid:
                         content = content.replace(f"@{placeholder}", f"@{name}")
         elif msg_type == "audioMessage":
@@ -21291,30 +20653,6 @@ class MainWindow(wx.Frame):
             pass
 
 
-def _startup_t(key: str, **values) -> str:
-    """Translate fatal-startup UI before MainWindow/I18n necessarily exists."""
-    try:
-        import locale
-        from core.i18n import LANGUAGE_NAMES, _load_translations
-
-        current = (locale.getlocale()[0] or "").replace("_", "-")
-        supported = list(LANGUAGE_NAMES)
-        if current not in supported:
-            prefix = current.split("-", 1)[0].lower() if current else ""
-            current = next(
-                (code for code in supported if code.split("-", 1)[0].lower() == prefix),
-                "en-US",
-            )
-        translations = _load_translations(current)
-        text = translations.get(key)
-        if not text and current != "en-US":
-            text = _load_translations("en-US").get(key)
-        text = text or key
-        return text.format(**values) if values else text
-    except Exception:
-        return key
-
-
 def _write_crash_log(tb: str) -> str:
     """Write a traceback to crash.log next to the exe and return the path."""
     from app_paths import _outer_exe_dir
@@ -21460,14 +20798,14 @@ if __name__ == "__main__":
         _mode = _startup["mode"]
         if _mode == "error":
             ctypes.windll.user32.MessageBoxW(
-                0, _startup_t("startup_invalid_account"),
+                0, f"WinZapp: {_startup.get('reason', 'nieprawidłowe konto')}",
                 "WinZapp", 0x10)
             sys.exit(2)
         elif _mode == "manager":
             # Global manager mode: no account/data_path, no Node (plan sekcja F).
             # TODO(Zad 4.5/4.6): show the account manager. For now, inform+exit.
             ctypes.windll.user32.MessageBoxW(
-                0, _startup_t("startup_account_manager_unavailable"),
+                0, "WinZapp: brak kont do uruchomienia (menedżer kont w budowie).",
                 "WinZapp", 0x40)
             sys.exit(0)
         elif _mode == "first_run":
@@ -21553,12 +20891,9 @@ if __name__ == "__main__":
         try:
             ctypes.windll.user32.MessageBoxW(
                 0,
-                _startup_t(
-                    "startup_critical_message",
-                    path=crash_path,
-                    details=tb[:800],
-                ),
-                _startup_t("startup_critical_title"),
+                f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
+                f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
+                "WinZapp — Erro de inicialização",
                 0x10,  # MB_ICONERROR
             )
         except Exception:

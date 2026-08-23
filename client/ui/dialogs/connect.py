@@ -71,7 +71,7 @@ class Connect:
         headers = self._wpp_headers(use_global_key=True)
 
         try:
-            response = api_post(url, json=payload, headers=headers, timeout=90)
+            response = api_post(url, json=payload, headers=headers, timeout=15)
             # 200, 201 are success. 400 might mean session already active which is fine.
             if response.status_code in (200, 201, 400):
                 return token
@@ -474,7 +474,7 @@ class Connect:
         self.phone_panel.SetSizer(phone_sizer)
 
         # Quit button
-        self.quit_btn = wx.Button(self.connection_dial, wx.ID_CANCEL, self.i18n.t("menu_exit"))
+        self.quit_btn = wx.Button(self.connection_dial, wx.ID_CANCEL, "&Sair")
         self.quit_btn.Bind(wx.EVT_BUTTON, self.on_quit_from_connect)
 
         # Bind close event
@@ -601,40 +601,19 @@ class Connect:
             api_key = self.main_window.wpp_api_key
 
             def _generate_hash(raw: str) -> str:
-                """Call generate-token with retries and return 'raw:hash'.
-
-                Falls back to local HMAC-SHA256 token calculation if the Node API
-                is in a cold-start state to prevent blocking the UI connection dialog.
-                """
+                """Call generate-token and return 'raw:hash'. Raises on failure."""
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
-                last_exc = None
-                for attempt, timeout in enumerate((3, 5), start=1):
-                    try:
-                        res = api_post(url, timeout=timeout)
-                        if res.status_code in (200, 201):
-                            hash_token = res.json().get("token") or ""
-                            if hash_token:
-                                return f"{raw}:{hash_token}"
-                    except Exception as exc:
-                        last_exc = exc
-                        logging.info(
-                            "[generate_hash] HTTP attempt %d failed (%s). Testing local fallback...",
-                            attempt, exc
-                        )
-
-                # Local HMAC-SHA256 token generation fallback (matches WPPConnect encryptSession algorithm)
-                try:
-                    import hmac
-                    import hashlib
-                    hash_val = hmac.new(
-                        api_key.encode("utf-8"),
-                        raw.encode("utf-8"),
-                        hashlib.sha256
-                    ).hexdigest()
-                    logging.info("[generate_hash] Generated local token hash fallback successfully.")
-                    return f"{raw}:{hash_val}"
-                except Exception as exc:
-                    raise last_exc or exc
+                res = api_post(url, timeout=10)
+                if res.status_code in (200, 201):
+                    hash_token = res.json().get("token") or ""
+                    if hash_token:
+                        return f"{raw}:{hash_token}"
+                    raise RuntimeError(
+                        f"generate-token returned empty hash (HTTP {res.status_code})"
+                    )
+                raise RuntimeError(
+                    f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
+                )
 
             if _instance_exists:
                 # Re-generate hash if the stored token has no colon (legacy or corrupt).

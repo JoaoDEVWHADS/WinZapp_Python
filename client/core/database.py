@@ -675,30 +675,6 @@ class DatabaseManager:
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
 
-    async def get_messages_page(
-        self, remote_jid: str, limit: int = 200, offset: int = 0
-    ) -> tuple[list[dict], int]:
-        """Return a page of messages plus the total count in one bridge job."""
-        messages = await self.get_messages(remote_jid, limit, offset)
-        total = await self.get_message_count(remote_jid)
-        return messages, total
-
-    async def get_message(self, remote_jid: str, message_id: str) -> dict | None:
-        """Return one message by its WhatsApp id, including legacy JID aliases."""
-        if not remote_jid or not message_id:
-            return None
-        conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
-        placeholders = ",".join("?" for _ in jids)
-        cursor = await conn.execute(
-            f"""SELECT message_json FROM messages
-                WHERE remote_jid IN ({placeholders}) AND message_id = ?
-                LIMIT 1""",
-            (*jids, message_id),
-        )
-        row = await cursor.fetchone()
-        return self._decrypt_json(row["message_json"]) if row else None
-
     def _build_message_values(self, remote_jid: str, msg: dict) -> tuple | None:
         """Compute the 8-tuple bound to the messages upsert, shared by every
         message-import path (insert_message/insert_messages_batch/
@@ -745,46 +721,30 @@ class DatabaseManager:
     async def insert_messages_batch(
         self, remote_jid: str, msgs: list[dict]
     ) -> None:
-        """Insert many messages with one executemany call + one transaction.
-
-        The old implementation used one transaction but still awaited one
-        ``conn.execute()`` per message. During a 200-message sync page that
-        meant 200 separate jobs on aiosqlite's worker queue, multiplied by
-        hundreds of chats/backfill passes. Building the encrypted rows first
-        and handing SQLite the whole page with ``executemany`` keeps the same
-        atomic semantics while drastically reducing queue pressure.
-        """
+        """Insert many messages in a single transaction."""
         if not msgs:
             return
-
-        values_batch = []
         skipped = 0
-        for msg in msgs:
-            values = self._build_message_values(remote_jid, msg)
-            if values is None:
-                skipped += 1
-                continue
-            values_batch.append(values)
-
-        if not values_batch:
-            if skipped:
-                log.warning(
-                    "[insert_messages_batch] dropped %d message(s) with empty "
-                    "key.id for %s", skipped, remote_jid,
-                )
-            return
-
         async with self._write_lock:
             conn = await self._ensure_conn()
             try:
                 await conn.execute("BEGIN")
-                await conn.executemany(
-                    """INSERT OR REPLACE INTO messages
-                       (message_id, remote_jid, from_me, participant,
-                        message_type, message_json, timestamp, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    values_batch,
-                )
+                for msg in msgs:
+                    values = self._build_message_values(remote_jid, msg)
+                    if values is None:
+                        # See _build_message_values() — an empty id-less
+                        # message would silently overwrite another id-less
+                        # message in the same batch/chat instead of being
+                        # rejected.
+                        skipped += 1
+                        continue
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO messages
+                           (message_id, remote_jid, from_me, participant,
+                            message_type, message_json, timestamp, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        values,
+                    )
                 await conn.commit()
             except Exception:
                 await conn.rollback()
@@ -835,40 +795,13 @@ class DatabaseManager:
 
     async def delete_message(self, remote_jid: str, message_id: str) -> None:
         """Delete a single message by remote_jid + message_id."""
-        await self.delete_messages_batch(remote_jid, [message_id])
-
-    async def delete_messages_batch(self, remote_jid: str, message_ids) -> None:
-        """Delete many messages for one chat in a single transaction/query.
-
-        Phone-side reconciliation can remove dozens or hundreds of rows at
-        once. Deleting them one by one used to enqueue one commit per message
-        and, worse, the UI caller waited synchronously for every one.
-        """
-        ids = list(dict.fromkeys(str(mid) for mid in (message_ids or []) if mid))
-        if not ids or not remote_jid:
-            return
-
-        jids = self._jid_variants(remote_jid)
         async with self._write_lock:
             conn = await self._ensure_conn()
-            try:
-                await conn.execute("BEGIN")
-                # Keep well below SQLite's bind-variable limit. A normal page
-                # is 200 messages, but chunking makes this safe for larger bulk
-                # selections/reconciliation runs too.
-                for start in range(0, len(ids), 400):
-                    chunk = ids[start:start + 400]
-                    jid_ph = ",".join("?" for _ in jids)
-                    id_ph = ",".join("?" for _ in chunk)
-                    await conn.execute(
-                        f"DELETE FROM messages WHERE remote_jid IN ({jid_ph}) "
-                        f"AND message_id IN ({id_ph})",
-                        (*jids, *chunk),
-                    )
-                await conn.commit()
-            except Exception:
-                await conn.rollback()
-                raise
+            await conn.execute(
+                "DELETE FROM messages WHERE remote_jid=? AND message_id=?",
+                (remote_jid, message_id),
+            )
+            await conn.commit()
 
     async def delete_chat_messages(self, remote_jid: str) -> None:
         """Remove all messages for a chat."""
@@ -1080,18 +1013,6 @@ class DatabaseManager:
                 (participant, mid, msg_enc, ts),
             )
             await conn.commit()
-
-    async def delete_status_update(self, message_id: str) -> int:
-        """Delete one failed story from local storage by its message id."""
-        if not message_id:
-            return 0
-        async with self._write_lock:
-            conn = await self._ensure_conn()
-            cursor = await conn.execute(
-                "DELETE FROM status_updates WHERE message_id = ?", (message_id,)
-            )
-            await conn.commit()
-            return cursor.rowcount if cursor.rowcount is not None else 0
 
     # ── Bulk Import / Export (for migration) ─────────────────────────────────
 

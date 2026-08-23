@@ -1,10 +1,11 @@
-"""Tests for the bounded boot message sync.
+"""Tests for the boot-sync deep-history window for the most-recent chats.
 
-Every chat must get the configured first page before lower-priority deep
-history begins.  Fetching 1,000 messages for the ten newest chats at boot used
-all workers while private history was still landing, leaving other private
-conversations visibly stuck at 1 or 15 messages.  Deep history now runs only in
-the background after the first-page repair queue drains.
+The boot sync normally fetches only ``messages_page_size`` (200) newest
+messages per chat, so scrolling up in a conversation quickly exhausts local
+history and stalls on ``fetch_older_messages()`` network round-trips.  The fix
+tags the N most-recent chats (the ones the user is most likely to open first)
+with a deeper ``_sync_limit`` so their first several page-ups read from the
+local DB.
 
 MainWindow is a wx.Frame and cannot be instantiated without a running app, so
 the methods under test are exercised against a stub carrying just the state
@@ -37,10 +38,12 @@ class _FakeDb:
 class _SyncStub:
     """Minimal MainWindow stand-in for sync_remote_chats()."""
 
+    _DEEP_SYNC_TOP_N = MainWindow._DEEP_SYNC_TOP_N
+    _DEEP_SYNC_COUNT = MainWindow._DEEP_SYNC_COUNT
+
     def __init__(self, chats):
         self.chats = chats
         self.calls = []
-        self.repair_calls = []
         self.settings = {"user_interface": {"messages_page_size": 200}}
         # sync_remote_chats() reports the chats whose fetch exhausted its
         # retries — a failure that returns normally instead of raising, and so
@@ -57,10 +60,6 @@ class _SyncStub:
     def sync_chat_messages(self, chat):
         self.calls.append((chat.get("remoteJid"), chat.get("_sync_limit")))
 
-    def _repair_short_chat(self, chat):
-        self.repair_calls.append(chat.get("remoteJid"))
-        self.sync_chat_messages(chat)
-
 
 def _chats(n, start_t):
     return {
@@ -69,14 +68,24 @@ def _chats(n, start_t):
     }
 
 
-class TestSyncRemoteChatsBoundedWindow:
-    def test_all_chats_use_the_normal_page_limit(self):
+class TestSyncRemoteChatsDeepWindow:
+    def test_top_n_chats_get_the_deep_limit(self):
         stub = _SyncStub(_chats(15, start_t=100))
         MainWindow.sync_remote_chats(stub)
         limits = dict(stub.calls)
         assert len(limits) == 15
-        assert all(limit is None for limit in limits.values())
-        assert set(stub.repair_calls) == set(limits)
+        # Highest t wins the deep window; the rest sync the regular page target.
+        for jid in (f"jid{i:04d}@c.us" for i in range(MainWindow._DEEP_SYNC_TOP_N)):
+            assert limits[jid] == MainWindow._DEEP_SYNC_COUNT
+        for jid in (f"jid{i:04d}@c.us" for i in range(
+                MainWindow._DEEP_SYNC_TOP_N, 15)):
+            assert not limits[jid]
+
+    def test_fewer_chats_than_n_are_all_deep(self):
+        stub = _SyncStub(_chats(3, start_t=100))
+        MainWindow.sync_remote_chats(stub)
+        limits = dict(stub.calls)
+        assert all(v == MainWindow._DEEP_SYNC_COUNT for v in limits.values())
 
     def test_invalid_jids_are_filtered_before_ranking(self):
         stub = _SyncStub({
@@ -88,7 +97,7 @@ class TestSyncRemoteChatsBoundedWindow:
         MainWindow.sync_remote_chats(stub)
         limits = dict(stub.calls)
         assert set(limits) == {"jid0000@c.us", "jid0001@c.us"}
-        assert all(limit is None for limit in limits.values())
+        assert all(v == MainWindow._DEEP_SYNC_COUNT for v in limits.values())
 
 
 class _MessagesStub:
@@ -130,8 +139,8 @@ class _MessagesStub:
         return MainWindow._chat_jids_equivalent(self, left, right)
 
 
-class TestSyncChatMessagesHonorsPageLimit:
-    def test_legacy_deep_tag_cannot_override_configured_count(self, monkeypatch):
+class TestSyncChatMessagesHonorsDeepLimit:
+    def test_deep_tagged_chat_queries_the_deep_count(self, monkeypatch):
         urls = []
         monkeypatch.setattr(
             main_module.requests, "get",
@@ -141,7 +150,7 @@ class TestSyncChatMessagesHonorsPageLimit:
         chat = {"remoteJid": "jid0000@c.us", "t": 100, "_sync_limit": 1000}
         MainWindow.sync_chat_messages(stub, chat)
         assert len(urls) == 1
-        assert "count=250" in urls[0]
+        assert "count=1000" in urls[0]
 
     def test_untagged_chat_falls_back_to_messages_page_size(self, monkeypatch):
         urls = []
@@ -153,7 +162,7 @@ class TestSyncChatMessagesHonorsPageLimit:
         chat = {"remoteJid": "jid0000@c.us", "t": 100}
         MainWindow.sync_chat_messages(stub, chat)
         assert len(urls) == 1
-        assert "count=250" in urls[0]
+        assert "count=200" in urls[0]
 
 
 class TestSyncChatMessagesLidIdentity:
@@ -183,7 +192,7 @@ class TestSyncChatMessagesLidIdentity:
 
         MainWindow.sync_chat_messages(stub, stub.chats[phone].copy())
 
-        assert f"get-messages/{lid}?count=250" in urls[0]
+        assert f"get-messages/{lid}?count=200" in urls[0]
         records = stub.chats[phone]["messages"]["messages"]["records"]
         assert [record["key"]["id"] for record in records] == ["MSG-1"]
         assert records[0]["key"]["remoteJid"] == phone

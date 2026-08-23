@@ -69,7 +69,7 @@ class TestFetchHistorySyncStatus:
         stub = _Stub()
         payload = {"backendWorkerBridgeReady": True, "storeCounts": {"message": 9000}}
         monkeypatch.setattr(
-            "main.api_get",
+            "main.requests.get",
             lambda *a, **k: _Response(200, {"status": "success", "response": payload}),
         )
         assert stub.fetch_history_sync_status() == payload
@@ -80,13 +80,13 @@ class TestFetchHistorySyncStatus:
         def _boom(*a, **k):
             raise AssertionError("must not hit the API while disconnected")
 
-        monkeypatch.setattr("main.api_get", _boom)
+        monkeypatch.setattr("main.requests.get", _boom)
         assert stub.fetch_history_sync_status() is None
 
     def test_missing_route_is_not_fatal(self, monkeypatch):
         """An older client/api/ build simply has no such endpoint."""
         stub = _Stub()
-        monkeypatch.setattr("main.api_get", lambda *a, **k: _Response(404, text="nope"))
+        monkeypatch.setattr("main.requests.get", lambda *a, **k: _Response(404, text="nope"))
         assert stub.fetch_history_sync_status() is None
 
     def test_transport_error_is_swallowed(self, monkeypatch):
@@ -95,7 +95,7 @@ class TestFetchHistorySyncStatus:
         def _raise(*a, **k):
             raise OSError("connection refused")
 
-        monkeypatch.setattr("main.api_get", _raise)
+        monkeypatch.setattr("main.requests.get", _raise)
         assert stub.fetch_history_sync_status() is None
 
 
@@ -171,7 +171,7 @@ class TestRequestOlderMessages:
             seen["url"] = url
             return _Response(200, {"status": "success", "response": {"requested": True}})
 
-        monkeypatch.setattr("main.api_post", _post)
+        monkeypatch.setattr("main.requests.post", _post)
         assert stub.request_older_messages("5535999999999@s.whatsapp.net") is True
         assert seen["url"].endswith("/request-older-messages/5535999999999@c.us")
 
@@ -181,7 +181,7 @@ class TestRequestOlderMessages:
         stub._phone_to_lid["5535999999999@s.whatsapp.net"] = "12345@lid"
         seen = {}
         monkeypatch.setattr(
-            "main.api_post",
+            "main.requests.post",
             lambda url, **k: (
                 seen.__setitem__("url", url),
                 _Response(200, {"status": "success", "response": {"requested": True}}),
@@ -194,7 +194,7 @@ class TestRequestOlderMessages:
         stub = _Stub()
         seen = {}
         monkeypatch.setattr(
-            "main.api_post",
+            "main.requests.post",
             lambda url, **k: (
                 seen.__setitem__("url", url),
                 _Response(200, {"status": "success", "response": {"requested": True}}),
@@ -207,7 +207,7 @@ class TestRequestOlderMessages:
         """WhatsApp Web disables on-demand sending after repeated failures."""
         stub = _Stub()
         monkeypatch.setattr(
-            "main.api_post",
+            "main.requests.post",
             lambda *a, **k: _Response(
                 500,
                 {"status": "error", "response": {"error": "on-demand requests disabled"}},
@@ -218,49 +218,10 @@ class TestRequestOlderMessages:
     def test_200_without_requested_flag_is_not_a_success(self, monkeypatch):
         stub = _Stub()
         monkeypatch.setattr(
-            "main.api_post",
+            "main.requests.post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {"requested": False}}),
         )
         assert stub.request_older_messages("120363000000000000@g.us") is False
-
-    def test_inflight_request_counts_as_active(self, monkeypatch):
-        stub = _Stub()
-        monkeypatch.setattr(
-            "main.api_post",
-            lambda *a, **k: _Response(200, {"status": "success", "response": {
-                "requested": False, "inFlight": True,
-                "endOfHistoryTransferType": 2, "endOfHistory": False,
-            }}),
-        )
-        assert stub.request_older_messages("120363000000000000@g.us") is True
-
-    def test_explicit_end_type_one_is_recorded(self, monkeypatch):
-        stub = _Stub()
-        jid = "120363000000000000@g.us"
-        monkeypatch.setattr(
-            "main.api_post",
-            lambda *a, **k: _Response(200, {"status": "success", "response": {
-                "requested": False, "endOfHistoryTransferType": 1,
-                "endOfHistory": True,
-            }}),
-        )
-        assert stub.request_older_messages(jid) is False
-        assert jid in stub._older_request_confirmed_end
-
-    def test_incomplete_chat_is_temporarily_blocked(self, monkeypatch):
-        stub = _Stub()
-        jid = "120363000000000000@g.us"
-        monkeypatch.setattr(
-            "main.api_post",
-            lambda *a, **k: _Response(200, {"status": "success", "response": {
-                "requested": False, "endOfHistoryTransferType": 2,
-                "endOfHistory": False, "primaryHasMore": False,
-                "moreOnPrimary": False, "initialHistoryIncomplete": True,
-            }}),
-        )
-        assert stub.request_older_messages(jid) is False
-        assert jid not in getattr(stub, "_older_request_confirmed_end", set())
-        assert jid in stub._older_request_temporarily_blocked
 
     def test_disconnected_session_never_calls_the_api(self, monkeypatch):
         stub = _Stub(connected=False)
@@ -268,7 +229,7 @@ class TestRequestOlderMessages:
         def _boom(*a, **k):
             raise AssertionError("must not hit the API while disconnected")
 
-        monkeypatch.setattr("main.api_post", _boom)
+        monkeypatch.setattr("main.requests.post", _boom)
         assert stub.request_older_messages("120363000000000000@g.us") is False
 
     def test_transport_error_is_swallowed(self, monkeypatch):
@@ -277,7 +238,7 @@ class TestRequestOlderMessages:
         def _raise(*a, **k):
             raise OSError("connection refused")
 
-        monkeypatch.setattr("main.api_post", _raise)
+        monkeypatch.setattr("main.requests.post", _raise)
         assert stub.request_older_messages("120363000000000000@g.us") is False
 
 
@@ -314,41 +275,20 @@ class TestRefreshHistoryStillLanding:
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
-    def test_incomplete_recent_sync_keeps_short_chats_pending(self, monkeypatch):
-        """RECENT may still be landing after the bootstrap queue looks empty.
-
-        The retry loop is time-budgeted, so keeping the chats pending cannot
-        re-query them forever and avoids requiring Home in every conversation.
-        """
+    def test_an_interrupted_recent_sync_does_not_pin_the_flag(self, monkeypatch):
+        """recentCompleted stays false forever on such a session — keying off it
+        would re-query every short chat on every launch for good."""
         stub = self._stub(
             {"unprocessedChunks": 0, "initialSyncComplete": True, "recentCompleted": False},
             monkeypatch)
-        assert stub.refresh_history_still_landing() is True
-        assert stub._history_still_landing is True
-
-    def test_an_unreadable_status_is_safe_before_the_first_check(self, monkeypatch):
-        """One endpoint timeout cannot announce completion ahead of the phone."""
-        stub = self._stub(None, monkeypatch)
-        assert stub.refresh_history_still_landing() is True
-        assert stub._history_still_landing is True
-
-    def test_an_unreadable_status_preserves_last_known_state(self, monkeypatch):
-        stub = self._stub(None, monkeypatch)
-        stub._history_still_landing = False
         assert stub.refresh_history_still_landing() is False
-        stub._history_still_landing = True
-        assert stub.refresh_history_still_landing() is True
 
-
-class TestBackfillPriority:
-    """Visible 1/15-message gaps must not wait behind cosmetic/deep work."""
-
-    def test_short_chats_gate_lower_priority_work(self):
-        import inspect
-
-        source = inspect.getsource(MainWindow._backfill_empty_chats)
-        assert "named = 0 if continuing_short_sweep else self._backfill_names()" in source
-        assert "if deep_pending and not continuing_short_sweep:" in source
+    def test_an_unreadable_status_is_treated_as_settled(self, monkeypatch):
+        """Better to take a short chat at face value than to re-query 600 of
+        them for the whole budget because the status endpoint is missing."""
+        stub = self._stub(None, monkeypatch)
+        assert stub.refresh_history_still_landing() is False
+        assert stub._history_still_landing is False
 
 
 def _history_sync_warnings(caplog):
@@ -381,7 +321,7 @@ class TestUnblockHistorySync:
     def test_removed_chunks_are_reported_loudly(self, monkeypatch, caplog):
         stub = _Stub()
         monkeypatch.setattr(
-            "main.api_post",
+            "main.requests.post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {
                 "recentCompleted": False, "unprocessed": 26, "recentWaiting": 22,
                 "onDemandPending": 4, "removed": ["a", "b", "c", "d"],
@@ -398,7 +338,7 @@ class TestUnblockHistorySync:
     def test_healthy_queue_is_a_quiet_no_op(self, monkeypatch, caplog):
         stub = _Stub()
         monkeypatch.setattr(
-            "main.api_post",
+            "main.requests.post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {
                 "recentCompleted": True, "unprocessed": 0, "recentWaiting": 0,
                 "onDemandPending": 0, "removed": [],
@@ -413,7 +353,7 @@ class TestUnblockHistorySync:
     def test_missing_route_is_not_fatal(self, monkeypatch):
         """An older client/api/ build simply has no such endpoint."""
         stub = _Stub()
-        monkeypatch.setattr("main.api_post", lambda *a, **k: _Response(404, text="nope"))
+        monkeypatch.setattr("main.requests.post", lambda *a, **k: _Response(404, text="nope"))
         assert stub.unblock_history_sync() is None
 
     def test_disconnected_session_never_calls_the_api(self, monkeypatch):
@@ -422,7 +362,7 @@ class TestUnblockHistorySync:
         def _boom(*a, **k):
             raise AssertionError("must not hit the API while disconnected")
 
-        monkeypatch.setattr("main.api_post", _boom)
+        monkeypatch.setattr("main.requests.post", _boom)
         assert stub.unblock_history_sync() is None
 
     def test_transport_error_is_swallowed(self, monkeypatch):
@@ -431,7 +371,7 @@ class TestUnblockHistorySync:
         def _raise(*a, **k):
             raise OSError("connection refused")
 
-        monkeypatch.setattr("main.api_post", _raise)
+        monkeypatch.setattr("main.requests.post", _raise)
         assert stub.unblock_history_sync() is None
 
 
@@ -450,15 +390,14 @@ class _FetchStub:
 
 
 def _run_empty_result_branch(stub, remote_jid):
-    """Mirror the immediate no-messages decision in fetch_older_messages()."""
+    """Mirror of the no-messages branch in fetch_older_messages()."""
     already_asked = remote_jid in stub._older_requested_chats
+    requested = False
     if not already_asked:
+        stub._older_requested_chats.add(remote_jid)
         requested = stub.request_older_messages(remote_jid)
-        # A timestamp/asked marker is evidence only after the request went out.
-        if requested:
-            stub._older_requested_chats.add(remote_jid)
-    # Neither a failed/refused request nor a second empty page inside the reply
-    # window is enough to mark the chat exhausted anymore.
+    if not requested:
+        stub._exhausted_chats.add(remote_jid)
 
 
 class TestExhaustionBookkeeping:
@@ -475,20 +414,19 @@ class TestExhaustionBookkeeping:
         assert stub.requested_for == ["120363000000000000@g.us"]
         assert "120363000000000000@g.us" not in stub._exhausted_chats
 
-    def test_failed_request_keeps_the_chat_requeryable(self):
+    def test_failed_request_marks_exhausted(self):
         stub = _FetchStub(request_succeeds=False)
-        jid = "120363000000000000@g.us"
-        _run_empty_result_branch(stub, jid)
-        assert jid not in stub._exhausted_chats
-        assert jid not in stub._older_requested_chats
+        _run_empty_result_branch(stub, "120363000000000000@g.us")
+        assert "120363000000000000@g.us" in stub._exhausted_chats
 
-    def test_confirmed_request_is_not_repeated_inside_reply_window(self):
+    def test_the_phone_is_asked_only_once_per_chat(self):
+        """Second empty result gives up instead of re-asking the phone."""
         stub = _FetchStub(request_succeeds=True)
         jid = "120363000000000000@g.us"
         _run_empty_result_branch(stub, jid)
         _run_empty_result_branch(stub, jid)
         assert stub.requested_for == [jid]
-        assert jid not in stub._exhausted_chats
+        assert jid in stub._exhausted_chats
 
 
 class TestBrowserFlagsStayRemoved:
@@ -566,52 +504,6 @@ class TestRoutesArePatched:
         assert guard_at < send_at, "the guard must run before the request goes out"
 
 
-    def test_stuck_recent_queue_has_a_real_recovery_path(self):
-        import pathlib
-
-        root = pathlib.Path(__file__).resolve().parents[1]
-        controller = (
-            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
-        ).read_text(encoding="utf-8")
-        assert "queueFingerprint" in controller
-        assert "cmd.restartBackend()" in controller
-        assert "staleForMs >= 30_000" in controller
-        assert "staleForMs >= 75_000" in controller
-        assert "req.client.page.reload" in controller
-
-    def test_stale_partial_recent_chunks_are_requested_again(self):
-        """A progress<100 row is never selectable and blocks later chunks."""
-        import pathlib
-
-        root = pathlib.Path(__file__).resolve().parents[1]
-        controller = (
-            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
-        ).read_text(encoding="utf-8")
-        assert "progress < 100" in controller
-        assert "now - startedAt >= 120_000" in controller
-        assert "row.reuploadPending !== true" in controller
-        assert "api.markChunkForReuploadPending(row.msgKey)" in controller
-        assert "Number(result?.reuploadPending || 0) === 0" in controller
-        assert "PARTIAL_REUPLOAD_GRACE_MS = 5 * 60_000" in controller
-        assert "partialRetryReset" in controller
-        assert "row.reuploadPending !== true" in controller
-        assert "getHistorySyncCompleteOnDemandAccessGranted" in controller
-        assert "setHistorySyncCompleteOnDemandAccessGranted(true)" not in controller
-        assert "droppedStalePartialChunks" not in controller
-        assert "getPnLidEntry" in controller
-        assert "resolvedChatId = alternateId" in controller
-        assert "history_sync_on_demand_message_count" in controller
-        assert "out.oldestMsgId = oldest?.id?.id" in controller
-        assert "out.oldestMsgFromMe = oldest?.id?.fromMe" in controller
-        assert "oldestMsgTimestampMs" in controller
-        assert "out.requestPayloadMode = 'chatId'" in controller
-        assert "ConversationEndOfHistoryTransferModelPropType" in controller
-        assert "out.initialHistoryIncomplete" in controller
-        assert "out.moreOnPrimary = out.primaryHasMore === true" in controller
-        assert "sendPeerDataOperationRequest(kind, {" in controller
-        assert "chatId: chatModel.id" in controller
-
-
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.
 
@@ -649,11 +541,6 @@ class TestDocumentOnlyInterception:
         assert "version = undefined;" in start
         assert "browserController.initWhatsapp = async function" in start
 
-    def test_pin_failure_also_consumes_version_instead_of_using_blanket_fallback(self):
-        start = self._start_js()
-        assert "falling back to WPPConnect's blanket one" not in start
-        assert "History sync is preserved" in start
-
     def test_every_paused_request_is_answered(self):
         """A paused request nobody answers is the bug itself, not a fix for it."""
         start = self._start_js()
@@ -674,96 +561,3 @@ class TestDocumentOnlyInterception:
         # why the old call was wrong and legitimately names it.
         assert "await (window as any).WAPI.loadEarlierMessages(" not in controller
         assert "await (window as any).WPP.chat.loadEarlierMessages(" not in controller
-
-
-class TestWaitForRecentHistoryBeforeMessageSync:
-    class Stub:
-        _RECENT_HISTORY_WAIT = 360
-        wait_for_recent_history_before_message_sync = (
-            MainWindow.wait_for_recent_history_before_message_sync
-        )
-
-        def __init__(self, statuses):
-            self.statuses = list(statuses)
-            self.unblocked = 0
-
-        def _should_abort_sync_for_offline(self):
-            return False
-
-        def fetch_history_sync_status(self):
-            return self.statuses.pop(0)
-
-        def unblock_history_sync(self):
-            self.unblocked += 1
-
-    def test_ready_store_does_not_wait_or_recover(self):
-        stub = self.Stub([{"recentCompleted": True}])
-        stub.wait_for_recent_history_before_message_sync()
-        assert stub.unblocked == 0
-
-    def test_incomplete_store_is_recovered_before_chat_reads(self, monkeypatch):
-        stub = self.Stub([
-            {"recentCompleted": False, "unprocessedChunks": 2},
-            {"recentCompleted": True, "unprocessedChunks": 0},
-        ])
-        monkeypatch.setattr("main.time.sleep", lambda _seconds: None)
-        stub.wait_for_recent_history_before_message_sync()
-        assert stub.unblocked == 1
-
-class _InteractiveWaitStub:
-    wait_for_older_messages = MainWindow.wait_for_older_messages
-    _normalize_jid = staticmethod(MainWindow._normalize_jid)
-
-    def __init__(self, responder):
-        self._wa_connected = True
-        self.offline_mode = False
-        self.calls = []
-        self._responder = responder
-
-    def fetch_older_messages(
-        self, jid, oldest, store_only=False, allow_phone_request=True
-    ):
-        self.calls.append(allow_phone_request)
-        return self._responder(allow_phone_request, len(self.calls))
-
-
-class TestInteractiveHistoryWait:
-    def _clock(self, monkeypatch):
-        clock = [0.0]
-        monkeypatch.setattr("main.time.monotonic", lambda: clock[0])
-        monkeypatch.setattr("main.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
-        return clock
-
-    def test_polling_reads_passively_until_the_page_arrives(self, monkeypatch):
-        self._clock(monkeypatch)
-        stub = _InteractiveWaitStub(
-            lambda allow, call: [{"key": {"id": "older"}}] if call == 2 else None
-        )
-        got = stub.wait_for_older_messages(
-            "120363000000000000@g.us", {"key": {"id": "anchor"}},
-            timeout=5, poll_interval=1, retry_request_every=10,
-        )
-        assert got and got[0]["key"]["id"] == "older"
-        assert stub.calls == [False, False]
-
-    def test_temporarily_refused_request_is_retried_interactively(self, monkeypatch):
-        self._clock(monkeypatch)
-        stub = _InteractiveWaitStub(
-            lambda allow, call: [{"key": {"id": "older"}}] if allow else None
-        )
-        got = stub.wait_for_older_messages(
-            "5511999999999@s.whatsapp.net", {"key": {"id": "anchor"}},
-            timeout=5, poll_interval=0.5, retry_request_every=1,
-        )
-        assert got and got[0]["key"]["id"] == "older"
-        assert stub.calls == [False, False, True]
-
-    def test_switching_conversation_cancels_the_wait(self, monkeypatch):
-        self._clock(monkeypatch)
-        stub = _InteractiveWaitStub(lambda allow, call: None)
-        got = stub.wait_for_older_messages(
-            "chat@g.us", {"key": {"id": "anchor"}},
-            timeout=5, should_continue=lambda: False,
-        )
-        assert got is None
-        assert stub.calls == []

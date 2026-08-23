@@ -66,3 +66,51 @@ class TestTopLevelMenuMnemonicsAreUnique:
             for key in TOP_LEVEL_MENU_KEYS:
                 label = translations.get(key, "")
                 assert _mnemonic(label) is not None, f"{locale}: {key!r} ({label!r}) has no '&' mnemonic"
+
+
+# Reserved as an explicit wx.AcceleratorTable entry, independent of any
+# label's own "&" mnemonic — see MainWindow._on_global_alt_t() and issue #78.
+_GLOBALLY_RESERVED_ALT_LETTERS = {"t"}
+
+# message_label's mnemonic ("type_message"/"type_message_group") is also
+# reused, letter-for-letter, to register an explicit ID_ALT_FOCUS_FIELD
+# accelerator in ConversationsPanel (see conversations.py's own
+# _mnemonic_letter() comment) — so these two keys must always agree with
+# each other, and reply_to/reply_to_group (which replace message_label's
+# text while composing a reply) must too, or the visible "&" underline in
+# reply mode stops matching the Alt-key that actually fires.
+_MESSAGE_FIELD_LABEL_KEYS = [
+    "type_message", "type_message_group", "reply_to", "reply_to_group",
+]
+
+
+class TestMessageFieldMnemonicDoesNotCollideWithAltT:
+    """Reported live (issue #78): en-US's "type_message" was "&Type a
+    message to", mnemonic-ed on T — colliding with the global Alt+T
+    "announce contact presence" shortcut. Because ConversationsPanel's own
+    accelerator table takes priority while a conversation has focus, Alt+T
+    inside an open chat moved focus to the message field instead of
+    announcing presence, with no way to reach the presence announcement
+    from inside the conversation at all.
+    """
+
+    def test_no_message_field_label_is_mnemonic_ed_on_a_reserved_letter(self):
+        for locale in LOCALES:
+            translations = _load(locale)
+            for key in _MESSAGE_FIELD_LABEL_KEYS:
+                label = translations.get(key, "")
+                letter = _mnemonic(label)
+                assert letter not in _GLOBALLY_RESERVED_ALT_LETTERS, (
+                    f"{locale}: {key!r} ({label!r}) is mnemonic-ed on "
+                    f"Alt+{letter.upper() if letter else '?'}, which collides "
+                    "with a globally reserved shortcut"
+                )
+
+    def test_type_message_and_its_variants_share_one_letter_per_locale(self):
+        for locale in LOCALES:
+            translations = _load(locale)
+            letters = {
+                key: _mnemonic(translations.get(key, ""))
+                for key in _MESSAGE_FIELD_LABEL_KEYS
+            }
+            assert len(set(letters.values())) == 1, f"{locale}: {letters!r}"

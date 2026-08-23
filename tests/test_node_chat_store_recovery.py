@@ -35,14 +35,6 @@ def test_store_recovery_is_bounded_chunked_and_single_flight():
     assert "Promise.allSettled" in source
 
 
-def test_store_recovery_finds_nested_and_compound_jids():
-    source = _source()
-    assert "const walk = (value: any, depth: number)" in source
-    assert "Object.entries(value).slice(0, 100)" in source
-    assert "jidPattern.exec(text)" in source
-    assert "value instanceof ArrayBuffer" in source
-
-
 def test_list_chats_route_uses_the_recovering_reader():
     source = _source()
     route_start = source.index("export async function listChats")

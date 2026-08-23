@@ -12,7 +12,7 @@ import re
 import threading
 import wx
 
-from core.utils import format_number, is_phone_like, looks_like_binary_blob
+from core.utils import format_number, is_phone_like, looks_like_binary_blob, contact_dedup_key
 
 
 class NewConversationDialog(wx.Dialog):
@@ -101,29 +101,9 @@ class NewConversationDialog(wx.Dialog):
     def _dedup_key(self, jid: str) -> str:
         """Canonical key identifying *the same person* across JID formats.
 
-        The same contact can be stored under @lid, @c.us or @s.whatsapp.net
-        (and with the Brazilian 8- vs 9-digit mobile variant), so keying a
-        results dedup on the raw JID string lets the same person appear
-        twice. Collapse all the formats the app already knows how to unify:
-        device suffix stripped, @c.us → @s.whatsapp.net, @lid bridged to its
-        phone number, and the 55-prefixed 9th-digit dropped. Groups keep
-        their full unique JID.
+        See core.utils.contact_dedup_key() — shared with attach_contact_dialog.py.
         """
-        mw = self._mw
-        normalize_jid = getattr(mw, "_normalize_jid", None)
-        norm = normalize_jid(jid) if normalize_jid else jid
-        if norm.endswith("@g.us"):
-            return norm
-        if norm.endswith("@lid"):
-            lid_map = getattr(mw, "_lid_to_phone", {}) or {}
-            phone = lid_map.get(norm, "")
-            if phone:
-                norm = phone
-        local = norm.split("@", 1)[0]
-        # Brazilian mobile 8/9-digit interchangeability: 5511999999999 ↔ 551199999999
-        if local.startswith("55") and len(local) == 13 and local[4] == "9":
-            local = local[:4] + local[5:]
-        return local
+        return contact_dedup_key(self._mw, jid)
 
     def _name_is_usable(self, name) -> bool:
         """Whether a resolved name is a real display name.

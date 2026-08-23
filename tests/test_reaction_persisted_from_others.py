@@ -50,6 +50,9 @@ class _FakeMessagesList:
     def Append(self, row):
         self.items.append(row[0])
 
+    def GetFocusedItem(self):
+        return -1
+
     def SetItemText(self, pos, text):
         self.items[pos] = text
 

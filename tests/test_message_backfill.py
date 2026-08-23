@@ -385,42 +385,6 @@ class TestBackfillPacing:
         assert MainWindow._BACKFILL_BUDGET >= 15 * 60, "must outlast a slow warm-up"
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
 
-    def test_first_repair_starts_before_user_can_give_up(self):
-        assert MainWindow._BACKFILL_FIRST_DELAY <= 30
-
-
-    def test_short_retry_is_followed_by_anchored_paging(self):
-        class Stub:
-            history_page_target = lambda self: 200
-            _normalize_jid = staticmethod(lambda jid: jid)
-
-            def __init__(self):
-                self.calls = []
-
-            def sync_chat_messages(self, chat):
-                self.calls.append(("newest", chat["remoteJid"]))
-
-            def _resolve_backfill_target(self, jid):
-                return jid, {"remoteJid": jid}
-
-            def _local_record_count(self, jid):
-                return 15
-
-            def _oldest_stored_message(self, jid):
-                return {"key": {"id": "oldest"}, "messageTimestamp": 1}
-
-            def fetch_older_messages(self, jid, anchor, store_only=False,
-                                     allow_phone_request=True):
-                self.calls.append(("anchored", jid, anchor["key"]["id"],
-                                   store_only, allow_phone_request))
-
-        stub = Stub()
-        MainWindow._repair_short_chat(stub, {"remoteJid": "dilla@lid"})
-        assert stub.calls == [
-            ("newest", "dilla@lid"),
-            ("anchored", "dilla@lid", "oldest", False, False),
-        ]
-
     @staticmethod
     def _next_delay(delay, recovered):
         """The pacing rule the loop applies after each pass."""
@@ -544,10 +508,3 @@ class TestBackfillPacing:
         s = _Stub(page_size=200, chunks_pending=True)
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=False)
         assert s._chats_awaiting_messages == set()
-
-
-def test_empty_chat_without_content_evidence_is_not_retried_forever():
-    """An empty chat without server evidence is allowed to be genuinely empty."""
-    s = _Stub(page_size=200, chunks_pending=True)
-    s._note_backfill_state("elder@lid", _chat(), api_ok=True)
-    assert s._chats_awaiting_messages == set()

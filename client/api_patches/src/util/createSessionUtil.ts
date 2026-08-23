@@ -522,30 +522,16 @@ export default class CreateSessionUtil {
                   client,
                   statusFind
                 );
-                const statusPayload = {
-                  status: statusFind,
-                  session: client.session,
-                };
-                // statusFind is the earliest authoritative phone-side logout
-                // signal. The eventEmitter channel above is internal; WinZapp
-                // listens on Socket.IO, so forward it there as well instead of
-                // leaving the desktop client stuck on its cached CONNECTED.
-                req.io.emit('status-find', statusPayload);
-                if (
-                  statusFind === StatusFind.disconnectedMobile ||
-                  statusFind === StatusFind.notLogged
-                ) {
-                  (client as any)._markedConnected = false;
-                  client.status = statusFind;
-                  client.qrcode = null;
-                }
                 if (statusFind === StatusFind.autocloseCalled) {
                   client.status = 'CLOSED';
                   client.qrcode = null;
                   client.close();
                   clientsArray[session] = undefined;
                 }
-                callWebHook(client, req, 'status-find', statusPayload);
+                callWebHook(client, req, 'status-find', {
+                  status: statusFind,
+                  session: client.session,
+                });
                 req.logger.info(statusFind + '\n\n');
               } catch (error) {}
             },
@@ -1381,7 +1367,9 @@ export default class CreateSessionUtil {
         // Allow a later CONNECTED to re-finalize (e.g. re-pair) by clearing the
         // once-guard, and drop the CONNECTED status so REST reports the truth.
         (client as any)._markedConnected = false;
-        client.status = state;
+        if (client.status === 'CONNECTED') {
+          client.status = state;
+        }
       }
     });
   }
