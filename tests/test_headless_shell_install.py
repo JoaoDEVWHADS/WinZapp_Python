@@ -45,6 +45,11 @@ class _Stub:
     find_headless_shell = MainWindow.find_headless_shell
     ensure_headless_shell_installed = MainWindow.ensure_headless_shell_installed
     ensure_api_modules_installed = MainWindow.ensure_api_modules_installed
+    _local_api_selected = MainWindow._local_api_selected
+    settings = {
+        "general": {"api_type_first_run_asked": True},
+        "connection": {"wpp_custom_api": False},
+    }
 
 
 @pytest.fixture

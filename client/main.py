@@ -1069,6 +1069,17 @@ class MainWindow(wx.Frame):
         # Check if we should ask the user to choose between local and custom/remote API (first run)
         self._check_api_type_first_run()
 
+        # The first-run question can open Connection settings and change all
+        # values read above. Refresh them before deciding whether a local
+        # runtime is needed, otherwise the pre-dialog defaults can wrongly
+        # trigger Node/npm/Chromium installation for a remote API.
+        conn = self.settings.get("connection", {})
+        self.wpp_server = conn.get("wpp_server", "http://127.0.0.1")
+        self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
+        self.wpp_api_key = conn.get("wpp_api_key", "wz-local-api-key")
+        self.wpp_custom_api = bool(conn.get("wpp_custom_api", False))
+        self.wpp_port = self._resolve_wpp_port(conn)
+
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever).
         # These must run BEFORE the WPPConnect API is started so the user never
         # sees a "starting WPPConnect" dialog stacked on top of setup prompts —
@@ -3561,6 +3572,9 @@ class MainWindow(wx.Frame):
     def _start_wpp_update_checker(self, force: bool = False):
         if self.background_mode:
             return
+        if not self._local_api_selected():
+            logging.info("[wpp-update] Remote/unconfigured API — skipping local server update check.")
+            return
         updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
         if not updates_enabled and not force:
             return
@@ -5607,6 +5621,10 @@ class MainWindow(wx.Frame):
         fallback still gets its turn. Returns True when a shell is present
         afterwards.
         """
+        if not self._local_api_selected():
+            logging.info("[headless-shell] Remote/unconfigured API — skipping installation.")
+            return False
+
         existing = self.find_headless_shell()
         if existing:
             logging.info("[headless-shell] Already installed: %s", existing)
@@ -5692,6 +5710,9 @@ class MainWindow(wx.Frame):
         the browser, so "the API is fully set up" was true for an install with
         no browser at all — see ensure_headless_shell_installed().
         """
+        if not self._local_api_selected():
+            logging.info("[api-setup] Remote/unconfigured API — skipping Node/npm/browser setup.")
+            return
         self._ensure_api_modules_installed()
         self.ensure_headless_shell_installed()
 
@@ -5730,6 +5751,10 @@ class MainWindow(wx.Frame):
         In background mode dialogs are never shown; if the setup is incomplete
         the process exits silently.
         """
+        if not self._local_api_selected():
+            logging.info("[api-setup] Remote/unconfigured API — refusing local installation.")
+            return
+
         import sys
         import shutil
         if sys.platform == "win32":
@@ -6010,7 +6035,7 @@ class MainWindow(wx.Frame):
           - api/package.json is absent (setup not done yet)
           - WPP_MINIMUM_VERSION is not defined in the .env
         """
-        if self.background_mode:
+        if self.background_mode or not self._local_api_selected():
             return
 
         dist_main = resource_path("api", "dist", "main.js")
@@ -6742,6 +6767,10 @@ class MainWindow(wx.Frame):
         start.js) startup can take well over 2 minutes, hence the 5-minute
         budget below.
         """
+        if not self._local_api_selected():
+            logging.info("[api-start] Remote/unconfigured API — not starting local WPPConnect.")
+            return
+
         if self._is_wpp_running():
             # ADOPT path: the shared Node is already listening (spawned by another
             # account, or left running from a previous session). We won't spawn it,
@@ -7054,6 +7083,21 @@ class MainWindow(wx.Frame):
 
         self.settings.setdefault("general", {})["language"] = lang
         self.save_settings()
+
+    def _local_api_selected(self) -> bool:
+        """Return True only after an explicit first-run choice of local API.
+
+        ``wpp_custom_api`` defaults to False for compatibility, so that value
+        alone cannot distinguish "local was selected" from "the preference is
+        still absent/unconfigured". The first-run marker is the second half of
+        the decision and prevents background startup or an early helper call
+        from downloading Node, npm packages, or Chromium before the question.
+        """
+        general = self.settings.get("general", {})
+        if not general.get("api_type_first_run_asked", False):
+            return False
+        connection = self.settings.get("connection", {})
+        return not bool(connection.get("wpp_custom_api", False))
 
     def _check_api_type_first_run(self):
         """
