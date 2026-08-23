@@ -4540,8 +4540,8 @@ class ConversationsPanel(wx.Panel):
         """Ctrl+Space toggles the focused row's membership in
         self.selected_messages (the mass actions act on that set) — kept off
         plain Space, which is reserved for playing/pausing the focused audio
-        or video message. Shift+Down extends the selection to the next row;
-        Shift+Home/Shift+End select every row above/below the focused one and
+        or video message. Shift+Down/Shift+Up extend the selection to the
+        next/previous row; Shift+Home/Shift+End select every row above/below the focused one and
         move focus to the first/last row (falling back to their previous
         meaning — seeking the active playback to its start/end — whenever
         something actually is playing); Ctrl+Shift+Space selects every
@@ -4611,6 +4611,27 @@ class ConversationsPanel(wx.Panel):
         if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
             target = (idx + 1) if idx >= 0 else 0
             if target < total:
+                self.messages_list.Focus(target)
+                self.messages_list.Select(target, True)
+                self.messages_list.EnsureVisible(target)
+                if self._select_message_at(target):
+                    self._refresh_message_rows_by_ids([self._sorted_messages[target].get("key", {}).get("id", "")])
+                    self.selection_sound.play()
+                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        # Shift+Up: extend the selection to the previous row and move focus to
+        # it — the upward mirror of Shift+Down above. Without this, Shift+Up
+        # fell through to the plain WXK_UP branch further down (which ignores
+        # `shift` and calls event.Skip()), leaving the native ListCtrl
+        # selection to extend on its own. That never touches
+        # self.selected_messages (what the mass actions actually act on) and
+        # doesn't know the unread-separator row isn't a selectable message,
+        # so selecting upward past it went out of sync with the visible
+        # highlight.
+        if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
+            target = (idx - 1) if idx >= 0 else 0
+            if target >= 0:
                 self.messages_list.Focus(target)
                 self.messages_list.Select(target, True)
                 self.messages_list.EnsureVisible(target)
