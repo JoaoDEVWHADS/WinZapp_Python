@@ -1991,15 +1991,42 @@ export async function getMessages(req: Request, res: Response) {
           }
 
           console.log(
-            `[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`
+            `[browser-evaluate] Final query using WPP.chat.getMessages with anchor: ${queryId}`
           );
-          const result = await (window as any).WAPI.getMessages(chatId, {
-            count: targetCount,
-            direction: 'before',
-            id: queryId,
-          });
+          let result: any[] = [];
+          try {
+            if ((window as any).WPP?.chat?.getMessages) {
+              const rawMsgs = await (window as any).WPP.chat.getMessages(chatId, {
+                count: targetCount,
+                direction: 'before',
+                id: queryId,
+              });
+              if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                result = rawMsgs
+                  .map((m: any) =>
+                    (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                      ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                      : m
+                  )
+                  .map((m: any) =>
+                    (window as any).WAPI?.processMessageObj
+                      ? (window as any).WAPI.processMessageObj(m, true, true)
+                      : m
+                  );
+              }
+            }
+          } catch (e) {
+            console.log(`[browser-evaluate] WPP.chat.getMessages failed in anchor query: ${e}`);
+          }
+          if (!result || result.length === 0) {
+            result = await (window as any).WAPI.getMessages(chatId, {
+              count: targetCount,
+              direction: 'before',
+              id: queryId,
+            });
+          }
           console.log(
-            `[browser-evaluate] WAPI.getMessages returned ${
+            `[browser-evaluate] Final getMessages returned ${
               result ? result.length : 0
             } messages`
           );
@@ -2011,41 +2038,6 @@ export async function getMessages(req: Request, res: Response) {
       // WinZapp patch: no anchor id — this is the plain "give me up to
       // `count` messages" call sync_chat_messages() makes for every chat on
       // every sync.
-      //
-      // A previous version of this branch looped on WAPI.loadEarlierMessages()
-      // to pull more history into the Store. That loop never ran even once:
-      // WAPI.loadEarlierMessages() calls chat.loadEarlierMsgs(), a method
-      // current WhatsApp Web builds no longer have, so the very first call
-      // threw `TypeError: t.loadEarlierMsgs is not a function` and the
-      // `catch { break; }` swallowed it — the whole thing was dead code that
-      // looked like a fix. (Measured directly against the live page: four
-      // iterations, four identical TypeErrors, store length unchanged at 1.)
-      //
-      // What actually works is anchored paging. WAPI.getMessages() with an
-      // explicit `id` resolves through msgFindBefore(), which is a query
-      // against WhatsApp Web's *IndexedDB*, not against the in-memory
-      // chat.msgs collection — so walking the anchor backwards can surface
-      // messages the collection has not materialised. Verified live: a chat
-      // whose in-memory collection held 15 messages answered a `before
-      // <newest>` query with the other 14, and `msgFindBefore` reports
-      // status 200 with an empty array when the DB genuinely ends there
-      // (i.e. "no more history" is distinguishable from a failure).
-      //
-      // Note what this can and cannot do. It exhausts everything WhatsApp Web
-      // has locally. It cannot conjure history WhatsApp Web never ingested —
-      // that requires an on-demand request to the phone
-      // (requestOlderMessages below) plus a working history-sync pipeline.
-      //
-      // Deliberately WAPI throughout, matching what this branch called before
-      // (client.getMessages() → WAPI.getMessages() — see wppconnect's own
-      // whatsapp.js). An earlier patch swapped in WPP.chat.getMessages() and
-      // it came back EMPTY for at least one real group chat. An empty (not
-      // failed, not null — a valid but empty array) response is
-      // indistinguishable from "every message was deleted on the phone" to
-      // WinZapp's own _fetch_remote_message_ids() /
-      // _reconcile_active_conversation_with_remote(), and was reported live
-      // as a group's entire history vanishing from the open conversation
-      // mid-read, "recovering" only once a new live message forced a repaint.
       response = await req.client.page.evaluate(
         async ({ chatId, targetCount }) => {
           const keyOf = (m: any) =>
@@ -2058,7 +2050,19 @@ export async function getMessages(req: Request, res: Response) {
                 const opts: any = { count: targetCount, direction: 'before' };
                 if (anchor) opts.id = anchor;
                 const r = await (window as any).WPP.chat.getMessages(chatId, opts);
-                if (Array.isArray(r) && r.length > 0) return r;
+                if (Array.isArray(r) && r.length > 0) {
+                  return r
+                    .map((m: any) =>
+                      (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                        ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                        : m
+                    )
+                    .map((m: any) =>
+                      (window as any).WAPI?.processMessageObj
+                        ? (window as any).WAPI.processMessageObj(m, true, true)
+                        : m
+                    );
+                }
               } catch (err) {
                 console.log(`[browser-evaluate] WPP.chat.getMessages fallback: ${err}`);
               }
