@@ -161,8 +161,25 @@ class SettingsDialog(wx.Dialog):
         )
         self._lang_codes = list(LANGUAGE_NAMES.keys())
         self._restart_required = False
+        # Dirty-tracking for the Apply button — see _mark_dirty()'s docstring.
+        self._dirty = False
+        self._loading_values = False
         self._build_ui()
+        self._loading_values = True
         self._load_values()
+        self._loading_values = False
+        self._apply_btn.Hide()
+        # Catches every checkbox/radio/combo/text change anywhere in the
+        # dialog via wx's normal command-event propagation (a control-level
+        # handler that doesn't call event.Skip() would otherwise swallow it —
+        # see _mark_dirty()'s docstring for the handlers that needed one
+        # added). Bound after _load_values() so SetValue()-driven text
+        # events fired while populating the controls (see _load_values()
+        # itself) are covered by _loading_values rather than by binding order.
+        self.Bind(wx.EVT_CHECKBOX, self._mark_dirty)
+        self.Bind(wx.EVT_RADIOBUTTON, self._mark_dirty)
+        self.Bind(wx.EVT_COMBOBOX, self._mark_dirty)
+        self.Bind(wx.EVT_TEXT, self._mark_dirty)
         self.Fit()
         self.SetMinSize((360, -1))
         self.Centre()
@@ -1206,6 +1223,7 @@ class SettingsDialog(wx.Dialog):
         self._current_pack_id = self._sound_pack_ids[idx]
         self._load_sound_events_display(self._current_pack_id)
         self._reload_alert_tone_choices()
+        event.Skip()
 
     def _on_import_sound_pack_folder(self, event):
         i18n = self.main_window.i18n
@@ -1250,6 +1268,10 @@ class SettingsDialog(wx.Dialog):
 
         self.main_window.refresh_sound_packs()
         self._reload_sound_pack_choices(select_pack_id=new_pack_id)
+        # Selects the new pack programmatically (SetSelection(), which fires
+        # no event) — mark dirty directly, same reason _toggle_current_sound_
+        # event()/_set_all_sound_events() below do.
+        self._mark_dirty()
         wx.MessageBox(
             i18n.t("soundpack_import_success"),
             i18n.t("settings_title"),
@@ -1268,6 +1290,7 @@ class SettingsDialog(wx.Dialog):
 
     def _on_self_reference_toggle(self, event):
         self._update_self_reference_field_state()
+        event.Skip()
 
     # ── Sound events tab ─────────────────────────────────────────────────────
 
@@ -1297,6 +1320,9 @@ class SettingsDialog(wx.Dialog):
         entry["enabled"] = not entry.get("enabled", True)
         self._sound_events_list.SetString(idx, self._sound_event_label(key, entry["enabled"]))
         self._sound_events_list.SetSelection(idx)
+        # SetString()/SetSelection() on a ListBox fire no change event of
+        # their own to bubble up to _mark_dirty() — mark directly.
+        self._mark_dirty()
 
     def _on_sound_event_path_changed(self, event):
         idx = self._sound_events_list.GetSelection()
@@ -1306,6 +1332,7 @@ class SettingsDialog(wx.Dialog):
         settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
         entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
         entry["path"] = self._sound_event_path_field.GetValue()
+        event.Skip()
 
     def _set_all_sound_events(self, value: bool):
         settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
@@ -1313,6 +1340,7 @@ class SettingsDialog(wx.Dialog):
             entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
             entry["enabled"] = value
             self._sound_events_list.SetString(idx, self._sound_event_label(key, value))
+        self._mark_dirty()
 
     # ── Alert tones tab ──────────────────────────────────────────────────────
 
@@ -1335,6 +1363,7 @@ class SettingsDialog(wx.Dialog):
             self._alert_private_preview.stop()
         else:
             self._alert_group_preview.stop()
+        event.Skip()
 
     def _resolve_alert_preview_path(self, kind: str) -> str:
         """Resolve whatever the private/group Alert Tones combo currently
@@ -1360,9 +1389,11 @@ class SettingsDialog(wx.Dialog):
         except (ValueError, TypeError):
             speed_idx = 0
         self._audio_speed_combo.SetSelection(speed_idx)
+        event.Skip()
 
-    def _on_call_alerts_toggle(self, _event):
+    def _on_call_alerts_toggle(self, event):
         self._update_call_fields_state()
+        event.Skip()
 
     def _update_call_fields_state(self):
         """A popup is meaningful only while incoming-call alerts are enabled."""
@@ -2054,8 +2085,48 @@ class SettingsDialog(wx.Dialog):
 
     def _on_apply(self, event):
         if self._apply_values():
+            self._loading_values = True
             self._refresh_dialog_labels()
+            self._loading_values = False
             self._maybe_warn_restart_required()
+            self._dirty = False
+            self._apply_btn.Hide()
+            self.Layout()
+
+    def _mark_dirty(self, event=None):
+        """Show the Apply button the moment any setting actually changes,
+        instead of leaving it visible unconditionally — reported live as
+        confusing since it never went away even with nothing to apply.
+
+        Bound once at the dialog level (see __init__) so it catches every
+        checkbox/radio/combo/text control anywhere in the dialog via wx's
+        normal command-event propagation, rather than wiring a per-control
+        handler. A handful of controls already had their own dedicated
+        handler (_on_self_reference_toggle, _on_custom_api_toggle,
+        _on_call_alerts_toggle, _on_alert_choice_changed,
+        _on_sound_pack_selected, _on_sound_event_path_changed) — an
+        unhandled wx.CommandEvent propagates to the parent automatically,
+        but one a lower-level handler actually processes does NOT unless
+        that handler calls event.Skip(), so those six now do just to let
+        this one still fire after them. A few settings changes never fire
+        any of the bound event types at all (toggling a sound event
+        enabled/disabled, "activate/deactivate all", importing a sound
+        pack) — those call this directly instead.
+
+        Guarded by _loading_values: _load_values() populates every control
+        from the current settings when the dialog opens (and _on_apply()
+        re-syncs labels afterwards), and wx.TextCtrl.SetValue() — unlike the
+        CheckBox/RadioButton/ComboBox setters — does fire wx.EVT_TEXT, which
+        would otherwise mark the dialog dirty before the user touched
+        anything.
+        """
+        if event is not None:
+            event.Skip()
+        if self._loading_values or self._dirty:
+            return
+        self._dirty = True
+        self._apply_btn.Show()
+        self.Layout()
 
     def _maybe_warn_restart_required(self):
         if self._restart_required:
