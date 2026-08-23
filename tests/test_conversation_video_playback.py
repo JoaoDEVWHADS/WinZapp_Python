@@ -94,6 +94,7 @@ class _Stub:
         self._action_download_btn  = _FakeWidget()
         self._buttons_container    = _FakeWidget()
         self._contact_converse_btn = _FakeWidget()
+        self._contact_save_btn     = _FakeWidget()
         self._contact_msg_jid      = None
         self.conversation_panel    = _FakeWidget()
         self.conversation_panel.IsShown = lambda: False

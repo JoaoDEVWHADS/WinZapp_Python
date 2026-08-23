@@ -565,13 +565,25 @@ class ConversationsPanel(wx.Panel):
         )
         self._buttons_container.Hide()
 
-        # ── Contact message — Converse button ──────────────────────────────
+        # ── Contact message — Converse / Save contact buttons ──────────────
         self._contact_converse_btn = wx.Button(
             self.conversation_panel, label=i18n.t("converse")
         )
         self._contact_converse_btn.Bind(wx.EVT_BUTTON, self._on_contact_converse)
         conv_sizer.Add(self._contact_converse_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._contact_converse_btn.Hide()
+
+        # Same Ctrl+Shift+S accelerator/accessible reporting as the media
+        # "Save as" button (_action_save_as_btn) — _on_action_save_as()
+        # dispatches to _on_save_contact_message() for a contactMessage
+        # instead of the file-save dialog.
+        self._contact_save_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("save_contact")
+        )
+        self._contact_save_btn.SetAccessible(AccessibleSaveAs())
+        self._contact_save_btn.Bind(wx.EVT_BUTTON, self._on_save_contact_message)
+        conv_sizer.Add(self._contact_save_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._contact_save_btn.Hide()
 
         # ── Audio / video playback controls ────────────────────────────────
         self.audio_speed_btn = wx.Button(
@@ -1499,6 +1511,7 @@ class ConversationsPanel(wx.Panel):
         self._caption_label.SetLabel(i18n.t("attachment_caption_hint"))
         self._send_attachment_btn.SetLabel(i18n.t("send_attachment"))
         self._contact_converse_btn.SetLabel(i18n.t("converse"))
+        self._contact_save_btn.SetLabel(i18n.t("save_contact"))
         self._discard_voice_btn.SetLabel(i18n.t("discard_voice_message"))
         self._send_voice_btn.SetLabel(i18n.t("send_voice_message"))
         if self._is_recording and self._recording_paused:
@@ -2822,6 +2835,7 @@ class ConversationsPanel(wx.Panel):
             self._contact_msg_jid = self._jid_from_vcard(vcard)
             if self._contact_msg_jid:
                 self._contact_converse_btn.Show()
+                self._contact_save_btn.Show()
                 self.conversation_panel.Layout()
 
         elif msg_type in ("locationMessage", "liveLocationMessage"):
@@ -2904,6 +2918,13 @@ class ConversationsPanel(wx.Panel):
         elif msg_type in ("imageMessage", "documentMessage", "locationMessage", "liveLocationMessage"):
             # Enter on an image, document, or location → open in default app
             self._on_action_open(None, index=index)
+
+        elif msg_type == "contactMessage":
+            # Enter/Space on a contact message → open a conversation with
+            # that contact, same as clicking the "Conversar" button.
+            contact = msg_obj.get("contactMessage") or {}
+            jid = self._jid_from_vcard(contact.get("vcard", ""))
+            self._on_contact_converse(None, jid=jid)
 
     def on_messages_context_menu(self, event):
         index = self.messages_list.GetFirstSelected()
@@ -3213,6 +3234,7 @@ class ConversationsPanel(wx.Panel):
         self._action_download_btn.Hide()
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
+        self._contact_save_btn.Hide()
         self._contact_msg_jid = None
         self._update_links_panel([])
         self._update_mentions_panel([])
@@ -5257,6 +5279,10 @@ class ConversationsPanel(wx.Panel):
             return
         msg_type = msg.get("messageType", "")
 
+        if msg_type == "contactMessage":
+            self._on_save_contact_message(event)
+            return
+
         # Nothing to save: say so instead of opening a file dialog over a
         # message that has no file. Silence would be worse than the bug it
         # replaces — pressing Ctrl+Shift+S and getting no reaction at all
@@ -6543,23 +6569,7 @@ class ConversationsPanel(wx.Panel):
 
         # ── Contact ──────────────────────────────────────────────────────────
         if msg_type == "contactMessage":
-            contact = msg_obj.get("contactMessage") or {}
-            name    = contact.get("displayName") or ""
-            vcard   = contact.get("vcard") or ""
-
-            if not name or "BEGIN:VCARD" in name:
-                vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
-                parsed_name = ""
-                for line in vcard_to_parse.splitlines():
-                    if line.startswith("FN:"):
-                        parsed_name = line[3:].strip()
-                        break
-                if parsed_name:
-                    name = parsed_name
-                else:
-                    name = i18n.t("unknown_contact")
-
-            return i18n.t("contact_message").format(name=name)
+            return i18n.t("contact_message").format(name=self._contact_display_name(msg))
 
         if msg_type == "contactsArrayMessage":
             arr = msg_obj.get("contactsArrayMessage") or {}
@@ -10677,13 +10687,70 @@ class ConversationsPanel(wx.Panel):
                 return digits + "@s.whatsapp.net"
         return None
 
-    def _on_contact_converse(self, event):
-        """Navigate to the conversation with the contact from the selected message."""
-        if not self._contact_msg_jid:
+    def _contact_display_name(self, msg: dict) -> str:
+        """Extract a contactMessage's display name — prefers WPPConnect's own
+        displayName field, falling back to parsing "FN:" out of the vCard
+        (some clients only ever populate the vcard, or stuff the whole vcard
+        into displayName)."""
+        i18n = self.main_window.i18n
+        contact = (msg.get("message") or {}).get("contactMessage") or {}
+        name  = contact.get("displayName") or ""
+        vcard = contact.get("vcard") or ""
+
+        if not name or "BEGIN:VCARD" in name:
+            vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
+            parsed_name = ""
+            for line in vcard_to_parse.splitlines():
+                if line.startswith("FN:"):
+                    parsed_name = line[3:].strip()
+                    break
+            name = parsed_name or i18n.t("unknown_contact")
+        return name
+
+    def _on_contact_converse(self, event, jid: str | None = None):
+        """Navigate to the conversation with the contact from the selected
+        message. *jid* lets Enter/Space activation (_do_activate_message)
+        pass the focused row's own JID directly instead of relying on
+        self._contact_msg_jid, the side channel _on_message_focused() sets
+        for the Converse button."""
+        jid = jid or self._contact_msg_jid
+        if not jid:
             return
-        chat = self.main_window.get_chat(self._contact_msg_jid)
+        chat = self.main_window.get_chat(jid)
         if chat is not None:
             self.navigate_to_conversation(chat)
+
+    def _on_save_contact_message(self, event):
+        """Ctrl+Shift+S / the "Salvar contato" button next to "Conversar":
+        open NewContactDialog pre-filled from the focused contactMessage, to
+        add that contact locally in WinZapp — same dialog/flow
+        conversation_data_dialog.py's "Adicionar contato" uses."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg) or msg.get("messageType", "") != "contactMessage":
+            return
+        contact = (msg.get("message") or {}).get("contactMessage") or {}
+        jid = self._jid_from_vcard(contact.get("vcard", ""))
+        if not jid:
+            return
+
+        i18n = self.main_window.i18n
+        name = self._contact_display_name(msg)
+        parts  = name.split(None, 1) if name and name != i18n.t("unknown_contact") else []
+        p_name = parts[0] if parts else ""
+        p_sur  = parts[1] if len(parts) > 1 else ""
+
+        from ui.dialogs.new_contact import NewContactDialog
+        dlg = NewContactDialog(
+            self.main_window, self,
+            prefill_phone=format_number(jid),
+            prefill_name=p_name,
+            prefill_surname=p_sur,
+        )
+        dlg.ShowModal()
+        dlg.Destroy()
 
     # ── Real-time incoming message ────────────────────────────────────────────
 

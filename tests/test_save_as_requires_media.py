@@ -87,7 +87,6 @@ class TestMessagesWithNoFile:
         "extendedTextMessage",   # text with a link/quote
         "stickerMessage",
         "locationMessage",
-        "contactMessage",
         "reactionMessage",
         "protocolMessage",       # system events
         "groupNotification",
@@ -113,6 +112,22 @@ class TestMessagesWithNoFile:
 
         panel._on_action_save_as(None)
 
+        assert panel.main_window.outputs == []
+
+
+class TestContactMessageRoutesToSaveContactInstead:
+    """contactMessage has a file-less "save" of its own — adding the contact
+    locally (see tests/test_contact_message_actions.py) — so it must never
+    fall into the generic "nothing to save" refusal above."""
+
+    def test_gets_routed_to_save_contact_message(self):
+        calls = []
+        panel = _Stub([_msg("contactMessage")])
+        panel._on_save_contact_message = lambda event: calls.append(event)
+
+        panel._on_action_save_as(None)
+
+        assert calls == [None]
         assert panel.main_window.outputs == []
 
 
