@@ -19784,7 +19784,18 @@ class MainWindow(wx.Frame):
         everyone, remote-mirrored deletion). Both the preview and the sort
         key (_chat_last_ts) fall back to these fields whenever they are newer
         than anything left in records, so without this a deleted message kept
-        the chat pinned at its old position with its old preview text forever."""
+        the chat pinned at its old position with its old preview text forever.
+
+        Also drops chat["_last_reaction"] when the message it points to is
+        one of the ones just removed (issue #72). A reaction is deliberately
+        never added to `records` itself (see _track_last_reaction()), so
+        deleting its target message left nothing here for the ordinary
+        "did the last message disappear" check to catch — _last_msg_preview()
+        kept showing "you reacted with X to <deleted message>" as the chat's
+        latest activity forever, since the only guard it has is a timestamp
+        comparison against whatever real message remains, and a reaction
+        newer than every remaining message passes that unconditionally.
+        """
         chat = self.chats.get(jid)
         if not chat:
             return
@@ -19808,6 +19819,16 @@ class MainWindow(wx.Frame):
         else:
             chat["lastMessage"] = None
             chat["t"] = 0
+
+        last_reaction = chat.get("_last_reaction")
+        if last_reaction:
+            target_id = last_reaction.get("target_id", "")
+            still_present = any(
+                isinstance(m, dict) and m.get("key", {}).get("id") == target_id
+                for m in records
+            )
+            if not still_present:
+                chat.pop("_last_reaction", None)
 
         if hasattr(self, "db") and self.db is not None:
             try:
