@@ -4660,6 +4660,10 @@ class ConversationsPanel(wx.Panel):
         
         def _fetch():
             phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
+            if not phone_jid_val:
+                wx.CallAfter(self._clear_loading_more, phone_jid_val)
+                return
+            self.main_window._begin_interactive_history_request(phone_jid_val)
             try:
                 logging.info(f"[_load_older_messages_from_server thread] Launching fetch_older_messages for {phone_jid_val}")
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
@@ -4688,6 +4692,8 @@ class ConversationsPanel(wx.Panel):
             except Exception as e:
                 logging.exception(f"[_load_older_messages_from_server] thread error: {e}")
                 wx.CallAfter(self._clear_loading_more, phone_jid_val)
+            finally:
+                self.main_window._end_interactive_history_request(phone_jid_val)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
