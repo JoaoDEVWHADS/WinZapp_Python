@@ -9893,6 +9893,25 @@ class MainWindow(wx.Frame):
                 and chat_list_ok and chat_list_settled):
             self._sync_completed = True
             self._sync_retry_count = 0
+            _completed_run_id = getattr(self, "_sync_run_id", None)
+            if getattr(self, "_history_still_landing", False):
+                # The chat sweep is usable, but the phone is still feeding
+                # RECENT chunks into WhatsApp Web. Announcing completion here
+                # is observably false: thousands of messages can arrive after
+                # the sound while the phone still says "keep the app open".
+                self._sync_complete_announcement_pending_run_id = (
+                    _completed_run_id
+                )
+                logging.info(
+                    "[start_sync] Sync run %s has a usable snapshot; "
+                    "deferring completion announcement until RECENT settles.",
+                    _completed_run_id,
+                )
+            else:
+                logging.info(
+                    "[start_sync] Sync run %s completed; scheduling completion "
+                    "sound/TTS.", _completed_run_id)
+                wx.CallAfter(self._announce_sync_complete, _completed_run_id)
         else:
             self._sync_completed = False
             self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
@@ -9977,6 +9996,12 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if not self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
+        elif getattr(self, "_history_still_landing", False):
+            # Media extraction shares the same single Puppeteer page as the
+            # history decoder. Starting it during RECENT made both operations
+            # take seconds per request and delayed the phone-side completion.
+            logging.info("[start_sync] Phase 2 media auto-download deferred — RECENT history is still landing.")
+            self._media_sync_deferred = True
         elif not getattr(self, "_sync_completed", False):
             # An incomplete chat-list round will be retried by the health
             # checker. Scanning every cached media record on each such round
@@ -13205,7 +13230,19 @@ class MainWindow(wx.Frame):
 
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
-        max_workers = min(6, len(valid_chats))
+        #
+        # A plain newest-window query can legitimately answer with only 1, 3 or
+        # 15 rows while WhatsApp Web is materialising history.  Do not postpone
+        # the anchored follow-up until the whole account has been swept: that
+        # left every short group/private chat incomplete until the user opened
+        # it and pressed Home.  The repair path performs that same anchored page
+        # immediately, while this chat already owns a worker slot.
+        # RECENT decoding and get-messages both execute through one Puppeteer
+        # page. Keep the foreground sweep gentle until the phone finishes;
+        # otherwise six workers starve the decoder and make the phone remain on
+        # "keep the app open" for minutes.
+        worker_cap = 2 if getattr(self, "_history_still_landing", False) else 6
+        max_workers = min(worker_cap, len(valid_chats))
         failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             def _job(c):
@@ -13214,7 +13251,7 @@ class MainWindow(wx.Frame):
                     copy["_sync_limit"] = self._DEEP_SYNC_COUNT
                 return copy
 
-            futs = {pool.submit(self.sync_chat_messages, _job(c)): c for c in valid_chats}
+            futs = {pool.submit(self._repair_short_chat, _job(c)): c for c in valid_chats}
             for fut in as_completed(futs):
                 try:
                     fut.result()
@@ -13627,6 +13664,41 @@ class MainWindow(wx.Frame):
             logging.info("[backfill] Name resolution bridged %d new LID(s).", gained)
         return gained
 
+    def _repair_short_chat(self, chat: dict) -> None:
+        """Retry a short chat, then page it exactly like pressing Home does.
+
+        The old backfill only repeated sync_chat_messages(), an unanchored
+        newest-window query. A chat whose browser store exposed 1 or 15 rows
+        therefore returned the same 1 or 15 forever. The conversation view's
+        Home path succeeds because it follows that query with an anchored
+        ``fetch_older_messages`` call. Short-chat repair must use the same path.
+        """
+        self.sync_chat_messages(chat)
+        if getattr(self, "_history_still_landing", False):
+            # The first page is enough to make the conversation usable. An
+            # anchored second request for every short chat doubles the browser
+            # traffic exactly while RECENT is decoding; the backfill performs
+            # the anchored repair after more history has landed.
+            return
+        raw_jid = self._normalize_jid(chat.get("remoteJid", ""))
+        jid, _live = self._resolve_backfill_target(raw_jid)
+        if not jid:
+            return
+        count = self._local_record_count(jid)
+        if count <= 0 or count >= self.history_page_target():
+            return
+        anchor = self._oldest_stored_message(jid)
+        if anchor:
+            # Background repair may walk pages that are already present in the
+            # linked-device store, but it must never issue an on-demand request
+            # to the primary phone.  A live account showed 94 such requests for
+            # 91 chats in 145 seconds, starving the one conversation the user
+            # was actively trying to scroll.  Phone history is interactive and
+            # is requested only by the open conversation's scroll path.
+            self.fetch_older_messages(
+                jid, anchor, store_only=False, allow_phone_request=False
+            )
+
     def _backfill_empty_chats(self):
         """Re-fetch messages for chats whose history WhatsApp Web had not loaded.
 
@@ -13681,9 +13753,26 @@ class MainWindow(wx.Frame):
                 # sweep, not once per chunk. Large queues now move through
                 # several chunks quickly and do not need to hammer this status
                 # endpoint between each one.
-                if (not attempted
-                        and self.refresh_history_still_landing(
-                            context=f"backfill pass {attempt}")):
+                landing_now = getattr(self, "_history_still_landing", False)
+                if not attempted:
+                    landing_now = self.refresh_history_still_landing(
+                        context=f"backfill pass {attempt}"
+                    )
+                if not landing_now:
+                    pending_announcement = getattr(
+                        self, "_sync_complete_announcement_pending_run_id", None
+                    )
+                    if pending_announcement is not None:
+                        self._sync_complete_announcement_pending_run_id = None
+                        logging.info(
+                            "[history-sync] RECENT settled; announcing sync run %s complete.",
+                            pending_announcement,
+                        )
+                        wx.CallAfter(
+                            self._announce_sync_complete, pending_announcement
+                        )
+                    self._start_deferred_media_sync()
+                if not attempted and landing_now:
                     # Two things can stall the queue, and both are silent: a
                     # chunk the processing loop will never accept parked at the
                     # head of it, and a loop that simply stopped scheduling
@@ -14090,6 +14179,47 @@ class MainWindow(wx.Frame):
             logging.warning(
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
             return False
+
+    def _start_deferred_media_sync(self) -> None:
+        """Start the media phase once RECENT no longer competes for the page."""
+        if not getattr(self, "_media_sync_deferred", False):
+            return
+        if getattr(self, "_media_sync_running", False):
+            return
+        self._media_sync_deferred = False
+
+        def _run():
+            self._media_sync_running = True
+            announced = False
+            try:
+                wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+                if not self.background_mode and self._announce_sync_events_enabled():
+                    announced = True
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+                count = self.sync_media_for_all_chats()
+                logging.info(
+                    "[history-sync] Deferred media phase downloaded %d file(s).",
+                    count,
+                )
+                if announced:
+                    if getattr(self, "_wa_connected", False) and not getattr(
+                        self, "offline_mode", False
+                    ):
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
+                    else:
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
+            except Exception:
+                logging.exception("[history-sync] Deferred media phase failed")
+                if announced:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
+            finally:
+                self._media_sync_running = False
+                wx.CallAfter(self._set_status, "")
+                wx.CallAfter(self.set_chats)
+
+        threading.Thread(
+            target=_run, daemon=True, name="deferred-media-sync"
+        ).start()
 
     def sync_media_for_all_chats(self) -> int:
         """Download every not-yet-stored media file across all chats.
@@ -17347,8 +17477,16 @@ class MainWindow(wx.Frame):
         # Handle group JIDs (@g.us) vs user JIDs (@c.us / @s.whatsapp.net)
         if remote_jid.endswith("@g.us"):
             phone = remote_jid
+        elif remote_jid.endswith("@lid"):
+            phone = remote_jid
         else:
-            phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
+            known_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+            phone = (
+                known_lid
+                or self._resolve_jid_for_msg_key(remote_jid).replace(
+                    "@s.whatsapp.net", "@c.us"
+                )
+            )
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
@@ -17375,9 +17513,17 @@ class MainWindow(wx.Frame):
                     # Primary query used resolved phone JID, so fallback to original LID JID
                     alternate_jid = remote_jid
                 else:
-                    alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-                    if alt_lid:
-                        alternate_jid = alt_lid
+                    cus_form = (
+                        remote_jid.split("@")[0] + "@c.us"
+                        if remote_jid.endswith("@s.whatsapp.net")
+                        else remote_jid
+                    )
+                    if cus_form != phone:
+                        alternate_jid = cus_form
+                    else:
+                        alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+                        if alt_lid and alt_lid != phone:
+                            alternate_jid = alt_lid
 
                 if alternate_jid and alternate_jid != phone:
                     alt_serialized_id = serialized_id
