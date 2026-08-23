@@ -1012,6 +1012,14 @@ class MainWindow(wx.Frame):
         # and _initial_sync_running is cleared as soon as the thread exits.
         self._sync_ever_started = False
         self._early_live_messages = []
+        # Mirror durable DB tombstones in memory as well. SQLite filtering
+        # alone is too late for the UI: sync_chat_messages() merges a Store
+        # page into self.chats before it persists that page, so a recently
+        # deleted message could visibly reappear even though the DB correctly
+        # refused to write it. This cache lets every in-memory/live path reject
+        # the same IDs before they touch self.chats.
+        self._deleted_message_ids_lock = threading.RLock()
+        self._deleted_message_ids_by_jid = {}
         # High-water mark of what list-chats has answered with this session,
         # across sync rounds. Session-scoped on purpose — see the evidence
         # comment in _run_sync()'s retry loop: it is the one number that
@@ -4547,6 +4555,13 @@ class MainWindow(wx.Frame):
         if not remote_jid:
             return
 
+        if msg_id and self._is_message_tombstoned(remote_jid, msg_id):
+            logging.info(
+                "[on_new_message] ignoring tombstoned live message %s in %s",
+                msg_id, remote_jid,
+            )
+            return
+
         # ── Guard against self-chat multi-device-sync artifacts ─────────────
         # WPPConnect/Baileys occasionally reports one of our own sends (seen
         # with self-chat text, audio and documents) tagged with an identity
@@ -5264,6 +5279,13 @@ class MainWindow(wx.Frame):
         msg_id     = key.get("id", "")
 
         if not remote_jid or not msg_id:
+            return
+
+        if self._is_message_tombstoned(remote_jid, msg_id):
+            logging.info(
+                "[on_historical_message] ignoring tombstoned history message %s in %s",
+                msg_id, remote_jid,
+            )
             return
 
         # Statuses (stories) or channels ignored
@@ -8227,6 +8249,16 @@ class MainWindow(wx.Frame):
         # Build cache first so deduplicate_chats() can use it as a fallback
         # for @lid chats whose messages carry no remoteJidAlt bridge field.
         self._build_lid_to_phone_cache()
+        # Warm the process-local deleted-message cache before live events are
+        # allowed through. Durable DB tombstones already protected SQLite, but
+        # without this mirror a stale Store/live event after restart could
+        # briefly re-add a deleted bubble to self.chats before persistence
+        # rejected it.
+        try:
+            for deleted_jid, deleted_id in self.db.get_all_deleted_message_keys():
+                self._remember_deleted_message_ids(deleted_jid, [deleted_id])
+        except Exception as exc:
+            logging.warning("[tombstones] failed to warm deleted-message cache: %s", exc)
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
@@ -10244,6 +10276,13 @@ class MainWindow(wx.Frame):
         self.chats = {}
         self.contacts = {}
         self._status_updates = {}
+        if wipe_metadata:
+            # A real logout/account switch also deletes deleted_messages from
+            # SQLite, so its in-memory mirror must go with it. F5/resync uses
+            # wipe_metadata=False and deliberately keeps both: local deletions
+            # should remain deleted while the rest of the cache is rebuilt.
+            with getattr(self, "_deleted_message_ids_lock", threading.RLock()):
+                self._deleted_message_ids_by_jid = {}
         if hasattr(self, "_lid_to_phone"):
             self._lid_to_phone.clear()
         else:
@@ -15053,12 +15092,28 @@ class MainWindow(wx.Frame):
                     )
                 )
 
+        # SQLite tombstones used to be consulted only when this page was
+        # persisted. That was one layer too late: the stale WPPConnect Store
+        # copy had already been merged into self.chats and repainted on screen,
+        # so the user saw a deleted message come back even though the database
+        # correctly refused to save it. Filter the final merged page (API +
+        # local + late-live extras) before it becomes authoritative in memory.
+        all_messages, tombstone_filtered_ids = self._filter_tombstoned_messages(
+            remote_jid, all_messages
+        )
+        if tombstone_filtered_ids:
+            logging.info(
+                "[sync_chat_messages] filtered %d locally deleted message(s) "
+                "from in-memory page for %s",
+                len(tombstone_filtered_ids), remote_jid,
+            )
+
         # Update records: accept API data only when it actually returned some
         # messages, or fall back to preserving whatever we have in memory.
         # An empty API response (200 OK with no messages) must NOT wipe the
         # cached records, otherwise conversations appear empty after sync.
         has_records = bool(chat.get("messages", {}).get("messages", {}).get("records"))
-        if api_ok and all_messages:
+        if api_ok and (all_messages or tombstone_filtered_ids):
             if "messages" not in chat:
                 chat["messages"] = {}
             chat["messages"]["messages"] = {
@@ -15077,6 +15132,8 @@ class MainWindow(wx.Frame):
         apply_history_sync_unread_correction(remote_jid, chat)
 
         self.chats[remote_jid] = chat
+        if tombstone_filtered_ids:
+            self._recompute_chat_last_message(remote_jid)
         self._note_backfill_state(remote_jid, chat, api_ok)
         if not api_ok:
             # Counted so the sync stops reporting a clean run over chats whose
@@ -16270,6 +16327,15 @@ class MainWindow(wx.Frame):
         import time as _time
         logging.info("[VOICE_TIMING] _on_message_sent — message LEFT pending state. local_id=%s real_id=%s",
                      local_id, real_id)
+        deleted_before_confirmation = bool(
+            remote_jid and self._is_message_tombstoned(remote_jid, local_id)
+        )
+        if deleted_before_confirmation and real_id:
+            # The user removed the pending row while send-message was still in
+            # flight. Once the API reveals the real WhatsApp id, extend the
+            # tombstone to that id too so the later own-message echo cannot
+            # recreate the bubble under its new key.
+            self._remember_deleted_message_ids(remote_jid, [real_id])
         if real_id and remote_jid:
             def _bg_update_db():
                 try:
@@ -16319,7 +16385,7 @@ class MainWindow(wx.Frame):
             if raw_ack is not None:
                 send_status = ack_to_status(raw_ack)
 
-        if hasattr(self, "conversations_panel"):
+        if hasattr(self, "conversations_panel") and not deleted_before_confirmation:
             if send_status is None:
                 self.conversations_panel._mark_message_sent(
                     local_id, real_id=real_id, quote_lost=quote_lost
@@ -16329,6 +16395,8 @@ class MainWindow(wx.Frame):
                     local_id, real_id=real_id, quote_lost=quote_lost,
                     send_status=send_status,
                 )
+        elif deleted_before_confirmation and hasattr(self, "conversations_panel"):
+            self.conversations_panel._outgoing_virtual_messages.pop(local_id, None)
 
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
@@ -19497,6 +19565,90 @@ class MainWindow(wx.Frame):
             except Exception as exc:
                 logging.warning("[send_recording_status] Request failed: %s", exc)
         threading.Thread(target=_api, daemon=True).start()
+
+    def _deleted_message_jid_candidates(self, jid: str) -> list[str]:
+        """Known aliases that can refer to the same chat for tombstone checks."""
+        if not jid:
+            return []
+        normalized = self._normalize_jid(jid)
+        candidates = [normalized]
+        if normalized.endswith("@lid"):
+            phone = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+            if phone:
+                candidates.append(self._normalize_jid(phone))
+        elif not normalized.endswith(("@g.us", "@broadcast", "@newsletter")):
+            lid = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+            if lid:
+                candidates.append(self._normalize_jid(lid))
+        return list(dict.fromkeys(c for c in candidates if c))
+
+    def _remember_deleted_message_ids(self, jid: str, message_ids) -> None:
+        """Add deleted IDs to the process-local mirror of durable tombstones."""
+        ids = {str(mid) for mid in (message_ids or []) if mid}
+        if not ids:
+            return
+        lock = getattr(self, "_deleted_message_ids_lock", None)
+        if lock is None:
+            self._deleted_message_ids_lock = threading.RLock()
+            lock = self._deleted_message_ids_lock
+        with lock:
+            cache = getattr(self, "_deleted_message_ids_by_jid", None)
+            if not isinstance(cache, dict):
+                cache = self._deleted_message_ids_by_jid = {}
+            for candidate in self._deleted_message_jid_candidates(jid):
+                cache.setdefault(candidate, set()).update(ids)
+
+    def _is_message_tombstoned(self, jid: str, message_id: str) -> bool:
+        """Fast UI-safe tombstone check; never performs SQLite I/O."""
+        if not jid or not message_id:
+            return False
+        lock = getattr(self, "_deleted_message_ids_lock", None)
+        cache = getattr(self, "_deleted_message_ids_by_jid", {})
+        if lock is None:
+            return False
+        with lock:
+            return any(
+                message_id in cache.get(candidate, set())
+                for candidate in self._deleted_message_jid_candidates(jid)
+            )
+
+    def _filter_tombstoned_messages(
+        self, jid: str, messages: list[dict], *, consult_db: bool = False
+    ) -> tuple[list[dict], set[str]]:
+        """Remove locally deleted IDs before a fetched page reaches self.chats.
+
+        ``consult_db`` is used only from background sync workers. Live wx
+        callbacks use the already-warmed in-memory cache so they never block
+        the main thread on SQLite.
+        """
+        if not messages:
+            return messages, set()
+        ids = {
+            str(m.get("key", {}).get("id", ""))
+            for m in messages if isinstance(m, dict)
+            if m.get("key", {}).get("id")
+        }
+        if not ids:
+            return messages, set()
+        if consult_db:
+            db = getattr(self, "db", None)
+            lookup = getattr(db, "get_deleted_message_ids", None) if db else None
+            if callable(lookup):
+                try:
+                    durable = set(lookup(jid, ids) or set())
+                    if durable:
+                        self._remember_deleted_message_ids(jid, durable)
+                except Exception as exc:
+                    logging.warning(
+                        "[tombstones] durable lookup failed for %s: %s", jid, exc
+                    )
+        removed = {mid for mid in ids if self._is_message_tombstoned(jid, mid)}
+        if not removed:
+            return messages, set()
+        return [
+            m for m in messages
+            if str(m.get("key", {}).get("id", "")) not in removed
+        ], removed
 
     def _is_cleared_message(self, jid: str, msg: dict) -> bool:
         """

@@ -9627,13 +9627,18 @@ class ConversationsPanel(wx.Panel):
         pending_local_id = str(msg.get("_local_id") or "")
         cancelled_pending = bool(msg.get("_local_pending") and pending_local_id)
         if cancelled_pending:
-            # There is no WhatsApp message ID to revoke yet. Whichever scope the
-            # dialog had selected, cancel the queued/in-flight upload and apply
-            # a local deletion; asking the API for "everyone" here can only fail.
+            # There is no stable WhatsApp ID to revoke yet. Cancel the queued/
+            # in-flight upload and tombstone the local ID immediately. If the
+            # request was already past cancellation and later returns a real
+            # WhatsApp ID, MainWindow._on_message_sent() transfers this
+            # tombstone to the real ID instead of resurrecting the bubble.
             self.main_window.message_queue.cancel(pending_local_id)
             self._media_upload_progress.pop(pending_local_id, None)
             self._media_transfer_started.discard(pending_local_id)
             self._hide_media_transfer_gauge()
+            self.remove_messages_by_id(
+                {msg_id or pending_local_id}, focus_previous=True
+            )
         elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
@@ -9756,6 +9761,15 @@ class ConversationsPanel(wx.Panel):
                 if m.get("key", {}).get("id") not in msg_ids
             ]
             jid = self.conversation.get("remoteJid", "")
+            remember_deleted = getattr(
+                self.main_window, "_remember_deleted_message_ids", None
+            )
+            if jid and callable(remember_deleted):
+                # Update the in-memory guard synchronously, before the
+                # priority DB job is even queued. A concurrent get-messages
+                # refresh can otherwise repaint the stale Store copy during
+                # this tiny window and make the row visibly "come back".
+                remember_deleted(jid, msg_ids)
             db = getattr(self.main_window, "db", None)
             if jid and db is not None:
                 try:
