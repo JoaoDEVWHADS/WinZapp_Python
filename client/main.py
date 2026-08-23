@@ -14020,7 +14020,11 @@ class MainWindow(wx.Frame):
                 counts_before = {j: self._local_record_count(j) for j in window}
                 if targets:
                     with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
-                        futs = [pool.submit(self.sync_chat_messages, c) for c in targets]
+                        # Repeat the same anchored repair used by the initial
+                        # sweep. A newest-window query alone can keep returning
+                        # the same short 1/15/16-message window, especially for
+                        # groups whose browser history is still materialising.
+                        futs = [pool.submit(self._repair_short_chat, c) for c in targets]
                         for fut in as_completed(futs):
                             try:
                                 fut.result()
