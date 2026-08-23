@@ -4786,11 +4786,15 @@ class ConversationsPanel(wx.Panel):
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
-        reached_start = phone_jid in getattr(self, "_reached_server_start", {})
-        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
-        if phone_jid and reached_start:
+        now = time.time()
+        if not hasattr(self, "_last_server_history_attempt"):
+            self._last_server_history_attempt = {}
+        last_attempt = self._last_server_history_attempt.get(phone_jid, 0.0)
+        if phone_jid and (now - last_attempt) < 3.0:
+            logging.info(f"[_load_older_messages_from_server] Debouncing server request for {phone_jid}")
             self._is_loading_more = False
             return
+        self._last_server_history_attempt[phone_jid] = now
         
         # Get oldest non-separator and non-pending message ID
         oldest_msg = None
@@ -4861,6 +4865,13 @@ class ConversationsPanel(wx.Panel):
             return
         self._reached_server_start[requested_jid] = True
         self._is_loading_more = False
+        try:
+            self.main_window.output(
+                self.main_window.i18n.t("start_of_conversation", "Início da conversa"),
+                interrupt=True,
+            )
+        except Exception:
+            pass
 
     def _clear_loading_more(self, requested_jid):
         if not self.conversation or self.conversation.get("remoteJid") != requested_jid:

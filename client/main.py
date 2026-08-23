@@ -18042,7 +18042,7 @@ class MainWindow(wx.Frame):
 
                     asked_at = self._older_requested_chats.get(remote_jid)
                     requested = False
-                    if asked_at is None:
+                    if asked_at is None or (allow_phone_request and (time.time() - asked_at) >= 10.0):
                         requested = bool(self.request_older_messages(remote_jid))
                         if requested:
                             # Record evidence only after the endpoint confirms
@@ -18162,8 +18162,8 @@ class MainWindow(wx.Frame):
             return None
 
     def wait_for_older_messages(
-        self, remote_jid, oldest_msg, timeout: float = 300.0,
-        poll_interval: float = 2.0, retry_request_every: float = 10.0,
+        self, remote_jid, oldest_msg, timeout: float = 15.0,
+        poll_interval: float = 2.0, retry_request_every: float = 6.0,
         should_continue=None,
     ):
         """Wait for interactive phone history to materialise in the web store."""
