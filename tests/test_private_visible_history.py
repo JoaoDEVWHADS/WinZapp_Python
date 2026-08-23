@@ -16,8 +16,8 @@ def test_private_sync_requests_raw_margin_but_groups_do_not():
 
 
 def test_private_db_load_reads_raw_margin_before_visible_pagination():
-    margin = '''if not _conv_jid.endswith("@g.us"):
-                    limit += 50'''
+    margin = '''if not jid.endswith("@g.us"):
+            limit += 50'''
     assert margin in CONVERSATIONS
 
     filter_pos = CONVERSATIONS.index(

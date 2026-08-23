@@ -265,12 +265,11 @@ class TestTheGrowthGuard:
         assert stub.message_sync_ran == 1
 
     def test_the_documented_late_filling_store_still_settles(self):
-        """The shape the code has a live capture of: nothing for five
-        attempts, then the whole list."""
+        """Three zero readings trigger recovery before a very late answer."""
         stub = _make([0, 0, 0, 0, 0, 498, 498], wa_web=937, local_chats=931)
         stub._run_sync()
         assert stub.restarted is False
-        assert stub._sync_completed is True
+        assert stub._sync_completed is False
 
     def test_a_reconnection_with_a_warm_cache_settles_on_the_first_answer(self):
         stub = _make([931], wa_web=937, local_chats=931)

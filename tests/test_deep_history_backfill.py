@@ -408,6 +408,9 @@ class _FetchStub:
 
 def _fetch_stub(monkeypatch, returned):
     stub = _FetchStub(returned)
+    stub._history_chunk_pending = set()
+    stub._older_request_temporarily_blocked = set()
+    stub._older_request_confirmed_end = set()
     stub.db = _FetchStub._DB2(stub)
     stub.fetch_older_messages = types.MethodType(
         MainWindow.__dict__["fetch_older_messages"], stub)
@@ -538,4 +541,3 @@ class TestBackgroundNeverFloodsThePhone:
         stub.deep_backfill_chat("chat@g.us")
 
         assert stub.requested == []
-

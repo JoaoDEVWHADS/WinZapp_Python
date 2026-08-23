@@ -141,7 +141,7 @@ class TestSyncChatMessagesHonorsPageLimit:
         chat = {"remoteJid": "jid0000@c.us", "t": 100, "_sync_limit": 1000}
         MainWindow.sync_chat_messages(stub, chat)
         assert len(urls) == 1
-        assert "count=200" in urls[0]
+        assert "count=250" in urls[0]
 
     def test_untagged_chat_falls_back_to_messages_page_size(self, monkeypatch):
         urls = []
@@ -153,7 +153,7 @@ class TestSyncChatMessagesHonorsPageLimit:
         chat = {"remoteJid": "jid0000@c.us", "t": 100}
         MainWindow.sync_chat_messages(stub, chat)
         assert len(urls) == 1
-        assert "count=200" in urls[0]
+        assert "count=250" in urls[0]
 
 
 class TestSyncChatMessagesLidIdentity:
@@ -183,8 +183,8 @@ class TestSyncChatMessagesLidIdentity:
 
         MainWindow.sync_chat_messages(stub, stub.chats[phone].copy())
 
-        assert f"get-messages/{lid}?count=200" in urls[0]
-        records = stub.chats[phone]["messages"]["records"]
+        assert f"get-messages/{lid}?count=250" in urls[0]
+        records = stub.chats[phone]["messages"]["messages"]["records"]
         assert [record["key"]["id"] for record in records] == ["MSG-1"]
         assert records[0]["key"]["remoteJid"] == phone
 

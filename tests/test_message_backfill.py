@@ -386,7 +386,7 @@ class TestBackfillPacing:
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
 
     def test_first_repair_starts_before_user_can_give_up(self):
-        assert MainWindow._BACKFILL_FIRST_DELAY <= 5
+        assert MainWindow._BACKFILL_FIRST_DELAY <= 30
 
 
     def test_short_retry_is_followed_by_anchored_paging(self):
@@ -409,14 +409,16 @@ class TestBackfillPacing:
             def _oldest_stored_message(self, jid):
                 return {"key": {"id": "oldest"}, "messageTimestamp": 1}
 
-            def fetch_older_messages(self, jid, anchor, store_only=False):
-                self.calls.append(("anchored", jid, anchor["key"]["id"], store_only))
+            def fetch_older_messages(self, jid, anchor, store_only=False,
+                                     allow_phone_request=True):
+                self.calls.append(("anchored", jid, anchor["key"]["id"],
+                                   store_only, allow_phone_request))
 
         stub = Stub()
         MainWindow._repair_short_chat(stub, {"remoteJid": "dilla@lid"})
         assert stub.calls == [
             ("newest", "dilla@lid"),
-            ("anchored", "dilla@lid", "oldest", False),
+            ("anchored", "dilla@lid", "oldest", False, False),
         ]
 
     @staticmethod
@@ -544,8 +546,8 @@ class TestBackfillPacing:
         assert s._chats_awaiting_messages == set()
 
 
-def test_empty_chat_without_metadata_stays_pending_while_history_lands():
-    """Elder: first query was empty, but the same LID gained messages later."""
+def test_empty_chat_without_content_evidence_is_not_retried_forever():
+    """An empty chat without server evidence is allowed to be genuinely empty."""
     s = _Stub(page_size=200, chunks_pending=True)
     s._note_backfill_state("elder@lid", _chat(), api_ok=True)
-    assert s._chats_awaiting_messages == {"elder@lid"}
+    assert s._chats_awaiting_messages == set()

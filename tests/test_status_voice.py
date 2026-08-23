@@ -175,12 +175,16 @@ class TestSendMediaStatusUsesThePathField:
             status_code = 200
             text = ""
 
+            @staticmethod
+            def json():
+                return {"status": "success", "response": {}}
+
         def fake_post(url, json=None, headers=None, timeout=None):
             posted["url"] = url
             posted["json"] = json
             return _Resp()
 
-        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
+        monkeypatch.setattr(status_panel_module, "api_post", fake_post)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_media_status_bg(img, "legenda")
@@ -201,12 +205,16 @@ class TestSendMediaStatusUsesThePathField:
             status_code = 200
             text = ""
 
+            @staticmethod
+            def json():
+                return {"status": "success", "response": {}}
+
         def fake_post(url, json=None, headers=None, timeout=None):
             posted["url"] = url
             posted["json"] = json
             return _Resp()
 
-        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
+        monkeypatch.setattr(status_panel_module, "api_post", fake_post)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_media_status_bg(vid, "")
@@ -271,8 +279,9 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
         wav = _touch(tmp_path, "recorded.wav")
         ogg = _touch(tmp_path, "recorded.wav.ogg")
         stub.main_window._convert_result = ogg
-        monkeypatch.setattr(status_panel_module.requests, "post",
-                             lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})())
+        monkeypatch.setattr(status_panel_module, "api_post",
+                             lambda *a, **k: type("R", (), {"status_code": 200, "text": "",
+                                                            "json": lambda self: {"status": "success", "response": {}}})())
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_status_voice_bg(wav, is_temp_file=True)
@@ -286,8 +295,9 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
         picked = _touch(tmp_path, "my_song.mp3")
         ogg = _touch(tmp_path, "my_song.mp3.ogg")
         stub.main_window._convert_result = ogg
-        monkeypatch.setattr(status_panel_module.requests, "post",
-                             lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})())
+        monkeypatch.setattr(status_panel_module, "api_post",
+                             lambda *a, **k: type("R", (), {"status_code": 200, "text": "",
+                                                            "json": lambda self: {"status": "success", "response": {}}})())
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_status_voice_bg(picked)  # is_temp_file not passed -> False
@@ -305,12 +315,16 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
             status_code = 200
             text = ""
 
+            @staticmethod
+            def json():
+                return {"status": "success", "response": {}}
+
         def fake_post(url, json=None, headers=None, timeout=None):
             posted["url"] = url
             posted["json"] = json
             return _Resp()
 
-        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
+        monkeypatch.setattr(status_panel_module, "api_post", fake_post)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
         stub._send_status_voice_bg(wav, is_temp_file=True)
@@ -323,7 +337,7 @@ class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
         stub = _Stub(convert_result=None)  # ffmpeg missing/failed
         wav = _touch(tmp_path, "recorded.wav")
         posted = []
-        monkeypatch.setattr(status_panel_module.requests, "post", lambda *a, **k: posted.append(1))
+        monkeypatch.setattr(status_panel_module, "api_post", lambda *a, **k: posted.append(1))
         monkeypatch.setattr(status_panel_module.wx, "MessageBox", lambda *a, **kw: None)
         monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 

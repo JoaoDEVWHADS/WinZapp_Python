@@ -18,11 +18,11 @@ def method_source(name: str) -> str:
 def test_pending_attachment_is_kept_outside_open_conversation():
     init = method_source("__init__")
     register = method_source("_register_virtual_msg")
-    navigate = method_source("navigate_to_conversation")
+    navigate = method_source("_apply_conversation_db_load")
     assert "self._outgoing_virtual_messages: dict = {}" in init
     assert "self._outgoing_virtual_messages[local_id] = virtual_msg" in register
     assert "for local_id, pending in list(self._outgoing_virtual_messages.items())" in navigate
-    assert "db_msgs.append(pending)" in navigate
+    assert "merged.append(pending)" in navigate
 
 
 def test_inactive_send_completion_updates_stable_virtual_row():

@@ -341,8 +341,8 @@ class TestBackfillPriority:
         import inspect
 
         source = inspect.getsource(MainWindow._backfill_empty_chats)
-        assert "if not pending:\n                    named = self._backfill_names()" in source
-        assert "if deep_pending and not pending:" in source
+        assert "named = 0 if continuing_short_sweep else self._backfill_names()" in source
+        assert "if deep_pending and not continuing_short_sweep:" in source
 
 
 def _history_sync_warnings(caplog):
