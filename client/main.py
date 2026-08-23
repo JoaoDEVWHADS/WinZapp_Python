@@ -1048,6 +1048,8 @@ class MainWindow(wx.Frame):
         # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
         # from presence.update events. Loaded from DB on prepare_sync() and saved whenever updated.
         self._presence_pushname_map = {}
+        self._contact_resolution_lock = threading.Lock()
+        self._contact_resolution_inflight = set()
         # Incoming call IDs currently ringing. The sound is one shared looping
         # stream, so it stops only after the final simultaneous call ends.
         self._active_incoming_calls = {}
@@ -12913,10 +12915,25 @@ class MainWindow(wx.Frame):
             threading.Thread(target=resolve_in_bg, daemon=True).start()
 
         if phone_jids_to_resolve:
-            logging.info(f"[Contact Resolution] Found unresolved mentioned phone JIDs in message: {phone_jids_to_resolve}")
+            # A group page can contain the same mention in dozens of messages.
+            # Claim each normalized JID once until its lookup finishes: the API
+            # has one browser page, and duplicate contact lookups were starving
+            # the message-sync workers for 10-15 seconds at a time.
+            unique_phone_jids = list(dict.fromkeys(phone_jids_to_resolve))
+            with self._contact_resolution_lock:
+                claimed_phone_jids = []
+                for p_jid in unique_phone_jids:
+                    normalized = self._normalize_jid(p_jid)
+                    if normalized in self._contact_resolution_inflight:
+                        continue
+                    self._contact_resolution_inflight.add(normalized)
+                    claimed_phone_jids.append(p_jid)
+            if not claimed_phone_jids:
+                return
+            logging.info(f"[Contact Resolution] Resolving mentioned phone JIDs: {claimed_phone_jids}")
             def resolve_phones_in_bg():
                 updated_contacts = {}
-                for p_jid in phone_jids_to_resolve:
+                for p_jid in claimed_phone_jids:
                     try:
                         res = self.get_contact_profile(p_jid)
                         if res:
@@ -12933,6 +12950,10 @@ class MainWindow(wx.Frame):
                                     updated_contacts[normalized] = self.contacts[normalized]
                     except Exception as e:
                         logging.error(f"[Contact Resolution] Error resolving {p_jid}: {e}")
+                    finally:
+                        normalized = self._normalize_jid(p_jid)
+                        with self._contact_resolution_lock:
+                            self._contact_resolution_inflight.discard(normalized)
                 if updated_contacts:
                     try:
                         self.db.upsert_contacts_batch(updated_contacts)
@@ -13503,11 +13524,18 @@ class MainWindow(wx.Frame):
         """
         status = self.fetch_history_sync_status()
         if status is None:
-            # No endpoint / no answer. Assume settled: one wasted retry per
-            # short chat is a far better failure than re-querying hundreds of
-            # them for the whole backfill budget.
-            self._history_still_landing = False
-            return False
+            # An unavailable status endpoint is not positive evidence that the
+            # phone finished RECENT. Treating one timeout as settled made the
+            # client announce completion while WhatsApp still displayed
+            # "keep the app open". Preserve the last known state; before the
+            # first successful check, choose the safe state.
+            landing = bool(getattr(self, "_history_still_landing", True))
+            self._history_still_landing = landing
+            logging.warning(
+                "[history-sync] %s: status unavailable; preserving landing=%s.",
+                context or "check", landing,
+            )
+            return landing
         unprocessed = status.get("unprocessedChunks")
         queued = isinstance(unprocessed, int) and unprocessed > 0
         first_sync = status.get("initialSyncComplete") is not True
