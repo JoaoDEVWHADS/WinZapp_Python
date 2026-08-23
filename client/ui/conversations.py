@@ -8644,7 +8644,10 @@ class ConversationsPanel(wx.Panel):
         )
 
     def _on_menu_delete_message(self, index: int):
-        """Show delete-scope dialog and delete locally or for everyone."""
+        """Show delete-scope dialog and delete locally or for everyone.
+
+        The self-chat ("Me") skips the dialog entirely and always deletes
+        locally only — see the is_self_chat check below (issue #73)."""
         if index < 0 or index >= len(self._sorted_messages):
             return
         if self._is_separator(self._sorted_messages[index]):
@@ -8661,10 +8664,22 @@ class ConversationsPanel(wx.Panel):
         # fail after the row already looked deleted. Both the fromMe path and
         # the group-admin path below are excluded.
         is_system = self._is_system_event(msg)
-        can_delete_for_all = from_me and not is_system
+        # The "Me" chat (messages to yourself) has only one participant —
+        # WhatsApp's own revoke is a no-op there: the message disappears
+        # locally, the API call returns success, but the message is still on
+        # every other linked device, and reappears in WinZapp itself after
+        # the next resync. Offering "delete for everyone" here just misleads
+        # the user into thinking it worked (issue #73) — go straight to a
+        # plain local delete instead, same as this chat's only real option.
+        conv_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        is_self_chat = bool(conv_jid) and self.main_window._is_self_jid(conv_jid)
+        can_delete_for_all = from_me and not is_system and not is_self_chat
+
+        if is_self_chat and not is_system:
+            self._delete_message_for_me_only(msg, msg_id, index)
+            return
 
         if not can_delete_for_all and not is_system and self.conversation:
-            conv_jid = self.conversation.get("remoteJid", "")
             if conv_jid.endswith("@g.us"):
                 group_meta = self.conversation.get("groupMetadata", {})
                 participants = group_meta.get("participants") or self.conversation.get("participants") or []
@@ -8747,12 +8762,31 @@ class ConversationsPanel(wx.Panel):
                         wx.OK | wx.ICON_WARNING,
                     )
             threading.Thread(target=_revoke, daemon=True).start()
+            # Always delete locally
+            if msg_id:
+                self.remove_messages_by_id({msg_id}, focus_previous=True)
+            else:
+                self._sorted_messages.pop(index)
+                self.messages_list.DeleteItem(index)
         else:
-            def _delete_for_me(k=dict(msg_key), j=jid):
-                self.main_window.delete_message_for_me(j, k)
-            threading.Thread(target=_delete_for_me, daemon=True).start()
+            self._delete_message_for_me_only(msg, msg_id, index)
 
-        # Always delete locally
+    def _delete_message_for_me_only(self, msg: dict, msg_id: str, index: int):
+        """Delete a message for this account only (delete_message_for_me),
+        then remove it locally — the plain "delete for me" path, shared by
+        the dialog's own choice and the self-chat shortcut in
+        _on_menu_delete_message() that skips the dialog entirely (issue #73:
+        "delete for everyone" is a no-op there, since the "Me" chat has no
+        one else to delete it for)."""
+        msg_key = msg.get("key", {})
+        jid = msg_key.get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+
+        def _delete_for_me(k=dict(msg_key), j=jid):
+            self.main_window.delete_message_for_me(j, k)
+        threading.Thread(target=_delete_for_me, daemon=True).start()
+
         if msg_id:
             self.remove_messages_by_id({msg_id}, focus_previous=True)
         else:
