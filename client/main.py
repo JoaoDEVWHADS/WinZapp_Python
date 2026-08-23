@@ -9958,24 +9958,10 @@ class MainWindow(wx.Frame):
             self._sync_completed = True
             self._sync_retry_count = 0
             _completed_run_id = getattr(self, "_sync_run_id", None)
-            if getattr(self, "_history_still_landing", False):
-                # The chat sweep is usable, but the phone is still feeding
-                # RECENT chunks into WhatsApp Web. Announcing completion here
-                # is observably false: thousands of messages can arrive after
-                # the sound while the phone still says "keep the app open".
-                self._sync_complete_announcement_pending_run_id = (
-                    _completed_run_id
-                )
-                logging.info(
-                    "[start_sync] Sync run %s has a usable snapshot; "
-                    "deferring completion announcement until RECENT settles.",
-                    _completed_run_id,
-                )
-            else:
-                logging.info(
-                    "[start_sync] Sync run %s completed; scheduling completion "
-                    "sound/TTS.", _completed_run_id)
-                wx.CallAfter(self._announce_sync_complete, _completed_run_id)
+            logging.info(
+                "[start_sync] Sync run %s completed; scheduling completion "
+                "sound/TTS.", _completed_run_id)
+            wx.CallAfter(self._announce_sync_complete, _completed_run_id)
         else:
             self._sync_completed = False
             self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
@@ -10060,12 +10046,6 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if not self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
-        elif getattr(self, "_history_still_landing", False):
-            # Media extraction shares the same single Puppeteer page as the
-            # history decoder. Starting it during RECENT made both operations
-            # take seconds per request and delayed the phone-side completion.
-            logging.info("[start_sync] Phase 2 media auto-download deferred — RECENT history is still landing.")
-            self._media_sync_deferred = True
         elif not getattr(self, "_sync_completed", False):
             # An incomplete chat-list round will be retried by the health
             # checker. Scanning every cached media record on each such round
@@ -13969,12 +13949,11 @@ class MainWindow(wx.Frame):
         if not pending:
             return 0
         before = len(getattr(self, "_lid_to_phone", {}))
-        # Same chunk as the message backfill, and for the same reason: this all
-        # funnels through the one Puppeteer page.
+        chunk_size = min(len(pending), 15)
         logging.info("[backfill] Resolving names for %d unresolved @lid chat(s) "
-                     "(%d still pending).", min(len(pending), self._BACKFILL_CHUNK), len(pending))
+                     "(%d still pending).", chunk_size, len(pending))
         self.resolve_lid_jids_via_api(
-            pending[:self._BACKFILL_CHUNK], yield_to_sync=True
+            pending[:chunk_size], yield_to_sync=True
         )
         gained = len(getattr(self, "_lid_to_phone", {})) - before
         if gained > 0:
@@ -14272,7 +14251,7 @@ class MainWindow(wx.Frame):
                     # the displayed name all depend on this, so rebuild the list.
                     self._schedule_save()
                     wx.CallAfter(self._schedule_set_chats)
-                    if not getattr(self, "_media_sync_running", False) and not getattr(self, "_history_still_landing", False):
+                    if not getattr(self, "_media_sync_running", False):
                         self._media_sync_deferred = True
                         self._start_deferred_media_sync()
                 # An unfinished sweep continues promptly; the retained retry
