@@ -1014,6 +1014,18 @@ class DatabaseManager:
             )
             await conn.commit()
 
+    async def delete_status_update(self, message_id: str) -> int:
+        """Delete one locally cached status by its WhatsApp message id."""
+        if not message_id:
+            return 0
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            cursor = await conn.execute(
+                "DELETE FROM status_updates WHERE message_id = ?", (message_id,)
+            )
+            await conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+
     # ── Bulk Import / Export (for migration) ─────────────────────────────────
 
     async def import_from_dict(self, data: dict, clear_first: bool = False,
