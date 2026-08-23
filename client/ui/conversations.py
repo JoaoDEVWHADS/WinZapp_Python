@@ -5142,6 +5142,27 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
             return
 
+        # Shift+Up: extend the selection to the previous row and move focus to
+        # it — the upward mirror of Shift+Down above. Without this, Shift+Up
+        # fell through to the plain WXK_UP branch further down (which ignores
+        # `shift` and calls event.Skip()), leaving the native ListCtrl
+        # selection to extend on its own. That never touches
+        # self.selected_messages (what the mass actions actually act on) and
+        # doesn't know the unread-separator row isn't a selectable message,
+        # so selecting upward past it went out of sync with the visible
+        # highlight.
+        if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
+            target = (idx - 1) if idx >= 0 else 0
+            if target >= 0:
+                self.messages_list.Focus(target)
+                self.messages_list.Select(target, True)
+                self.messages_list.EnsureVisible(target)
+                if self._select_message_at(target):
+                    self._refresh_message_rows_by_ids([self._sorted_messages[target].get("key", {}).get("id", "")])
+                    self.selection_sound.play()
+                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
         # Ctrl+Shift+Space: select every message, or clear the selection if
         # everything selectable is already selected.
         if ctrl and shift and key == wx.WXK_SPACE:
