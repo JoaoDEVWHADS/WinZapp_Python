@@ -2044,12 +2044,35 @@ export async function getMessages(req: Request, res: Response) {
             (m && m.id && (m.id._serialized || m.id)) || null;
           const stampOf = (m: any) => Number(m?.t ?? m?.timestamp ?? 0) || 0;
 
+          // Resolve chatId to active ChatModel in browser (LID vs phone)
+          let targetChatId = chatId;
+          if (!(window as any).WPP?.chat?.get?.(chatId)) {
+            try {
+              const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(chatId);
+              const alt = chatId.endsWith('@c.us') ? mapping?.lid : mapping?.phoneNumber;
+              const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+              if (altId && (window as any).WPP?.chat?.get?.(altId)) {
+                targetChatId = altId;
+              }
+            } catch (e) {}
+            if (targetChatId === chatId) {
+              try {
+                const contact = (window as any).WPP?.contact?.get?.(chatId);
+                const alt = chatId.endsWith('@c.us') ? contact?.lid : (chatId.endsWith('@lid') ? contact?.id : null);
+                const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+                if (altId && (window as any).WPP?.chat?.get?.(altId)) {
+                  targetChatId = altId;
+                }
+              } catch (e) {}
+            }
+          }
+
           const fetchBatch = async (anchor: string | null) => {
             if ((window as any).WPP?.chat?.getMessages) {
               try {
                 const opts: any = { count: targetCount, direction: 'before' };
                 if (anchor) opts.id = anchor;
-                const r = await (window as any).WPP.chat.getMessages(chatId, opts);
+                const r = await (window as any).WPP.chat.getMessages(targetChatId, opts);
                 if (Array.isArray(r) && r.length > 0) {
                   return r
                     .map((m: any) =>
@@ -2067,7 +2090,7 @@ export async function getMessages(req: Request, res: Response) {
                 console.log(`[browser-evaluate] WPP.chat.getMessages fallback: ${err}`);
               }
             }
-            return (window as any).WAPI.getMessages(chatId, {
+            return (window as any).WAPI.getMessages(targetChatId, {
               count: targetCount,
               direction: 'before',
               id: anchor,
