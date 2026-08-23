@@ -505,6 +505,10 @@ class ConversationsPanel(wx.Panel):
         self._links_sizer.Add(self._links_label, 0, wx.LEFT | wx.TOP, 3)
         self._links_panel.SetSizer(self._links_sizer)
         self._links_panel.Hide()
+        # The list control _update_links_panel() builds when a message has 2+
+        # links (None otherwise, or before the first message with links is
+        # focused) — see that method.
+        self._links_list = None
         conv_sizer.Add(self._links_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         # ── Mention controls (shown when focused message contains @mentions) ──
@@ -3211,7 +3215,15 @@ class ConversationsPanel(wx.Panel):
         return out
 
     def _update_links_panel(self, links: list):
-        """Rebuild the hyperlink controls below the messages list."""
+        """Rebuild the link controls below the messages list.
+
+        A single link keeps the existing HyperlinkCtrl tab-stop. Two or
+        more are shown as one navigable list instead (issue #65) — users
+        previously had to Tab/Shift+Tab through every link in a message as
+        its own separate stop. Up/Down move between them (native ListCtrl
+        behaviour also gives Home/End for free), and Ctrl+C copies just the
+        focused link.
+        """
         # Destroy all child controls except the static label (first item)
         for child in list(self._links_panel.GetChildren()):
             if child is not self._links_label:
@@ -3219,6 +3231,7 @@ class ConversationsPanel(wx.Panel):
         # Remove all items except the first (label) from the sizer
         while self._links_sizer.GetItemCount() > 1:
             self._links_sizer.Remove(1)
+        self._links_list = None
 
         if not links:
             self._links_panel.Hide()
@@ -3230,7 +3243,9 @@ class ConversationsPanel(wx.Panel):
         self._current_links = links
         i18n = self.main_window.i18n
 
-        for url in links:
+        if len(links) == 1:
+            self._links_label.SetLabel(i18n.t("links_section_label"))
+            url = links[0]
             ctrl = wx.adv.HyperlinkCtrl(
                 self._links_panel,
                 id=wx.ID_ANY,
@@ -3241,31 +3256,71 @@ class ConversationsPanel(wx.Panel):
             ctrl.Bind(wx.adv.EVT_HYPERLINK, self._on_hyperlink_open)
             ctrl.Bind(wx.EVT_KEY_DOWN,  self._on_link_key_down)
             self._links_sizer.Add(ctrl, 0, wx.LEFT | wx.BOTTOM, 3)
+        else:
+            self._links_label.SetLabel(i18n.t("links_list_label"))
+            lst = wx.ListCtrl(
+                self._links_panel,
+                style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_NO_HEADER,
+            )
+            lst.InsertColumn(0, i18n.t("links_list_label"), width=400)
+            for url in links:
+                lst.Append((url,))
+            lst.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_links_list_activated)
+            lst.Bind(wx.EVT_KEY_DOWN, self._on_links_list_key_down)
+            lst.Focus(0)
+            lst.Select(0)
+            self._links_sizer.Add(lst, 0, wx.EXPAND | wx.LEFT | wx.BOTTOM, 3)
+            self._links_list = lst
 
         self._links_panel.Show()
         self._links_panel.Layout()
         if self.conversation_panel.IsShown():
             self.conversation_panel.Layout()
 
-    def _on_hyperlink_open(self, event):
+    @staticmethod
+    def _open_link(url: str):
         """Open a link URL in the system's default application."""
-        url = event.GetURL()
         try:
             os.startfile(url)
         except Exception:
             wx.LaunchDefaultBrowser(url)
 
+    def _on_hyperlink_open(self, event):
+        self._open_link(event.GetURL())
+
     def _on_link_key_down(self, event):
         """Ensure Space and Enter activate a focused HyperlinkCtrl."""
         kc = event.GetKeyCode()
         if kc in (wx.WXK_RETURN, wx.WXK_SPACE, wx.WXK_NUMPAD_ENTER):
-            ctrl = event.GetEventObject()
-            try:
-                os.startfile(ctrl.GetURL())
-            except Exception:
-                wx.LaunchDefaultBrowser(ctrl.GetURL())
+            self._open_link(event.GetEventObject().GetURL())
         else:
             event.Skip()
+
+    def _on_links_list_activated(self, event):
+        """Enter (or a double-click) on a link row opens it."""
+        idx = event.GetIndex()
+        if 0 <= idx < len(self._current_links):
+            self._open_link(self._current_links[idx])
+
+    def _on_links_list_key_down(self, event):
+        """Space also opens the focused link; Ctrl+C copies just its URL."""
+        kc = event.GetKeyCode()
+        if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER, wx.WXK_SPACE):
+            idx = self._links_list.GetFirstSelected()
+            if 0 <= idx < len(self._current_links):
+                self._open_link(self._current_links[idx])
+            return
+        if event.ControlDown() and kc == ord("C"):
+            idx = self._links_list.GetFirstSelected()
+            if 0 <= idx < len(self._current_links):
+                url = self._current_links[idx]
+                try:
+                    pyperclip.copy(url)
+                    self.main_window.output(self.main_window.i18n.t("link_copied"))
+                except Exception:
+                    self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+            return
+        event.Skip()
 
     # ── @mention helpers ─────────────────────────────────────────────────────
 
