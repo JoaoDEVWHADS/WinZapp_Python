@@ -13532,7 +13532,7 @@ class MainWindow(wx.Frame):
         # target count, so immediately following it with another anchored
         # request only duplicates browser work. Deep history is deliberately
         # left to the paced/resumable background walker after completion.
-        worker_cap = 2 if getattr(self, "_history_still_landing", False) else 6
+        worker_cap = 2 if getattr(self, "_history_still_landing", False) else 4
         max_workers = min(worker_cap, len(valid_chats))
         logging.info(
             "[sync_remote_chats] Foreground sweep: %d chat(s), one page each "
@@ -13816,9 +13816,10 @@ class MainWindow(wx.Frame):
             grew = previous is not None and count > previous
             still_landing = getattr(self, "_history_still_landing", False)
             _done()
-            # `gap and previous is None` queues a gap chat once; from the next
-            # pass it is kept only while growing, like any other short chat.
-            if still_landing or grew or (gap and previous is None):
+            # `previous is None` queues any short chat seen for the first time for
+            # one confirming retry pass; from the next pass it is kept only while
+            # growing or while history chunks are still actively landing.
+            if still_landing or grew or previous is None or (gap and previous is None):
                 counts[canonical] = count
                 pending.add(canonical)
 
@@ -14271,6 +14272,9 @@ class MainWindow(wx.Frame):
                     # the displayed name all depend on this, so rebuild the list.
                     self._schedule_save()
                     wx.CallAfter(self._schedule_set_chats)
+                    if not getattr(self, "_media_sync_running", False) and not getattr(self, "_history_still_landing", False):
+                        self._media_sync_deferred = True
+                        self._start_deferred_media_sync()
                 # An unfinished sweep continues promptly; the retained retry
                 # backoff changes only after every pending chat has had a turn.
                 delay, retry_delay = MainWindow._backfill_short_queue_delays(
@@ -14285,6 +14289,9 @@ class MainWindow(wx.Frame):
                     "[backfill] Budget spent with %d chat(s) still short of a full page "
                     "and %d still unnamed — WhatsApp Web never resolved them this session.",
                     still, unnamed)
+            if not getattr(self, "_media_sync_running", False):
+                self._media_sync_deferred = True
+                self._start_deferred_media_sync()
         except Exception:
             logging.exception("[backfill] Unhandled error in the backfill loop")
 
@@ -14731,9 +14738,8 @@ class MainWindow(wx.Frame):
             url = (f"{self.wpp_server}:{self.wpp_port}/api/{self.token}"
                    f"/get-messages/{phone}?count={count}")
             try:
-                # Deliberately longer than the 30s of the normal page: this
-                # request makes WhatsApp Web walk back through up to ten pages.
-                resp = api_get(url, headers=headers, timeout=90)
+                # Bounded timeout for history gap expansion so the foreground sync is never stalled
+                resp = api_get(url, headers=headers, timeout=30)
             except Exception as exc:
                 logging.warning("[history-gap] %s: request failed at count=%d: %s",
                                 remote_jid, count, exc)
