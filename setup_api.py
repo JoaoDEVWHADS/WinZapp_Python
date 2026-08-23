@@ -651,16 +651,23 @@ def main():
     try:
         # Determine node/npm command
         # On Windows, check if portable node exists in client/node/node.exe
+        node_dir = os.path.join(ROOT_DIR, "client", "node")
+        git_dir = os.path.join(ROOT_DIR, "client", "git", "cmd")
+        for extra_p in [node_dir, git_dir]:
+            if os.path.isdir(extra_p) and extra_p not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{extra_p}{os.pathsep}{os.environ.get('PATH', '')}"
+
         node_bin = "node"
         npm_bin = "npm"
         if is_windows:
-            win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
+            win_node = os.path.join(node_dir, "node.exe")
             if os.path.isfile(win_node):
                 node_bin = win_node
                 # Try to locate npm CLI
-                win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
+                win_npm = os.path.join(node_dir, "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
                     npm_bin = win_npm
+
 
         # Run npm install
         print("[INFO] Running npm install...")

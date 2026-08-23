@@ -114,10 +114,17 @@ def run_setup_api() -> None:
     """Invoke setup_api.py to clone WPPConnect Server and apply custom patches."""
     _log("Running setup_api.py to clone WPPConnect Server and apply WinZapp patches...")
     setup_api_script = os.path.join(ROOT_DIR, "setup_api.py")
-    res = subprocess.run([sys.executable, setup_api_script], cwd=ROOT_DIR)
+    env = dict(os.environ)
+    if os.path.isdir(NODE_DIR):
+        env["PATH"] = f"{NODE_DIR}{os.pathsep}{env.get('PATH', '')}"
+    git_cmd_dir = os.path.join(GIT_DIR, "cmd")
+    if os.path.isdir(git_cmd_dir):
+        env["PATH"] = f"{git_cmd_dir}{os.pathsep}{env.get('PATH', '')}"
+    res = subprocess.run([sys.executable, setup_api_script], cwd=ROOT_DIR, env=env)
     if res.returncode != 0:
         _log("ERROR: setup_api.py failed!")
         sys.exit(res.returncode)
+
 
 
 def build_wppconnect_api(node_exe: str) -> None:
