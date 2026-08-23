@@ -409,11 +409,6 @@ class TestCtrlSpaceInTheMessagesList:
         assert panel.messages_list._focused == 1
 
     def test_shift_up_repeatedly_selects_bottom_to_top_across_an_unread_separator(self):
-        """Reported live: Shift+Up used to fall through to the native
-        ListCtrl selection (no explicit handler existed, unlike Shift+Down),
-        which didn't know the unread-separator row isn't a real message and
-        never touched self.selected_messages — so selecting upward past it
-        went out of sync."""
         panel = _Panel(messages=[_msg("m1"), _msg("m2"), SEPARATOR, _msg("m4"), _msg("m5")], focused=4)
         panel._on_messages_list_key_down(_shift_up())  # m5 -> m4
         panel._on_messages_list_key_down(_shift_up())  # m4 -> separator (skipped)

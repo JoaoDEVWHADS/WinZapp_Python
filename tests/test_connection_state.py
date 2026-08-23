@@ -50,6 +50,13 @@ def test_logout_only_after_connected_then_unlinked_confirmed():
     assert _classify("QRCODE", True, LOGOUT_CONFIRM, 0) == cs.LOGOUT
 
 
+def test_every_api_unlinked_spelling_is_classified_as_logout():
+    """statusFind and onStateChange spell the same phone unlink differently."""
+    for status in ("disconnectedMobile", "notLogged", "UNPAIRED", "UNPAIRED_IDLE"):
+        assert status in cs.UNLINKED_STATES
+        assert _classify(status, True, LOGOUT_CONFIRM, 0) == cs.LOGOUT
+
+
 def test_logout_needs_connection_first():
     # Even with a huge logout-strike count, without ever connecting this run it
     # must never be classified as a logout (that was the destructive bug).

@@ -87,6 +87,8 @@ class _Stub:
         self.media_sync_ran = 0
         self.lid_batches = []
         self.backfill_started = False
+        self.remote_contact_fetches = 0
+        self.blocklist_fetches = 0
 
     # ── the two calls the loop actually makes ────────────────────────
     def get_remote_chats(self, chats, persist_full=True, notify_errors=True,
@@ -130,6 +132,12 @@ class _Stub:
 
     def resolve_lid_jids_via_api(self, jids):
         self.lid_batches.append(len(jids))
+
+    def get_remote_contacts(self):
+        self.remote_contact_fetches += 1
+
+    def get_block_list(self):
+        self.blocklist_fetches += 1
 
     def _backfill_empty_chats(self):
         self.backfill_started = True
@@ -315,6 +323,16 @@ class TestTheProbeIsNotChatty:
         assert stub.wa_web_probes == 0
 
 
+class TestHeavyEnrichmentIsPostSync:
+    def test_contacts_and_blocklist_do_not_block_run_sync(self):
+        stub = _make([931, 931], wa_web=937, local_chats=931)
+        stub._run_sync()
+
+        assert stub._sync_completed is True
+        assert stub.remote_contact_fetches == 0
+        assert stub.blocklist_fetches == 0
+
+
 class TestTheSyncDoesNotBlockOnNameResolution:
     """The inline @lid pass used to resolve every unresolved name before the
     "conversations synchronized" announcement, serially, sleeping 0.5 s per
@@ -323,8 +341,8 @@ class TestTheSyncDoesNotBlockOnNameResolution:
     Measured on a live 935-chat sync: 728 unresolved LIDs, six and a half
     minutes — on a sync whose message phase took 58 seconds. The user waits
     that out with nothing announced. _backfill_names() already resolves the
-    same list in chunks of the same size, on its own thread, with an adaptive
-    delay, so the serial pass was duplicating paced work with unpaced work.
+    same list in paced chunks on its own thread, so there is no reason to keep
+    even one serial network batch on the foreground completion path.
     """
 
     def _synced(self, unnamed):
@@ -334,26 +352,25 @@ class TestTheSyncDoesNotBlockOnNameResolution:
         stub._run_sync()
         return stub
 
-    def test_only_one_chunk_is_resolved_inline(self):
+    def test_no_name_resolution_blocks_the_sync(self):
         stub = self._synced(728)
-        assert stub.lid_batches == [MainWindow._BACKFILL_CHUNK]
+        assert stub.lid_batches == []
 
-    def test_a_small_account_is_still_fully_resolved_inline(self):
-        """Below one chunk there is nothing to defer, so behaviour is
-        unchanged for the accounts that were never slow."""
+    def test_small_accounts_are_deferred_too(self):
+        """One policy for every account keeps sync latency predictable."""
         stub = self._synced(12)
-        assert stub.lid_batches == [12]
+        assert stub.lid_batches == []
+        assert stub.backfill_started is True
 
-    def test_the_remainder_is_handed_to_the_backfill(self):
-        """The half that makes capping safe. Without it the leftover names
-        would simply never resolve this session."""
+    def test_all_names_are_handed_to_the_backfill(self):
+        """Deferral is safe only because the existing backfill owns the same queue."""
         stub = self._synced(728)
         assert stub.backfill_started is True
 
     def test_names_alone_are_enough_to_start_the_backfill(self):
         """The scheduler used to look only at chats short of messages. That
-        was fine while the inline pass resolved every name before reaching
-        here; it is not fine now. A chat list where every chat holds a full
+        cannot work once name resolution is fully deferred. A chat list where
+        every chat holds a full
         page but hundreds show a raw @lid must still get its backfill."""
         stub = _make([931, 931], wa_web=937, local_chats=931)
         stub._chats_awaiting_messages = set()      # nothing short of a page

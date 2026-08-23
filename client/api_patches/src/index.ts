@@ -118,6 +118,12 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
 
   createFolders();
   const http = createServer(app);
+  http.timeout = 0;
+  if ('requestTimeout' in http) {
+    (http as any).requestTimeout = 0;
+  }
+  http.keepAliveTimeout = 600000;
+  http.headersTimeout = 610000;
   const io = new Socket(http, {
     cors: {
       origin: '*',

@@ -80,8 +80,14 @@ class _Stub:
         self.calls = []
         self.requested = []
 
-    def fetch_older_messages(self, jid, anchor, store_only=False):
-        self.calls.append({"jid": jid, "anchor": anchor, "store_only": store_only})
+    def fetch_older_messages(self, jid, anchor, store_only=False,
+                             allow_phone_request=True):
+        self.calls.append({
+            "jid": jid,
+            "anchor": anchor,
+            "store_only": store_only,
+            "allow_phone_request": allow_phone_request,
+        })
         if not self._pages:
             return []
         page = self._pages.pop(0)
@@ -537,3 +543,35 @@ class TestAskingThePhoneAgain:
         stub.deep_backfill_chat("chat@g.us")
 
         assert stub.requested == ["chat@g.us", "chat@g.us"]
+
+class TestInteractiveHistoryPriority:
+    def test_background_deep_walk_yields_to_open_conversation_scroll(self):
+        stub = _make([[_msg(3), _msg(4)]], oldest=_msg(5))
+        stub._interactive_history_jid = "active@s.whatsapp.net"
+        stub._normalize_jid = lambda jid: jid
+
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+        assert stub.calls == []
+
+
+class TestBackgroundNeverFloodsThePhone:
+    """Only interactive scrolling may ask the primary phone for history."""
+
+    def test_repeated_stalls_never_request_phone_history(self):
+        stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
+        stub.deep_backfill_chat("chat@g.us")
+        stub._deep_stalled_anchors.clear()
+        stub.deep_backfill_chat("chat@g.us")
+
+        assert stub.requested == []
+        assert all(c["allow_phone_request"] is False for c in stub.calls)
+
+    def test_expired_old_request_timestamp_does_not_change_that_rule(self):
+        stub = _make([[_msg(5)]], oldest=_msg(5))
+        stub._older_requested_chats["chat@g.us"] = (
+            main.time.time() - MainWindow._OLDER_REQUEST_GRACE - 1
+        )
+        stub.deep_backfill_chat("chat@g.us")
+
+        assert stub.requested == []
+        assert all(c["allow_phone_request"] is False for c in stub.calls)
