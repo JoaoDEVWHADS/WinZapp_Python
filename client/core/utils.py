@@ -245,6 +245,10 @@ DEFAULT_SETTINGS = {
         "effects_output_device_name": "",
         "input_device_name": ""
     },
+    "accessibility": {
+        "extended_sr_compat_enabled": True,
+        "sapi_fallback_enabled": True
+    },
     "speech_content": {
         "announce_typing": True,
         "announce_recording": True,

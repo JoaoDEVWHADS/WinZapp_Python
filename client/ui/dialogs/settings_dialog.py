@@ -466,6 +466,23 @@ class SettingsDialog(wx.Dialog):
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
+        # ── Accessibility tab ────────────────────────────────────────────────
+        self._accessibility_page = wx.Panel(self._notebook)
+        accessibility_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._extended_sr_compat_check = wx.CheckBox(
+            self._accessibility_page, label=i18n.t("accessibility_extended_sr_compat_label")
+        )
+        accessibility_sizer.Add(self._extended_sr_compat_check, 0, wx.ALL, 8)
+
+        self._sapi_fallback_check = wx.CheckBox(
+            self._accessibility_page, label=i18n.t("accessibility_sapi_fallback_label")
+        )
+        accessibility_sizer.Add(self._sapi_fallback_check, 0, wx.ALL, 8)
+
+        self._accessibility_page.SetSizer(accessibility_sizer)
+        self._notebook.AddPage(self._accessibility_page, i18n.t("tab_accessibility"))
+
         # ── Spoken content tab ───────────────────────────────────────────────
         self._speech_page = wx.Panel(self._notebook)
         speech_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -929,6 +946,10 @@ class SettingsDialog(wx.Dialog):
             )
         )
         self._update_self_reference_field_state()
+
+        accessibility = self.main_window.settings.get("accessibility", {})
+        self._extended_sr_compat_check.SetValue(accessibility.get("extended_sr_compat_enabled", True))
+        self._sapi_fallback_check.SetValue(accessibility.get("sapi_fallback_enabled", True))
 
         speech = self.main_window.settings.get("speech_content", {})
         self._announce_typing_check.SetValue(speech.get("announce_typing", True))
@@ -1414,7 +1435,7 @@ class SettingsDialog(wx.Dialog):
             if max_days < 0:
                 raise ValueError
         except ValueError:
-            self._notebook.SetSelection(7)
+            self._notebook.SetSelection(8)
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_media_max_days"),
                 self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
@@ -1430,7 +1451,7 @@ class SettingsDialog(wx.Dialog):
             if max_mb < 0:
                 raise ValueError
         except ValueError:
-            self._notebook.SetSelection(7)
+            self._notebook.SetSelection(8)
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_media_max_mb"),
                 self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
@@ -1454,7 +1475,7 @@ class SettingsDialog(wx.Dialog):
                 continue
             override = (cfg.get("path") or "").strip()
             if override and not os.path.isfile(override):
-                self._notebook.SetSelection(5)
+                self._notebook.SetSelection(6)
                 self._sound_events_list.SetSelection(idx)
                 self._update_sound_event_path_display()
                 self._sound_event_path_field.SetFocus()
@@ -1471,7 +1492,7 @@ class SettingsDialog(wx.Dialog):
         if self._alert_private_combo.GetSelection() == last_idx:
             path = self._alert_private_custom_field.GetValue().strip()
             if not path or not os.path.isfile(path):
-                self._notebook.SetSelection(6)
+                self._notebook.SetSelection(7)
                 self._alert_private_custom_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
@@ -1483,7 +1504,7 @@ class SettingsDialog(wx.Dialog):
         if self._alert_group_combo.GetSelection() == last_idx:
             path = self._alert_group_custom_field.GetValue().strip()
             if not path or not os.path.isfile(path):
-                self._notebook.SetSelection(6)
+                self._notebook.SetSelection(7)
                 self._alert_group_custom_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
@@ -1510,7 +1531,7 @@ class SettingsDialog(wx.Dialog):
         output_sel = self._audio_output_combo.GetSelection()
         output_name = self._audio_output_device_names[output_sel - 1] if output_sel > 0 else ""
         if not self.main_window.sound_system.apply_output_device(output_name):
-            self._notebook.SetSelection(4)
+            self._notebook.SetSelection(5)
             self._audio_output_combo.SetFocus()
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_audio_output_device"),
@@ -1523,7 +1544,7 @@ class SettingsDialog(wx.Dialog):
         effects_sel = self._audio_effects_combo.GetSelection()
         effects_name = self._audio_effects_device_names[effects_sel - 1] if effects_sel > 0 else ""
         if not self.main_window.sound_system.apply_effects_device(effects_name):
-            self._notebook.SetSelection(4)
+            self._notebook.SetSelection(5)
             self._audio_effects_combo.SetFocus()
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_audio_output_device"),
@@ -1542,7 +1563,7 @@ class SettingsDialog(wx.Dialog):
                     input_index = idx
                     break
             if input_index is None or not test_input_device(input_index):
-                self._notebook.SetSelection(4)
+                self._notebook.SetSelection(5)
                 self._audio_input_combo.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_audio_input_device"),
@@ -1644,6 +1665,14 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "self_reference_custom_word"
         ] = self_reference_custom_word
+
+        # Accessibility
+        self.main_window.settings.setdefault("accessibility", {})[
+            "extended_sr_compat_enabled"
+        ] = self._extended_sr_compat_check.GetValue()
+        self.main_window.settings.setdefault("accessibility", {})[
+            "sapi_fallback_enabled"
+        ] = self._sapi_fallback_check.GetValue()
 
         # Spoken content: typing/recording announcements
         self.main_window.settings.setdefault("speech_content", {})[
@@ -1878,14 +1907,15 @@ class SettingsDialog(wx.Dialog):
         self.SetTitle(i18n.t("settings_title"))
         self._notebook.SetPageText(0, i18n.t("tab_general"))
         self._notebook.SetPageText(1, i18n.t("tab_ui"))
-        self._notebook.SetPageText(2, i18n.t("tab_speech_content"))
-        self._notebook.SetPageText(3, i18n.t("tab_connection"))
-        self._notebook.SetPageText(4, i18n.t("tab_audio_devices"))
-        self._notebook.SetPageText(5, i18n.t("tab_sound_events"))
-        self._notebook.SetPageText(6, i18n.t("tab_alert_tones"))
-        self._notebook.SetPageText(7, i18n.t("tab_storage"))
-        self._notebook.SetPageText(8, i18n.t("tab_audio_playback"))
-        self._notebook.SetPageText(9, i18n.t("tab_calls"))
+        self._notebook.SetPageText(2, i18n.t("tab_accessibility"))
+        self._notebook.SetPageText(3, i18n.t("tab_speech_content"))
+        self._notebook.SetPageText(4, i18n.t("tab_connection"))
+        self._notebook.SetPageText(5, i18n.t("tab_audio_devices"))
+        self._notebook.SetPageText(6, i18n.t("tab_sound_events"))
+        self._notebook.SetPageText(7, i18n.t("tab_alert_tones"))
+        self._notebook.SetPageText(8, i18n.t("tab_storage"))
+        self._notebook.SetPageText(9, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(10, i18n.t("tab_calls"))
         self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
         self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
         self._audio_effects_label.SetLabel(i18n.t("audio_effects_output_device_label"))

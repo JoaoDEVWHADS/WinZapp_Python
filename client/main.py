@@ -37,6 +37,7 @@ import ctypes
 import ctypes.wintypes
 import uuid
 from accessible_output2 import outputs
+from core.accessible_speech import AccessibleSpeechOutput
 from core.sound_system import (
     SoundSystem, Sound, load_sound, SOUND_EVENTS,
     alert_tone_choice_keys, resolve_alert_tone_path,
@@ -888,7 +889,13 @@ class MainWindow(wx.Frame):
 
         #Initialize screen reader/sapi output
         logging.info("MainWindow: Initializing screen reader output...")
-        self.speak_output = outputs.auto.Auto()
+        # Wrapped in AccessibleSpeechOutput so both Settings > Acessibilidade
+        # toggles (extended_sr_compat_enabled, sapi_fallback_enabled) apply to
+        # every call site at once, not just MainWindow.output() — see that
+        # module's docstring. The settings dict isn't loaded yet at this point
+        # in __init__ (load_settings() runs right below), so the getter reads
+        # self.settings live rather than capturing today's (empty) value.
+        self.speak_output = AccessibleSpeechOutput(outputs.auto.Auto(), lambda: self.settings)
 
         # Settings must exist before the sound system loads, since
         # load_sounds()/get_active_sound_pack() read self.settings to resolve
@@ -7010,10 +7017,10 @@ class MainWindow(wx.Frame):
             self.wpp_custom_api = True
             self.save_settings()
 
-            # Open settings dialog on the Connection tab (index 3)
+            # Open settings dialog on the Connection tab (index 4)
             from ui.dialogs.settings_dialog import SettingsDialog
             dlg = SettingsDialog(self)
-            dlg._notebook.SetSelection(3)
+            dlg._notebook.SetSelection(4)
             settings_res = dlg.ShowModal()
             dlg.Destroy()
 

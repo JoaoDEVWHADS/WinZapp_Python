@@ -52,6 +52,10 @@
         "input_device_name": "",
         "effects_output_device_name": ""
     },
+    "accessibility": {
+        "extended_sr_compat_enabled": true,
+        "sapi_fallback_enabled": true
+    },
     "speech_content": {
         "announce_typing": true,
         "announce_recording": true,
