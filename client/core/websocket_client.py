@@ -1246,16 +1246,34 @@ class WebSocketClient:
             ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
             ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
         ]
-        for limit_type, value in limits:
-            try:
-                api_post(
-                    url,
-                    json={"type": limit_type, "value": value},
-                    headers=headers,
-                    timeout=10,
-                )
-            except Exception:
-                pass
+        pending = list(limits)
+        # sessionLogged can arrive before wa-js has finished injecting. In
+        # that window setLimit exists at the HTTP layer but returns 500 because
+        # the page-side method is not ready yet. Retry the pending limits while
+        # the session settles instead of silently losing both settings.
+        for attempt in range(6):
+            failed = []
+            for limit_type, value in pending:
+                try:
+                    response = api_post(
+                        url,
+                        json={"type": limit_type, "value": value},
+                        headers=headers,
+                        timeout=10,
+                    )
+                    if response.status_code not in (200, 201):
+                        failed.append((limit_type, value))
+                except Exception:
+                    failed.append((limit_type, value))
+            if not failed:
+                return
+            pending = failed
+            if attempt < 5:
+                time.sleep(2)
+        logging.warning(
+            "[WebSocketClient] Could not apply WPP limits after retries: %s",
+            ", ".join(limit_type for limit_type, _ in pending),
+        )
 
     def on_wpp_status_find(self, data):
         try:
