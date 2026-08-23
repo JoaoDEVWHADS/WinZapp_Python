@@ -16535,6 +16535,41 @@ class MainWindow(wx.Frame):
                 normalized, old_count, unread_count, previous_unread,
             )
             return
+        elif (
+            read_at_t is None
+            and unread_count > old_count
+            and not _remote_read
+            and getattr(self, "_new_since_read", {}).get(normalized)
+        ):
+            # Once the read_at_t entry that protected a chat has been
+            # consumed and popped (see the `elif read_at_t is not None`
+            # branch below, which pops it after its own clamp), a LATER
+            # chats-update for the same chat can still arrive reporting a
+            # higher unreadCount than what was actually read locally —
+            # WhatsApp Web's own total, which that same branch already
+            # documents as sometimes still counting messages already read
+            # locally but not yet acknowledged by the server. Without this
+            # guard that inflated total was accepted verbatim (there is no
+            # other elif left to catch it), which is what pulled an
+            # already-read message back into "unread" (first_unread_index()
+            # draws the separator by counting backwards from unreadCount, so
+            # a count too high by N drags N already-read messages along with
+            # it). _new_since_read is only ever set together with the local
+            # unreadCount increment in on_new_message(), so a nonzero entry
+            # here means old_count is itself locally verified, not merely
+            # "whatever the last sync happened to say" — clamp to it exactly
+            # like the read_at_t-present branch does, rather than rejecting
+            # the update outright (a chat truly gaining more unread than
+            # tracked locally, e.g. from another device, still updates).
+            unread_count = min(unread_count, self._new_since_read[normalized])
+            logging.info(
+                "[unread] %s: %s -> %s (previous=%s, open=%s, read_ack=%s).",
+                normalized, old_count, unread_count, previous_unread, _open_now, read_at_t,
+            )
+            chat["unreadCount"] = unread_count
+            self._schedule_save(dirty_jid=normalized)
+            self._schedule_set_chats()
+            return
         elif read_at_t is not None:
             incoming_t = int(chat.get("t", 0) or 0)
             if incoming_t <= read_at_t:

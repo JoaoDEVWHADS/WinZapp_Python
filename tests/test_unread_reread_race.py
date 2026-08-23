@@ -106,6 +106,27 @@ class TestStaleServerCountAfterLocalRead:
 
         assert stub.chats[JID]["unreadCount"] == 3
 
+    def test_a_second_stale_update_after_the_read_ack_was_consumed_is_dropped(self):
+        """Reported live: a chat read locally, then one genuinely new message
+        arrives (on_new_message bumps unreadCount 0 -> 1 and _new_since_read to
+        1). The first chats.update after that consumes and pops
+        _locally_read_at (see the `elif read_at_t is not None` branch), which
+        is correct and expected. But a second, later chats.update for the same
+        chat can still arrive — now with no read_at_t left to protect it —
+        reporting an even higher total (e.g. 2) that still counts a message
+        already read locally days earlier. Before this guard, that inflated
+        total was accepted verbatim, which is exactly what pulled an
+        already-read message back into "unread" (first_unread_index() places
+        the separator by counting backwards from unreadCount)."""
+        stub = _Stub(_chat(t=2000))
+        stub.chats[JID]["unreadCount"] = 1
+        stub._new_since_read[JID] = 1
+        # _locally_read_at has no entry for JID — already consumed/popped.
+
+        stub.on_chat_unread_update(JID, 2, previous_unread=1)
+
+        assert stub.chats[JID]["unreadCount"] == 1
+
 class _CP:
     """Conversation panel stub.
 
