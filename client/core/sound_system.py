@@ -642,7 +642,15 @@ class Sound(stream.FileStream):
                     self.set_device(dev)
                 except Exception as exc:
                     logging.debug("[sound_system] effect set_device(%s) failed: %s", dev, exc)
-            super().play()
+            # restart=True: sound_lib's Channel.play() defaults to False,
+            # which resumes from wherever BASS_ChannelStop above left the
+            # read position instead of seeking back to 0. Two consecutive
+            # play() calls close together (e.g. two messages arriving back
+            # to back) would stop the still-playing channel and then resume
+            # it near its own tail — audibly indistinguishable from a single
+            # play, which is exactly the "sounds like only one message
+            # arrived" bug this was reported as.
+            super().play(restart=True)
         except Exception:
             # The configured output device may have gone away mid-session
             # (unplugged, disabled) after having worked fine earlier — fall

@@ -50,6 +50,7 @@ from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
+from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path, accounts_root
@@ -7588,7 +7589,16 @@ class MainWindow(wx.Frame):
         return self._resolve_message_background_path()
 
     def play_background_notification_sound(self, remote_jid: str):
-        """Play the resolved background/toast notification sound for `remote_jid`."""
+        """Play the resolved background/toast notification sound for `remote_jid`.
+
+        Skipped while Windows is in a state where it would itself suppress a
+        toast's sound (Focus Assist, fullscreen app, presentation mode) —
+        see core/quiet_hours.py for why this needs its own check: this sound
+        is played directly through BASS, entirely outside the WinRT toast
+        pipeline Windows actually gates on Focus Assist.
+        """
+        if is_quiet_hours_active():
+            return
         path = self._resolve_background_sound_path(remote_jid)
         if not path:
             return
