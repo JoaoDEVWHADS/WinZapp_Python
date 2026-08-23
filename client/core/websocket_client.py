@@ -862,6 +862,9 @@ class WebSocketClient:
         try:
             if not isinstance(info, dict) or not self._belongs_to_this_session(info):
                 return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -948,6 +951,9 @@ class WebSocketClient:
         try:
             if not isinstance(info, dict) or not self._belongs_to_this_session(info):
                 return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             data      = info.get("data", {})
             jid       = data.get("id", "")
             presences = data.get("presences", {})
@@ -1366,6 +1372,9 @@ class WebSocketClient:
 
     def on_wpp_message_received(self, data):
         try:
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             # Unconditional breadcrumb, logged before any filtering below —
             # reported live: a message shows up in the chat list (unread
             # count bumped) with no toast/sound/local notification at all,
@@ -1540,6 +1549,9 @@ class WebSocketClient:
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             wpp_ack = data.get("ack")
             status = ack_to_status(wpp_ack)
             if status is None:

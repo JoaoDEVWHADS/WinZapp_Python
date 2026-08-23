@@ -242,8 +242,8 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         stub = _Stub()
         audio = _touch(tmp_path, "note.mp3")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([audio], "ignored caption")
 
@@ -253,8 +253,8 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         stub = _Stub()
         img = _touch(tmp_path, "pic.png")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([img], "legenda")
 
@@ -265,12 +265,45 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         img   = _touch(tmp_path, "pic.png")
         audio = _touch(tmp_path, "note.ogg")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([img, audio], "")
 
         assert calls == [("media", img), ("voice", audio)]
+
+    def test_batch_failures_produce_a_single_aggregated_dialog(self, tmp_path, monkeypatch):
+        """The exact bug: posting several files where more than one fails must
+        show ONE summary MessageBox, not one blocking dialog per failure."""
+        stub = _Stub()
+        img1 = _touch(tmp_path, "pic1.png")
+        img2 = _touch(tmp_path, "pic2.png")
+        img3 = _touch(tmp_path, "pic3.png")
+        boxes = []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                             lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        results = iter([True, False, False])
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: next(results))
+
+        stub._send_all_media_statuses_bg([img1, img2, img3], "")
+
+        assert len(boxes) == 1, "one popup per batch, not one per failed file"
+        assert stub.status_sent_calls == 0  # not routed through the per-file success path in this test
+
+    def test_batch_all_succeed_shows_no_dialog(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img1 = _touch(tmp_path, "pic1.png")
+        img2 = _touch(tmp_path, "pic2.png")
+        boxes = []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                             lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: True)
+
+        stub._send_all_media_statuses_bg([img1, img2], "")
+
+        assert boxes == []
 
 
 class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:

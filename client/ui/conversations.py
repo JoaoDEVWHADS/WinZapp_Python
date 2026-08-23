@@ -24,7 +24,7 @@ from sound_lib.effects import Tempo
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
-from core.audio_transcode import transcode_m4a_to_wav
+from core.audio_transcode import transcode_audio_to_wav
 from core.sound_system import load_sound
 from ui.accessible import (
     AccessibleSearchConversations,
@@ -33,6 +33,7 @@ from ui.accessible import (
     AccessibleSaveAs,
     AccessibleConversationDataButton,
     AccessibleAddAttachmentButton,
+    AccessibleEmojiButton,
     AccessibleDiscardVoiceMessage,
     AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
@@ -552,6 +553,10 @@ class ConversationsPanel(wx.Panel):
         self._links_sizer.Add(self._links_label, 0, wx.LEFT | wx.TOP, 3)
         self._links_panel.SetSizer(self._links_sizer)
         self._links_panel.Hide()
+        # The list control _update_links_panel() builds when a message has 2+
+        # links (None otherwise, or before the first message with links is
+        # focused) — see that method.
+        self._links_list = None
         conv_sizer.Add(self._links_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         # ── Mention controls (shown when focused message contains @mentions) ──
@@ -697,12 +702,14 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT,       self.on_change_message_field)
         self.message_field.Bind(wx.EVT_TEXT_ENTER, self.on_send_message)
         self.message_field.Bind(wx.EVT_KEY_DOWN,   self._on_message_field_key_down)
+        self.message_field.Bind(wx.EVT_CHAR,       self._on_message_field_char)
         self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
         self._emoji_btn = wx.Button(
             self.conversation_panel, label=i18n.t("emoji_button")
         )
+        self._emoji_btn.SetAccessible(AccessibleEmojiButton())
         self._emoji_btn.Bind(wx.EVT_BUTTON, self._on_open_emoji_picker)
         conv_sizer.Add(self._emoji_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -736,6 +743,16 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self.send_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self.send_message_btn.Hide()
 
+        # ── Add attachment button (before Record voice — see issue #68: adding
+        # attachments is more frequent, and Record voice reads last, matching
+        # where most other messaging apps place it) ────────────────────────
+        self._add_attachment_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("add_attachment")
+        )
+        self._add_attachment_btn.SetAccessible(AccessibleAddAttachmentButton())
+        self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
+        conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
         self.record_voice_message_btn = wx.Button(
             self.conversation_panel, label=i18n.t("record_voice_message")
         )
@@ -744,14 +761,6 @@ class ConversationsPanel(wx.Panel):
         )
         self.record_voice_message_btn.Bind(wx.EVT_BUTTON, self.on_record_voice_message)
         conv_sizer.Add(self.record_voice_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-
-        # ── Add attachment button (moved closer to message input area) ─────────
-        self._add_attachment_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("add_attachment")
-        )
-        self._add_attachment_btn.SetAccessible(AccessibleAddAttachmentButton())
-        self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
-        conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         # ── Attachment staging panel (hidden until files are chosen) ─────────
         self._attachment_panel = wx.Panel(self.conversation_panel)
@@ -3338,13 +3347,20 @@ class ConversationsPanel(wx.Panel):
                 for em in msg_reactions.values():
                     all_emojis[em] = all_emojis.get(em, 0) + 1
             if all_emojis:
+                # issue #67: mark whichever of these I already sent to THIS
+                # message as checked, and toggling that one off removes it
+                # instead of resending the same emoji — there was previously
+                # no way to remove a reaction from the UI at all.
+                current_emoji = (self._reaction_map.get(msg_id) or {}).get(self._SELF_REACTOR_KEY, "")
                 top_emojis = sorted(all_emojis.items(), key=lambda x: x[1], reverse=True)[:5]
                 most_used_sub = wx.Menu()
                 for em, _cnt in top_emojis:
-                    sub_item = most_used_sub.Append(wx.ID_ANY, em)
+                    sub_item = most_used_sub.AppendCheckItem(wx.ID_ANY, em)
+                    is_current = em == current_emoji
+                    sub_item.Check(is_current)
                     self.Bind(
                         wx.EVT_MENU,
-                        lambda e, m=msg, em=em: self._send_reaction(m, em),
+                        lambda e, m=msg, em=em, cur=is_current: self._send_reaction(m, "" if cur else em),
                         sub_item,
                     )
                 menu.AppendSubMenu(most_used_sub, i18n.t("most_used_reactions"))
@@ -3604,7 +3620,15 @@ class ConversationsPanel(wx.Panel):
         return out
 
     def _update_links_panel(self, links: list):
-        """Rebuild the hyperlink controls below the messages list."""
+        """Rebuild the link controls below the messages list.
+
+        A single link keeps the existing HyperlinkCtrl tab-stop. Two or
+        more are shown as one navigable list instead (issue #65) — users
+        previously had to Tab/Shift+Tab through every link in a message as
+        its own separate stop. Up/Down move between them (native ListCtrl
+        behaviour also gives Home/End for free), and Ctrl+C copies just the
+        focused link.
+        """
         # Destroy all child controls except the static label (first item)
         for child in list(self._links_panel.GetChildren()):
             if child is not self._links_label:
@@ -3612,6 +3636,7 @@ class ConversationsPanel(wx.Panel):
         # Remove all items except the first (label) from the sizer
         while self._links_sizer.GetItemCount() > 1:
             self._links_sizer.Remove(1)
+        self._links_list = None
 
         if not links:
             self._links_panel.Hide()
@@ -3623,7 +3648,9 @@ class ConversationsPanel(wx.Panel):
         self._current_links = links
         i18n = self.main_window.i18n
 
-        for url in links:
+        if len(links) == 1:
+            self._links_label.SetLabel(i18n.t("links_section_label"))
+            url = links[0]
             ctrl = wx.adv.HyperlinkCtrl(
                 self._links_panel,
                 id=wx.ID_ANY,
@@ -3634,31 +3661,71 @@ class ConversationsPanel(wx.Panel):
             ctrl.Bind(wx.adv.EVT_HYPERLINK, self._on_hyperlink_open)
             ctrl.Bind(wx.EVT_KEY_DOWN,  self._on_link_key_down)
             self._links_sizer.Add(ctrl, 0, wx.LEFT | wx.BOTTOM, 3)
+        else:
+            self._links_label.SetLabel(i18n.t("links_list_label"))
+            lst = wx.ListCtrl(
+                self._links_panel,
+                style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_NO_HEADER,
+            )
+            lst.InsertColumn(0, i18n.t("links_list_label"), width=400)
+            for url in links:
+                lst.Append((url,))
+            lst.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_links_list_activated)
+            lst.Bind(wx.EVT_KEY_DOWN, self._on_links_list_key_down)
+            lst.Focus(0)
+            lst.Select(0)
+            self._links_sizer.Add(lst, 0, wx.EXPAND | wx.LEFT | wx.BOTTOM, 3)
+            self._links_list = lst
 
         self._links_panel.Show()
         self._links_panel.Layout()
         if self.conversation_panel.IsShown():
             self.conversation_panel.Layout()
 
-    def _on_hyperlink_open(self, event):
+    @staticmethod
+    def _open_link(url: str):
         """Open a link URL in the system's default application."""
-        url = event.GetURL()
         try:
             os.startfile(url)
         except Exception:
             wx.LaunchDefaultBrowser(url)
 
+    def _on_hyperlink_open(self, event):
+        self._open_link(event.GetURL())
+
     def _on_link_key_down(self, event):
         """Ensure Space and Enter activate a focused HyperlinkCtrl."""
         kc = event.GetKeyCode()
         if kc in (wx.WXK_RETURN, wx.WXK_SPACE, wx.WXK_NUMPAD_ENTER):
-            ctrl = event.GetEventObject()
-            try:
-                os.startfile(ctrl.GetURL())
-            except Exception:
-                wx.LaunchDefaultBrowser(ctrl.GetURL())
+            self._open_link(event.GetEventObject().GetURL())
         else:
             event.Skip()
+
+    def _on_links_list_activated(self, event):
+        """Enter (or a double-click) on a link row opens it."""
+        idx = event.GetIndex()
+        if 0 <= idx < len(self._current_links):
+            self._open_link(self._current_links[idx])
+
+    def _on_links_list_key_down(self, event):
+        """Space also opens the focused link; Ctrl+C copies just its URL."""
+        kc = event.GetKeyCode()
+        if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER, wx.WXK_SPACE):
+            idx = self._links_list.GetFirstSelected()
+            if 0 <= idx < len(self._current_links):
+                self._open_link(self._current_links[idx])
+            return
+        if event.ControlDown() and kc == ord("C"):
+            idx = self._links_list.GetFirstSelected()
+            if 0 <= idx < len(self._current_links):
+                url = self._current_links[idx]
+                try:
+                    pyperclip.copy(url)
+                    self.main_window.output(self.main_window.i18n.t("link_copied"))
+                except Exception:
+                    self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+            return
+        event.Skip()
 
     # ── @mention helpers ─────────────────────────────────────────────────────
 
@@ -4134,12 +4201,45 @@ class ConversationsPanel(wx.Panel):
                 self._mention_list.SetSelection(0)
             return  # consume — don't let the field handle ↓
         if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and event.ShiftDown():
-            pos = self.message_field.GetInsertionPoint()
-            text = self.message_field.GetValue()
-            self.message_field.ChangeValue(text[:pos] + "\n" + text[pos:])
-            self.message_field.SetInsertionPoint(pos + 1)
+            # WriteText() inserts at the control's own insertion point (and
+            # over any active selection) and lets the native control manage
+            # the caret itself — necessary because on Windows a multiline
+            # wx.TextCtrl stores line breaks internally as \r\n while
+            # GetInsertionPoint()/SetInsertionPoint() count positions in that
+            # native representation, not the \n-only positions GetValue()
+            # reports. The previous approach (rebuild the whole value with a
+            # plain "\n", then SetInsertionPoint(pos + 1)) assumed one
+            # inserted character, but Windows silently expands it to two —
+            # so the caret landed one character short, between the \r and
+            # the \n. NVDA then kept announcing everything typed next as
+            # still on the previous line (issue #48).
+            self.message_field.WriteText("\n")
             self.on_change_message_field(None)
             return  # consume — don't send and don't double-insert
+        event.Skip()
+
+    @staticmethod
+    def _is_phantom_nvda_char(event) -> bool:
+        """True for the bogus U+00FF character NVDA's laptop-layout object
+        navigation gestures (Windows+NVDA+Left/Right and others — issue #71)
+        leak into whatever wx.TextCtrl happens to be focused.
+
+        Reported live: each press of Windows+NVDA+Left/Right inserted one
+        literal 'ÿ' into the message field, even though no text key was
+        pressed and the same gestures type nothing in other applications.
+        NVDA's own keyboard hook is supposed to swallow these combinations
+        entirely; when the OS still emits a WM_CHAR for one anyway (observed
+        specifically for Windows-key gestures NVDA intercepts), it carries
+        the character U+00FF — not a value any real keyboard layout produces
+        by pressing the Windows key plus an arrow. That makes it safe to
+        veto unconditionally rather than trying to special-case NVDA's own
+        modifier state, which wx never sees.
+        """
+        return event.GetUnicodeKey() == 0xFF
+
+    def _on_message_field_char(self, event):
+        if self._is_phantom_nvda_char(event):
+            return  # veto — do not insert, do not Skip()
         event.Skip()
 
     def _on_text_field_paste(self, event):
@@ -6028,7 +6128,7 @@ class ConversationsPanel(wx.Panel):
             tmp.close()
             self._audio_temp_file = tmp.name
             if actual_ext == ".m4a":
-                wav_path = transcode_m4a_to_wav(
+                wav_path = transcode_audio_to_wav(
                     self.main_window._find_api_ffmpeg(),
                     self._audio_temp_file,
                 )
@@ -6069,9 +6169,35 @@ class ConversationsPanel(wx.Panel):
         try:
             self._audio_stream, self._audio_tempo_ctrl = _open_stream()
         except Exception as e:
-            logging.exception(f"[UI Audio Playback] Error creating stream: {e}")
-            self._stop_audio()
-            return
+            # Both the decode+Tempo stream and the plain direct stream failed
+            # (_open_stream()'s own fallback) — e.g. an OGG whose codec isn't
+            # Opus, or whose bassopus.dll plugin failed to register, which
+            # BASS rejects for both attempts with error 41 "unsupported file
+            # format". Re-encode through ffmpeg to PCM WAV, which sidesteps
+            # BASS's codec support entirely, and retry once from that file
+            # rather than giving up on the message.
+            logging.info(
+                "[UI Audio Playback] Direct stream also failed (%s); "
+                "trying ffmpeg WAV fallback for %s", e, self._audio_temp_file,
+            )
+            wav_path = transcode_audio_to_wav(
+                self.main_window._find_api_ffmpeg(),
+                self._audio_temp_file,
+            )
+            if wav_path is None:
+                logging.exception(f"[UI Audio Playback] Error creating stream: {e}")
+                self._stop_audio()
+                return
+            os.unlink(self._audio_temp_file)
+            self._audio_temp_file = wav_path
+            try:
+                self._audio_stream, self._audio_tempo_ctrl = _open_stream()
+            except Exception as e2:
+                logging.exception(
+                    f"[UI Audio Playback] Error creating stream from converted WAV: {e2}"
+                )
+                self._stop_audio()
+                return
 
         # ── Start playback ───────────────────────────────────────────────────
         # When Tempo FX is active the decode stream has no audio output of its
@@ -9330,7 +9456,10 @@ class ConversationsPanel(wx.Panel):
         )
 
     def _on_menu_delete_message(self, index: int):
-        """Show delete-scope dialog and delete locally or for everyone."""
+        """Show delete-scope dialog and delete locally or for everyone.
+
+        The self-chat ("Me") skips the dialog entirely and always deletes
+        locally only — see the is_self_chat check below (issue #73)."""
         if index < 0 or index >= len(self._sorted_messages):
             return
         if self._is_separator(self._sorted_messages[index]):
@@ -9347,10 +9476,22 @@ class ConversationsPanel(wx.Panel):
         # fail after the row already looked deleted. Both the fromMe path and
         # the group-admin path below are excluded.
         is_system = self._is_system_event(msg)
-        can_delete_for_all = from_me and not is_system
+        # The "Me" chat (messages to yourself) has only one participant —
+        # WhatsApp's own revoke is a no-op there: the message disappears
+        # locally, the API call returns success, but the message is still on
+        # every other linked device, and reappears in WinZapp itself after
+        # the next resync. Offering "delete for everyone" here just misleads
+        # the user into thinking it worked (issue #73) — go straight to a
+        # plain local delete instead, same as this chat's only real option.
+        conv_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        is_self_chat = bool(conv_jid) and self.main_window._is_self_jid(conv_jid)
+        can_delete_for_all = from_me and not is_system and not is_self_chat
+
+        if is_self_chat and not is_system:
+            self._delete_message_for_me_only(msg, msg_id, index)
+            return
 
         if not can_delete_for_all and not is_system and self.conversation:
-            conv_jid = self.conversation.get("remoteJid", "")
             if conv_jid.endswith("@g.us"):
                 group_meta = self.conversation.get("groupMetadata", {})
                 participants = group_meta.get("participants") or self.conversation.get("participants") or []
@@ -9443,12 +9584,31 @@ class ConversationsPanel(wx.Panel):
                         wx.OK | wx.ICON_WARNING,
                     )
             threading.Thread(target=_revoke, daemon=True).start()
+            # Always delete locally
+            if msg_id:
+                self.remove_messages_by_id({msg_id}, focus_previous=True)
+            else:
+                self._sorted_messages.pop(index)
+                self.messages_list.DeleteItem(index)
         else:
-            def _delete_for_me(k=dict(msg_key), j=jid):
-                self.main_window.delete_message_for_me(j, k)
-            threading.Thread(target=_delete_for_me, daemon=True).start()
+            self._delete_message_for_me_only(msg, msg_id, index)
 
-        # Always delete locally
+    def _delete_message_for_me_only(self, msg: dict, msg_id: str, index: int):
+        """Delete a message for this account only (delete_message_for_me),
+        then remove it locally — the plain "delete for me" path, shared by
+        the dialog's own choice and the self-chat shortcut in
+        _on_menu_delete_message() that skips the dialog entirely (issue #73:
+        "delete for everyone" is a no-op there, since the "Me" chat has no
+        one else to delete it for)."""
+        msg_key = msg.get("key", {})
+        jid = msg_key.get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+
+        def _delete_for_me(k=dict(msg_key), j=jid):
+            self.main_window.delete_message_for_me(j, k)
+        threading.Thread(target=_delete_for_me, daemon=True).start()
+
         if msg_id:
             self.remove_messages_by_id({msg_id}, focus_previous=True)
         else:
@@ -10588,6 +10748,12 @@ class ConversationsPanel(wx.Panel):
             ("🥰", "🥰"),
         ]
 
+        msg_id = msg.get("key", {}).get("id", "")
+        # issue #67: show which reaction (if any) I already sent to this
+        # message, and let activating it again remove it — there was
+        # previously no way to remove a reaction from the UI at all.
+        current_emoji = (self._reaction_map.get(msg_id) or {}).get(self._SELF_REACTOR_KEY, "")
+
         dlg = wx.Dialog(
             self.main_window,
             title=i18n.t("react_dialog_title"),
@@ -10597,13 +10763,21 @@ class ConversationsPanel(wx.Panel):
         panel = wx.Panel(dlg)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        hint_label = wx.StaticText(panel, label=i18n.t("react_dialog_hint"))
+        hint_label = wx.StaticText(
+            panel,
+            label=i18n.t("react_dialog_hint_remove") if current_emoji else i18n.t("react_dialog_hint"),
+        )
         sizer.Add(hint_label, 0, wx.ALL, 8)
 
         emoji_list = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         emoji_list.InsertColumn(0, i18n.t("react_dialog_title"), width=240)
-        for emoji, display in EMOJIS:
+        emoji_list.EnableCheckBoxes(True)
+        current_idx = -1
+        for idx, (emoji, display) in enumerate(EMOJIS):
             emoji_list.Append((display,))
+            if emoji == current_emoji:
+                emoji_list.CheckItem(idx, True)
+                current_idx = idx
         sizer.Add(emoji_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         cancel_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
@@ -10619,7 +10793,10 @@ class ConversationsPanel(wx.Panel):
         def _on_emoji_activated(event):
             idx = event.GetIndex()
             if 0 <= idx < len(EMOJIS):
-                selected_emoji[0] = EMOJIS[idx][0]
+                # Activating the reaction already checked (i.e. the one I
+                # already sent) removes it instead of resending the same
+                # emoji — the only way to clear a reaction previously.
+                selected_emoji[0] = "" if idx == current_idx else EMOJIS[idx][0]
                 dlg.EndModal(wx.ID_OK)
 
         def _on_emoji_selected(event):
@@ -10631,16 +10808,19 @@ class ConversationsPanel(wx.Panel):
         dlg.Bind(wx.EVT_CHAR_HOOK, lambda e: dlg.EndModal(wx.ID_CANCEL) if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip())
 
         # A pre-populated list must never leave focus/selection pointing at
-        # nothing — mirrors the conversation list's own convention.
+        # nothing — mirrors the conversation list's own convention. Land on
+        # the currently-sent reaction when there is one, same reasoning as
+        # every other "open on the relevant row" dialog in this app.
         if emoji_list.GetItemCount() > 0:
-            emoji_list.Focus(0)
-            emoji_list.Select(0)
+            start = current_idx if current_idx >= 0 else 0
+            emoji_list.Focus(start)
+            emoji_list.Select(start)
         emoji_list.SetFocus()
         dlg.CentreOnParent()
         result = dlg.ShowModal()
         dlg.Destroy()
 
-        if result == wx.ID_OK and selected_emoji[0]:
+        if result == wx.ID_OK and selected_emoji[0] is not None:
             emoji = selected_emoji[0]
             msg_key = msg.get("key", {})
             threading.Thread(
@@ -10726,6 +10906,16 @@ class ConversationsPanel(wx.Panel):
             for i, m in enumerate(self._sorted_messages):
                 if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
                     self.messages_list.SetItemText(i, self._render_message_line(m))
+                    # The Reactions button only ever refreshes on focus
+                    # change (_update_reactions_button() is called from the
+                    # list's EVT_LIST_ITEM_FOCUSED handler) — a reaction
+                    # landing on the message the user already has focused
+                    # left the button in whatever state it was in before,
+                    # requiring the user to move focus away and back just to
+                    # make it appear. Refresh it here too when this is the
+                    # row currently focused.
+                    if i == self.messages_list.GetFocusedItem():
+                        self._update_reactions_button(i)
                     break
 
         # Persist so populate_messages()/refresh_active_conversation_messages()
@@ -10824,14 +11014,23 @@ class ConversationsPanel(wx.Panel):
             return
 
         # Update in-memory reaction map — replaces our own previous reaction
-        # on this message rather than adding another count.
+        # on this message rather than adding another count. An empty emoji
+        # means the reaction was removed (see _on_menu_react's checked-item
+        # toggle) — drop our own entry rather than leaving the stale emoji
+        # badge on the message.
         if emoji:
             self._reaction_map.setdefault(orig_id, {})[self._SELF_REACTOR_KEY] = emoji
+        else:
+            self._reaction_map.get(orig_id, {}).pop(self._SELF_REACTOR_KEY, None)
 
         # Re-render the original message row if currently visible
         for i, m in enumerate(self._sorted_messages):
             if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
                 self.messages_list.SetItemText(i, self._render_message_line(m))
+                # See apply_incoming_reaction()'s identical call for why this
+                # is needed in addition to the focus-driven refresh.
+                if i == self.messages_list.GetFocusedItem():
+                    self._update_reactions_button(i)
                 break
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
