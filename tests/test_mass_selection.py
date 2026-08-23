@@ -59,6 +59,9 @@ class _FakeList:
     def GetFocusedItem(self):
         return self._focused
 
+    def GetFirstSelected(self):
+        return self._focused
+
     def GetItemCount(self):
         return self._count
 
@@ -152,6 +155,11 @@ class _Panel:
     _on_mass_forward_messages = ConversationsPanel._on_mass_forward_messages
     _on_mass_save_messages = ConversationsPanel._on_mass_save_messages
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
+    _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
+    _on_mass_star_messages = ConversationsPanel._on_mass_star_messages
+    _on_mass_pin_messages = ConversationsPanel._on_mass_pin_messages
+    _on_accel_copy_message = ConversationsPanel._on_accel_copy_message
+    _bulk_shortcuts_enabled = ConversationsPanel._bulk_shortcuts_enabled
     _group_admin_delete_override = ConversationsPanel._group_admin_delete_override
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)
 
@@ -178,6 +186,9 @@ class _Panel:
         self.forwarded = []
         self.saved = []
         self.removed_locally = []
+        self.starred = []
+        self.pinned = []
+        self.copied_files = []
 
     def _on_menu_forward(self, msg, msgs_list=None):
         self.forwarded.append((msg, msgs_list))
@@ -190,6 +201,18 @@ class _Panel:
 
     def remove_messages_by_id(self, ids, focus_previous=False):
         self.removed_locally.append((set(ids), focus_previous))
+
+    def _on_menu_star(self, msg):
+        self.starred.append(msg["key"]["id"])
+
+    def _on_menu_pin_message(self, msg):
+        self.pinned.append(msg["key"]["id"])
+
+    def _on_menu_copy_message(self, msg):
+        pass
+
+    def _on_menu_copy_file(self, msg):
+        self.copied_files.append(msg["key"]["id"])
 
     def seek_active_playback_by(self, delta_seconds):
         return False
@@ -208,6 +231,18 @@ def _msg(msg_id, jid="grupo@g.us", from_me=False):
 
 def _saveable_msg(msg_id, jid="grupo@g.us", msg_type="documentMessage"):
     return {"key": {"id": msg_id, "remoteJid": jid}, "message": {}, "messageType": msg_type}
+
+
+def _text_msg(msg_id, text="hello", jid="grupo@g.us", extended=False):
+    if extended:
+        return {
+            "key": {"id": msg_id, "remoteJid": jid}, "messageType": "extendedTextMessage",
+            "message": {"extendedTextMessage": {"text": text}},
+        }
+    return {
+        "key": {"id": msg_id, "remoteJid": jid}, "messageType": "conversation",
+        "message": {"conversation": text},
+    }
 
 
 SEPARATOR = {"_type": "unread_separator", "count": 3}
@@ -900,6 +935,7 @@ class TestMassMessageActions:
 
     @pytest.mark.parametrize("handler", [
         "_on_mass_forward_messages", "_on_mass_save_messages", "_on_mass_delete_messages",
+        "_on_mass_copy_messages", "_on_mass_star_messages", "_on_mass_pin_messages",
     ])
     def test_an_empty_selection_does_nothing_at_all(self, handler, monkeypatch):
         monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: pytest.fail("asked"))
@@ -908,3 +944,97 @@ class TestMassMessageActions:
         assert panel.forwarded == []
         assert panel.saved == []
         assert panel.removed_locally == []
+        assert panel.starred == []
+        assert panel.pinned == []
+
+
+@pytest.fixture
+def fake_clipboard(monkeypatch):
+    """Fakes pyperclip.copy as used by ui.conversations — records what was
+    copied instead of touching the real system clipboard."""
+    calls = []
+    monkeypatch.setattr(
+        "ui.conversations.pyperclip.copy", lambda text: calls.append(text)
+    )
+    return calls
+
+
+class TestMassCopyMessages:
+    def test_joins_selected_text_messages_one_per_line(self, fake_clipboard):
+        msgs = [_text_msg("m1", "primeira"), _text_msg("m2", "segunda", extended=True)]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == ["primeira\nsegunda"]
+        assert panel.main_window.announced == ["messages_copied_bulk"]
+        assert panel.selected_messages == set()
+
+    def test_keeps_list_order_not_set_order(self, fake_clipboard):
+        msgs = [_text_msg(f"m{i}", f"text{i}") for i in range(5)]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m4", "m0", "m2"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == ["text0\ntext2\ntext4"]
+
+    def test_skips_non_text_message_types(self, fake_clipboard):
+        msgs = [_text_msg("m1", "only this"), _saveable_msg("m2"), SEPARATOR]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == ["only this"]
+
+    def test_nothing_copyable_announces_and_touches_no_clipboard(self, fake_clipboard):
+        panel = _Panel(messages=[_saveable_msg("m1")])
+        panel.selected_messages = {"m1"}
+        panel._on_mass_copy_messages(None)
+        assert fake_clipboard == []
+        assert panel.main_window.announced == ["copy_selected_nothing_to_copy"]
+        # Nothing copyable is left as-is, not silently cleared.
+        assert panel.selected_messages == {"m1"}
+
+    def test_ctrl_c_copies_the_whole_selection_when_bulk_shortcuts_enabled(self, fake_clipboard):
+        msgs = [_text_msg("m1", "a"), _text_msg("m2", "b")]
+        panel = _Panel(messages=msgs, focused=0)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_accel_copy_message(_FakeEvent(ord("C"), ctrl=True))
+        assert fake_clipboard == ["a\nb"]
+
+    def test_ctrl_c_copies_only_the_focused_message_when_bulk_shortcuts_disabled(self, fake_clipboard):
+        panel = _Panel(messages=[_text_msg("m1", "a"), _text_msg("m2", "b")], focused=1)
+        panel.main_window.settings["user_interface"]["bulk_action_shortcuts"] = False
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_accel_copy_message(_FakeEvent(ord("C"), ctrl=True))
+        # Falls through to the single-message path instead of the bulk one.
+        assert fake_clipboard == []
+
+
+class TestMassStarAndPinMessages:
+    def test_stars_every_selected_message_not_already_starred(self):
+        msgs = [_msg("m1"), _msg("m2")]
+        msgs[1]["starred"] = True
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_star_messages(None)
+        assert panel.starred == ["m1"]  # m2 skipped, already starred
+        assert panel.selected_messages == set()
+        assert panel.main_window.announced == ["success_star_bulk"]
+
+    def test_pins_every_selected_message_not_already_pinned(self):
+        msgs = [_msg("m1"), _msg("m2")]
+        msgs[1]["pinInChat"] = True
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_pin_messages(None)
+        assert panel.pinned == ["m1"]  # m2 skipped, already pinned
+        assert panel.main_window.announced == ["success_pin_bulk"]
+
+    @pytest.mark.parametrize("handler,recorder", [
+        ("_on_mass_star_messages", "starred"), ("_on_mass_pin_messages", "pinned"),
+    ])
+    def test_system_events_are_silently_skipped(self, handler, recorder):
+        notice = _msg("m1", from_me=True)
+        notice["messageType"] = "groupNotification"
+        panel = _Panel(messages=[notice])
+        panel.selected_messages = {"m1"}
+        getattr(panel, handler)(None)
+        assert getattr(panel, recorder) == []

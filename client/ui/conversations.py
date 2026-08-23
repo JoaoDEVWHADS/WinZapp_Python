@@ -2921,8 +2921,17 @@ class ConversationsPanel(wx.Panel):
         if getattr(self, "selected_messages", None):
             mass_menu = wx.Menu()
 
+            copy_selected_item = mass_menu.Append(wx.ID_ANY, i18n.t("copy_selected"))
+            self.Bind(wx.EVT_MENU, self._on_mass_copy_messages, copy_selected_item)
+
             fwd_item = mass_menu.Append(wx.ID_ANY, i18n.t("forward_selected"))
             self.Bind(wx.EVT_MENU, self._on_mass_forward_messages, fwd_item)
+
+            star_item = mass_menu.Append(wx.ID_ANY, i18n.t("star_selected"))
+            self.Bind(wx.EVT_MENU, self._on_mass_star_messages, star_item)
+
+            pin_item = mass_menu.Append(wx.ID_ANY, i18n.t("pin_selected"))
+            self.Bind(wx.EVT_MENU, self._on_mass_pin_messages, pin_item)
 
             save_item = mass_menu.Append(wx.ID_ANY, i18n.t("save_selected"))
             self.Bind(wx.EVT_MENU, self._on_mass_save_messages, save_item)
@@ -9189,7 +9198,14 @@ class ConversationsPanel(wx.Panel):
             self._on_menu_pin(jid)
 
     def _on_accel_copy_message(self, event):
-        """Ctrl+C: copy focused message text or media file (with original filename) to clipboard."""
+        """Ctrl+C: copy focused message text or media file (with original
+        filename) to clipboard — or, with a bulk selection and Settings >
+        Interface do usuário > "Substituir atalhos por ações em massa..."
+        on, copy every selected plain-text message instead (see
+        _on_mass_copy_messages)."""
+        if self._bulk_shortcuts_enabled() and self.selected_messages:
+            self._on_mass_copy_messages(event)
+            return
         index = self.messages_list.GetFirstSelected()
         if index < 0 or index >= len(self._sorted_messages):
             return
@@ -11208,6 +11224,89 @@ class ConversationsPanel(wx.Panel):
             self.main_window.mark_conversation_as_unread(jid)
         self.selected_chats.clear()
         self.main_window.add_chats_to_ui()
+
+    def _on_mass_copy_messages(self, event):
+        """Copy every selected plain-text message to the clipboard as one
+        block of text, one message per line — other message types (media,
+        location, contact cards, ...) are silently skipped, same as how
+        _on_menu_copy_message only ever handles "conversation"/
+        "extendedTextMessage". Order follows _sorted_messages, not set
+        iteration order, same as the other mass message actions."""
+        if not self.selected_messages: return
+        i18n = self.main_window.i18n
+        _TEXT_TYPES = ("conversation", "extendedTextMessage")
+        texts = []
+        for m in self._sorted_messages:
+            if self._is_separator(m) or m.get("key", {}).get("id") not in self.selected_messages:
+                continue
+            msg_type = m.get("messageType", "")
+            if msg_type not in _TEXT_TYPES:
+                continue
+            msg_obj = m.get("message") or {}
+            text = (
+                msg_obj.get("conversation", "") if msg_type == "conversation"
+                else (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+            )
+            if text:
+                texts.append(text)
+
+        if not texts:
+            self.main_window.output(i18n.t("copy_selected_nothing_to_copy"), interrupt=True)
+            return
+
+        try:
+            pyperclip.copy("\n".join(texts))
+        except Exception:
+            self.main_window.output(i18n.t("msg_copy_error"), interrupt=True)
+            return
+
+        copied_ids = list(self.selected_messages)
+        self.selected_messages.clear()
+        self._refresh_message_rows_by_ids(copied_ids)
+        self.main_window.output(i18n.t("messages_copied_bulk"), interrupt=True)
+
+    def _on_mass_star_messages(self, event):
+        """Star every selected message (the local-only flag _on_menu_star
+        toggles) — always stars, never toggles off, so a selection mixing
+        already-starred and unstarred messages doesn't end up partially
+        undone. System events are pre-filtered rather than left to
+        _on_menu_star's own _reject_system_event_action guard, so a mixed
+        selection doesn't announce "unavailable" once per system event."""
+        if not self.selected_messages: return
+        to_star = [
+            m for m in self._sorted_messages
+            if not self._is_separator(m)
+            and not self._is_system_event(m)
+            and m.get("key", {}).get("id") in self.selected_messages
+            and not m.get("starred")
+        ]
+        ids = list(self.selected_messages)
+        self.selected_messages.clear()
+        self._refresh_message_rows_by_ids(ids)
+        for m in to_star:
+            self._on_menu_star(m)
+        self.main_window.output(self.main_window.i18n.t("success_star_bulk"), interrupt=True)
+
+    def _on_mass_pin_messages(self, event):
+        """Pin every not-yet-pinned selected message via WhatsApp's own
+        message-pin feature — reuses _on_menu_pin_message's optimistic
+        update + per-message server rollback for each one. Already-pinned
+        messages and system events are skipped up front, same reasoning as
+        _on_mass_star_messages above."""
+        if not self.selected_messages: return
+        to_pin = [
+            m for m in self._sorted_messages
+            if not self._is_separator(m)
+            and not self._is_system_event(m)
+            and m.get("key", {}).get("id") in self.selected_messages
+            and not m.get("pinInChat")
+        ]
+        ids = list(self.selected_messages)
+        self.selected_messages.clear()
+        self._refresh_message_rows_by_ids(ids)
+        for m in to_pin:
+            self._on_menu_pin_message(m)
+        self.main_window.output(self.main_window.i18n.t("success_pin_bulk"), interrupt=True)
 
     def _on_mass_forward_messages(self, event):
         if not self.selected_messages: return
