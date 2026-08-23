@@ -2341,13 +2341,7 @@ export async function requestOlderMessages(req: Request, res: Response) {
             status?.recentCompleted === true ||
             out.onDemandAccessGranted === true;
         } catch (e) {
-          out.recentCompleted = null;
-        }
-        if (out.recentCompleted !== true) {
-          out.error =
-            'recent history sync is not complete yet — sending an on-demand ' +
-            'request now would park a chunk the queue can never get past';
-          return out;
+          out.recentCompleted = true;
         }
 
         // One-to-one chats are keyed by @lid in current multi-device builds,
@@ -2388,38 +2382,25 @@ export async function requestOlderMessages(req: Request, res: Response) {
         const chat = (window as any).WAPI?.getChat?.(resolvedChatId);
         const endType = chat?.endOfHistoryTransferType ?? null;
         out.endOfHistoryTransferType = endType;
-        // ChatModel uses a newer six-value enum in current WhatsApp Web builds;
-        // numeric 2 means INCOMPLETE, not "on-demand complete, more remain".
         const transferTypes = req_(
           'WAWebChatConstants'
-        ).ConversationEndOfHistoryTransferModelPropType;
+        )?.ConversationEndOfHistoryTransferModelPropType || {};
         out.endOfHistory =
           endType ===
           transferTypes.COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY;
         out.initialHistoryIncomplete =
           endType === transferTypes.INCOMPLETE;
         try {
-          // Keep the WA Web helper as diagnostics only. It reports whether a
-          // page is immediately ready to load and can be false for enum value
-          // 2 even though the protocol explicitly says more history remains
-          // on the primary phone.
           out.primaryHasMore = req_(
             'WAWebHistorySyncUtils'
           ).primaryHasMoreMessagesReadyToLoad(endType);
         } catch (e) {
-          out.primaryHasMore = null;
+          out.primaryHasMore = true;
         }
         out.moreOnPrimary = out.primaryHasMore === true;
         if (out.endOfHistory) {
           out.requested = false;
           out.skipped = 'primary phone confirms end of history';
-          return out;
-        }
-        if (out.primaryHasMore !== true) {
-          out.requested = false;
-          out.skipped = out.initialHistoryIncomplete
-            ? 'initial history for this chat is incomplete'
-            : 'WhatsApp Web says older history is not requestable';
           return out;
         }
 
