@@ -3597,6 +3597,9 @@ class MainWindow(wx.Frame):
         a broken/corrupted API install without waiting for a real version
         bump upstream.
         """
+        if not self._local_api_selected():
+            logging.info("[wpp-update] Remote/unconfigured API — force reinstall ignored.")
+            return
         if self._wpp_update_checker is None:
             from updater import WppUpdateChecker
             self._wpp_update_checker = WppUpdateChecker(self)
@@ -3609,6 +3612,9 @@ class MainWindow(wx.Frame):
         both WppUpdateChecker call sites already dispatch here via
         wx.CallAfter, so this can call ShowModal() directly.
         """
+        if not self._local_api_selected():
+            logging.info("[wpp-update] Remote/unconfigured API — local update ignored.")
+            return
         logging.info("[wpp_update] Stopping WPPConnect Server before update to %s...", target_tag)
         if not self.background_mode:
             self.output(self.i18n.t("wpp_update_in_progress"), interrupt=True)
@@ -5591,6 +5597,8 @@ class MainWindow(wx.Frame):
 
     def find_headless_shell(self):
         """Path to chrome-headless-shell inside client/api/.cache, or None."""
+        if not self._local_api_selected():
+            return None
         cache_dir = resource_path("api", ".cache")
         if not os.path.isdir(cache_dir):
             return None
@@ -5621,6 +5629,10 @@ class MainWindow(wx.Frame):
         fallback still gets its turn. Returns True when a shell is present
         afterwards.
         """
+        if not self._local_api_selected():
+            logging.info("[headless-shell] Remote/unconfigured API — installation ignored.")
+            return False
+
         existing = self.find_headless_shell()
         if existing:
             logging.info("[headless-shell] Already installed: %s", existing)
@@ -5706,6 +5718,9 @@ class MainWindow(wx.Frame):
         the browser, so "the API is fully set up" was true for an install with
         no browser at all — see ensure_headless_shell_installed().
         """
+        if not self._local_api_selected():
+            logging.info("[api-setup] Remote/unconfigured API — Node/npm/browser setup ignored.")
+            return
         self._ensure_api_modules_installed()
         self.ensure_headless_shell_installed()
 
@@ -6183,6 +6198,10 @@ class MainWindow(wx.Frame):
         is spawned using the non-elevated linked token via CreateProcessWithTokenW
         so that PostgreSQL's initdb can start (it refuses to run as root/admin).
         """
+        if not self._local_api_selected():
+            logging.info("[api-start] Remote/unconfigured API — bundled server launch ignored.")
+            return
+
         import sys
         import shutil
 
@@ -6598,6 +6617,13 @@ class MainWindow(wx.Frame):
                 self._close_orphaned_server_sessions()
             except Exception:
                 logging.exception("[shutdown] orphaned-session sweep failed (non-fatal)")
+
+        # A remote or not-yet-configured API has no local Node process owned by
+        # WinZapp. Never inspect/kill a local process merely because it happens
+        # to listen on the same numeric port as the remote configuration.
+        if not self._local_api_selected():
+            self._shutdown_audit("remote/unconfigured API — local Node teardown ignored")
+            return
 
         pid = None
         if proc and proc.poll() is None:
@@ -7077,6 +7103,16 @@ class MainWindow(wx.Frame):
         self.settings.setdefault("general", {})["language"] = lang
         self.save_settings()
 
+    def _api_type_choice_required(self) -> bool:
+        """Require a choice when an inherited/default local API is absent."""
+        general = self.settings.get("general", {})
+        if not general.get("api_type_first_run_asked", False):
+            return True
+        connection = self.settings.get("connection", {})
+        if bool(connection.get("wpp_custom_api", False)):
+            return False
+        return not os.path.isfile(resource_path("api", "start.js"))
+
     def _local_api_selected(self) -> bool:
         """Return True only after an explicit first-run choice of local API.
 
@@ -7086,6 +7122,9 @@ class MainWindow(wx.Frame):
         the decision and prevents background startup or an early helper call
         from downloading Node, npm packages, or Chromium before the question.
         """
+        if (self._api_type_choice_required()
+                and not getattr(self, "_api_type_confirmed_this_run", False)):
+            return False
         general = self.settings.get("general", {})
         if not general.get("api_type_first_run_asked", False):
             return False
@@ -7099,8 +7138,7 @@ class MainWindow(wx.Frame):
         if self.background_mode:
             return
 
-        gen = self.settings.get("general", {})
-        if gen.get("api_type_first_run_asked", False):
+        if not self._api_type_choice_required():
             return
 
         msg = self.i18n.t("api_type_ask_message")
@@ -7114,6 +7152,7 @@ class MainWindow(wx.Frame):
 
         if result == wx.YES:
             # User wants local API (default)
+            self._api_type_confirmed_this_run = True
             self.settings.setdefault("connection", {})["wpp_custom_api"] = False
             self.wpp_custom_api = False
             self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
@@ -7121,6 +7160,7 @@ class MainWindow(wx.Frame):
             self._persist_global_settings()
         elif result == wx.NO:
             # User wants to specify a custom/remote API
+            self._api_type_confirmed_this_run = True
             self.settings.setdefault("connection", {})["wpp_custom_api"] = True
             self.wpp_custom_api = True
             self.save_settings()
