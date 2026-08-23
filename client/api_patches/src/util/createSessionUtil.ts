@@ -1436,9 +1436,11 @@ export default class CreateSessionUtil {
     // that was already built for exactly this — it just never received a
     // live edit event to actually detect until now.
     await client.onMessageEdit(async (chat: any, id: string, message: any) => {
-      message.session = client.session;
-      req.io.emit('received-message', { response: message });
-      callWebHook(client, req, 'onmessageedit', message);
+      if (message) {
+        message.session = client.session;
+        req.io.emit('received-message', { response: message });
+        callWebHook(client, req, 'onmessageedit', message);
+      }
     });
 
     await client.onIncomingCall(async (call) => {
