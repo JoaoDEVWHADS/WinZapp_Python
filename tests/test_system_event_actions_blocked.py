@@ -67,6 +67,9 @@ class _Stub:
     _reject_system_event_action = ConversationsPanel._reject_system_event_action
     _on_menu_star = ConversationsPanel._on_menu_star
     _persist_message_local_flag = ConversationsPanel._persist_message_local_flag
+    # _persist_message_local_flag delegates to the bulk form so both share
+    # one code path (see its docstring) — the stub needs it bound too.
+    _persist_message_local_flags = ConversationsPanel._persist_message_local_flags
 
     def __init__(self):
         self.main_window = _FakeMainWindow()

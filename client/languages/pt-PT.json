@@ -914,6 +914,7 @@
     "messages_copied_bulk": "Mensagens copiadas para a área de transferência como um único texto.",
     "success_star_bulk": "Mensagens marcadas com estrela.",
     "success_pin_bulk": "Mensagens afixadas.",
+    "mass_nothing_to_do": "Nada a fazer nas mensagens selecionadas.",
     "unselected": "Desmarcado",
     "recent_reactions": "Reações recentes:",
     "no_reactions_found": "Nenhuma reação encontrada.",

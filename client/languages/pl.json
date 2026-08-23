@@ -914,6 +914,7 @@
     "messages_copied_bulk": "Wiadomości skopiowane do schowka jako pojedynczy tekst.",
     "success_star_bulk": "Wiadomości oznaczone gwiazdką.",
     "success_pin_bulk": "Wiadomości przypięte.",
+    "mass_nothing_to_do": "Nie ma nic do zrobienia dla zaznaczonych wiadomości.",
     "unselected": "Odznaczony",
     "recent_reactions": "Ostatnie reakcje:",
     "no_reactions_found": "Nie znaleziono reakcji.",

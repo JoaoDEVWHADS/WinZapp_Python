@@ -914,6 +914,7 @@
     "messages_copied_bulk": "Mensajes copiados al portapapeles como un único texto.",
     "success_star_bulk": "Mensajes destacados.",
     "success_pin_bulk": "Mensajes fijados.",
+    "mass_nothing_to_do": "No hay nada que hacer en los mensajes seleccionados.",
     "unselected": "Deseleccionado",
     "recent_reactions": "Reacciones recientes:",
     "no_reactions_found": "No se encontraron reacciones.",

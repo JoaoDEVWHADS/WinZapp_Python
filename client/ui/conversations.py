@@ -8769,14 +8769,29 @@ class ConversationsPanel(wx.Panel):
         until the write completes (see DatabaseBridge), and this is always
         called from a UI event handler.
         """
+        self._persist_message_local_flags(jid, [msg])
+
+    def _persist_message_local_flags(self, jid: str, msgs: list):
+        """Bulk form of _persist_message_local_flag() — persists several
+        messages' locally-mutated flags on ONE background thread.
+
+        The single-message version delegates here so both share one code
+        path. It exists because the mass actions apply a flag to an entire
+        selection at once: doing that through the single-message helper spun
+        up one thread per message, and every one of them then blocked on the
+        same serialized DatabaseBridge connection anyway (see its docstring —
+        writes go through a single connection with a per-write asyncio.Lock),
+        so the threads bought nothing and only multiplied.
+        """
         db = getattr(self.main_window, "db", None)
-        if db is None:
+        if db is None or not msgs:
             return
-        def _do(j=jid, m=dict(msg)):
-            try:
-                db.insert_message(j, m)
-            except Exception as exc:
-                logging.warning("[_persist_message_local_flag] failed for %s: %s", j, exc)
+        def _do(j=jid, records=[dict(m) for m in msgs]):
+            for record in records:
+                try:
+                    db.insert_message(j, record)
+                except Exception as exc:
+                    logging.warning("[_persist_message_local_flag] failed for %s: %s", j, exc)
         threading.Thread(target=_do, daemon=True).start()
 
     def _on_menu_star(self, msg: dict):
@@ -11502,48 +11517,132 @@ class ConversationsPanel(wx.Panel):
         self._refresh_message_rows_by_ids(copied_ids)
         self.main_window.output(i18n.t("messages_copied_bulk"), interrupt=True)
 
+    def _mass_message_targets(self, flag: str) -> "tuple[list, list]":
+        """(messages to act on, all selected ids) for a mass message action.
+
+        Targets are real messages in the current selection that don't already
+        carry *flag* — system events are filtered here rather than left to
+        each single-message handler's own _reject_system_event_action guard,
+        so a mixed selection doesn't announce "unavailable" once per system
+        event. Order follows _sorted_messages, not set iteration order, same
+        as every other mass message action.
+        """
+        targets = [
+            m for m in self._sorted_messages
+            if not self._is_separator(m)
+            and not self._is_system_event(m)
+            and m.get("key", {}).get("id") in self.selected_messages
+            and not m.get(flag)
+        ]
+        return targets, list(self.selected_messages)
+
     def _on_mass_star_messages(self, event):
         """Star every selected message (the local-only flag _on_menu_star
         toggles) — always stars, never toggles off, so a selection mixing
         already-starred and unstarred messages doesn't end up partially
-        undone. System events are pre-filtered rather than left to
-        _on_menu_star's own _reject_system_event_action guard, so a mixed
-        selection doesn't announce "unavailable" once per system event."""
+        undone.
+
+        Applies the flag to the whole batch and repaints ONCE, rather than
+        calling _on_menu_star() per message: that handler runs a full
+        populate_messages() of its own every time, so a selection of N
+        messages repainted the entire list N times on the UI thread and gave
+        screen readers N floods of accessibility events (the exact thing
+        CLAUDE.md's Freeze()/Thaw() note warns about). Same aggregate shape
+        the older mass actions (_on_mass_forward_messages,
+        _on_mass_delete_messages) already use.
+        """
         if not self.selected_messages: return
-        to_star = [
-            m for m in self._sorted_messages
-            if not self._is_separator(m)
-            and not self._is_system_event(m)
-            and m.get("key", {}).get("id") in self.selected_messages
-            and not m.get("starred")
-        ]
-        ids = list(self.selected_messages)
+        i18n = self.main_window.i18n
+        to_star, ids = self._mass_message_targets("starred")
         self.selected_messages.clear()
-        self._refresh_message_rows_by_ids(ids)
+        if not to_star:
+            # Everything selected was already starred (or was a system event).
+            # Announcing success here told screen-reader users the action had
+            # been applied when nothing happened at all.
+            self._refresh_message_rows_by_ids(ids)
+            self.main_window.output(i18n.t("mass_nothing_to_do"), interrupt=True)
+            return
+
         for m in to_star:
-            self._on_menu_star(m)
-        self.main_window.output(self.main_window.i18n.t("success_star_bulk"), interrupt=True)
+            m["starred"] = True
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if jid:
+            self._persist_message_local_flags(jid, to_star)
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        self.main_window.output(i18n.t("success_star_bulk"), interrupt=True)
 
     def _on_mass_pin_messages(self, event):
         """Pin every not-yet-pinned selected message via WhatsApp's own
-        message-pin feature — reuses _on_menu_pin_message's optimistic
-        update + per-message server rollback for each one. Already-pinned
-        messages and system events are skipped up front, same reasoning as
-        _on_mass_star_messages above."""
+        message-pin feature (visible to everyone in the chat, unlike star).
+
+        Like _on_mass_star_messages, applies the optimistic update to the
+        whole batch and repaints once. The server calls additionally run on
+        ONE background thread, sequentially, and their failures are collected
+        into a single rollback + a single dialog reporting the count —
+        _on_menu_pin_message() starts a thread per message and pops its own
+        blocking wx.MessageBox per rejection, so pinning a selection the
+        server refuses used to fire N concurrent requests at the local
+        WPPConnect server and then stack N modal dialogs, one per message.
+        (Same failure mode c518cce fixed for posting several files as status.)
+        """
         if not self.selected_messages: return
-        to_pin = [
-            m for m in self._sorted_messages
-            if not self._is_separator(m)
-            and not self._is_system_event(m)
-            and m.get("key", {}).get("id") in self.selected_messages
-            and not m.get("pinInChat")
-        ]
-        ids = list(self.selected_messages)
+        i18n = self.main_window.i18n
+        to_pin, ids = self._mass_message_targets("pinInChat")
         self.selected_messages.clear()
-        self._refresh_message_rows_by_ids(ids)
+        if not to_pin:
+            self._refresh_message_rows_by_ids(ids)
+            self.main_window.output(i18n.t("mass_nothing_to_do"), interrupt=True)
+            return
+
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            self._refresh_message_rows_by_ids(ids)
+            return
+
         for m in to_pin:
-            self._on_menu_pin_message(m)
-        self.main_window.output(self.main_window.i18n.t("success_pin_bulk"), interrupt=True)
+            m["pinInChat"] = True
+        self._persist_message_local_flags(jid, to_pin)
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        self.main_window.output(i18n.t("success_pin_bulk"), interrupt=True)
+
+        # Keys are copied now: the message dicts can be replaced underneath us
+        # by a resync while the requests are still in flight.
+        pending = [(m, dict(m.get("key", {}))) for m in to_pin]
+        total   = len(pending)
+
+        def _do(j=jid, items=pending, n=total):
+            failed = []
+            for m, k in items:
+                try:
+                    ok = self.main_window.pin_message(j, k, True)
+                except Exception as exc:
+                    logging.warning("[_on_mass_pin_messages] pin_message raised for %s: %s",
+                                    k.get("id", ""), exc)
+                    ok = False
+                if not ok:
+                    failed.append(m)
+            if failed:
+                wx.CallAfter(self._on_mass_pin_failed, failed, j, n)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_mass_pin_failed(self, failed: list, jid: str, total: int):
+        """Roll back the optimistic pins the server rejected, all at once
+        (main thread) — one repaint and one dialog carrying the count, rather
+        than _on_pin_message_failed()'s per-message repaint + modal."""
+        for m in failed:
+            m["pinInChat"] = False
+        self._persist_message_local_flags(jid, failed)
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        i18n = self.main_window.i18n
+        wx.MessageBox(
+            f"{i18n.t('pin_message_failed')} ({len(failed)}/{total})",
+            i18n.t("pin_message"),
+            wx.OK | wx.ICON_WARNING,
+        )
 
     def _on_mass_forward_messages(self, event):
         if not self.selected_messages: return
