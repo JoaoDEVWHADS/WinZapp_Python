@@ -321,6 +321,9 @@ class ConversationsPanel(wx.Panel):
         self._reaction_map: dict = {}
         # Keep track of chats where we reached the start of history on the server
         self._reached_server_start: dict = {}
+        # When a server page overlaps local history completely, keep walking
+        # from that page's oldest message instead of repeating the same anchor.
+        self._server_history_anchor: dict = {}
 
         # ── Reply / quoted message state ────────────────────────────────────
         # When not None, the next sent message will be a quoted reply
@@ -4600,6 +4603,19 @@ class ConversationsPanel(wx.Panel):
         result.reverse()
         return result
 
+    def _history_storage_jid(self, remote_jid: str) -> str:
+        """Return the JID under which this conversation is stored locally."""
+        phone_to_lid = getattr(self.main_window, "_phone_to_lid", {})
+        mapped_lid = phone_to_lid.get(remote_jid, "")
+        if mapped_lid:
+            logging.info(
+                "[_load_older_messages] Using mapped local-history JID %s for %s",
+                mapped_lid,
+                remote_jid,
+            )
+            return mapped_lid
+        return remote_jid
+
     def _load_older_messages(self):
         """Load older messages from the local database, or fall back to the server if none remain locally."""
         if not self.conversation or not self._all_sorted_messages:
@@ -4614,10 +4630,11 @@ class ConversationsPanel(wx.Panel):
             )
             # Count separator objects to get the actual database message count currently in memory.
             loaded_db_count = sum(1 for m in self._all_sorted_messages if not self._is_separator(m))
-            logging.info(f"[_load_older_messages] Querying local DB for {remote_jid} with count={loaded_db_count}")
+            storage_jid = self._history_storage_jid(remote_jid)
+            logging.info(f"[_load_older_messages] Querying local DB for {storage_jid} with count={loaded_db_count}")
             
             # Fetch from local DB
-            local_msgs = self.main_window.db.get_messages(remote_jid, limit=limit, offset=loaded_db_count)
+            local_msgs = self.main_window.db.get_messages(storage_jid, limit=limit, offset=loaded_db_count)
             logging.info(f"[_load_older_messages] Local DB returned {len(local_msgs) if local_msgs else 0} messages")
             
             if local_msgs:
@@ -4679,17 +4696,20 @@ class ConversationsPanel(wx.Panel):
             self._is_loading_more = False
             return
         
-        # Get oldest non-separator and non-pending message ID
-        oldest_msg = None
-        for m in self._all_sorted_messages:
-            if m.get("_type") == "unread_separator":
-                continue
-            m_id = m.get("key", {}).get("id", "")
-            # Skip local pending/virtual messages (UUIDs contain hyphens or start with 'pending-')
-            if m.get("_local_pending") or m_id.startswith("pending-") or "-" in m_id:
-                continue
-            oldest_msg = m
-            break
+        # A duplicate-only page still advances the server cursor. Prefer that
+        # cursor on the next attempt so we do not request the same 200 rows.
+        oldest_msg = self._server_history_anchor.get(phone_jid)
+        if oldest_msg is None:
+            # Get oldest non-separator and non-pending message ID
+            for m in self._all_sorted_messages:
+                if m.get("_type") == "unread_separator":
+                    continue
+                m_id = m.get("key", {}).get("id", "")
+                # Skip local pending/virtual messages (UUIDs contain hyphens or start with 'pending-')
+                if m.get("_local_pending") or m_id.startswith("pending-") or "-" in m_id:
+                    continue
+                oldest_msg = m
+                break
 
         if oldest_msg is None:
             # Fallback to the first message if all are pending/separators
@@ -4711,7 +4731,7 @@ class ConversationsPanel(wx.Panel):
                 logging.info(f"[_load_older_messages_from_server thread] fetch_older_messages returned {len(fetched) if fetched is not None else 'None'}")
                 if fetched is not None:
                     if fetched:
-                        wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
+                        wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val, oldest_msg)
                     else:
                         wx.CallAfter(self._set_reached_start, phone_jid_val)
                 else:
@@ -4735,7 +4755,7 @@ class ConversationsPanel(wx.Panel):
             return
         self._is_loading_more = False
 
-    def _on_older_messages_loaded(self, fetched_messages, requested_jid):
+    def _on_older_messages_loaded(self, fetched_messages, requested_jid, requested_anchor=None):
         """Prepend fetched history to UI message list."""
         if not self.conversation or self.conversation.get("remoteJid") != requested_jid:
             logging.info(f"[_on_older_messages_loaded] Ignoring fetched messages for {requested_jid} (current active: {self.conversation.get('remoteJid') if self.conversation else 'None'})")
@@ -4771,12 +4791,28 @@ class ConversationsPanel(wx.Panel):
             logging.info(f"[_on_older_messages_loaded] n_new={n_new}, displayable_count={len(displayable)}, total={len(self._sorted_messages)}")
             
             if n_new == 0:
-                # All fetched messages are duplicates — we've reached the beginning
+                # Overlap is not proof of the beginning. LID/phone aliases can
+                # make a valid older page look entirely duplicated locally.
+                # Advance to the oldest row returned and keep the chat retryable.
                 phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
-                logging.info(f"[_on_older_messages_loaded] No new messages after dedup — marking reached_server_start for {phone_jid_val}")
-                if phone_jid_val:
-                    self._reached_server_start[phone_jid_val] = True
+                next_anchor = displayable[0]
+                previous_id = (requested_anchor or {}).get("key", {}).get("id", "")
+                next_id = next_anchor.get("key", {}).get("id", "")
+                if phone_jid_val and next_id and next_id != previous_id:
+                    self._server_history_anchor[phone_jid_val] = next_anchor
+                    logging.info(
+                        "[_on_older_messages_loaded] Duplicate page advanced anchor %s -> %s; keeping history retryable",
+                        previous_id,
+                        next_id,
+                    )
+                else:
+                    logging.warning(
+                        "[_on_older_messages_loaded] Duplicate page did not advance anchor for %s; not treating overlap as server start",
+                        phone_jid_val,
+                    )
                 return
+
+            self._server_history_anchor.pop(requested_jid, None)
             
             self._recompute_unread_sep_idx()
 
