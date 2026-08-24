@@ -13966,30 +13966,11 @@ class MainWindow(wx.Frame):
                 # dozens of chats stuck at exactly one message). Ask the phone
                 # for older history, a few chats per pass, and keep every such
                 # chat queued while its asynchronous reply is pending.
-                older_requested = getattr(self, "_older_requested_chats", None)
-                if not isinstance(older_requested, dict):
-                    older_requested = self._older_requested_chats = {}
-                requests_attempted = 0
-                requests_sent = 0
                 for jid, was in counts_before.items():
                     now = self._local_record_count(jid)
                     if now >= self.history_page_target() or now > was:
                         continue
-                    asked_at = older_requested.get(jid)
-                    due = (asked_at is None or
-                           time.time() - asked_at >= self._OLDER_REQUEST_GRACE)
-                    if due and requests_attempted < self._BACKFILL_WORKERS:
-                        requests_attempted += 1
-                        result = self.request_older_messages(jid)
-                        if result is True:
-                            older_requested[jid] = time.time()
-                            self._persist_older_requested()
-                            requests_sent += 1
                     self._keep_backfill_pending(jid, now)
-                if requests_sent:
-                    logging.info(
-                        "[backfill] Requested phone history for %d unchanged "
-                        "short chat(s); keeping them pending.", requests_sent)
 
                 completed = self._completed_backfill_targets(window)
                 grew = sum(1 for j, was in counts_before.items()
@@ -17389,7 +17370,8 @@ class MainWindow(wx.Frame):
                 count_before = self.db.get_message_count(remote_jid)
             except Exception:
                 count_before = None
-            page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
+            page = self.fetch_older_messages(
+                remote_jid, anchor, store_only=True, allow_phone_request=False)
             if not page:
                 break
             next_anchor = self._oldest_stored_message(remote_jid)
@@ -17413,36 +17395,11 @@ class MainWindow(wx.Frame):
                     anchor_identity,
                     time.monotonic() + self._DEEP_STALL_RETRY_SECONDS,
                 )
-                requested = False
-                older_requested = getattr(self, "_older_requested_chats", None)
-                if not isinstance(older_requested, dict):
-                    older_requested = self._older_requested_chats = {}
-                # Repeatable, not once-per-install. This used to ask only if
-                # the chat had never been asked, and the map is persisted, so
-                # the first request was the only one it would ever get: any
-                # later end-of-IndexedDB sent nothing, and a conversation that
-                # needs several on-demand cycles stayed truncated for good.
-                #
-                # Gated by the same grace that governs writing a chat off, so
-                # asking again is never cheaper than waiting for the answer
-                # already outstanding. Resetting the clock also has a second,
-                # deliberate effect: fetch_older_messages() only PERSISTS
-                # exhaustion once a full grace has passed since the last ask,
-                # so a chat we are still actively asking about can no longer be
-                # written off permanently while a request is in flight.
-                asked_at = older_requested.get(remote_jid)
-                due = (asked_at is None
-                       or (time.time() - asked_at) >= self._OLDER_REQUEST_GRACE)
-                if due:
-                    older_requested[remote_jid] = time.time()
-                    self._persist_older_requested()
-                    requested = bool(self.request_older_messages(remote_jid))
                 logging.warning(
                     "[deep-backfill] Page for %s did not advance the oldest "
-                    "database anchor (%s; %d new row(s)). Pausing this anchor "
-                    "instead of counting duplicates%s.",
+                    "database anchor (%s; %d new row(s)). Pausing passive "
+                    "background paging; no phone-history request was sent.",
                     remote_jid, anchor_identity, added,
-                    " and requesting older history from the phone" if requested else "",
                 )
                 break
             stalled.pop(remote_jid, None)
@@ -17550,7 +17507,10 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[history] Could not persist older_history_requested: %s", exc)
 
-    def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
+    def fetch_older_messages(
+        self, remote_jid, oldest_msg, store_only: bool = False,
+        allow_phone_request: bool = True,
+    ):
         """Fetch older messages from server starting before the oldest_msg.
 
         `store_only` writes the page to SQLite without growing the chat's
@@ -17566,7 +17526,7 @@ class MainWindow(wx.Frame):
 
         # Check if history is already marked as exhausted in-memory
         if remote_jid in getattr(self, "_exhausted_chats", set()):
-            if store_only:
+            if store_only or not allow_phone_request:
                 logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping background API query.")
                 return []
             # An explicit user scroll is stronger evidence than a cached
@@ -17678,7 +17638,15 @@ class MainWindow(wx.Frame):
                     asked_at = self._older_requested_chats.get(remote_jid)
                     asked_now = asked_at is None
                     requested = False
-                    if asked_now:
+                    if not allow_phone_request:
+                        history_pending = True
+                    if asked_now and not allow_phone_request:
+                        history_pending = True
+                        logging.info(
+                            "[fetch_older_messages] Background paging reached "
+                            "the browser-store edge for %s; deferring the phone "
+                            "request to interactive scroll.", remote_jid)
+                    elif asked_now:
                         asked_at = time.time()
                         self._older_requested_chats[remote_jid] = asked_at
                         self._persist_older_requested()
@@ -17692,7 +17660,7 @@ class MainWindow(wx.Frame):
                             self._older_requested_chats.pop(remote_jid, None)
                             self._persist_older_requested()
                             history_pending = True
-                    waited = max(0.0, time.time() - asked_at)
+                    waited = max(0.0, time.time() - (asked_at or time.time()))
                     if requested:
                         history_pending = True
                         logging.info(
@@ -17707,7 +17675,7 @@ class MainWindow(wx.Frame):
                             "pending (waited %.0fs); keeping it re-queryable.",
                             remote_jid, waited,
                         )
-                    else:
+                    elif allow_phone_request:
                         # In-memory always, so the chat leaves the deep-backfill
                         # queue at the same rate it always did. Persisted only
                         # once the phone has genuinely had its chance: the
@@ -17799,6 +17767,57 @@ class MainWindow(wx.Frame):
         except Exception as e:
             logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
             return None
+
+    def wait_for_older_messages(
+        self, remote_jid, oldest_msg, timeout: float = 300.0,
+        poll_interval: float = 2.0, retry_request_every: float = 10.0,
+        should_continue=None,
+    ):
+        """Poll one interactive phone-history request until its page arrives."""
+        jid = self._normalize_jid(remote_jid)
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        delay = max(0.5, float(poll_interval))
+        retry_delay = max(delay, float(retry_request_every))
+        next_interactive_retry = time.monotonic() + retry_delay
+        logging.info(
+            "[history-scroll] Waiting up to %.0fs for phone history for %s.",
+            timeout, jid)
+        while time.monotonic() < deadline:
+            if callable(should_continue):
+                try:
+                    if not should_continue():
+                        logging.info(
+                            "[history-scroll] Cancelled wait for %s because the "
+                            "conversation is no longer active.", jid)
+                        return None
+                except Exception:
+                    return None
+            if not getattr(self, "_wa_connected", False) or getattr(
+                self, "offline_mode", False
+            ):
+                return None
+            time.sleep(delay)
+            page = self.fetch_older_messages(
+                jid, oldest_msg, store_only=False, allow_phone_request=False)
+            if page is not None:
+                logging.info(
+                    "[history-scroll] Phone history became available for %s "
+                    "(%d message(s)).", jid, len(page))
+                return page
+            now = time.monotonic()
+            if now >= next_interactive_retry:
+                next_interactive_retry = now + retry_delay
+                page = self.fetch_older_messages(
+                    jid, oldest_msg, store_only=False, allow_phone_request=True)
+                if page is not None:
+                    logging.info(
+                        "[history-scroll] Interactive retry produced history "
+                        "for %s (%d message(s)).", jid, len(page))
+                    return page
+        logging.warning(
+            "[history-scroll] Timed out waiting for phone history for %s; "
+            "the chat remains re-queryable.", jid)
+        return None
 
     def save_audio_locally(self, msg, audio_content):
         """Encrypt and write a voice message to disk. Returns whether it worked."""

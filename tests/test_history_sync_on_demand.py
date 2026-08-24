@@ -621,3 +621,58 @@ class TestDocumentOnlyInterception:
         # why the old call was wrong and legitimately names it.
         assert "await (window as any).WAPI.loadEarlierMessages(" not in controller
         assert "await (window as any).WPP.chat.loadEarlierMessages(" not in controller
+
+
+class _InteractiveWaitStub:
+    wait_for_older_messages = MainWindow.wait_for_older_messages
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+
+    def __init__(self, responder):
+        self._wa_connected = True
+        self.offline_mode = False
+        self.calls = []
+        self._responder = responder
+
+    def fetch_older_messages(
+        self, jid, oldest, store_only=False, allow_phone_request=True
+    ):
+        self.calls.append(allow_phone_request)
+        return self._responder(allow_phone_request, len(self.calls))
+
+
+class TestInteractiveHistoryWait:
+    def _clock(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("main.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            "main.time.sleep",
+            lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def test_polling_reads_passively_until_the_page_arrives(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _InteractiveWaitStub(
+            lambda allow, call: [{"key": {"id": "older"}}] if call == 2 else None)
+        got = stub.wait_for_older_messages(
+            "120363000000000000@g.us", {"key": {"id": "anchor"}},
+            timeout=5, poll_interval=1, retry_request_every=10)
+        assert got and got[0]["key"]["id"] == "older"
+        assert stub.calls == [False, False]
+
+    def test_temporarily_refused_request_is_retried_interactively(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _InteractiveWaitStub(
+            lambda allow, call: [{"key": {"id": "older"}}] if allow else None)
+        got = stub.wait_for_older_messages(
+            "5511999999999@s.whatsapp.net", {"key": {"id": "anchor"}},
+            timeout=5, poll_interval=0.5, retry_request_every=1)
+        assert got and got[0]["key"]["id"] == "older"
+        assert stub.calls == [False, False, True]
+
+    def test_switching_conversation_cancels_the_wait(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _InteractiveWaitStub(lambda allow, call: None)
+        got = stub.wait_for_older_messages(
+            "chat@g.us", {"key": {"id": "anchor"}},
+            timeout=5, should_continue=lambda: False)
+        assert got is None
+        assert stub.calls == []
