@@ -4869,11 +4869,27 @@ class ConversationsPanel(wx.Panel):
         change — SetItemText only, no list rebuild/focus disruption."""
         if not msg_ids:
             return
-        ids = set(msg_ids)
+        self._set_message_row_texts(set(msg_ids))
+
+    def _set_message_row_texts(self, ids: set) -> set:
+        """Re-render every rendered row whose message id is in *ids*, and
+        return the ids that were actually found on screen.
+
+        The bare mechanism, shared by _refresh_message_rows_by_ids() (selection
+        markers, which never care whether a row is missing) and
+        _repaint_message_rows() (local flag changes, which fall back to a full
+        rebuild when one is).
+        """
+        found = set()
         total = len(self._sorted_messages)
         for i, m in enumerate(self._sorted_messages):
-            if not self._is_separator(m) and m.get("key", {}).get("id") in ids:
+            if self._is_separator(m):
+                continue
+            mid = m.get("key", {}).get("id", "")
+            if mid in ids:
                 self.messages_list.SetItemText(i, self._render_message_line(m, index=i, total=total))
+                found.add(mid)
+        return found
 
     def _on_messages_list_key_down(self, event):
         """Ctrl+Space toggles the focused row's membership in
@@ -6088,7 +6104,11 @@ class ConversationsPanel(wx.Panel):
             self._stop_playback_for_removed_messages({msg_id})
         if msg_id and self._focused_msg_id() == msg_id:
             self._hide_all_media_controls()
-        self.refresh_active_conversation_messages()
+        # Only the revoked message's own row changes text (it keeps its row —
+        # a revoke protocolMessage is still displayable), so re-rendering every
+        # row of the conversation for it was disproportionate.
+        if not self._repaint_message_rows([msg_id]):
+            self.refresh_active_conversation_messages()
 
     def on_audio_timer(self, event):
         if self._current_video_msg_id is not None:
@@ -8979,7 +8999,7 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self.main_window._schedule_save()
             self._persist_message_local_flag(jid, msg)
-            self.populate_messages(preserve_focus=True)
+            self._repaint_or_repopulate([msg.get("key", {}).get("id", "")])
 
     def _on_menu_pin_message(self, msg: dict):
         """Pin/unpin a message via WhatsApp's own message-pin feature.
@@ -8998,7 +9018,7 @@ class ConversationsPanel(wx.Panel):
         msg["pinInChat"] = pin
         self.main_window._schedule_save()
         self._persist_message_local_flag(jid, msg)
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate([msg.get("key", {}).get("id", "")])
 
         msg_key = dict(msg.get("key", {}))
 
@@ -9016,7 +9036,7 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self._persist_message_local_flag(jid, msg)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate([msg.get("key", {}).get("id", "")])
         i18n = self.main_window.i18n
         wx.MessageBox(
             i18n.t("pin_message_failed" if attempted_pin else "unpin_message_failed"),
@@ -11380,6 +11400,104 @@ class ConversationsPanel(wx.Panel):
             tuple(sig),
         )
 
+    @staticmethod
+    def _signature_changed_ids(old, new):
+        """Which message ids differ between two _messages_signature() snapshots.
+
+        Returns None when the difference isn't expressible as "these rows
+        changed": a different conversation, a moved unread separator, or an id
+        that is empty/repeated in either snapshot (which makes the per-id
+        comparison below ambiguous). Those change which row sits where, so no
+        per-row repaint can stand in for a rebuild.
+        """
+        if not (isinstance(old, tuple) and isinstance(new, tuple)):
+            return None
+        if len(old) != 4 or len(new) != 4 or old[:3] != new[:3]:
+            return None
+        old_rows = {r[0]: r for r in old[3]}
+        new_rows = {r[0]: r for r in new[3]}
+        if len(old_rows) != len(old[3]) or len(new_rows) != len(new[3]):
+            return None
+        if "" in old_rows or "" in new_rows:
+            return None
+        return {
+            mid for mid in set(old_rows) | set(new_rows)
+            if old_rows.get(mid) != new_rows.get(mid)
+        }
+
+    def _adopt_signature_after_repaint(self, msg_ids: set) -> None:
+        """Move refresh_messages_if_changed()'s fingerprint forward after rows
+        were repainted in place.
+
+        populate_messages() snapshots the fingerprint on its way out, so a
+        local change used to land in the cache as a side effect of rebuilding.
+        Repainting instead leaves the cache describing the state *before* the
+        change, and the next background refresh would find a mismatch and
+        rebuild the whole list — moving the user's focus for something already
+        correct on screen. Adopting the new fingerprint unconditionally would
+        be worse: anything else that changed in `records` since the last
+        rebuild would be swallowed and never rendered. So it's adopted only
+        when the rows that differ are the ones just repainted.
+        """
+        try:
+            new_sig = self._messages_signature()
+        except Exception:
+            logging.exception("[_adopt_signature_after_repaint] signature failed")
+            self._messages_signature_cache = None
+            return
+        changed = self._signature_changed_ids(
+            getattr(self, "_messages_signature_cache", None), new_sig
+        )
+        if changed is not None and changed <= set(msg_ids):
+            self._messages_signature_cache = new_sig
+
+    def _repaint_message_rows(self, msg_ids) -> bool:
+        """Repaint the rows of *msg_ids* in place instead of rebuilding the
+        list. Returns whether every requested row was found and repainted;
+        callers fall back to a full rebuild when it returns False.
+
+        Starring, pinning and a remote "delete for everyone" each change the
+        text of rows already on screen and nothing else: the list is sorted by
+        timestamp, which none of them touch, so no row moves, appears or
+        disappears (a revoked message keeps its row — see
+        _is_displayable_message()). populate_messages() nevertheless re-sorts
+        and de-duplicates every record in the conversation, rebuilds the
+        reaction map, recomputes the unread separator and the pagination
+        window, then DeleteAllItems() + Append()s every row — and hands the
+        screen reader a whole new list in the process (CLAUDE.md's
+        Freeze()/Thaw() note). Starring a selection of messages in a long
+        conversation is the visible case. Same idea as main.py's
+        refresh_chat_row_text() for the conversations list.
+        """
+        ids = {i for i in (msg_ids or ()) if i}
+        if not ids or not self._sorted_messages:
+            return False
+        # Backing list out of step with the control means a targeted
+        # SetItemText would write the right text into the wrong row.
+        if self.messages_list.GetItemCount() != len(self._sorted_messages):
+            logging.info("[_repaint_message_rows] list out of step with rows — full path")
+            return False
+        try:
+            found = self._set_message_row_texts(ids)
+        except Exception:
+            logging.exception("[_repaint_message_rows] failed — full path")
+            return False
+        if found != ids:
+            # Something asked for isn't rendered: paginated out of the current
+            # window, or replaced by a resync while a server call was in
+            # flight. The rebuild is the only thing that can show it.
+            logging.info("[_repaint_message_rows] %d of %d rows not rendered — full path",
+                         len(ids - found), len(ids))
+            return False
+        self._adopt_signature_after_repaint(ids)
+        return True
+
+    def _repaint_or_repopulate(self, msg_ids) -> None:
+        """Repaint just the rows of *msg_ids*, rebuilding the list only if
+        that isn't possible. The shape every local flag change uses."""
+        if not self._repaint_message_rows(msg_ids):
+            self.populate_messages(preserve_focus=True)
+
     def refresh_messages_if_changed(self):
         """Repopulate the messages list only when its content actually changed.
 
@@ -11828,7 +11946,9 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self._persist_message_local_flags(jid, to_star)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        # The whole selection, not just to_star: clearing selected_messages
+        # above dropped the " selecionado" marker from every row in it.
+        self._repaint_or_repopulate(ids)
         self.main_window.output(i18n.t("success_star_bulk"), interrupt=True)
 
     def _on_mass_pin_messages(self, event):
@@ -11863,7 +11983,7 @@ class ConversationsPanel(wx.Panel):
             m["pinInChat"] = True
         self._persist_message_local_flags(jid, to_pin)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate(ids)   # see _on_mass_star_messages on `ids`
         self.main_window.output(i18n.t("success_pin_bulk"), interrupt=True)
 
         # Keys are copied now: the message dicts can be replaced underneath us
@@ -11895,7 +12015,7 @@ class ConversationsPanel(wx.Panel):
             m["pinInChat"] = False
         self._persist_message_local_flags(jid, failed)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate([m.get("key", {}).get("id", "") for m in failed])
         i18n = self.main_window.i18n
         wx.MessageBox(
             f"{i18n.t('pin_message_failed')} ({len(failed)}/{total})",

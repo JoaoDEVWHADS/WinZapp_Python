@@ -75,6 +75,10 @@ class _Stub:
         self.main_window = _FakeMainWindow()
         self.conversation = {"remoteJid": "group@g.us"}
         self.populated = 0
+        self.repainted = []
+
+    def _repaint_or_repopulate(self, msg_ids):
+        self.repainted.append(sorted(i for i in msg_ids if i))
 
     def populate_messages(self, preserve_focus=False):
         self.populated += 1
@@ -113,6 +117,7 @@ class TestStarIsGuarded:
         assert "starred" not in msg
         assert stub.main_window.saves == 0
         assert stub.populated == 0
+        assert stub.repainted == []
         assert stub.main_window.announced == ["system_event_action_unavailable"]
 
     def test_normal_message_is_still_starred(self):
@@ -123,7 +128,7 @@ class TestStarIsGuarded:
 
         assert msg["starred"] is True
         assert stub.main_window.saves == 1
-        assert stub.populated == 1
+        assert stub.repainted == [[NORMAL_MESSAGE["key"]["id"]]]
         assert stub.main_window.announced == []
 
 

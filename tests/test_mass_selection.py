@@ -186,6 +186,7 @@ class _Panel:
     _select_chat_at = ConversationsPanel._select_chat_at
     _all_chat_jids = ConversationsPanel._all_chat_jids
     _refresh_message_rows_by_ids = ConversationsPanel._refresh_message_rows_by_ids
+    _set_message_row_texts = ConversationsPanel._set_message_row_texts
     _render_message_line = lambda self, msg, index=None, total=None: msg.get("key", {}).get("id", "")
     _extract_timestamp = ConversationsPanel._extract_timestamp
 
@@ -217,11 +218,20 @@ class _Panel:
         # The mass star/pin handlers apply the flag themselves and repaint
         # once, instead of delegating to the single-message handlers — these
         # record that they do exactly one repaint / one persist per batch.
+        # The repaint is per-row (_repaint_or_repopulate); populate_calls
+        # stays here to assert the full rebuild is NOT what happens.
         self.populate_calls = 0
+        self.repainted = []
+        self.repaint_ok = True
         self.persisted = []
 
     def populate_messages(self, preserve_focus=False):
         self.populate_calls += 1
+
+    def _repaint_or_repopulate(self, msg_ids):
+        self.repainted.append(sorted(i for i in msg_ids if i))
+        if not self.repaint_ok:
+            self.populate_messages(preserve_focus=True)
 
     def _persist_message_local_flags(self, jid, msgs):
         self.persisted.append((jid, [m.get("key", {}).get("id", "") for m in msgs]))
@@ -1214,20 +1224,44 @@ class TestMassStarAndPinAreBatched:
         panel.selected_messages = {"m1", "m2", "m3"}
         panel._on_mass_star_messages(None)
         assert all(m["starred"] for m in msgs)
-        assert panel.populate_calls == 1
+        assert panel.repainted == [["m1", "m2", "m3"]]
+        assert panel.populate_calls == 0, "the affected rows are repainted, not the whole list"
         assert panel.persisted == [("grupo@g.us", ["m1", "m2", "m3"])]
         assert panel.main_window.saves == 1
+
+    def test_starring_repaints_the_whole_selection_not_just_the_changed_rows(self):
+        """Clearing selected_messages drops the " selecionado" marker from
+        every row that was in it, including the ones already starred and
+        therefore left alone — those rows still have to be repainted."""
+        msgs = [_msg("m1"), _msg("m2")]
+        msgs[1]["starred"] = True
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_star_messages(None)
+        assert panel.repainted == [["m1", "m2"]]
 
     def test_pinning_a_batch_repaints_once_and_uses_one_thread(self, run_threads):
         msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2", "m3"}
         panel._on_mass_pin_messages(None)
-        assert panel.populate_calls == 1
+        assert panel.repainted == [["m1", "m2", "m3"]]
+        assert panel.populate_calls == 0
         assert len(_CapturedThread.created) == 1, "one worker for the batch, not one per message"
         run_threads()
         assert [c[1] for c in panel.main_window.pin_calls] == ["m1", "m2", "m3"]
-        assert panel.populate_calls == 1, "no repaint when nothing failed"
+        assert len(panel.repainted) == 1, "no repaint when nothing failed"
+
+    def test_a_repaint_that_cannot_be_done_falls_back_to_the_full_rebuild(self):
+        """A row that isn't rendered (paginated out, replaced by a resync)
+        can only be shown by populate_messages() — the caller must not be
+        left with the change applied and nothing on screen."""
+        msgs = [_msg("m1")]
+        panel = _Panel(messages=msgs)
+        panel.repaint_ok = False
+        panel.selected_messages = {"m1"}
+        panel._on_mass_star_messages(None)
+        assert panel.populate_calls == 1
 
     def test_server_rejections_produce_one_dialog_with_a_count(self, run_threads, boxes):
         msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
@@ -1250,7 +1284,10 @@ class TestMassStarAndPinAreBatched:
         assert msgs[1]["pinInChat"] is False     # rejected, rolled back
         assert msgs[2]["pinInChat"] is False
         assert panel.persisted[-1] == ("grupo@g.us", ["m2", "m3"])
-        assert panel.populate_calls == 2, "one repaint to apply, one to roll back"
+        assert panel.repainted == [["m1", "m2", "m3"], ["m2", "m3"]], (
+            "one repaint to apply the batch, one for the rolled-back rows only"
+        )
+        assert panel.populate_calls == 0
 
     def test_a_raising_pin_call_is_treated_as_a_rejection(self, run_threads, boxes):
         """One message blowing up must not abandon the rest of the batch."""
