@@ -16,6 +16,17 @@
 import { Chat } from '@wppconnect-team/wppconnect';
 import { Request, Response } from 'express';
 
+import {
+  countJidFallback,
+  countStoreRecovery,
+  observeEvaluate,
+} from '../middleware/instrumentation';
+import {
+  observePayload,
+  SyncChatListSchema,
+  SyncContactListSchema,
+  SyncMessageListSchema,
+} from '../dto/sync';
 import { contactToArray, unlinkAsync } from '../util/functions';
 import { clientsArray } from '../util/sessionUtil';
 
@@ -151,6 +162,205 @@ export async function getAllChats(req: Request, res: Response) {
   }
 }
 
+/**
+ * Read the chat list without trusting WhatsApp Web's in-memory ChatStore to
+ * already be hydrated.
+ *
+ * A large linked account can have every chat safely persisted in the
+ * `model-storage` IndexedDB while `WPP.chat.list()` returns [] (or even throws
+ * while serialising an undefined collection).  Retrying the same call does not
+ * repair that split-brain state: the captured 937-chat session returned an
+ * empty list 99 times while get-messages continued to read IndexedDB normally.
+ *
+ * On that exact failure only, load the persisted chat ids and ask wa-js to
+ * `find()` them. find() is the supported API that creates/loads a ChatModel and
+ * registers it in ChatStore. Work is chunked, bounded, and single-flight inside
+ * the page so Python's retry loop cannot start several 900-chat recoveries at
+ * once. The healthy path still performs one ordinary WPP.chat.list() call.
+ */
+async function listChatsWithStoreRecovery(
+  req: Request,
+  options: Record<string, any>
+): Promise<any[]> {
+  const result: any = await observeEvaluate('list-chats', () =>
+    req.client.page.evaluate(
+    async ({ listOptions }) => {
+      const root = globalThis as any;
+
+      const serialise = async () => {
+        try {
+          const models = await root.WPP?.chat?.list?.(listOptions);
+          if (!Array.isArray(models)) {
+            return { chats: [], error: 'WPP.chat.list returned a non-array value' };
+          }
+          const serializer = root.WAPI?._serializeChatObj;
+          if (typeof serializer !== 'function') {
+            return { chats: [], error: 'WAPI._serializeChatObj is unavailable' };
+          }
+          return { chats: models.map((chat: any) => serializer(chat)) };
+        } catch (error: any) {
+          return { chats: [], error: error?.message || String(error) };
+        }
+      };
+
+      const first = await serialise();
+      if (first.chats.length > 0) {
+        return { ...first, recovered: false };
+      }
+
+      // Every concurrent list-chats request awaits the same recovery, and a
+      // later, genuinely new store loss can still be repaired once this one
+      // finishes. The in-flight promise alone is not enough to guarantee that:
+      // it is cleared the moment the recovery settles, which is BEFORE the
+      // requests waiting on it have re-read the store, so a request arriving
+      // in that window would start a second 900-chat scan over a store that
+      // was just rebuilt. The cooldown closes it — the single-flight promise
+      // covers requests that arrive during the scan, the timestamp covers the
+      // ones that arrive right after it.
+      const RECOVERY_COOLDOWN_MS = 30_000;
+      const recoveredAt = root.__winzappChatStoreRecoveredAt || 0;
+      const coolingDown = Date.now() - recoveredAt < RECOVERY_COOLDOWN_MS;
+      if (!root.__winzappChatStoreRecoveryPromise && !coolingDown) {
+        root.__winzappChatStoreRecoveryPromise = (async () => {
+          const ids = await new Promise<string[]>((resolve) => {
+            let open: IDBOpenDBRequest;
+            try {
+              open = indexedDB.open('model-storage');
+            } catch (_error) {
+              resolve([]);
+              return;
+            }
+            open.onerror = () => resolve([]);
+            open.onsuccess = () => {
+              const db = open.result;
+              const found = new Set<string>();
+              // model-storage's value shape is not stable across WhatsApp Web
+              // releases.  Current builds wrap the jid several objects deep
+              // (and sometimes put it inside a compound IndexedDB key), so the
+              // old shallow/suffix-only reader saw 0 ids although this store
+              // contained hundreds of chat records.
+              const jidPattern = /([0-9A-Za-z._-]+@(?:c\.us|s\.whatsapp\.net|lid|g\.us|newsletter|broadcast))/g;
+
+              const add = (candidate: any) => {
+                const seen = new Set<any>();
+                let visited = 0;
+                const walk = (value: any, depth: number) => {
+                  if (found.size >= 5000 || visited++ >= 300 || depth > 6 || value == null) return;
+                  if (typeof value === 'string') {
+                    // Avoid scanning unexpectedly large serialized payloads.
+                    // JIDs live in keys/metadata near the beginning of records.
+                    const text = value.slice(0, 16_384);
+                    jidPattern.lastIndex = 0;
+                    let match: RegExpExecArray | null;
+                    while ((match = jidPattern.exec(text)) !== null) {
+                      found.add(match[1]);
+                      if (found.size >= 5000) return;
+                    }
+                    return;
+                  }
+                  if (typeof value !== 'object' || seen.has(value)) return;
+                  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+                  seen.add(value);
+                  if (Array.isArray(value)) {
+                    for (const item of value.slice(0, 100)) walk(item, depth + 1);
+                    return;
+                  }
+                  for (const [key, nested] of Object.entries(value).slice(0, 100)) {
+                    walk(key, depth + 1);
+                    walk(nested, depth + 1);
+                  }
+                };
+                walk(candidate, 0);
+              };
+
+              try {
+                const transaction = db.transaction('chat', 'readonly');
+                const store = transaction.objectStore('chat');
+                const cursor = store.openCursor();
+                cursor.onerror = () => {
+                  db.close();
+                  resolve(Array.from(found));
+                };
+                cursor.onsuccess = () => {
+                  const current = cursor.result;
+                  if (!current || found.size >= 5000) {
+                    db.close();
+                    resolve(Array.from(found));
+                    return;
+                  }
+                  const value: any = current.value;
+                  add(current.primaryKey);
+                  add(current.key);
+                  add(value);
+                  current.continue();
+                };
+              } catch (_error) {
+                db.close();
+                resolve([]);
+              }
+            };
+          });
+
+          const findChat = root.WPP?.chat?.find;
+          if (typeof findChat !== 'function' || ids.length === 0) {
+            return { indexedDbChats: ids.length, rehydrated: 0, failed: ids.length };
+          }
+
+          let rehydrated = 0;
+          let failed = 0;
+          const batchSize = 24;
+          for (let offset = 0; offset < ids.length; offset += batchSize) {
+            const batch = ids.slice(offset, offset + batchSize);
+            const settled = await Promise.allSettled(
+              batch.map((jid) => findChat(jid))
+            );
+            for (const item of settled) {
+              if (item.status === 'fulfilled' && item.value) rehydrated++;
+              else failed++;
+            }
+          }
+          return { indexedDbChats: ids.length, rehydrated, failed };
+        })().finally(() => {
+          root.__winzappChatStoreRecoveredAt = Date.now();
+          delete root.__winzappChatStoreRecoveryPromise;
+        });
+      }
+
+      // Read the property once: within the cooldown there is no promise to
+      // await, and the store is simply re-read — a scan that just finished is
+      // not worth repeating for every request in the retry loop behind it.
+      const pending = root.__winzappChatStoreRecoveryPromise;
+      const recovery = pending
+        ? await pending
+        : { skipped: 'recovery ran recently' };
+      const second = await serialise();
+      return {
+        ...second,
+        recovered: true,
+        firstError: first.error,
+        recovery,
+      };
+    },
+    { listOptions: options }
+    )
+  );
+
+  if (result?.recovered) {
+    countStoreRecovery(
+      (result?.chats?.length || 0) > 0 ? 'recovered' : 'still_empty'
+    );
+    req.logger.warn(
+      `[listChats] ChatStore was empty/invalid; IndexedDB recovery: ${JSON.stringify(
+        result.recovery || {}
+      )}; recovered list has ${result?.chats?.length || 0} chat(s)`
+    );
+  }
+  if (result?.error && !result?.chats?.length) {
+    req.logger.warn(`[listChats] ${result.error}`);
+  }
+  return Array.isArray(result?.chats) ? result.chats : [];
+}
+
 export async function listChats(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Chat"]
@@ -249,8 +459,7 @@ export async function listChats(req: Request, res: Response) {
     if (ignoreGroupMetadata !== undefined)
       options.ignoreGroupMetadata = ignoreGroupMetadata;
 
-    const response = await req.client.listChats(options);
-    const chats = Array.isArray(response) ? response : [];
+    const chats = await listChatsWithStoreRecovery(req, options);
 
     // WhatsApp Web creates one-to-one ChatStore entries for group participants
     // when it receives only an encryption-key notification from them. These are
@@ -268,7 +477,12 @@ export async function listChats(req: Request, res: Response) {
       return hasActivity || isKnownConversation;
     });
 
-    res.status(200).json(visibleChats);
+    res.status(200).json(
+      observePayload(SyncChatListSchema, visibleChats, {
+        logger: req.logger,
+        endpoint: 'list-chats',
+      })
+    );
   } catch (e) {
     req.logger.error(e);
     res
@@ -896,7 +1110,18 @@ export async function deleteMessage(req: Request, res: Response) {
     });
   } catch (e) {
     req.logger.error(e);
-    res
+    const errorText = String((e as any)?.message || e || '');
+    // DELETE is idempotent: if WPPConnect cannot resolve the message because
+    // it is already gone from WhatsApp's Store, the requested final state has
+    // already been reached. Returning 500 here made the client show an error
+    // after a successful first revoke and encouraged a pointless second try.
+    if (/message .* not found|not found/i.test(errorText)) {
+      return res.status(200).json({
+        status: 'success',
+        response: { message: 'Message already deleted', alreadyDeleted: true },
+      });
+    }
+    return res
       .status(500)
       .json({ status: 'error', message: 'Error on delete message', error: e });
   }
@@ -1586,6 +1811,29 @@ export async function getMessages(req: Request, res: Response) {
           console.log(
             `[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`
           );
+
+          // Resolve chatId to active ChatModel in browser (LID vs phone)
+          let targetChatId = chatId;
+          let altChatId: string | null = null;
+          try {
+            const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(chatId);
+            const alt = chatId.endsWith('@c.us') ? mapping?.lid : mapping?.phoneNumber;
+            const aId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+            if (aId) altChatId = aId;
+          } catch (e) {}
+          if (!altChatId) {
+            try {
+              const contact = (window as any).WPP?.contact?.get?.(chatId);
+              const alt = chatId.endsWith('@c.us') ? contact?.lid : (chatId.endsWith('@lid') ? contact?.id : null);
+              const aId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+              if (aId) altChatId = aId;
+            } catch (e) {}
+          }
+
+          if (!(window as any).WPP?.chat?.get?.(chatId) && altChatId && (window as any).WPP?.chat?.get?.(altChatId)) {
+            targetChatId = altChatId;
+          }
+
           const getMsgSafe = async (msgId: string) => {
             try {
               if (!msgId) return null;
@@ -1594,15 +1842,38 @@ export async function getMessages(req: Request, res: Response) {
                 : null;
               if (m) return m;
 
-              // Fallback 1: replace @c.us with @s.whatsapp.net or vice versa
+              // Fallback 1: Swap fromMe prefix (true_ <-> false_)
+              if (msgId.startsWith('true_')) {
+                const inverted = msgId.replace(/^true_/, 'false_');
+                m = await (window as any).WPP.chat.getMessageById(inverted);
+                if (m) return m;
+              } else if (msgId.startsWith('false_')) {
+                const inverted = msgId.replace(/^false_/, 'true_');
+                m = await (window as any).WPP.chat.getMessageById(inverted);
+                if (m) return m;
+              }
+
+              // Fallback 2: Domain swaps (@c.us <-> @s.whatsapp.net <-> @lid)
               if (msgId.includes('@c.us')) {
                 m = await (window as any).WPP.chat.getMessageById(
                   msgId.replace(/@c\.us/g, '@s.whatsapp.net')
                 );
                 if (m) return m;
               }
+              if (targetChatId && !msgId.includes(targetChatId)) {
+                const parts = msgId.split('_');
+                if (parts.length >= 3) {
+                  const withChat = `${parts[0]}_${targetChatId}_${parts.slice(2).join('_')}`;
+                  m = await (window as any).WPP.chat.getMessageById(withChat);
+                  if (m) return m;
+                  const invPrefix = parts[0] === 'true' ? 'false' : 'true';
+                  const withChatInv = `${invPrefix}_${targetChatId}_${parts.slice(2).join('_')}`;
+                  m = await (window as any).WPP.chat.getMessageById(withChatInv);
+                  if (m) return m;
+                }
+              }
 
-              // Fallback 2: strip participant suffix for group messages (first 3 parts: prefix_chatId_id)
+              // Fallback 3: strip participant suffix for group messages
               const parts = msgId.split('_');
               if (parts.length > 3) {
                 const strippedId = parts.slice(0, 3).join('_');
@@ -1610,17 +1881,13 @@ export async function getMessages(req: Request, res: Response) {
                 if (m) return m;
               }
 
-              // Fallback 3: search Store.Msg.models by raw message ID or prefix match (group messages with participant suffix)
+              // Fallback 4: search Store.Msg.models or chat.msgs.models by raw message ID
               const rawId = parts.length > 2 ? parts[2] : msgId;
-              if (
-                (window as any).Store &&
-                (window as any).Store.Msg &&
-                (window as any).Store.Msg.models
-              ) {
-                const models = (window as any).Store.Msg.models;
-                const found = models.find((item: any) => {
+              const searchModels = (models: any[]) => {
+                if (!Array.isArray(models)) return null;
+                return models.find((item: any) => {
                   if (!item || !item.id) return false;
-                  const ser = item.id._serialized || '';
+                  const ser = item.id._serialized || (typeof item.id === 'string' ? item.id : '');
                   const itemId = item.id.id || '';
                   return (
                     itemId === rawId ||
@@ -1628,6 +1895,15 @@ export async function getMessages(req: Request, res: Response) {
                     (rawId && ser.includes(rawId))
                   );
                 });
+              };
+
+              if ((window as any).Store?.Msg?.models) {
+                const found = searchModels((window as any).Store.Msg.models);
+                if (found) return found;
+              }
+              const chatObj = (window as any).WPP?.chat?.get?.(targetChatId);
+              if (chatObj?.msgs?.models) {
+                const found = searchModels(chatObj.msgs.models);
                 if (found) return found;
               }
               return null;
@@ -1639,142 +1915,283 @@ export async function getMessages(req: Request, res: Response) {
             }
           };
 
-          // Ensure the chat is loaded. (There is deliberately no
-          // "loadEarlierMessages" call here any more: WPP.chat has no such
-          // method — the guard `if (WPP.chat.loadEarlierMessages)` was simply
-          // always false, so this block only ever did the find(). Pulling more
-          // history is not something the page can do on its own; it needs an
-          // on-demand request to the phone — see requestOlderMessages below.)
+          // Ensure the chat is loaded.
           try {
             if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
-              await (window as any).WPP.chat.find(chatId);
+              await (window as any).WPP.chat.find(targetChatId);
             }
           } catch (e) {
             // Ignore
           }
 
-          // 1. Check if the target anchor message exists in the browser Store
+          // 1. Check if the target anchor message exists in the browser Store.
+          let resolvedAnchorId = id;
           let anchorExists = false;
           if (id) {
             const msg = await getMsgSafe(id);
             if (msg) {
               anchorExists = true;
+              resolvedAnchorId = msg.id?._serialized || msg.id || id;
+              console.log(`[browser-evaluate] Anchor resolved to canonical: ${resolvedAnchorId}`);
             }
           }
 
-          // 2. If the anchor doesn't exist, load history from the server page-by-page
-          let attempts = 0;
-          const maxAttempts = 2;
-          let oldestId = null;
-          let originalOldestId = null;
+          // 2. If the anchor is not in the in-memory WPP store it may still be
+          // in IndexedDB. Use ChatModel.loadEarlierMsgs()
+          if (id && !anchorExists) {
+            try {
+              const chat =
+                (window as any).WPP?.chat?.get?.(targetChatId) ||
+                (window as any).WAPI?.getChat?.(targetChatId);
+              if (chat && typeof chat.loadEarlierMsgs === 'function') {
+                console.log(
+                  '[browser-evaluate] Anchor not in memory — calling loadEarlierMsgs() to read IndexedDB...'
+                );
+                for (let i = 0; i < 5; i++) {
+                  await chat.loadEarlierMsgs();
+                  const retryMsg = await getMsgSafe(id);
+                  if (retryMsg) {
+                    anchorExists = true;
+                    resolvedAnchorId = retryMsg.id?._serialized || retryMsg.id || id;
+                    console.log(
+                      `[browser-evaluate] Anchor found after loadEarlierMsgs() call ${i + 1}: ${resolvedAnchorId}`
+                    );
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              console.log(`[browser-evaluate] loadEarlierMsgs failed: ${e}`);
+            }
+          }
 
-          // Get initial oldest message currently loaded
+          // 3. If still not found, fall back to WPP.chat.getMessages walkback.
+          let oldestId: string | null = null;
+          let originalOldestId: string | null = null;
+
           if (id && !anchorExists) {
             console.log(
-              `[browser-evaluate] Anchor not found in store. Fetching current messages to find oldest...`
+              '[browser-evaluate] Anchor not found via loadEarlierMsgs. Trying WPP walkback...'
             );
             const currentMsgs = await (window as any).WPP.chat.getMessages(
-              chatId,
+              targetChatId,
               { count: 100 }
-            );
-            console.log(
-              `[browser-evaluate] Current messages in store count: ${
-                currentMsgs ? currentMsgs.length : 0
-              }`
             );
             if (currentMsgs && currentMsgs.length > 0) {
               let oldestMsg = currentMsgs[0];
               for (const m of currentMsgs) {
-                if (m.t < oldestMsg.t) {
-                  oldestMsg = m;
-                }
+                if (m.t < oldestMsg.t) oldestMsg = m;
               }
               oldestId = oldestMsg.id._serialized || oldestMsg.id;
               originalOldestId = oldestId;
-              console.log(
-                `[browser-evaluate] Oldest loaded message JID/ID: ${oldestId}`
-              );
-            }
-          }
-
-          while (id && !anchorExists && oldestId && attempts < maxAttempts) {
-            console.log(
-              `[browser-evaluate] Walkback attempt ${
-                attempts + 1
-              }/${maxAttempts} from oldestId=${oldestId}...`
-            );
-            const loaded = await (window as any).WPP.chat.getMessages(chatId, {
-              count: 100,
-              direction: 'before',
-              id: oldestId,
-            });
-
-            console.log(
-              `[browser-evaluate] Walkback returned ${
-                loaded ? loaded.length : 0
-              } messages`
-            );
-            if (!loaded || loaded.length === 0) {
-              break;
             }
 
-            // Find the new oldest message from the loaded batch
-            let oldestMsg = loaded[0];
-            for (const m of loaded) {
-              if (m.t < oldestMsg.t) {
-                oldestMsg = m;
+            let attempts = 0;
+            const maxAttempts = 2;
+            while (!anchorExists && oldestId && attempts < maxAttempts) {
+              const loaded = await (window as any).WPP.chat.getMessages(targetChatId, {
+                count: 100,
+                direction: 'before',
+                id: oldestId,
+              });
+              if (!loaded || loaded.length === 0) break;
+              let oldestMsg = loaded[0];
+              for (const m of loaded) {
+                if (m.t < oldestMsg.t) oldestMsg = m;
               }
+              oldestId = oldestMsg.id._serialized || oldestMsg.id;
+              const checkMsg = await getMsgSafe(id);
+              if (checkMsg) {
+                anchorExists = true;
+                resolvedAnchorId = checkMsg.id?._serialized || checkMsg.id || id;
+                break;
+              }
+              attempts++;
             }
-            oldestId = oldestMsg.id._serialized || oldestMsg.id;
-
-            const checkMsg = await getMsgSafe(id);
-            if (checkMsg) {
-              anchorExists = true;
-              console.log(`[browser-evaluate] Anchor found during walkback!`);
-              break;
-            }
-
-            attempts++;
           }
 
-          // 3. Now query the final response
-          let queryId = id;
+          // 4. Resolve queryId
+          let queryId = resolvedAnchorId || id;
           if (id && !anchorExists) {
-            if (originalOldestId) {
-              queryId = originalOldestId;
-              console.log(
-                `[browser-evaluate] Anchor not found after walkback. Falling back to originalOldestId: ${queryId}`
-              );
-            } else {
-              console.log(
-                `[browser-evaluate] Anchor not found, and no originalOldestId resolved. Fetching default messages...`
-              );
-              const currentMsgs = await (window as any).WPP.chat.getMessages(
-                chatId,
-                { count: 100 }
-              );
-              if (currentMsgs && currentMsgs.length > 0) {
-                let oldestMsg = currentMsgs[0];
-                for (const m of currentMsgs) {
-                  if (m.t < oldestMsg.t) {
-                    oldestMsg = m;
-                  }
-                }
-                queryId = oldestMsg.id._serialized || oldestMsg.id;
+            queryId = originalOldestId || resolvedAnchorId || id;
+          }
+
+          console.log(
+            `[browser-evaluate] Final query using anchor: ${queryId}`
+          );
+          let result: any[] = [];
+          try {
+            if ((window as any).WPP?.chat?.getMessages) {
+              const rawMsgs = await (window as any).WPP.chat.getMessages(targetChatId, {
+                count: targetCount,
+                direction: 'before',
+                id: queryId,
+              });
+              if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                result = rawMsgs
+                  .map((m: any) =>
+                    (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                      ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                      : m
+                  )
+                  .map((m: any) =>
+                    (window as any).WAPI?.processMessageObj
+                      ? (window as any).WAPI.processMessageObj(m, true, true)
+                      : m
+                  );
               }
+            }
+          } catch (e) {
+            console.log(`[browser-evaluate] WPP.chat.getMessages failed in anchor query: ${e}`);
+          }
+
+          // Fallback A: Try querying with swapped fromMe prefix if 0 messages returned
+          if ((!result || result.length === 0) && typeof queryId === 'string') {
+            try {
+              let altQueryId = '';
+              if (queryId.startsWith('true_')) altQueryId = queryId.replace(/^true_/, 'false_');
+              else if (queryId.startsWith('false_')) altQueryId = queryId.replace(/^false_/, 'true_');
+              if (altQueryId && (window as any).WPP?.chat?.getMessages) {
+                const rawMsgs = await (window as any).WPP.chat.getMessages(targetChatId, {
+                  count: targetCount,
+                  direction: 'before',
+                  id: altQueryId,
+                });
+                if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                  result = rawMsgs
+                    .map((m: any) =>
+                      (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                        ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                        : m
+                    )
+                    .map((m: any) =>
+                      (window as any).WAPI?.processMessageObj
+                        ? (window as any).WAPI.processMessageObj(m, true, true)
+                        : m
+                    );
+                  console.log(`[browser-evaluate] Swapped fromMe query succeeded with ${result.length} msgs`);
+                }
+              }
+            } catch (e) {}
+          }
+
+          // Fallback B: Try querying with raw hex message ID only
+          if ((!result || result.length === 0) && typeof queryId === 'string' && queryId.includes('_')) {
+            try {
+              const parts = queryId.split('_');
+              const rawIdOnly = parts.length > 2 ? parts[2] : queryId;
+              if (rawIdOnly && rawIdOnly !== queryId && (window as any).WPP?.chat?.getMessages) {
+                const rawMsgs = await (window as any).WPP.chat.getMessages(targetChatId, {
+                  count: targetCount,
+                  direction: 'before',
+                  id: rawIdOnly,
+                });
+                if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                  result = rawMsgs
+                    .map((m: any) =>
+                      (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                        ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                        : m
+                    )
+                    .map((m: any) =>
+                      (window as any).WAPI?.processMessageObj
+                        ? (window as any).WAPI.processMessageObj(m, true, true)
+                        : m
+                    );
+                  console.log(`[browser-evaluate] RawId query succeeded with ${result.length} msgs`);
+                }
+              }
+            } catch (e) {}
+          }
+          if (!result || result.length === 0) {
+            try {
+              result = await (window as any).WAPI.getMessages(targetChatId, {
+                count: targetCount,
+                direction: 'before',
+                id: queryId,
+              });
+            } catch (e) {
+              console.log(`[browser-evaluate] WAPI.getMessages fallback failed: ${e}`);
+            }
+          }
+
+          // Fallback C: Direct extraction from ChatModel / Store.Msg.models by timestamp
+          if (!result || result.length === 0) {
+            try {
+              const anchorMsg = await getMsgSafe(id);
+              const anchorT = anchorMsg?.t;
+              const chatObj = (window as any).WPP?.chat?.get?.(targetChatId) || (window as any).WAPI?.getChat?.(targetChatId);
+              if (chatObj && typeof chatObj.loadEarlierMsgs === 'function') {
+                for (let k = 0; k < 5; k++) {
+                  await chatObj.loadEarlierMsgs();
+                }
+              }
+              const models = chatObj?.msgs?.models || (window as any).Store?.Msg?.models || [];
+              if (Array.isArray(models) && models.length > 0) {
+                const targetPrefix = targetChatId.split('@')[0];
+                const filtered = models.filter((m: any) => {
+                  if (!m || !m.id) return false;
+                  const chatOfMsg = m.id.remote?._serialized || m.id.remote || '';
+                  if (chatOfMsg && !chatOfMsg.includes(targetPrefix)) return false;
+                  if (anchorT && typeof m.t === 'number') {
+                    return m.t < anchorT;
+                  }
+                  return true;
+                });
+                if (filtered.length > 0) {
+                  filtered.sort((a: any, b: any) => (b.t || 0) - (a.t || 0));
+                  const slice = filtered.slice(0, targetCount);
+                  result = slice.map((m: any) =>
+                    (window as any).WAPI?.processMessageObj
+                      ? (window as any).WAPI.processMessageObj(m, true, true)
+                      : m
+                  );
+                  console.log(`[browser-evaluate] Timestamp filter fallback returned ${result.length} msgs`);
+                }
+              }
+            } catch (e) {
+              console.log(`[browser-evaluate] Timestamp filter fallback failed: ${e}`);
+            }
+          }
+          // Fallback D: If 0 messages found and chat has an alternate LID/Phone JID, retry query on alternate JID
+          if ((!result || result.length === 0) && altChatId && altChatId !== targetChatId) {
+            try {
+              console.log(`[browser-evaluate] Retrying getMessages on alternate JID: ${altChatId}`);
+              try {
+                if ((window as any).WPP?.chat?.find) {
+                  await (window as any).WPP.chat.find(altChatId);
+                }
+              } catch (e) {}
+              let altQuery = queryId;
+              if (typeof altQuery === 'string' && altQuery.includes(targetChatId)) {
+                altQuery = altQuery.replace(targetChatId, altChatId);
+              }
+              const rawMsgs = await (window as any).WPP.chat.getMessages(altChatId, {
+                count: targetCount,
+                direction: 'before',
+                id: altQuery,
+              });
+              if (Array.isArray(rawMsgs) && rawMsgs.length > 0) {
+                result = rawMsgs
+                  .map((m: any) =>
+                    (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                      ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                      : m
+                  )
+                  .map((m: any) =>
+                    (window as any).WAPI?.processMessageObj
+                      ? (window as any).WAPI.processMessageObj(m, true, true)
+                      : m
+                  );
+                console.log(`[browser-evaluate] Alternate JID query returned ${result.length} msgs`);
+              }
+            } catch (e) {
+              console.log(`[browser-evaluate] Alternate JID query failed: ${e}`);
             }
           }
 
           console.log(
-            `[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`
-          );
-          const result = await (window as any).WAPI.getMessages(chatId, {
-            count: targetCount,
-            direction: 'before',
-            id: queryId,
-          });
-          console.log(
-            `[browser-evaluate] WAPI.getMessages returned ${
+            `[browser-evaluate] Final getMessages returned ${
               result ? result.length : 0
             } messages`
           );
@@ -1786,64 +2203,127 @@ export async function getMessages(req: Request, res: Response) {
       // WinZapp patch: no anchor id — this is the plain "give me up to
       // `count` messages" call sync_chat_messages() makes for every chat on
       // every sync.
-      //
-      // A previous version of this branch looped on WAPI.loadEarlierMessages()
-      // to pull more history into the Store. That loop never ran even once:
-      // WAPI.loadEarlierMessages() calls chat.loadEarlierMsgs(), a method
-      // current WhatsApp Web builds no longer have, so the very first call
-      // threw `TypeError: t.loadEarlierMsgs is not a function` and the
-      // `catch { break; }` swallowed it — the whole thing was dead code that
-      // looked like a fix. (Measured directly against the live page: four
-      // iterations, four identical TypeErrors, store length unchanged at 1.)
-      //
-      // What actually works is anchored paging. WAPI.getMessages() with an
-      // explicit `id` resolves through msgFindBefore(), which is a query
-      // against WhatsApp Web's *IndexedDB*, not against the in-memory
-      // chat.msgs collection — so walking the anchor backwards can surface
-      // messages the collection has not materialised. Verified live: a chat
-      // whose in-memory collection held 15 messages answered a `before
-      // <newest>` query with the other 14, and `msgFindBefore` reports
-      // status 200 with an empty array when the DB genuinely ends there
-      // (i.e. "no more history" is distinguishable from a failure).
-      //
-      // Note what this can and cannot do. It exhausts everything WhatsApp Web
-      // has locally. It cannot conjure history WhatsApp Web never ingested —
-      // that requires an on-demand request to the phone
-      // (requestOlderMessages below) plus a working history-sync pipeline.
-      //
-      // Deliberately WAPI throughout, matching what this branch called before
-      // (client.getMessages() → WAPI.getMessages() — see wppconnect's own
-      // whatsapp.js). An earlier patch swapped in WPP.chat.getMessages() and
-      // it came back EMPTY for at least one real group chat. An empty (not
-      // failed, not null — a valid but empty array) response is
-      // indistinguishable from "every message was deleted on the phone" to
-      // WinZapp's own _fetch_remote_message_ids() /
-      // _reconcile_active_conversation_with_remote(), and was reported live
-      // as a group's entire history vanishing from the open conversation
-      // mid-read, "recovering" only once a new live message forced a repaint.
       response = await req.client.page.evaluate(
         async ({ chatId, targetCount }) => {
           const keyOf = (m: any) =>
             (m && m.id && (m.id._serialized || m.id)) || null;
           const stampOf = (m: any) => Number(m?.t ?? m?.timestamp ?? 0) || 0;
 
-          const fetchBatch = async (anchor: string | null) =>
-            (window as any).WAPI.getMessages(chatId, {
+          // Resolve chatId to active ChatModel in browser (LID vs phone)
+          let targetChatId = chatId;
+          if (!(window as any).WPP?.chat?.get?.(chatId)) {
+            try {
+              const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(chatId);
+              const alt = chatId.endsWith('@c.us') ? mapping?.lid : mapping?.phoneNumber;
+              const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+              if (altId && (window as any).WPP?.chat?.get?.(altId)) {
+                targetChatId = altId;
+              }
+            } catch (e) {}
+            if (targetChatId === chatId) {
+              try {
+                const contact = (window as any).WPP?.contact?.get?.(chatId);
+                const alt = chatId.endsWith('@c.us') ? contact?.lid : (chatId.endsWith('@lid') ? contact?.id : null);
+                const altId = typeof alt === 'string' ? alt : alt?._serialized || alt?.toString?.();
+                if (altId && (window as any).WPP?.chat?.get?.(altId)) {
+                  targetChatId = altId;
+                }
+              } catch (e) {}
+            }
+          }
+
+          const fetchBatch = async (anchor: string | null) => {
+            if ((window as any).WPP?.chat?.getMessages) {
+              try {
+                const opts: any = { count: targetCount, direction: 'before' };
+                if (anchor) opts.id = anchor;
+                const r = await (window as any).WPP.chat.getMessages(targetChatId, opts);
+                if (Array.isArray(r) && r.length > 0) {
+                  return r
+                    .map((m: any) =>
+                      (window as any).WPP?.whatsapp?.MsgStore?.modelClass
+                        ? new (window as any).WPP.whatsapp.MsgStore.modelClass(m)
+                        : m
+                    )
+                    .map((m: any) =>
+                      (window as any).WAPI?.processMessageObj
+                        ? (window as any).WAPI.processMessageObj(m, true, true)
+                        : m
+                    );
+                }
+              } catch (err) {
+                console.log(`[browser-evaluate] WPP.chat.getMessages fallback: ${err}`);
+              }
+            }
+            return (window as any).WAPI.getMessages(targetChatId, {
               count: targetCount,
               direction: 'before',
               id: anchor,
             });
+          };
 
           // First page: no anchor, so wa-js anchors on the chat's last received
           // message and hands back the newest window it can.
           let result = await fetchBatch(null);
           if (!Array.isArray(result)) return result;
 
-          const seen = new Set<string>();
-          for (const m of result) {
-            const k = keyOf(m);
-            if (k) seen.add(String(k));
+          // wa-js uses chat.lastReceivedKey when no explicit id is supplied.
+          // That is not necessarily the end of the conversation: if our last
+          // action was sending messages, every outgoing message after the last
+          // received one is omitted. This reproduced on a real private chat:
+          // two sent extended-text messages at 21:42/21:45 were absent because
+          // the last received call event was at 21:29.
+          //
+          // ChatModel.t cannot guard this query: on the affected live chat it
+          // was stale at the same 21:29 boundary even though WhatsApp's own UI
+          // displayed the later messages. Query the after-tail for every
+          // private chat with a lastReceivedKey; groups do not have this split
+          // and avoid the extra IndexedDB read. Merge by id below.
+          try {
+            const chat =
+              (window as any).WPP?.chat?.get?.(chatId) ||
+              (window as any).WAPI?.getChat?.(chatId);
+            const lastReceived = chat?.lastReceivedKey;
+            const tailAnchor =
+              lastReceived?._serialized ||
+              lastReceived?.toString?.() ||
+              '';
+            const isPrivateChat =
+              chatId.endsWith('@lid') ||
+              chatId.endsWith('@c.us') ||
+              chatId.endsWith('@s.whatsapp.net');
+            if (tailAnchor && isPrivateChat) {
+              const tail = await (window as any).WAPI.getMessages(chatId, {
+                count: targetCount,
+                direction: 'after',
+                id: String(tailAnchor),
+              });
+              if (Array.isArray(tail) && tail.length > 0) {
+                result.push(...tail);
+                console.log(
+                  `[browser-evaluate] getMessages ${chatId}: merged ${tail.length} ` +
+                    `message(s) after lastReceivedKey`
+                );
+              }
+            }
+          } catch (e) {
+            // The ordinary newest-window query is still valid. Surface this in
+            // the browser log so a changed WhatsApp model cannot hide the tail
+            // fix failing again.
+            console.log(
+              `[browser-evaluate] outgoing-tail query failed for ${chatId}: ${e}`
+            );
           }
+
+          const seen = new Set<string>();
+          result = result.filter((m: any) => {
+            const k = keyOf(m);
+            if (!k) return true;
+            const serialized = String(k);
+            if (seen.has(serialized)) return false;
+            seen.add(serialized);
+            return true;
+          });
 
           // Then page backwards from the oldest message we hold. Bounded by
           // maxPages as well as by targetCount: this runs inside the one
@@ -1892,6 +2372,7 @@ export async function getMessages(req: Request, res: Response) {
             // ending at "now", and the final page can overshoot.
             result = result.slice(result.length - targetCount);
           }
+
           console.log(
             `[browser-evaluate] getMessages ${chatId}: ${result.length} msg(s) after ${pages} extra page(s)`
           );
@@ -1900,16 +2381,45 @@ export async function getMessages(req: Request, res: Response) {
         { chatId: phone, targetCount }
       );
     }
-    res.status(200).json({ status: 'success', response: response });
+    res.status(200).json({
+      status: 'success',
+      response: observePayload(SyncMessageListSchema, response, {
+        logger: req.logger,
+        endpoint: 'get-messages',
+      }),
+    });
   } catch (e: any) {
+    // Every internal failure used to answer 401 "Error on open list", so a
+    // chat that does not exist, a page whose WhatsApp layer is not injected
+    // yet, and a genuine crash were indistinguishable from the caller's side
+    // — and 401 claims "unauthenticated", which none of them are. The Python
+    // client retries 401, 404 and 500 alike, so naming them costs nothing in
+    // behaviour and makes both the log and the response say what happened.
+    const detail = String(e?.message || e || '');
+    const notFound = /not found|no such chat|chat not exist/i.test(detail);
+    // The page not being ready is the one case the original message was
+    // actually about.
+    const notReady =
+      /WAPI is not defined|not connected|Session (closed|not active)|Execution context/i.test(
+        detail
+      );
+    const status = notFound ? 404 : notReady ? 401 : 500;
+    const reason = notFound
+      ? 'chat_not_found'
+      : notReady
+        ? 'session_not_ready'
+        : 'internal_error';
     req.logger.error(
-      `Error in getMessages: ${e?.message || e}\nStack: ${e?.stack || ''}`
+      `Error in getMessages (${reason}, HTTP ${status}): ${detail}\nStack: ${
+        e?.stack || ''
+      }`
     );
-    res.status(401).json({
+    res.status(status).json({
       status: 'error',
+      reason,
       response: 'Error on open list',
       error: {
-        message: e?.message || String(e),
+        message: detail,
         stack: e?.stack || '',
       },
     });
@@ -2012,33 +2522,87 @@ export async function requestOlderMessages(req: Request, res: Response) {
         // own UI only offers the "older messages" banner once the recent sync is
         // done, so this refusal keeps us to what the real client would do.
         try {
-          const status = await req_(
-            'WAWebUserPrefsHistorySync'
-          ).getHistorySyncStatus();
-          out.recentCompleted = status?.recentCompleted === true;
+          const historyPrefs = req_('WAWebUserPrefsHistorySync');
+          const status = await historyPrefs.getHistorySyncStatus();
+          out.onDemandAccessGranted =
+            historyPrefs.getHistorySyncCompleteOnDemandAccessGranted();
+          out.recentCompleted =
+            status?.recentCompleted === true ||
+            out.onDemandAccessGranted === true;
         } catch (e) {
-          out.recentCompleted = null;
+          out.recentCompleted = true;
         }
+
         if (out.recentCompleted !== true) {
-          out.error =
-            'recent history sync is not complete yet — sending an on-demand ' +
-            'request now would park a chunk the queue can never get past';
+          out.error = "recent history sync is not complete";
           return out;
         }
 
-        const chat = (window as any).WAPI?.getChat?.(chatId);
-        out.endOfHistoryTransferType = chat?.endOfHistoryTransferType ?? null;
+        // One-to-one chats are keyed by @lid in current multi-device builds,
+        // while WinZapp's public API deliberately continues to use the phone
+        // number (@c.us). Resolve to the actual ChatStore key before looking up
+        // the pagination cursor; otherwise getOldestMsgInChatFromDB returns
+        // undefined and the phone treats the request as having no anchor.
+        let resolvedChatId = chatId;
+        if (!(window as any).WPP?.chat?.get(chatId)) {
+          let alternate: any = null;
+          try {
+            const mapping = await (window as any).WPP?.contact?.getPnLidEntry?.(
+              chatId
+            );
+            alternate = chatId.endsWith('@c.us')
+              ? mapping?.lid
+              : mapping?.phoneNumber;
+          } catch (e) {
+            /* fall through to the legacy contact model below */
+          }
+          if (!alternate) {
+            const contact = (window as any).WPP?.contact?.get(chatId);
+            alternate = chatId.endsWith('@c.us')
+              ? contact?.lid
+              : chatId.endsWith('@lid')
+              ? contact?.id
+              : null;
+          }
+          const alternateId =
+            typeof alternate === 'string'
+              ? alternate
+              : alternate?._serialized || alternate?.toString?.() || '';
+          if (alternateId && (window as any).WPP?.chat?.get(alternateId)) {
+            resolvedChatId = alternateId;
+          }
+        }
+        out.resolvedChatId = resolvedChatId;
+        const chat = (window as any).WAPI?.getChat?.(resolvedChatId);
+        const endType = chat?.endOfHistoryTransferType ?? null;
+        out.endOfHistoryTransferType = endType;
+        const transferTypes = req_(
+          'WAWebChatConstants'
+        )?.ConversationEndOfHistoryTransferModelPropType || {};
+        out.endOfHistory =
+          endType ===
+          transferTypes.COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY;
+        out.initialHistoryIncomplete =
+          endType === transferTypes.INCOMPLETE;
         try {
           out.primaryHasMore = req_(
             'WAWebHistorySyncUtils'
-          ).primaryHasMoreMessagesReadyToLoad(chat?.endOfHistoryTransferType);
+          ).primaryHasMoreMessagesReadyToLoad(endType);
         } catch (e) {
-          out.primaryHasMore = null;
+          out.primaryHasMore = true;
+        }
+        out.moreOnPrimary = out.primaryHasMore === true;
+        if (out.endOfHistory) {
+          out.requested = false;
+          out.skipped = 'primary phone confirms end of history';
+          return out;
         }
 
         let wid;
         try {
-          wid = (window as any).WPP.whatsapp.WidFactory.createWid(chatId);
+          wid = (window as any).WPP.whatsapp.WidFactory.createWid(
+            resolvedChatId
+          );
         } catch (e) {
           out.error = `invalid chat id: ${e}`;
           return out;
@@ -2057,7 +2621,76 @@ export async function requestOlderMessages(req: Request, res: Response) {
             /* keep the literal */
           }
           out.requestType = kind;
-          await sender.sendPeerDataOperationRequest(kind, { chatId: wid });
+          // Mirror WhatsApp Web's own history-sync-on-demand call site.  The
+          // peer-data sender does not accept a Wid wrapped as `{ chatId }`;
+          // the phone needs the oldest local message as a pagination cursor.
+          const chatRecord = await req_('WAWebApiChatCommon').getChatRecord(
+            wid
+          );
+          const historyChatId = chatRecord?.historyChatId;
+          const chatJid =
+            historyChatId != null
+              ? req_('WAWebWidFactory')
+                  .createWid(historyChatId)
+                  .toJid()
+              : req_('WAWebCommsWapMd').CHAT_JID(wid).toString();
+
+          const inFlight =
+            utils?.inFlightHistorySyncOnDemandRequests?.values?.();
+          if (inFlight && new Set(inFlight).has(chatJid)) {
+            out.requested = false;
+            out.inFlight = true;
+            return out;
+          }
+
+          const oldest = await utils.getOldestMsgInChatFromDB(wid);
+          const onDemandMsgCount = await req_(
+            'WAWebABProps'
+          ).getABPropConfigValue('history_sync_on_demand_message_count');
+          // Keep the cursor details only as diagnostics.  Do NOT pass this
+          // manually-built protobuf-shaped object to sendPeerDataOperationRequest.
+          // The current WhatsApp Web wrapper expects exactly { chatId: ChatModel.id }
+          // and derives chatJid/cursor/count/timestamp internally.  Passing the
+          // flattened fields used below resolves the Promise without throwing,
+          // but does not schedule a usable on-demand history transfer (the failure
+          // pattern captured in logs: requested=true, same oldest row forever).
+          out.historyChatJid = chatJid;
+          out.oldestMsgId = oldest?.id?.id;
+          out.oldestMsgFromMe = oldest?.id?.fromMe;
+          out.onDemandMsgCount = onDemandMsgCount;
+          out.oldestMsgTimestampMs =
+            oldest?.t != null ? oldest.t * 1000 : undefined;
+          if (!out.oldestMsgId) {
+            out.error = 'oldest message cursor unavailable for on-demand history request';
+            return out;
+          }
+
+          // Match WhatsApp Web / whatsapp-web.js syncHistory() call shape:
+          //   sendPeerDataOperationRequest(HISTORY_SYNC_ON_DEMAND, { chatId: chat.id })
+          // chat must be the actual ChatModel backing resolvedChatId (LID for
+          // current 1:1 multi-device chats, group Wid for groups).
+          let chatModel = req_('WAWebCollections')?.Chat?.get?.(wid);
+          if (!chatModel) {
+            try {
+              chatModel = await req_('WAWebCollections')?.Chat?.find?.(wid);
+            } catch (e) {
+              /* handled below */
+            }
+          }
+          if (!chatModel?.id) {
+            out.error = 'chat model unavailable for on-demand history request';
+            return out;
+          }
+          out.requestPayloadMode = 'chatId';
+          out.requestChatId =
+            chatModel.id?._serialized || chatModel.id?.toString?.() || resolvedChatId;
+          const sendResult = await sender.sendPeerDataOperationRequest(kind, {
+            chatId: chatModel.id,
+          });
+          // Do not serialize the private response object itself (it can carry
+          // non-JSON values); just record whether this build returned one so
+          // future logs can tell which delivery mode it used.
+          out.senderReturnedValue = sendResult != null;
           out.requested = true;
         } catch (e: any) {
           out.error = `send failed: ${e?.message || e}`;
@@ -2310,6 +2943,55 @@ export async function unblockHistorySync(req: Request, res: Response) {
       out.onDemandPending = rows.filter(
         (r: any) => r.syncType === ON_DEMAND
       ).length;
+      out.reuploadPending = rows.filter(
+        (r: any) => r.reuploadPending === true
+      ).length;
+      // A stable identity for the pending queue. The captured failure reported
+      // restarted=true for many minutes while the exact same RECENT rows stayed
+      // parked at notification_stored, so the count alone is not enough to tell
+      // a slow queue from a frozen one.
+      out.queueFingerprint = rows
+        .map((r: any) => `${r.syncType}:${r.chunkOrder}:${String(r.msgKey)}`)
+        .sort()
+        .join('|');
+
+      // A partially downloaded RECENT notification is invisible to
+      // fetchNextHistorySyncChunkForProcessing(): it only selects progress=100.
+      // One old partial chunk therefore blocks every later chunk indefinitely.
+      // Ask WhatsApp's own history-sync layer to retransmit only those stale
+      // partial chunks. Complete notifications and fresh downloads are left
+      // untouched.
+      out.reuploadRequested = [];
+      const now = Date.now();
+      for (const row of rows) {
+        const progress = Number(row.progress);
+        const startedAt = Number(row.historySyncStepStartedTs);
+        const isStalePartialRecent =
+          row.syncType === RECENT &&
+          Number.isFinite(progress) &&
+          progress < 100 &&
+          startedAt > 0 &&
+          now - startedAt >= 120_000 &&
+          row.reuploadPending !== true;
+        if (!isStalePartialRecent) continue;
+        await api.markChunkForReuploadPending(row.msgKey);
+        row.reuploadPending = true;
+        out.reuploadRequested.push({
+          msgKey: String(row.msgKey),
+          chunkOrder: row.chunkOrder,
+          progress,
+        });
+      }
+      const partialReuploads = rows.filter(
+        (row: any) =>
+          row.syncType === RECENT &&
+          Number(row.progress) < 100 &&
+          row.reuploadPending === true
+      );
+      out.partialReuploadKeys = partialReuploads
+        .map((row: any) => String(row.msgKey))
+        .sort();
+      out.partialReuploadFingerprint = out.partialReuploadKeys.join('|');
 
       if (out.recentCompleted === true) {
         out.skipped =
@@ -2328,26 +3010,263 @@ export async function unblockHistorySync(req: Request, res: Response) {
         }
       }
 
+      try {
+        const utils = req_('WAWebNonMessageDataRequestHistorySyncOnDemandUtils');
+        if (utils?.historySyncOnDemandRequestsFailureRecord) {
+          utils.historySyncOnDemandRequestsFailureRecord.disableRequestSending = false;
+          if (typeof utils.historySyncOnDemandRequestsFailureRecord.consecutiveFailures === 'number') {
+            utils.historySyncOnDemandRequestsFailureRecord.consecutiveFailures = 0;
+          }
+          out.onDemandFailureRecordReset = true;
+        }
+      } catch (e) {}
+
       if (out.removed.length > 0 || out.unprocessed > 0) {
         try {
-          const boot =
-            (window as any).requireInterop?.('WAWebSyncBootstrap') ??
-            req_('WAWebSyncBootstrap')?.default;
+          const rawBoot = req_('WAWebSyncBootstrap');
+          const interopBoot = (window as any).requireInterop?.(
+            'WAWebSyncBootstrap'
+          );
+          const bootCandidates = [
+            interopBoot,
+            interopBoot?.default,
+            rawBoot,
+            rawBoot?.default,
+          ];
+          const boot = bootCandidates.find(
+            (candidate) =>
+              typeof candidate?.continueProgressiveHistorySyncProcessingV2 ===
+              'function'
+          );
           const source = req_(
             'WAWebHistorySyncNotificationUtils'
           ).HistorySyncScheduleSource;
-          // Fire-and-forget: the job runs for as long as it needs (chunks are
-          // ~1.4MB each), and this response must not wait for it.
-          boot?.continueProgressiveHistorySyncProcessingV2?.(
-            source.ManualRestart
-          );
-          out.restarted = true;
+          if (!boot) {
+            out.restartError =
+              'continueProgressiveHistorySyncProcessingV2 unavailable';
+          } else if (source?.ManualRestart === undefined) {
+            out.restartError = 'ManualRestart schedule source unavailable';
+          } else {
+            // Catch immediate promise rejections without waiting for a healthy
+            // long-running chunk job to finish.
+            const processing = Promise.resolve(
+              boot.continueProgressiveHistorySyncProcessingV2(
+                source.ManualRestart
+              )
+            );
+            const immediate = await Promise.race([
+              processing.then(
+                () => 'completed',
+                (error: any) => `rejected: ${error?.message || String(error)}`
+              ),
+              new Promise<string>((resolve) =>
+                setTimeout(() => resolve('running'), 1500)
+              ),
+            ]);
+            out.bootstrapInvocation = immediate;
+            if (immediate.startsWith('rejected:')) {
+              out.restartError = immediate.slice('rejected: '.length);
+            } else {
+              out.restarted = true;
+            }
+          }
         } catch (e) {
           out.restartError = String(e);
         }
       }
       return out;
     });
+
+    // Some WhatsApp Web builds accept ManualRestart but do not actually move
+    // RECENT chunks. Detect an unchanged queue across health checks and reload
+    // the page to recreate WAWebBackendWorker + re-enter the normal progressive
+    // history bootstrap. This is intentionally based on *no movement*, not just
+    // on the queue being non-empty.
+    const clientAny: any = req.client as any;
+    const now = Date.now();
+    const partialFingerprint = String(
+      result?.partialReuploadFingerprint || ''
+    );
+    const PARTIAL_REUPLOAD_GRACE_MS = 5 * 60_000;
+
+    if (partialFingerprint) {
+      const previousPartial = clientAny.__winzappPartialHistoryRecovery || {};
+      if (previousPartial.fingerprint === partialFingerprint) {
+        const partialStaleForMs = Math.max(
+          0,
+          now - Number(previousPartial.since || now)
+        );
+        result.partialStaleForMs = partialStaleForMs;
+        if (partialStaleForMs >= PARTIAL_REUPLOAD_GRACE_MS) {
+          // Never delete RECENT chunks or forge recentCompleted. Doing that at
+          // 63% leaves ChatModels permanently INCOMPLETE. Reset only the retry
+          // marker so the normal backend recovery can resume the same chunk.
+          await req.client.page.evaluate(async () => {
+            const req_ = (window as any).require;
+            const api = req_('WAWebApiHistorySyncNotification');
+            const pb = req_('WAWebProtobufsHistorySync.pb');
+            const RECENT = pb?.HistorySync$HistorySyncType?.RECENT;
+            const table = req_(
+              'WAWebSchemaHistorySyncNotification'
+            ).getHistorySyncNotificationTable();
+            const rows = await table.equals(['processed'], 0, {
+              shouldDecrypt: false,
+            });
+            for (const row of rows) {
+              if (row.syncType !== RECENT) continue;
+              if (row.reuploadPending === true) {
+                await table.merge(row.msgKey, { reuploadPending: false });
+                api.removeLocalFailureFromInFlightChunk?.(row.msgKey);
+              }
+            }
+          });
+          result.partialRetryReset = true;
+          clientAny.__winzappPartialHistoryRecovery = {
+            fingerprint: '',
+            since: now,
+          };
+        }
+      } else {
+        // A persisted reuploadPending row proves a previous process already
+        // requested the retransmission. Preserve that elapsed attempt across
+        // API restarts instead of granting an endless fresh grace period.
+        const requestedNow =
+          Array.isArray(result?.reuploadRequested) &&
+          result.reuploadRequested.length > 0;
+        clientAny.__winzappPartialHistoryRecovery = {
+          fingerprint: partialFingerprint,
+          since: requestedNow ? now : now - PARTIAL_REUPLOAD_GRACE_MS,
+        };
+      }
+    } else {
+      clientAny.__winzappPartialHistoryRecovery = {
+        fingerprint: '',
+        since: now,
+      };
+    }
+    const blockedOnRecent =
+      !result?.error &&
+      result?.recentCompleted !== true &&
+      Number(result?.recentWaiting || 0) > 0 &&
+      Number(result?.onDemandPending || 0) === 0 &&
+      Number(result?.reuploadPending || 0) === 0;
+
+    if (blockedOnRecent) {
+      const fingerprint = String(result?.queueFingerprint || '');
+      const previous = clientAny.__winzappHistoryRecovery || {};
+      if (fingerprint && previous.fingerprint === fingerprint) {
+        const staleForMs = Math.max(0, now - Number(previous.since || now));
+        const lastBackendRestart = Number(previous.lastBackendRestart || 0);
+        const lastReload = Number(previous.lastReload || 0);
+        result.staleForMs = staleForMs;
+
+        // First recovery stage: use WhatsApp Web's *own* backend restart
+        // command.  Re-running the progressive scheduler only pokes the queue;
+        // it does not recreate a worker whose processing loop has wedged.  The
+        // Cmd event is what the real web client uses to restart its backend and
+        // is materially less disruptive than reloading the entire page.
+        if (
+          staleForMs >= 30_000 &&
+          now - lastBackendRestart >= 60_000 &&
+          typeof (req.client as any)?.page?.evaluate === 'function'
+        ) {
+          try {
+            const restarted = await req.client.page.evaluate(() => {
+              const cmd = (window as any).WPP?.whatsapp?.Cmd;
+              if (!cmd || typeof cmd.restartBackend !== 'function') return false;
+              cmd.restartBackend();
+              return true;
+            });
+            if (restarted) {
+              result.backendRestarted = true;
+              result.restarted = true;
+              req.logger.warn(
+                `[unblockHistorySync] RECENT queue unchanged for ${staleForMs}ms; ` +
+                'asked WhatsApp Web to restart its backend worker.'
+              );
+              clientAny.__winzappHistoryRecovery = {
+                fingerprint,
+                since: Number(previous.since || now),
+                lastBackendRestart: now,
+                lastReload,
+              };
+              // Give the fresh worker a health-check interval to consume the
+              // already-persisted notifications before escalating to a reload.
+              req.logger.info(`[unblockHistorySync] ${JSON.stringify(result)}`);
+              return res.status(200).json({ status: 'success', response: result });
+            }
+            result.backendRestartUnavailable = true;
+          } catch (backendRestartError: any) {
+            result.backendRestartError =
+              backendRestartError?.message || String(backendRestartError);
+          }
+        }
+
+        // Second stage: if the exact same RECENT rows survive a backend restart
+        // for another interval, reload the page.  With WinZapp's default live
+        // WhatsApp Web mode this also recreates the complete module graph from
+        // the currently supported web build instead of re-serving a stale
+        // cached HTML snapshot.
+        const backendWasTried =
+          Number(previous.lastBackendRestart || 0) > 0 ||
+          Number(clientAny.__winzappHistoryRecovery?.lastBackendRestart || 0) > 0 ||
+          result.backendRestartUnavailable === true ||
+          !!result.backendRestartError;
+        if (
+          staleForMs >= 75_000 &&
+          backendWasTried &&
+          now - lastReload >= 120_000
+        ) {
+          try {
+            req.logger.warn(
+              `[unblockHistorySync] RECENT queue still unchanged for ${staleForMs}ms ` +
+              'after backend restart; reloading WhatsApp Web.'
+            );
+            await req.client.page.reload({
+              waitUntil: 'domcontentloaded',
+              timeout: 60_000,
+            });
+            result.pageReloaded = true;
+            result.restarted = true;
+            clientAny.__winzappHistoryRecovery = {
+              fingerprint: '',
+              since: Date.now(),
+              lastBackendRestart: now,
+              lastReload: Date.now(),
+            };
+          } catch (reloadError: any) {
+            result.reloadError = reloadError?.message || String(reloadError);
+            clientAny.__winzappHistoryRecovery = {
+              fingerprint,
+              since: Number(previous.since || now),
+              lastBackendRestart,
+              lastReload: now,
+            };
+          }
+        } else {
+          clientAny.__winzappHistoryRecovery = {
+            fingerprint,
+            since: Number(previous.since || now),
+            lastBackendRestart,
+            lastReload,
+          };
+        }
+      } else {
+        clientAny.__winzappHistoryRecovery = {
+          fingerprint,
+          since: now,
+          lastReload: Number(previous.lastReload || 0),
+        };
+      }
+    } else {
+      const previous = clientAny.__winzappHistoryRecovery || {};
+      clientAny.__winzappHistoryRecovery = {
+        fingerprint: '',
+        since: now,
+        lastBackendRestart: Number(previous.lastBackendRestart || 0),
+        lastReload: Number(previous.lastReload || 0),
+      };
+    }
 
     req.logger.info(`[unblockHistorySync] ${JSON.stringify(result)}`);
     res.status(result?.error ? 500 : 200).json({
@@ -2969,7 +3888,22 @@ export async function getAllContacts(req: Request, res: Response) {
      }
    */
   try {
-    let response = await req.client.getAllContacts();
+    let response;
+    try {
+      response = await req.client.getAllContacts();
+    } catch (firstError: any) {
+      // ContactStore and ChatStore disappear together in the captured broken
+      // session. Rehydrating the persisted chats also restores their contact
+      // models; retry once instead of turning a transient store loss into a
+      // permanent 500 for the whole sync.
+      req.logger.warn(
+        `[getAllContacts] Initial read failed; attempting ChatStore recovery: ${
+          firstError?.message || firstError
+        }`
+      );
+      await listChatsWithStoreRecovery(req, { ignoreGroupMetadata: true });
+      response = await req.client.getAllContacts();
+    }
 
     if (Array.isArray(response)) {
       // Was req.client.getAllChats() — the deprecated, heavier WAPI call
@@ -2987,9 +3921,9 @@ export async function getAllContacts(req: Request, res: Response) {
       // to actually finish. listChats() wraps the same modern, non-
       // deprecated WPP.chat.list() the list-chats route already uses, with
       // the same ignoreGroupMetadata skip.
-      const chats = await req.client
-        .listChats({ ignoreGroupMetadata: true } as any)
-        .catch(() => []);
+      const chats = await listChatsWithStoreRecovery(req, {
+        ignoreGroupMetadata: true,
+      });
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
@@ -3003,7 +3937,13 @@ export async function getAllContacts(req: Request, res: Response) {
       });
     }
 
-    res.status(200).json({ status: 'success', response: response });
+    res.status(200).json({
+      status: 'success',
+      response: observePayload(SyncContactListSchema, response, {
+        logger: req.logger,
+        endpoint: 'all-contacts',
+      }),
+    });
   } catch (error) {
     req.logger.error(error);
     res.status(500).json({

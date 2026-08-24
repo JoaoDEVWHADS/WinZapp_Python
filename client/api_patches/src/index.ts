@@ -27,6 +27,8 @@ import { Logger } from 'winston';
 import { version } from '../package.json';
 import config from './config';
 import { convert } from './mapper/index';
+import { errorHandler } from './middleware/errorHandler';
+import { requestInstrumentation } from './middleware/instrumentation';
 import routes from './routes';
 import { ServerOptions } from './types/ServerOptions';
 import {
@@ -59,6 +61,7 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
   const app = express();
   const PORT = process.env.PORT || serverOptions.port;
 
+  app.use(requestInstrumentation(logger));
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -73,7 +76,7 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
   // Add request options
   app.use((req: any, res: any, next: NextFunction) => {
     req.serverOptions = serverOptions;
-    req.logger = logger;
+    req.logger = req.logger || logger;
     req.io = io as any;
 
     const oldSend = res.send;
@@ -107,9 +110,20 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
   });
 
   app.use(routes);
+  // After the routes, and last: Express only reaches a four-argument handler
+  // once everything before it has passed the error along. Controllers that
+  // still catch their own errors are unaffected — this catches what they let
+  // through, and is what new code throws into instead of inventing a status.
+  app.use(errorHandler);
 
   createFolders();
   const http = createServer(app);
+  http.timeout = 0;
+  if ('requestTimeout' in http) {
+    (http as any).requestTimeout = 0;
+  }
+  http.keepAliveTimeout = 600000;
+  http.headersTimeout = 610000;
   const io = new Socket(http, {
     cors: {
       origin: '*',

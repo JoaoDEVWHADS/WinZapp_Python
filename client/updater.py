@@ -25,7 +25,7 @@ import requests
 import wx
 
 from app_paths import _outer_exe_dir, _is_frozen, resource_path, log_path
-from config import GITHUB_API_LATEST_RELEASE
+from config import GITHUB_API_LATEST_RELEASE, GITHUB_API_LATEST_STABLE_RELEASE
 from version import __version__
 
 
@@ -218,6 +218,46 @@ def is_newer(remote: str, local: str) -> bool:
     r_key = (r_nums, _PRE_ORDER.get(r_suf, 0))
     l_key = (l_nums, _PRE_ORDER.get(l_suf, 0))
     return r_key > l_key
+
+
+# ── Release channel selection ─────────────────────────────────────────────────
+
+def is_alpha_release(release: dict) -> bool:
+    """Return True only for the explicit WinZapp alpha channel."""
+    tag = (release.get("tag_name") or "").lower()
+    name = (release.get("name") or "").lower()
+    return "alpha" in tag or "alpha" in name
+
+
+def find_zip_asset(assets: list) -> str:
+    """Find the portable ZIP, preferring the canonical WinZapp.zip."""
+    fallback = ""
+    for asset in assets or []:
+        name = (asset.get("name") or "").lower()
+        url = asset.get("browser_download_url", "")
+        if name == "winzapp.zip":
+            return url
+        if name.endswith(".zip") and not fallback:
+            fallback = url
+    return fallback
+
+
+def select_release(releases: list, include_alpha: bool) -> "dict | None":
+    """Choose the newest eligible, parseable release with a ZIP asset."""
+    best = None
+    best_key = None
+    for release in releases or []:
+        if not isinstance(release, dict) or release.get("draft"):
+            continue
+        if is_alpha_release(release) and not include_alpha:
+            continue
+        parsed = parse_version((release.get("tag_name") or "").lstrip("vV"))
+        if parsed is None or not find_zip_asset(release.get("assets", [])):
+            continue
+        key = (parsed[0], _PRE_ORDER.get(parsed[1], 0))
+        if best_key is None or key > best_key:
+            best, best_key = release, key
+    return best
 
 
 # ── Changelog parser ──────────────────────────────────────────────────────────
@@ -759,97 +799,130 @@ class UpdateDialog(wx.Dialog):
 
 # ── UpdateChecker ─────────────────────────────────────────────────────────────
 
-class UpdateChecker:
-    """
-    Runs version checks in a background thread.
-    Shows UpdateDialog on the main thread when a newer version is found.
-    Retries every 3 hours on decline or when already up-to-date.
-    """
+def _is_window_alive(w) -> bool:
+    if w is None:
+        return False
+    try:
+        if not bool(w):
+            return False
+        if hasattr(wx, "IsDestroyed") and wx.IsDestroyed(w):
+            return False
+        return bool(w.IsShown())
+    except (RuntimeError, TypeError, AttributeError):
+        return False
 
-    _RETRY_INTERVAL = 3 * 60 * 60  # 3 hours in seconds
+
+class UpdateChecker:
+    """Background release checker with stable/alpha channel support."""
+
+    _RETRY_INTERVAL = 3 * 60 * 60
 
     def __init__(self, main_window):
-        self._mw           = main_window
-        self._retry_timer  = None
-        self._force        = False
+        self._mw = main_window
+        self._retry_timer = None
+        self._force = False
+
+    def _alpha_enabled(self) -> bool:
+        try:
+            return bool(self._mw.settings.get("general", {}).get(
+                "alpha_updates_enabled", False))
+        except Exception:
+            return False
+
+    def _get_json(self, url: str, params: "dict | None" = None):
+        resp = requests.get(
+            url,
+            headers={"User-Agent": f"WinZapp/{__version__}"},
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _fetch_releases(self) -> list:
+        releases = []
+        first_error = None
+        try:
+            data = self._get_json(GITHUB_API_LATEST_RELEASE, params={"per_page": 100})
+            if isinstance(data, dict):
+                releases.append(data)
+            elif isinstance(data, list):
+                releases.extend(item for item in data if isinstance(item, dict))
+        except Exception as exc:
+            first_error = exc
+            log_updater(logging.WARNING, "Could not fetch releases listing: %s", exc)
+
+        try:
+            data = self._get_json(GITHUB_API_LATEST_STABLE_RELEASE)
+            if isinstance(data, dict):
+                releases.append(data)
+        except Exception as exc:
+            log_updater(logging.WARNING, "Could not fetch latest stable release: %s", exc)
+            if first_error is None:
+                first_error = exc
+
+        if not releases:
+            raise first_error or RuntimeError("No releases could be fetched")
+
+        deduped = []
+        seen = set()
+        for release in releases:
+            key = release.get("id") or release.get("tag_name")
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(release)
+        return deduped
 
     def start(self):
-        """Launch the first check in a background thread."""
-        t = threading.Thread(target=self._check_once, daemon=True)
-        t.start()
+        threading.Thread(target=self._check_once, daemon=True).start()
 
     def force_check(self):
-        """Called from the Help > Check for Updates menu item."""
         self._force = True
         if self._retry_timer is not None:
             self._retry_timer.cancel()
             self._retry_timer = None
-        t = threading.Thread(target=self._check_once, daemon=True)
-        t.start()
+        threading.Thread(target=self._check_once, daemon=True).start()
 
     def force_reinstall(self):
-        """
-        Called from the Help > Force Reinstall from ZIP menu item.
-        Unlike force_check(), this skips the version comparison entirely and
-        always re-downloads and reinstalls whatever ZIP is attached to the
-        latest GitHub release — used to recover a broken install without
-        waiting for a newer version to exist.
-        """
         if self._retry_timer is not None:
             self._retry_timer.cancel()
             self._retry_timer = None
-        t = threading.Thread(target=self._fetch_latest_release_for_reinstall, daemon=True)
-        t.start()
-
-    # ── Internal ──────────────────────────────────────────────────────────────
+        threading.Thread(target=self._fetch_latest_release_for_reinstall, daemon=True).start()
 
     def _check_once(self):
-        log_updater(logging.INFO, "Checking GitHub Releases for updates...")
+        include_alpha = self._alpha_enabled()
+        log_updater(
+            logging.INFO,
+            "Checking GitHub Releases for updates (alpha channel: %s)...",
+            "on" if include_alpha else "off",
+        )
         try:
-            resp = requests.get(
-                GITHUB_API_LATEST_RELEASE,
-                headers={"User-Agent": f"WinZapp/{__version__}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            releases = self._fetch_releases()
         except Exception:
             log_updater(logging.ERROR, "Exception checking for updates", exc_info=True)
             self._schedule_retry()
             return
 
-        tag_name       = data.get("tag_name", "")
+        data = select_release(releases, include_alpha)
+        if data is None:
+            log_updater(logging.WARNING, "No eligible release found.")
+            self._schedule_retry()
+            return
+
+        tag_name = data.get("tag_name", "")
         remote_version = tag_name.lstrip("vV")
-        log_updater(logging.INFO, "Latest release tag=%s version=%s", tag_name, remote_version)
-
         if not remote_version:
-            log_updater(logging.WARNING, "Could not parse version from tag_name=%r", tag_name)
             self._schedule_retry()
             return
-
-        # Find the portable ZIP asset (prefer WinZapp.zip by exact name)
-        zip_url = ""
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            url  = asset.get("browser_download_url", "")
-            if name == "winzapp.zip":
-                zip_url = url
-                break
-            if name.endswith(".zip") and not zip_url:
-                zip_url = url
-
+        zip_url = find_zip_asset(data.get("assets", []))
         if not zip_url:
-            log_updater(logging.WARNING, "No ZIP asset found in release %s", tag_name)
             self._schedule_retry()
             return
-
         sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
 
         local_version = __version__
-        log_updater(logging.INFO, "Local version is %s", local_version)
-
         if not is_newer(remote_version, local_version):
-            log_updater(logging.INFO, "WinZapp is already up-to-date.")
             if self._force:
                 self._force = False
                 wx.CallAfter(self._show_no_update)
@@ -857,15 +930,12 @@ class UpdateChecker:
                 self._schedule_retry()
             return
 
-        log_updater(logging.INFO, "Newer version %s is available!", remote_version)
         self._force = False
-
-        # Prefer a local, per-version changelog file (see resolve_changelog())
-        # over the GitHub release body — only used as a last resort.
         lang_code = self._mw.i18n.get_language() if hasattr(self._mw, "i18n") else "pt-BR"
-        changelog = resolve_changelog(local_version, remote_version, lang_code, data.get("body", ""))
-
-        wx.CallAfter(self._show_update_dialog, remote_version, changelog, zip_url, sha256sums_url)
+        changelog = resolve_changelog(
+            local_version, remote_version, lang_code, data.get("body", ""))
+        wx.CallAfter(
+            self._show_update_dialog, remote_version, changelog, zip_url, sha256sums_url)
 
     def _show_no_update(self):
         i18n = self._mw.i18n
@@ -877,43 +947,30 @@ class UpdateChecker:
         )
 
     def _fetch_latest_release_for_reinstall(self):
-        log_updater(logging.INFO, "Fetching latest GitHub release for forced ZIP reinstall...")
         try:
-            resp = requests.get(
-                GITHUB_API_LATEST_RELEASE,
-                headers={"User-Agent": f"WinZapp/{__version__}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            releases = self._fetch_releases()
         except Exception as exc:
-            log_updater(logging.ERROR, "Exception fetching latest release for forced reinstall", exc_info=True)
+            log_updater(logging.ERROR, "Exception fetching release", exc_info=True)
             wx.CallAfter(self._show_reinstall_error, str(exc))
             return
-
-        tag_name       = data.get("tag_name", "")
-        remote_version = tag_name.lstrip("vV") or tag_name
-
-        zip_url = ""
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            url  = asset.get("browser_download_url", "")
-            if name == "winzapp.zip":
-                zip_url = url
-                break
-            if name.endswith(".zip") and not zip_url:
-                zip_url = url
-
-        if not zip_url:
-            log_updater(logging.WARNING, "No ZIP asset found in latest release %s", tag_name)
-            wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
+        data = select_release(releases, self._alpha_enabled())
+        if data is None:
+            wx.CallAfter(
+                self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
             return
-
+        tag_name = data.get("tag_name", "")
+        remote_version = tag_name.lstrip("vV") or tag_name
+        zip_url = find_zip_asset(data.get("assets", []))
+        if not zip_url:
+            wx.CallAfter(
+                self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
+            return
         sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
+        wx.CallAfter(
+            self._confirm_and_reinstall, remote_version, zip_url, sha256sums_url)
 
-        wx.CallAfter(self._confirm_and_reinstall, remote_version, zip_url, sha256sums_url)
-
-    def _confirm_and_reinstall(self, remote_version: str, zip_url: str, sha256sums_url: str = ""):
+    def _confirm_and_reinstall(self, remote_version: str, zip_url: str,
+                               sha256sums_url: str = ""):
         i18n = self._mw.i18n
         if wx.MessageBox(
             i18n.t("force_reinstall_confirm_msg").format(version=remote_version),
@@ -935,82 +992,95 @@ class UpdateChecker:
 
     def _get_active_parent(self):
         mw = self._mw
-        # Check if there is an active modal dialog (e.g. connection_dial, pairing_dial, settings)
-        cd = getattr(getattr(mw, "connect", None), "connection_dial", None)
-        if cd is not None and hasattr(cd, "IsShown") and cd.IsShown():
-            pd = getattr(getattr(mw, "connect", None), "pairing_dial", None)
-            if pd is not None and hasattr(pd, "IsShown") and pd.IsShown():
-                return pd
-            return cd
-        # Fallback to focused top-level window or main window
-        focused = wx.Window.FindFocus()
-        if focused:
-            tlw = wx.GetTopLevelParent(focused)
-            if tlw and hasattr(tlw, "IsShown") and tlw.IsShown():
-                return tlw
-        return mw
+        try:
+            connect = getattr(mw, "connect", None)
+            if connect:
+                for attr in ("pairing_dial", "connection_dial"):
+                    dialog = getattr(connect, attr, None)
+                    if _is_window_alive(dialog):
+                        return dialog
+        except Exception:
+            pass
+        try:
+            focused = wx.Window.FindFocus()
+            if _is_window_alive(focused):
+                top = wx.GetTopLevelParent(focused)
+                if _is_window_alive(top):
+                    return top
+        except Exception:
+            pass
+        return mw if _is_window_alive(mw) else None
 
-    def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str, sha256sums_url: str = ""):
-        previously_focused = wx.Window.FindFocus()
+    def _restore_focus(self, previously_focused):
+        if _is_window_alive(previously_focused):
+            try:
+                if (not hasattr(previously_focused, "IsShownOnScreen")
+                        or previously_focused.IsShownOnScreen()):
+                    previously_focused.SetFocus()
+                    return
+            except Exception:
+                pass
+        mw = self._mw
+        if not _is_window_alive(mw):
+            return
+        try:
+            mw.Raise()
+            mw.SetFocus()
+        except Exception:
+            pass
+        connect = getattr(mw, "connect", None)
+        connection_dialog = getattr(connect, "connection_dial", None) if connect else None
+        if _is_window_alive(connection_dialog):
+            try:
+                connection_dialog.Raise()
+                connection_dialog.SetFocus()
+            except Exception:
+                pass
+            return
+        panel = getattr(mw, "conversations_panel", None)
+        conversations = getattr(panel, "conversations_list", None) if panel else None
+        if _is_window_alive(conversations):
+            try:
+                conversations.SetFocus()
+            except Exception:
+                pass
+
+    def _show_update_dialog(self, remote_version: str, changelog: str,
+                            zip_url: str, sha256sums_url: str = ""):
+        try:
+            previously_focused = wx.Window.FindFocus()
+        except Exception:
+            previously_focused = None
         parent_window = self._get_active_parent()
-
-        dlg    = UpdateDialog(parent_window, remote_version, changelog, main_window=self._mw)
+        dlg = UpdateDialog(
+            parent_window, remote_version, changelog, main_window=self._mw)
         result = dlg.ShowModal()
         dlg.Destroy()
-
-        # Restore focus to whichever window or control was active before the dialog appeared
-        def _restore_focus():
-            if previously_focused:
-                try:
-                    if hasattr(previously_focused, "IsShownOnScreen") and previously_focused.IsShownOnScreen():
-                        previously_focused.SetFocus()
-                        return
-                except Exception:
-                    pass
-
-            mw = self._mw
-            if hasattr(mw, "IsShown") and mw.IsShown():
-                mw.Raise()
-                mw.SetFocus()
-                # If connection_dial is active, focus its main element/panel
-                cd = getattr(getattr(mw, "connect", None), "connection_dial", None)
-                if cd is not None and hasattr(cd, "IsShown") and cd.IsShown():
-                    cd.Raise()
-                    cd.SetFocus()
-                    return
-                # If conversations panel exists and has list, focus it
-                cp = getattr(mw, "conversations_panel", None)
-                if cp is not None and hasattr(cp, "conversations_list"):
-                    cp.conversations_list.SetFocus()
-                elif hasattr(mw, "navigation_panel"):
-                    mw.navigation_panel.nav_list.SetFocus()
-
-        wx.CallAfter(_restore_focus)
-
+        wx.CallAfter(self._restore_focus, previously_focused)
         if result == wx.ID_YES:
             self._do_install(remote_version, zip_url, sha256sums_url)
         else:
-            # User said No — retry in 3 hours
             self._schedule_retry()
 
-    def _do_install(self, new_version: str, zip_url: str, sha256sums_url: str = ""):
-        parent_window = self._get_active_parent()
+    def _do_install(self, new_version: str, zip_url: str,
+                    sha256sums_url: str = ""):
+        parent_getter = getattr(self, "_get_active_parent", None)
+        parent_window = parent_getter() if callable(parent_getter) else self._mw
         while True:
-            prog = UpdateProgressDialog(parent_window, new_version, self._mw, zip_url, sha256sums_url)
+            prog = UpdateProgressDialog(
+                parent_window, new_version, self._mw, zip_url, sha256sums_url)
             result = prog.run()
+            install_launched = bool(getattr(prog, "_install_ok", False))
             prog.Destroy()
-
             if result == wx.ID_OK:
-                # Install launched — quit the app so the batch script can run
+                if not install_launched:
+                    log_updater(logging.INFO, "Nothing installed; keeping WinZapp open.")
+                    return
                 self._mw.real_exit()
                 return
-
             if result == wx.ID_CANCEL:
-                # User cancelled
                 self._schedule_retry()
                 return
-
-            # wx.ID_ABORT: error occurred
             error_msg = prog._error_msg
             i18n = self._mw.i18n
             retry = wx.MessageBox(
@@ -1022,15 +1092,15 @@ class UpdateChecker:
             if retry != wx.YES:
                 self._schedule_retry()
                 return
-            # else: loop and retry the download
 
     def _schedule_retry(self):
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
         self._retry_timer = threading.Timer(self._RETRY_INTERVAL, self._check_once)
         self._retry_timer.daemon = True
         self._retry_timer.start()
 
     def stop(self):
-        """Cancel any pending retry timer."""
         if self._retry_timer is not None:
             self._retry_timer.cancel()
             self._retry_timer = None

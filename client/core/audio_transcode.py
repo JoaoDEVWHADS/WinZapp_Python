@@ -7,8 +7,16 @@ import subprocess
 import sys
 
 
-def transcode_m4a_to_wav(ffmpeg: str, source_path: str) -> str | None:
-    """Convert an MP4/M4A audio stream to PCM WAV for reliable BASS playback."""
+def transcode_audio_to_wav(ffmpeg: str, source_path: str) -> str | None:
+    """Convert any ffmpeg-readable audio stream to PCM WAV for reliable BASS playback.
+
+    Originally MP4/M4A-only (hence the old name), this is also the fallback for
+    any other container BASS can't open directly — notably an OGG whose codec
+    isn't Opus (or whose bassopus.dll plugin failed to register), which BASS
+    rejects with error 41 "unsupported file format" for both the decode+Tempo
+    stream and the plain direct stream. Re-encoding through ffmpeg sidesteps
+    BASS's codec support entirely rather than depending on it.
+    """
     if not ffmpeg or not os.path.isfile(ffmpeg):
         return None
 
@@ -34,12 +42,12 @@ def transcode_m4a_to_wav(ffmpeg: str, source_path: str) -> str | None:
         ):
             return output_path
         logging.error(
-            "[UI Audio Playback] M4A→WAV conversion failed (rc=%s): %s",
+            "[UI Audio Playback] audio→WAV conversion failed (rc=%s): %s",
             result.returncode,
             (result.stderr or b"").decode("utf-8", errors="replace")[-800:],
         )
     except Exception:
-        logging.exception("[UI Audio Playback] M4A→WAV conversion failed")
+        logging.exception("[UI Audio Playback] audio→WAV conversion failed")
 
     try:
         os.unlink(output_path)

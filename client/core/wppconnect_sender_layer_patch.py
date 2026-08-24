@@ -1,34 +1,45 @@
 """Shared source-text constant for patching @wppconnect-team/wppconnect's
-compiled sender.layer.js — sendFile() losing the real error when a video
-send fails inside the browser page.
+compiled sender.layer.js — two independent fixes to sendFile(), applied
+together since they touch the same method:
 
-Bug: every video sent from WinZapp (message attachment AND status) fails
-with an opaque HTTP 500 whose logged "error" is just
-{"name":"t","message":"t"} — useless, single-letter, minified junk. Root
-cause: `WPP.chat.sendFileMessage()` throws INSIDE the Puppeteer page
-context (browser side), and whatever it throws there is not a standard
-`Error` instance wa-js's own minified bundle constructs cleanly — Puppeteer
-serializes a thrown page-context exception across the CDP boundary via
-`Runtime.evaluate`'s `exceptionDetails`, which for a non-standard thrown
-value only reliably carries a `className`/`description`, not the real
-message/stack. That's what "t"/"t" actually is: the minified class name of
-whatever wa-js threw, with no usable text.
+1. sendFile() losing the real error when a send fails inside the browser
+   page. Every video sent from WinZapp (message attachment AND status)
+   used to fail with an opaque HTTP 500 whose logged "error" was just
+   {"name":"t","message":"t"} — useless, single-letter, minified junk. Root
+   cause: `WPP.chat.sendFileMessage()` throws INSIDE the Puppeteer page
+   context (browser side), and whatever it throws there is not a standard
+   `Error` instance wa-js's own minified bundle constructs cleanly —
+   Puppeteer serializes a thrown page-context exception across the CDP
+   boundary via `Runtime.evaluate`'s `exceptionDetails`, which for a
+   non-standard thrown value only reliably carries a `className`/
+   `description`, not the real message/stack. That's what "t"/"t" actually
+   is: the minified class name of whatever wa-js threw, with no usable
+   text. Fixed by catching the exception INSIDE the page (where the real
+   Error object with its real message/stack still exists) and RETURNing it
+   as plain data instead of letting it cross the CDP exception boundary raw
+   — `page.evaluate()`'s return value goes through ordinary JSON-safe
+   structured cloning, which preserves whatever plain string properties are
+   pulled off the error before returning, unlike its exception path. The
+   Node side then reconstructs and throws a real `Error` from that data, so
+   messageController.ts's returnError() (see
+   client/api_patches/src/controller/messageController.ts) finally has real
+   text to report instead of "t".
 
-Fix: catch the exception INSIDE the page (where the real Error object with
-its real message/stack still exists) and RETURN it as plain data instead of
-letting it cross the CDP exception boundary raw — `page.evaluate()`'s
-return value goes through ordinary JSON-safe structured cloning, which
-preserves whatever plain string properties are pulled off the error before
-returning, unlike its exception path. The Node side then reconstructs and
-throws a real `Error` from that data, so messageController.ts's
-returnError() (see client/api_patches/src/controller/messageController.ts)
-finally has real text to report instead of "t".
-
-This does not by itself fix WHY the browser-side sendFileMessage() call
-fails for video — only what the log says about it. See that module's own
-history/comments for the working theory (chrome-headless-shell's video
-decode support) once a real message/stack comes back from a live
-reproduction.
+2. The bounded/chunked browser transfer (PATCHED_SEND_FILE below — streams
+   the file into Chromium in 3MB pieces via window.__winzappFileTransfers
+   instead of building one giant base64 string and passing it as a single
+   CDP argument) was gated to `options.type === 'document'` only
+   (PATCHED_FILE_LOADING_V1). Every other type (image/video/audio) always
+   fell through to the old base64-in-memory path regardless of size —
+   exactly the "one oversized CDP argument" problem the chunked path exists
+   to avoid, just for every type BUT documents. Reported live as "erro 500
+   ao enviar vídeos em diferentes formatos" for anything past WinZapp's own
+   conservative client-side media cap (a cap that only existed because this
+   path couldn't safely go any higher). WPP.chat.sendFileMessage() doesn't
+   care whether the content it's classifying is a document or a video —
+   options.type (always explicitly set by WinZapp, never left at
+   'auto-detect') is what tells it that, identically on both paths — so
+   PATCHED_FILE_LOADING widens the gate to image/video/audio too.
 
 Both setup_api.py and ApiSetupDialog (client/ui/dialogs/api_setup.py) apply
 this patch to node_modules right after every `npm install` — see
@@ -75,10 +86,63 @@ ORIGINAL_FILE_LOADING = (
     "        }\n"
 )
 
-PATCHED_FILE_LOADING = (
+PATCHED_FILE_LOADING_V1 = (
     "        let base64 = '';\n"
     "        let largeFilePath = '';\n"
     "        if (!pathOrBase64.startsWith('data:') && options.type === 'document') {\n"
+    "            try {\n"
+    "                if (require('fs').statSync(pathOrBase64).size > 8 * 1024 * 1024)\n"
+    "                    largeFilePath = pathOrBase64;\n"
+    "            }\n"
+    "            catch (_) { }\n"
+    "        }\n"
+    "        if (pathOrBase64.startsWith('data:')) {\n"
+    "            base64 = pathOrBase64;\n"
+    "        }\n"
+    "        else if (!largeFilePath) {\n"
+    "            let fileContent = await (0, helpers_1.downloadFileToBase64)(pathOrBase64);\n"
+    "            if (!fileContent) {\n"
+    "                fileContent = await (0, helpers_1.fileToBase64)(pathOrBase64);\n"
+    "            }\n"
+    "            if (fileContent) {\n"
+    "                base64 = fileContent;\n"
+    "            }\n"
+    "        }\n"
+    "        if (!options.filename && !pathOrBase64.startsWith('data:')) {\n"
+    "            options.filename = path.basename(pathOrBase64);\n"
+    "        }\n"
+    "        if (!base64 && !largeFilePath) {\n"
+    "            const error = new Error('Empty or invalid file or base64');\n"
+    "            Object.assign(error, {\n"
+    "                code: 'empty_file',\n"
+    "            });\n"
+    "            throw error;\n"
+    "        }\n"
+)
+
+# v2: the chunked/bounded-transfer path (see PATCHED_SEND_FILE below) was
+# document-only — anything else (image/video/audio) always fell through to
+# the base64-in-memory branch just below, however large. That's the old
+# "single oversized CDP argument" problem PATCHED_SEND_FILE exists to avoid
+# in the first place, just for every OTHER media type instead of documents:
+# reported live as "erro 500 ao enviar vídeos em diferentes formatos" for
+# anything beyond WinZapp's own conservative 70MB client-side media cap
+# (ui/conversations.py's since-removed _MAX_MEDIA_BYTES / websocket_client.py's
+# maxMediaSize) — a cap that only existed because this path couldn't safely
+# go any higher, and that widening this gate is what allowed image/video/audio
+# to be folded into the single _MAX_ATTACHMENT_BYTES ceiling documents already
+# used. WPP.chat.sendFileMessage() itself doesn't care whether the
+# content it's classifying is a document or a video — options.type (always
+# explicitly set by WinZapp, never left at 'auto-detect') is what tells it
+# that, identically on both paths — so there is no reason large image/
+# video/audio sends can't reuse the exact same bounded transfer.
+PATCHED_FILE_LOADING = (
+    "        let base64 = '';\n"
+    "        let largeFilePath = '';\n"
+    "        if (\n"
+    "            !pathOrBase64.startsWith('data:') &&\n"
+    "            ['document', 'image', 'video', 'audio'].includes(options.type)\n"
+    "        ) {\n"
     "            try {\n"
     "                if (require('fs').statSync(pathOrBase64).size > 8 * 1024 * 1024)\n"
     "                    largeFilePath = pathOrBase64;\n"
@@ -230,6 +294,7 @@ PATCHED_SEND_FILE = (
 
 ALL_PATCHES = (
     (ORIGINAL_FILE_LOADING, PATCHED_FILE_LOADING),
+    (PATCHED_FILE_LOADING_V1, PATCHED_FILE_LOADING),
     (ORIGINAL_SEND_FILE, PATCHED_SEND_FILE),
     (LEGACY_PATCHED_SEND_FILE, PATCHED_SEND_FILE),
 )

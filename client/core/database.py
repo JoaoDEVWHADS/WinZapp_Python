@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_msgs_jid_ts
     ON messages(remote_jid, timestamp DESC);
 
+-- Durable tombstones for messages the user removed. A high-priority UI
+-- DELETE can legitimately overtake a previously queued INSERT while sync is
+-- busy; without a tombstone that older INSERT (or a briefly stale WPPConnect
+-- Store page) can resurrect the message in SQLite after it disappeared from
+-- WhatsApp. Keeping the key here makes deletion idempotent and race-safe.
+CREATE TABLE IF NOT EXISTS deleted_messages (
+    remote_jid      TEXT NOT NULL,
+    message_id      TEXT NOT NULL,
+    deleted_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (remote_jid, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_deleted_messages_at
+    ON deleted_messages(deleted_at);
+
 CREATE TABLE IF NOT EXISTS contacts (
     jid             TEXT PRIMARY KEY,
     remote_jid      TEXT NOT NULL,
@@ -584,52 +598,57 @@ class DatabaseManager:
 
     @staticmethod
     def _jid_variants(remote_jid: str) -> list[str]:
-        """*remote_jid* plus its @c.us/@s.whatsapp.net counterpart.
-
-        Everything is SUPPOSED to be normalized to @s.whatsapp.net before it
-        ever reaches the database (see main.py's extensive JID-normalization
-        docs — "the single most common bug source in this codebase"), so
-        under correct operation this is a one-element list and a no-op. It
-        exists as a defensive second line: if a message ever got inserted
-        under the legacy @c.us form by some path that skipped
-        normalization, a plain single-JID lookup would silently never find
-        it again (not an error — just messages that quietly never load).
-        Querying both forms costs nothing extra when only one is ever
-        actually populated (SQLite's `IN` short-circuits false-y branches
-        the same as `=`), and closes that failure mode either way.
-        """
+        """*remote_jid* plus its @c.us/@s.whatsapp.net counterpart."""
         if remote_jid.endswith("@s.whatsapp.net"):
             return [remote_jid, remote_jid.replace("@s.whatsapp.net", "@c.us")]
         if remote_jid.endswith("@c.us"):
             return [remote_jid, remote_jid.replace("@c.us", "@s.whatsapp.net")]
         return [remote_jid]
 
+    async def _resolve_all_jid_aliases(self, remote_jid: str) -> list[str]:
+        """Return remote_jid and all known aliases (@c.us, @s.whatsapp.net, and LID mapping)."""
+        variants = list(self._jid_variants(remote_jid))
+        try:
+            conn = await self._ensure_conn()
+            if remote_jid.endswith("@lid"):
+                cur = await conn.execute(
+                    "SELECT phone_jid FROM lid_mappings WHERE lid_jid = ?", (remote_jid,)
+                )
+                row = await cur.fetchone()
+                if row and row["phone_jid"]:
+                    for v in self._jid_variants(row["phone_jid"]):
+                        if v not in variants:
+                            variants.append(v)
+            else:
+                norm = remote_jid.replace("@c.us", "@s.whatsapp.net")
+                cur = await conn.execute(
+                    "SELECT lid_jid FROM lid_mappings WHERE phone_jid = ? OR phone_jid = ?",
+                    (norm, remote_jid),
+                )
+                rows = await cur.fetchall()
+                for r in rows:
+                    if r["lid_jid"] and r["lid_jid"] not in variants:
+                        variants.append(r["lid_jid"])
+        except Exception:
+            pass
+        return variants
+
     async def get_messages(
         self, remote_jid: str, limit: int = 200, offset: int = 0
     ) -> list[dict]:
-        """Return message dicts for a chat, newest-first.
-
-        Parameters
-        ----------
-        remote_jid : str
-            Chat JID.
-        limit : int
-            Maximum records to return (default 200).
-        offset : int
-            Skip this many records (for pagination).
-
-        Returns
-        -------
-        list[dict]
-            Normalized message dicts (same shape as current messages.dat).
-        """
+        """Return message dicts for a chat, newest-first."""
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"""SELECT message_json FROM messages
-               WHERE remote_jid IN ({placeholders})
-               ORDER BY timestamp DESC, message_id
+            f"""SELECT m.message_json FROM messages AS m
+               WHERE m.remote_jid IN ({placeholders})
+                 AND NOT EXISTS (
+                     SELECT 1 FROM deleted_messages AS d
+                     WHERE d.remote_jid = m.remote_jid
+                       AND d.message_id = m.message_id
+                 )
+               ORDER BY m.timestamp DESC, m.message_id
                LIMIT ? OFFSET ?""",
             (*jids, limit, offset),
         )
@@ -646,12 +665,17 @@ class DatabaseManager:
     ) -> list[dict]:
         """Return message dicts oldest-first (for initial chat load)."""
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"""SELECT message_json FROM messages
-               WHERE remote_jid IN ({placeholders})
-               ORDER BY timestamp ASC, message_id
+            f"""SELECT m.message_json FROM messages AS m
+               WHERE m.remote_jid IN ({placeholders})
+                 AND NOT EXISTS (
+                     SELECT 1 FROM deleted_messages AS d
+                     WHERE d.remote_jid = m.remote_jid
+                       AND d.message_id = m.message_id
+                 )
+               ORDER BY m.timestamp ASC, m.message_id
                LIMIT ? OFFSET ?""",
             (*jids, limit, offset),
         )
@@ -666,14 +690,49 @@ class DatabaseManager:
     async def get_message_count(self, remote_jid: str) -> int:
         """Return total message count for a chat."""
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM messages WHERE remote_jid IN ({placeholders})",
+            f"""SELECT COUNT(*) AS cnt FROM messages AS m
+                WHERE m.remote_jid IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deleted_messages AS d
+                      WHERE d.remote_jid = m.remote_jid
+                        AND d.message_id = m.message_id
+                  )""",
             tuple(jids),
         )
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
+
+    async def get_messages_page(
+        self, remote_jid: str, limit: int = 200, offset: int = 0
+    ) -> tuple[list[dict], int]:
+        """Return a page of messages plus the total count in one bridge job."""
+        messages = await self.get_messages(remote_jid, limit, offset)
+        total = await self.get_message_count(remote_jid)
+        return messages, total
+
+    async def get_message(self, remote_jid: str, message_id: str) -> dict | None:
+        """Return one message by its WhatsApp id, including legacy JID aliases."""
+        if not remote_jid or not message_id:
+            return None
+        conn = await self._ensure_conn()
+        jids = await self._resolve_all_jid_aliases(remote_jid)
+        placeholders = ",".join("?" for _ in jids)
+        cursor = await conn.execute(
+            f"""SELECT m.message_json FROM messages AS m
+                WHERE m.remote_jid IN ({placeholders}) AND m.message_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deleted_messages AS d
+                      WHERE d.remote_jid = m.remote_jid
+                        AND d.message_id = m.message_id
+                  )
+                LIMIT 1""",
+            (*jids, message_id),
+        )
+        row = await cursor.fetchone()
+        return self._decrypt_json(row["message_json"]) if row else None
 
     def _build_message_values(self, remote_jid: str, msg: dict) -> tuple | None:
         """Compute the 8-tuple bound to the messages upsert, shared by every
@@ -697,8 +756,44 @@ class DatabaseManager:
         return (mid, remote_jid, from_me, participant, mtype, msg_enc, ts,
                 _delivery_status(msg))
 
+    async def _deleted_message_ids(self, remote_jid: str, message_ids) -> set[str]:
+        """Return tombstoned IDs for *remote_jid*, including JID aliases."""
+        ids = list(dict.fromkeys(str(mid) for mid in (message_ids or []) if mid))
+        if not remote_jid or not ids:
+            return set()
+        conn = await self._ensure_conn()
+        jids = await self._resolve_all_jid_aliases(remote_jid)
+        deleted = set()
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            jid_ph = ",".join("?" for _ in jids)
+            id_ph = ",".join("?" for _ in chunk)
+            cursor = await conn.execute(
+                f"SELECT message_id FROM deleted_messages "
+                f"WHERE remote_jid IN ({jid_ph}) AND message_id IN ({id_ph})",
+                (*jids, *chunk),
+            )
+            deleted.update(str(row[0]) for row in await cursor.fetchall())
+        return deleted
+
+    async def get_deleted_message_ids(self, remote_jid: str, message_ids) -> set[str]:
+        """Public read-only tombstone lookup used by the in-memory sync layer."""
+        return await self._deleted_message_ids(remote_jid, message_ids)
+
+    async def get_all_deleted_message_keys(self) -> list[tuple[str, str]]:
+        """Return durable tombstones so the live-event layer can warm its cache."""
+        conn = await self._ensure_conn()
+        cursor = await conn.execute(
+            "SELECT remote_jid, message_id FROM deleted_messages"
+        )
+        return [
+            (str(row[0]), str(row[1]))
+            for row in await cursor.fetchall()
+            if row[0] and row[1]
+        ]
+
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
-        """Insert a single message record."""
+        """Insert one message unless a durable local deletion owns its ID."""
         values = self._build_message_values(remote_jid, msg)
         if values is None:
             log.warning(
@@ -707,8 +802,15 @@ class DatabaseManager:
                 remote_jid,
             )
             return
+        message_id = str(values[0])
         async with self._write_lock:
             conn = await self._ensure_conn()
+            if message_id in await self._deleted_message_ids(remote_jid, [message_id]):
+                log.info(
+                    "[insert_message] ignoring tombstoned message %s in %s",
+                    message_id, remote_jid,
+                )
+                return
             await conn.execute(
                 """INSERT OR REPLACE INTO messages
                    (message_id, remote_jid, from_me, participant,
@@ -721,30 +823,60 @@ class DatabaseManager:
     async def insert_messages_batch(
         self, remote_jid: str, msgs: list[dict]
     ) -> None:
-        """Insert many messages in a single transaction."""
+        """Insert many messages with one executemany call + one transaction.
+
+        The old implementation used one transaction but still awaited one
+        ``conn.execute()`` per message. During a 200-message sync page that
+        meant 200 separate jobs on aiosqlite's worker queue, multiplied by
+        hundreds of chats/backfill passes. Building the encrypted rows first
+        and handing SQLite the whole page with ``executemany`` keeps the same
+        atomic semantics while drastically reducing queue pressure.
+        """
         if not msgs:
             return
+
+        values_batch = []
         skipped = 0
+        for msg in msgs:
+            values = self._build_message_values(remote_jid, msg)
+            if values is None:
+                skipped += 1
+                continue
+            values_batch.append(values)
+
+        if not values_batch:
+            if skipped:
+                log.warning(
+                    "[insert_messages_batch] dropped %d message(s) with empty "
+                    "key.id for %s", skipped, remote_jid,
+                )
+            return
+
         async with self._write_lock:
             conn = await self._ensure_conn()
+            tombstoned = await self._deleted_message_ids(
+                remote_jid, [values[0] for values in values_batch]
+            )
+            if tombstoned:
+                values_batch = [
+                    values for values in values_batch
+                    if str(values[0]) not in tombstoned
+                ]
+                log.info(
+                    "[insert_messages_batch] skipped %d tombstoned message(s) for %s",
+                    len(tombstoned), remote_jid,
+                )
+            if not values_batch:
+                return
             try:
                 await conn.execute("BEGIN")
-                for msg in msgs:
-                    values = self._build_message_values(remote_jid, msg)
-                    if values is None:
-                        # See _build_message_values() — an empty id-less
-                        # message would silently overwrite another id-less
-                        # message in the same batch/chat instead of being
-                        # rejected.
-                        skipped += 1
-                        continue
-                    await conn.execute(
-                        """INSERT OR REPLACE INTO messages
-                           (message_id, remote_jid, from_me, participant,
-                            message_type, message_json, timestamp, status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        values,
-                    )
+                await conn.executemany(
+                    """INSERT OR REPLACE INTO messages
+                       (message_id, remote_jid, from_me, participant,
+                        message_type, message_json, timestamp, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    values_batch,
+                )
                 await conn.commit()
             except Exception:
                 await conn.rollback()
@@ -761,6 +893,30 @@ class DatabaseManager:
         """Update a message's ID from old_id to new_id in the database."""
         async with self._write_lock:
             conn = await self._ensure_conn()
+            deleted = await self._deleted_message_ids(
+                remote_jid, [old_id, new_id]
+            )
+            if old_id in deleted or new_id in deleted:
+                # A send callback may learn the real WhatsApp id after the user
+                # already removed the local pending row. Carry that deletion
+                # forward to the real id rather than allowing the id rename (or
+                # a later Store echo) to resurrect the bubble.
+                variants = self._jid_variants(remote_jid)
+                if old_id in deleted and new_id not in deleted:
+                    await conn.executemany(
+                        """INSERT OR REPLACE INTO deleted_messages
+                           (remote_jid, message_id, deleted_at)
+                           VALUES (?, ?, strftime('%s','now'))""",
+                        [(jid, new_id) for jid in variants],
+                    )
+                jid_ph = ",".join("?" for _ in variants)
+                await conn.execute(
+                    f"DELETE FROM messages WHERE remote_jid IN ({jid_ph}) "
+                    "AND message_id IN (?, ?)",
+                    (*variants, old_id, new_id),
+                )
+                await conn.commit()
+                return
             # First, check if the new_id already exists (to prevent duplicates)
             cursor = await conn.execute(
                 "SELECT 1 FROM messages WHERE remote_jid=? AND message_id=?",
@@ -795,13 +951,53 @@ class DatabaseManager:
 
     async def delete_message(self, remote_jid: str, message_id: str) -> None:
         """Delete a single message by remote_jid + message_id."""
+        await self.delete_messages_batch(remote_jid, [message_id])
+
+    async def delete_messages_batch(self, remote_jid: str, message_ids) -> None:
+        """Delete many messages for one chat in a single transaction/query.
+
+        Phone-side reconciliation can remove dozens or hundreds of rows at
+        once. Deleting them one by one used to enqueue one commit per message
+        and, worse, the UI caller waited synchronously for every one.
+        """
+        ids = list(dict.fromkeys(str(mid) for mid in (message_ids or []) if mid))
+        if not ids or not remote_jid:
+            return
+
+        jids = self._jid_variants(remote_jid)
         async with self._write_lock:
             conn = await self._ensure_conn()
-            await conn.execute(
-                "DELETE FROM messages WHERE remote_jid=? AND message_id=?",
-                (remote_jid, message_id),
-            )
-            await conn.commit()
+            try:
+                await conn.execute("BEGIN")
+                # Record the deletion before removing the row. This is what
+                # makes a priority DELETE safe even if an older INSERT is still
+                # queued behind it, and also blocks briefly stale Store pages
+                # from re-importing the same WhatsApp message afterwards.
+                tombstone_rows = [
+                    (jid, mid) for jid in jids for mid in ids
+                ]
+                await conn.executemany(
+                    """INSERT OR REPLACE INTO deleted_messages
+                       (remote_jid, message_id, deleted_at)
+                       VALUES (?, ?, strftime('%s','now'))""",
+                    tombstone_rows,
+                )
+                # Keep well below SQLite's bind-variable limit. A normal page
+                # is 200 messages, but chunking makes this safe for larger bulk
+                # selections/reconciliation runs too.
+                for start in range(0, len(ids), 400):
+                    chunk = ids[start:start + 400]
+                    jid_ph = ",".join("?" for _ in jids)
+                    id_ph = ",".join("?" for _ in chunk)
+                    await conn.execute(
+                        f"DELETE FROM messages WHERE remote_jid IN ({jid_ph}) "
+                        f"AND message_id IN ({id_ph})",
+                        (*jids, *chunk),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
 
     async def delete_chat_messages(self, remote_jid: str) -> None:
         """Remove all messages for a chat."""
@@ -1014,6 +1210,18 @@ class DatabaseManager:
             )
             await conn.commit()
 
+    async def delete_status_update(self, message_id: str) -> int:
+        """Delete one failed story from local storage by its message id."""
+        if not message_id:
+            return 0
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            cursor = await conn.execute(
+                "DELETE FROM status_updates WHERE message_id = ?", (message_id,)
+            )
+            await conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+
     # ── Bulk Import / Export (for migration) ─────────────────────────────────
 
     async def import_from_dict(self, data: dict, clear_first: bool = False,
@@ -1063,7 +1271,7 @@ class DatabaseManager:
                     tables = ["chats", "messages", "contacts",
                               "lid_mappings", "unresolvable_lids", "status_updates"]
                     if clear_metadata:
-                        tables.append("system_metadata")
+                        tables.extend(["system_metadata", "deleted_messages"])
                     for tbl in tables:
                         await conn.execute(f"DELETE FROM {tbl}")
 
@@ -1085,12 +1293,16 @@ class DatabaseManager:
                             .get("messages", {})
                             .get("records", [])
                     )
+                    message_values = []
                     for msg in records:
                         values = self._build_message_values(remote_jid, msg)
-                        if values is None:
-                            # See _build_message_values(): an id-less message
-                            # would silently overwrite any other id-less
-                            # message in the same chat under INSERT OR REPLACE.
+                        if values is not None:
+                            message_values.append(values)
+                    tombstoned = await self._deleted_message_ids(
+                        remote_jid, [values[0] for values in message_values]
+                    )
+                    for values in message_values:
+                        if str(values[0]) in tombstoned:
                             continue
                         await conn.execute(
                             """INSERT OR REPLACE INTO messages
@@ -1190,7 +1402,7 @@ class DatabaseManager:
                 for table in (
                     "chats", "messages", "contacts",
                     "lid_mappings", "unresolvable_lids", "status_updates",
-                    "system_metadata",
+                    "system_metadata", "deleted_messages",
                 ):
                     await conn.execute(f"DELETE FROM {table}")
                 await conn.commit()

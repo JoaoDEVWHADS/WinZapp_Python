@@ -31,17 +31,24 @@ def _load_dotenv():
 
 _load_dotenv()
 
-# ── Update URLs ───────────────────────────────────────────────────────────────
+# ── Update source: GitHub Releases ───────────────────────────────────────────
+# Override WINZAPP_GITHUB_REPO in .env to point at a fork.
 
-GITHUB_RELEASE_URL = os.environ.get(
+GITHUB_REPO = os.environ.get("WINZAPP_GITHUB_REPO", "JoaoDEVWHADS/WinZapp_Python")
+
+# Listing includes prereleases/alpha builds. /latest is GitHub's stable-only
+# endpoint. The updater merges both so frequent alpha releases can never push
+# the latest stable off the listing page.
+GITHUB_API_LATEST_RELEASE = os.environ.get(
     "WINZAPP_GITHUB_RELEASE_URL",
-    "https://api.github.com/repos/JoaoDEVWHADS/WinZapp_Python/releases/latest",
+    f"https://api.github.com/repos/{GITHUB_REPO}/releases",
 )
-
-GITHUB_API_LATEST_RELEASE = GITHUB_RELEASE_URL
+GITHUB_API_LATEST_STABLE_RELEASE = os.environ.get(
+    "WINZAPP_GITHUB_STABLE_RELEASE_URL",
+    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+)
 
 UPDATE_ZIP_URL = os.environ.get(
     "WINZAPP_ZIP_URL",
-    "https://github.com/JoaoDEVWHADS/WinZapp_Python/releases/latest/download/WinZapp.zip",
+    f"https://github.com/{GITHUB_REPO}/releases/latest/download/WinZapp.zip",
 )
-

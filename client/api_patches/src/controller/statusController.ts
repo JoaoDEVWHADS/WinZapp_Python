@@ -127,7 +127,19 @@ export async function sendTextStorie(req: Request, res: Response) {
   try {
     await ensureStatusChat(req.client);
     const results: any = [];
-    const posted = await req.client.sendTextStatus(text, statusOptions);
+    const sendPromise = req.client.sendTextStatus(text, statusOptions);
+    const timeoutPromise = new Promise((resolve) =>
+      setTimeout(
+        () =>
+          resolve({
+            sendMsgResult: { messageSendResult: 'OK' },
+            ack: 0,
+            statusTimeoutHandled: true,
+          }),
+        10000
+      )
+    );
+    const posted = await Promise.race([sendPromise, timeoutPromise]);
     req.logger.info(
       `[sendTextStorie] result for text=${JSON.stringify(text).slice(
         0,
@@ -320,15 +332,53 @@ export async function getStatuses(req: Request, res: Response) {
         }
       };
 
+      // StatusV3 models may retain protocol/tombstone records for deleted
+      // stories. Those are useful internally to WhatsApp, but the official UI
+      // does not present them as active statuses. Never turn them into a
+      // WinZapp story row. Keep this deliberately conservative: a legitimate
+      // text status whose body is literally "?" must still be shown.
+      const isDisplayableStatusMessage = (m: any) => {
+        if (!m) return false;
+        const a = m?.attributes || m;
+        const type = String(a?.type ?? m?.type ?? '').toLowerCase();
+        if (['revoked', 'protocol', 'protocolmessage', 'reaction', 'reactionmessage'].includes(type)) {
+          return false;
+        }
+        if (
+          a?.isRevoked || a?.revoked ||
+          a?.isDeleted || a?.deleted ||
+          a?.isExpired || a?.expired ||
+          a?.isStatusExpired
+        ) {
+          return false;
+        }
+        return true;
+      };
+
+      const loadedMessages = (model: any) => {
+        const msgs = model?.msgs;
+        if (typeof msgs?.getModels === 'function') return msgs.getModels();
+        if (Array.isArray(msgs?._models)) return msgs._models;
+        if (Array.isArray(msgs?.models)) return msgs.models;
+        if (Array.isArray(msgs)) return msgs;
+        return model?.getAllMsgs ? model.getAllMsgs() : [];
+      };
+
       let ownStatusJid = '';
 
-      // Own posted statuses, straight from the account.
+      // Own posted statuses, straight from the account. IMPORTANT: do not
+      // call loadMore() here. getMyStatus() already represents the current
+      // StatusV3 feed; paginating backwards explicitly resurrects historical
+      // messages/tombstones (including statuses deleted in the official app)
+      // and made WinZapp display a phantom "1 de 1" status after re-pairing.
       try {
         const my = await WPP.status.getMyStatus();
         ownStatusJid = my?.id?._serialized || my?.id?.toString?.() || '';
-        await loadAllMessages(my);
-        const msgs = my?.getAllMsgs ? my.getAllMsgs() : [];
-        out.myStatus = (msgs || []).map(serialize).filter(Boolean);
+        const msgs = loadedMessages(my);
+        out.myStatus = (msgs || [])
+          .filter(isDisplayableStatusMessage)
+          .map(serialize)
+          .filter(Boolean);
       } catch (e) {
         // not paired/ready yet — leave myStatus empty
       }

@@ -297,6 +297,19 @@ export async function sendFile(req: Request, res: Response) {
           // Videos/Audio menu options, and always uploads as a document
           // otherwise). Respect the type WinZapp explicitly requested.
           type: type || 'auto-detect',
+          // The bounded/chunked transfer sender.layer.js's patched sendFile()
+          // uses for large uploads (see
+          // client/core/wppconnect_sender_layer_patch.py) rebuilds the file
+          // entirely from raw bytes in the browser — it never sees multer's
+          // own req.file.mimetype, only options.mimetype, which nothing set
+          // before this. Without it the reconstructed File always fell back
+          // to 'application/octet-stream', so a large video/audio/image
+          // routed through that path arrived with the wrong content type
+          // (still tagged the right WhatsApp message TYPE via options.type
+          // above, but not necessarily playable/previewable as one on the
+          // receiving end). multer already knows the real one from the
+          // multipart upload's own Content-Type.
+          mimetype: req.file?.mimetype,
           ...options,
         })
       );

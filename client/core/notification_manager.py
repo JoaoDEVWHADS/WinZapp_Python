@@ -20,6 +20,11 @@ Design decisions:
   - SetCurrentProcessExplicitAppUserModelID("WinZapp") (called in main.py)
     ensures that Windows displays "WinZapp" — not the exe filename — as the
     sender inside the notification.
+  - The toast is the ONLY announcement a backgrounded message gets: every
+    screen reader reads the banner itself, so also speaking it through
+    accessible_output2 delivers the message twice.  AO2 is a strict fallback
+    for when no banner will appear — see should_speak_background_message()
+    and announce_background_message() below.
   - A single long-lived worker thread owns the Toaster object so that WinRT
     COM objects are always created and used on the same thread, avoiding the
     [WinError -2147417842] RPC_E_WRONG_THREAD error that occurs when the
@@ -516,6 +521,59 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
     return title
 
 
+def should_speak_background_message(settings, has_notification_manager: bool) -> bool:
+    """Whether a backgrounded message needs its own AO2 announcement.
+
+    True only when no Windows toast will even be *attempted* for it: the user
+    turned the tray icon off (which switches toasts off with it), or there is
+    no NotificationManager on the window at all.
+
+    Whenever a toast is attempted the banner IS the announcement — every
+    screen reader reads it — so speaking the same text through AO2 as well
+    delivers the message twice.  The remaining case, "a toast was attempted
+    but no banner ever reached the screen", is decided where the outcome is
+    actually known rather than guessed at here: see
+    NotificationManager._dispatch(), which falls back to speaking it itself.
+    """
+    if not settings.get("general", {}).get("show_tray_icon", True):
+        return True
+    return not has_notification_manager
+
+
+def announce_background_message(main_window, i18n, title: str, body: str) -> None:
+    """Speak an incoming background message through accessible_output2.
+
+    This is a FALLBACK, never a companion to the Windows toast.  Every screen
+    reader (NVDA, JAWS, Narrator) reads the toast banner itself, so speaking
+    the same text through AO2 as well makes a backgrounded message arrive
+    twice: once as "Nova mensagem de X: ..." straight from AO2 and again as
+    the reader works through the banner Windows just put on screen.  Reported
+    live as exactly that double announcement.
+
+    So this is only called when no banner will be shown at all — the toast
+    system failed to initialise, ``show_toast()`` itself raised, or the user
+    turned the tray icon off (which switches toasts off with it).  Without it
+    a blind user with WinZapp in the background would be left with nothing
+    but the sound cue and no way to learn who wrote what.
+
+    Honours the same ``speak_other_conv_messages`` setting as the
+    window-active/different-conversation announcement in
+    ``MainWindow.on_new_message()`` — a backgrounded window is that same
+    "not what the user is looking at right now" case, just more so.
+
+    Safe to call from any thread: the AO2 call is marshalled onto the wx main
+    thread.
+    """
+    try:
+        speech = getattr(main_window, "settings", {}).get("speech_content", {})
+        if not speech.get("speak_other_conv_messages", True):
+            return
+        spoken = i18n.t("fg_new_msg").format(name=title) + f": {body}"
+        wx.CallAfter(main_window.output, spoken)
+    except Exception as e:
+        print(f"[NotificationManager] fallback announcement failed: {e}")
+
+
 class NotificationManager:
     """Manages Windows 11 toast notifications for incoming WinZapp messages."""
 
@@ -570,8 +628,16 @@ class NotificationManager:
                 break
             if dropped:
                 print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
-            title, body, remote_jid, msg_key = item
+            title, body, remote_jid, msg_key, queued_at = item
+            waited = time.monotonic() - queued_at
+            started = time.monotonic()
             self._dispatch(title, body, remote_jid, msg_key)
+            logging.info(
+                "[notif-timing] %s: %.0fms queued + %.0fms dispatch = %.0fms "
+                "from send() to on screen.",
+                remote_jid, waited * 1000, (time.monotonic() - started) * 1000,
+                (time.monotonic() - queued_at) * 1000,
+            )
 
     def _coalesce_pending(self, item):
         """Collapse everything already queued down to the newest notification.
@@ -637,16 +703,27 @@ class NotificationManager:
         self._register_aumid_registry()
 
         # Build a prioritised list of AUMID candidates to try.
-        # Installed build: registered AUMID "WinZapp" first, outer exe as fallback.
-        # Dev build / portable: outer exe path (always available to Windows).
         # _is_frozen() handles both PyInstaller (sys.frozen) and Nuitka (__compiled__).
         # Use sys.argv[0] as the exe fallback — in Nuitka onefile sys.executable
         # points to a temp-dir extraction; sys.argv[0] is the user-visible path.
+        #
+        # Both frozen and dev mode try the registered "WinZapp" AUMID first —
+        # _register_aumid_registry() just above always writes that key's
+        # DisplayName, regardless of frozen state. Dev mode used to skip
+        # straight to sys.executable (the venv's own python.exe) instead,
+        # an AUMID shared by every unrelated Python script run from that
+        # same venv, with no registered DisplayName/icon of its own — the
+        # "WinZapp" registry entry was simply never used. Reported live:
+        # running from source, only the custom sound played and the toast
+        # never appeared on screen at all (no exception anywhere) — Windows
+        # can silently decline to show a banner for an AUMID it has no real
+        # app identity for. The exe path stays as the fallback for whichever
+        # step fails, same as frozen mode.
         if _is_frozen():
-            outer_exe = self._outer_exe_path()
-            candidates = [self.APP_ID, outer_exe]
+            fallback = self._outer_exe_path()
         else:
-            candidates = [sys.executable]
+            fallback = sys.executable
+        candidates = [self.APP_ID, fallback]
 
         for app_id in candidates:
             # Try interactable first (supports inline reply text box).
@@ -708,8 +785,21 @@ class NotificationManager:
     # comfortable margin.
     _TOAST_REACTIONS = ["👍", "❤️"]
 
+    def _announce_unshown(self, title: str, body: str):
+        """Speak a notification this dispatch produced no banner for.
+
+        See announce_background_message() for why AO2 only ever speaks
+        *instead of* the toast, never alongside it.
+        """
+        self.i18n.get_language()
+        announce_background_message(self.main_window, self.i18n, title, body)
+
     def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
         if not self._toaster:
+            # _setup_toaster() exhausted every AUMID candidate (or
+            # windows_toasts is not importable at all): there will be no
+            # banner for the screen reader to read, so announce it ourselves.
+            self._announce_unshown(title, body)
             return
         try:
             from windows_toasts import (
@@ -867,7 +957,11 @@ class NotificationManager:
             self._last_shown_at = time.monotonic()
 
         except Exception as e:
+            # Anything raised here happened at or before show_toast() (only
+            # two plain assignments follow it), so no banner reached the
+            # screen — fall back to speaking it.
             print(f"[NotificationManager] send_worker error: {e}")
+            self._announce_unshown(title, body)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -878,7 +972,13 @@ class NotificationManager:
         toast's "Reagir" action react to that specific message instead of
         needing to look one up later.
         """
-        self._queue.put((title, body, remote_jid, msg_key))
+        # Stamped here so _dispatch() can say how long the toast waited behind
+        # the worker versus how long Windows itself took to put it on screen.
+        # Reported live: "ao chegar uma mensagem demora uns 3 segundos pra
+        # ler". Nothing on this path measured anything, so there was no way to
+        # tell our own queue from the Windows notification pipeline from the
+        # screen reader's own queue — three suspects, no evidence.
+        self._queue.put((title, body, remote_jid, msg_key, time.monotonic()))
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 

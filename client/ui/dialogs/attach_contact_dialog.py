@@ -11,7 +11,7 @@ returns ``wx.ID_OK``.
 """
 
 import wx
-from core.utils import format_number
+from core.utils import format_number, contact_dedup_key
 
 
 class AttachContactDialog(wx.Dialog):
@@ -64,18 +64,71 @@ class AttachContactDialog(wx.Dialog):
         dlg_sizer.Add(panel, 1, wx.EXPAND)
         self.SetSizer(dlg_sizer)
 
-        # Populate
+        # Populate — main_window.contacts intentionally holds more than one
+        # entry per real person (the same contact is bridged under @lid,
+        # @c.us and/or @s.whatsapp.net, and Brazilian numbers additionally
+        # under both their 8- and 9-digit mobile form — see
+        # core.utils.contact_dedup_key()), so iterating it directly showed
+        # every contact twice, once per JID variant, each formatted
+        # differently (issue #70). Collapse to one row per real person,
+        # preferring whichever variant is a phone JID — an @lid isn't a real
+        # phone number and can't produce a valid vCard when the contact is
+        # actually sent — and sort alphabetically for predictable
+        # keyboard/screen-reader navigation instead of dict-insertion order.
+        # Also skip a bare @lid with no bridged phone number at all (an
+        # unresolved LID, or one that only ever appeared as a group
+        # participant's sender-name entry — main_window.contacts has no
+        # isMyContact/isSaved flag for those, so the same legitimacy check
+        # add_member_dialog.py already applies is repeated here). Without
+        # this, an @lid contact_dedup_key() can't fold into any phone entry
+        # still got its own row showing raw, unconverted @lid digits — not a
+        # duplicate exactly, but useless junk that can't build a vCard
+        # (format_number() refuses to format a LID as a phone number) and
+        # looked like the same duplication bug from the user's report.
+        chats = getattr(self._mw, "chats", {})
         contacts = self._mw.contacts
-        if not contacts:
+        best_by_key: dict[str, dict] = {}
+        for jid, contact in contacts.items():
+            if not jid or jid.endswith("@g.us"):
+                continue
+            is_own_contact = (
+                contact.get("isMyContact") is True
+                or contact.get("isMe") is True
+                or contact.get("isSaved") is True
+                or jid in chats
+            )
+            if not is_own_contact:
+                continue
+            key = contact_dedup_key(self._mw, jid)
+            if jid.endswith("@lid") and key == jid.split("@", 1)[0]:
+                # contact_dedup_key() only returns the raw @lid local part
+                # when _lid_to_phone has no bridge for it — i.e. this LID
+                # never resolved to an actual phone number.
+                continue
+            entry = {**contact, "remoteJid": jid}
+            existing = best_by_key.get(key)
+            if existing is None or (
+                existing["remoteJid"].endswith("@lid") and not jid.endswith("@lid")
+            ):
+                best_by_key[key] = entry
+
+        if not best_by_key:
             self._list.Append((i18n.t("no_contacts"), ""))
         else:
-            for jid, contact in contacts.items():
-                name = contact.get("name") or contact.get("pushName") or format_number(jid)
-                self._list.Append((name, format_number(jid)))
-                self._contacts_list.append({**contact, "remoteJid": jid})
-            if self._list.GetItemCount() > 0:
-                self._list.Focus(0)
-                self._list.Select(0)
+            rows = [
+                (
+                    entry.get("name") or entry.get("pushName")
+                    or format_number(entry["remoteJid"]),
+                    entry,
+                )
+                for entry in best_by_key.values()
+            ]
+            rows.sort(key=lambda r: r[0].lower())
+            for name, entry in rows:
+                self._list.Append((name, format_number(entry["remoteJid"])))
+                self._contacts_list.append(entry)
+            self._list.Focus(0)
+            self._list.Select(0)
 
     # ── Events ──────────────────────────────────────────────────────────────
 

@@ -35,7 +35,7 @@ class ShortcutsDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Read-only text control with the shortcuts list
-        text = self._build_text(i18n)
+        text = self._build_text(i18n, self._mw)
         self._text_ctrl = wx.TextCtrl(
             panel,
             value=text,
@@ -63,25 +63,49 @@ class ShortcutsDialog(wx.Dialog):
     # ── Content ───────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_text(i18n) -> str:
+    def _build_text(i18n, main_window=None) -> str:
         """Compose the shortcuts text from i18n keys."""
         def section(key):
             return f"── {i18n.t(key)} ──"
+
+        # Alt+<letter> to focus the main navigation list uses whichever
+        # letter the active locale marked with "&" in "main_nav" (see
+        # MainWindow.create_accelerator_table's nav_letter) — "N" for
+        # pt/es/pl, "M" for en — so the help text has to track that instead
+        # of hardcoding "N".
+        nav_letter = "N"
+        _nav_label = i18n.t("main_nav")
+        _amp = _nav_label.find("&")
+        if 0 <= _amp < len(_nav_label) - 1 and _nav_label[_amp + 1].isalpha():
+            nav_letter = _nav_label[_amp + 1].upper()
 
         lines = [
             section("shortcuts_nav_section"),
             i18n.t("shortcut_alt1_label"),
             i18n.t("shortcut_alt4_label"),
             i18n.t("shortcut_alt5_label"),
+            i18n.t("shortcut_alt_nav_label").format(letter=nav_letter),
             i18n.t("shortcut_ctrl_comma_label"),
             i18n.t("shortcut_f1_label"),
             i18n.t("shortcut_ctrl_n_label"),
             i18n.t("shortcut_ctrl_shift_q_list_label"),
             i18n.t("shortcut_ctrl_shift_alt_m_label"),
+            i18n.t("shortcut_ctrl_alt_shift_d_label"),
+            i18n.t("shortcut_ctrl_alt_shift_q_label"),
+            i18n.t("shortcut_ctrl_alt_shift_p_label"),
+        ]
+        # Ctrl+Alt+1..9 only exists at all when this process is running under
+        # the multi-account system (see MainWindow._build_menubar's Accounts
+        # menu / _account_hotkey_slots) — showing it unconditionally would
+        # document a shortcut that does nothing for a single-account install.
+        if main_window is not None and getattr(main_window, "account_id", None) and getattr(main_window, "registry", None):
+            lines.append(i18n.t("shortcut_ctrl_alt_num_label"))
+        lines += [
             "",
             section("shortcuts_conv_section"),
             i18n.t("shortcut_alt2_label"),
             i18n.t("shortcut_alt3_label"),
+            i18n.t("shortcut_alt_t_label"),
             i18n.t("shortcut_ctrl_num_label"),
             i18n.t("shortcut_ctrl_shift_num_label"),
             i18n.t("shortcut_alt_shift_num_label"),
@@ -122,6 +146,14 @@ class ShortcutsDialog(wx.Dialog):
             i18n.t("shortcut_alt_shift_v_label"),
             i18n.t("shortcut_alt_shift_q_label"),
             i18n.t("shortcut_alt_shift_s_label"),
+            "",
+            section("shortcuts_bulk_section"),
+            i18n.t("shortcut_ctrl_space_label"),
+            i18n.t("shortcut_shift_down_label"),
+            i18n.t("shortcut_shift_home_label"),
+            i18n.t("shortcut_shift_end_label"),
+            i18n.t("shortcut_ctrl_shift_space_label"),
+            i18n.t("shortcut_bulk_override_note"),
             "",
             section("shortcuts_status_section"),
             i18n.t("shortcut_ctrl_left_label"),

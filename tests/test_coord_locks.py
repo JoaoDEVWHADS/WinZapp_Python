@@ -155,32 +155,62 @@ def test_same_global_dir_same_name(tmp_path):
     assert registry_lock(gd).name == registry_lock(gd).name
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
-def test_fork_child_does_not_inherit_lock_ownership(tmp_path):
-    """A child forked while the parent holds the lock must NOT look like a
-    re-entrant owner (depth reset to 0) AND must be correctly blocked at the OS
-    level by the parent's still-held flock — never falsely allowed in
-    (GPT r4 #5)."""
-    gd = str(tmp_path)
-    lock = registry_lock(gd, timeout=2.0)
-    with lock:  # parent holds it across the fork
-        pid = os.fork()
-        if pid == 0:  # child
-            rc = 0
-            try:
-                child_lock = registry_lock(gd, timeout=0.5)
-                if child_lock._state.depth != 0:
-                    rc = 3  # phantom inherited re-entrancy -> bug
-                else:
-                    try:
-                        child_lock.acquire()
-                        rc = 5  # should have been blocked by parent's flock
-                        child_lock.release()
-                    except LockTimeout:
-                        rc = 0  # correct: parent genuinely holds it
-            except Exception:
-                rc = 4
-            os._exit(rc)
-        else:
+def _spawned_lock_probe(global_dir, result_queue):
+    """Top-level so multiprocessing's Windows spawn mode can import it."""
+    child_lock = registry_lock(global_dir, timeout=0.5)
+    depth = child_lock._state.depth
+    try:
+        child_lock.acquire()
+    except LockTimeout:
+        result_queue.put((depth, "blocked"))
+    else:
+        child_lock.release()
+        result_queue.put((depth, "acquired"))
+
+
+if hasattr(os, "fork"):
+    def test_fork_child_does_not_inherit_lock_ownership(tmp_path):
+        """A forked child must reset ownership and remain blocked by flock."""
+        gd = str(tmp_path)
+        lock = registry_lock(gd, timeout=2.0)
+        with lock:  # parent holds it across the fork
+            pid = os.fork()
+            if pid == 0:  # child
+                rc = 0
+                try:
+                    child_lock = registry_lock(gd, timeout=0.5)
+                    if child_lock._state.depth != 0:
+                        rc = 3  # phantom inherited re-entrancy -> bug
+                    else:
+                        try:
+                            child_lock.acquire()
+                            rc = 5  # should have been blocked by parent's flock
+                            child_lock.release()
+                        except LockTimeout:
+                            rc = 0  # correct: parent genuinely holds it
+                except Exception:
+                    rc = 4
+                os._exit(rc)
             _, status = os.waitpid(pid, 0)
             assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+else:
+    def test_spawned_child_is_blocked_by_parent_process_lock(tmp_path):
+        """Windows spawn child sees fresh state but the parent's mutex blocks it."""
+        import multiprocessing
+
+        gd = str(tmp_path)
+        context = multiprocessing.get_context("spawn")
+        result_queue = context.Queue()
+        lock = registry_lock(gd, timeout=2.0)
+        with lock:
+            child = context.Process(
+                target=_spawned_lock_probe, args=(gd, result_queue))
+            child.start()
+            child.join(timeout=5.0)
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=2.0)
+                pytest.fail("spawned child did not finish its lock probe")
+
+        assert child.exitcode == 0
+        assert result_queue.get(timeout=1.0) == (0, "blocked")

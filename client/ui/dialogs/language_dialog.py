@@ -4,15 +4,16 @@ WinZapp – Language Selection Dialog
 Shown on first launch, before any API module installation or initial setup.
 The user picks a language and clicks OK to proceed, or Cancel to exit.
 
-This dialog intentionally avoids using the I18n / settings infrastructure
-(which may not be initialised yet) and hard-codes its own UI labels
-(title, OK/Cancel) as a minimal bootstrap interface. The list of languages
+This dialog intentionally avoids depending on settings infrastructure
+(which may not be initialised yet). Bootstrap labels are loaded directly
+from the locale JSON files. The list of languages
 itself, however, is read from languages/language_map.json — the same file
 core/i18n.py's LANGUAGE_NAMES loads from — so a new locale dropped in there
 shows up here too without a rebuild.
 """
 
 import json
+import locale
 import wx
 
 from app_paths import resource_path
@@ -40,6 +41,32 @@ def _load_language_choices():
 _LANGUAGE_CHOICES = _load_language_choices()
 
 
+def _bootstrap_language_code():
+    """Best-effort locale for the picker before normal I18n exists."""
+    try:
+        current = (locale.getlocale()[0] or "").replace("_", "-")
+    except Exception:
+        current = ""
+    codes = [code for _, code in _LANGUAGE_CHOICES]
+    if current in codes:
+        return current
+    prefix = current.split("-", 1)[0].lower() if current else ""
+    for code in codes:
+        if code.split("-", 1)[0].lower() == prefix:
+            return code
+    return "pt-BR"
+
+
+def _bootstrap_t(key):
+    code = _bootstrap_language_code()
+    try:
+        with open(resource_path("languages", f"{code}.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get(key, key)
+    except Exception:
+        return key
+
+
 class LanguageSelectionDialog(wx.Dialog):
     """
     First-run language picker shown before i18n is fully initialised.
@@ -54,10 +81,10 @@ class LanguageSelectionDialog(wx.Dialog):
     def __init__(self, parent=None):
         super().__init__(
             parent,
-            title="Selecionar um idioma | WinZapp",
+            title=_bootstrap_t("language_select_title"),
             style=wx.DEFAULT_DIALOG_STYLE,
         )
-        self.selected_language: str = "pt-BR"
+        self.selected_language: str = _bootstrap_language_code()
         self._lang_codes = [code for _, code in _LANGUAGE_CHOICES]
 
         self._build_ui()
@@ -71,7 +98,7 @@ class LanguageSelectionDialog(wx.Dialog):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(panel, label="Selecionar um idioma")
+        lbl = wx.StaticText(panel, label=_bootstrap_t("language_select_prompt"))
         sizer.Add(lbl, 0, wx.LEFT | wx.TOP | wx.RIGHT, 12)
 
         self._combo = wx.ComboBox(
@@ -79,12 +106,15 @@ class LanguageSelectionDialog(wx.Dialog):
             style=wx.CB_READONLY,
             choices=[name for name, _ in _LANGUAGE_CHOICES],
         )
-        self._combo.SetSelection(0)
+        try:
+            self._combo.SetSelection(self._lang_codes.index(self.selected_language))
+        except ValueError:
+            self._combo.SetSelection(0)
         sizer.Add(self._combo, 0, wx.EXPAND | wx.ALL, 8)
 
         btn_sizer = wx.StdDialogButtonSizer()
-        ok_btn     = wx.Button(panel, wx.ID_OK,     label="OK")
-        cancel_btn = wx.Button(panel, wx.ID_CANCEL, label="Cancelar")
+        ok_btn     = wx.Button(panel, wx.ID_OK,     label=_bootstrap_t("ok"))
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, label=_bootstrap_t("cancel"))
         ok_btn.Bind(wx.EVT_BUTTON, self._on_ok)
         cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
         btn_sizer.AddButton(ok_btn)

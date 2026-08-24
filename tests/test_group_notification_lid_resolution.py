@@ -37,6 +37,7 @@ class _FakeMainWindow:
         self._lid_to_phone = {}
         self._phone_to_lid = {}
         self._presence_pushname_map = {}
+        self._initial_sync_running = False
         self.resolve_calls = []
         self._resolved_event = threading.Event()
 
@@ -98,5 +99,29 @@ def test_a_plain_phone_jid_never_triggers_lid_resolution():
 
     panel._get_participant_name("5511999999999@s.whatsapp.net")
 
+    assert not mw._resolved_event.wait(timeout=0.3)
+    assert mw.resolve_calls == []
+
+
+def test_initial_sync_does_not_spawn_participant_resolution_threads():
+    """Foreground get-messages owns the browser page; participant lookup waits."""
+    mw = _FakeMainWindow()
+    mw._initial_sync_running = True
+    panel = _PanelStub(mw)
+
+    result = panel._get_participant_name(LID)
+
+    assert result == "123456789012345"
+    assert not mw._resolved_event.wait(timeout=0.3)
+    assert mw.resolve_calls == []
+
+
+def test_batch_lookup_can_suppress_per_participant_thread():
+    mw = _FakeMainWindow()
+    panel = _PanelStub(mw)
+
+    result = panel._get_participant_name(LID, resolve_missing=False)
+
+    assert result == "123456789012345"
     assert not mw._resolved_event.wait(timeout=0.3)
     assert mw.resolve_calls == []

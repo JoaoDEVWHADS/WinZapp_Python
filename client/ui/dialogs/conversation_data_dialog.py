@@ -126,11 +126,8 @@ class ConversationDataDialog(wx.Dialog):
         self._group_subject     = name if is_group else ""
         self._group_description = ""
 
-        title_key  = "group_data" if self._is_group else "conversation_data"
-        dlg_title  = f"{name} | {self._i18n.t(title_key)}"
-
         super().__init__(
-            main_window, title=dlg_title,
+            main_window, title=self._dialog_title(name),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self._build_ui()
@@ -139,6 +136,20 @@ class ConversationDataDialog(wx.Dialog):
 
         # Fetch data in background after the dialog is shown.
         threading.Thread(target=self._fetch_data, daemon=True).start()
+
+    def _dialog_title(self, name: str) -> str:
+        """The window title, name first: a screen reader announces the title
+        on every focus change, so whose data this is has to come before the
+        boilerplate rather than after it."""
+        title_key = "group_data" if self._is_group else "conversation_data"
+        return f"{name} | {self._i18n.t(title_key)}"
+
+    def _apply_subject_to_title(self, subject: str) -> None:
+        """Retitle the dialog once the group's name has changed under it."""
+        if not subject or subject == self._name:
+            return
+        self._name = subject
+        self.SetTitle(self._dialog_title(subject))
 
     def _on_back_button(self, event):
         if hasattr(self, "_sound_preview"):
@@ -407,6 +418,17 @@ class ConversationDataDialog(wx.Dialog):
                         self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
                     except Exception:
                         pass
+                # Media count needs one os.path.isfile() stat call per media
+                # message in the group — computed here, on the background
+                # thread, rather than inside _populate_group() (which runs via
+                # wx.CallAfter on the main/UI thread). A busy group can have
+                # hundreds of media messages, and that loop running
+                # synchronously on the UI thread is exactly what froze the
+                # window right as the dialog finished loading — reported
+                # live as freezing specifically while switching between the
+                # dialog's tabs, which is just when a user's input happens to
+                # land during that window (issue #52).
+                data["_media_count"] = self._count_group_media()
                 wx.CallAfter(self._populate_group, data)
             else:
                 if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
@@ -548,6 +570,16 @@ class ConversationDataDialog(wx.Dialog):
         # description).
         self._group_subject     = subject
         self._group_description = desc
+        # The title was built from the name the chat had when the dialog
+        # opened. Renaming the group from the very dialog whose title still
+        # says the old name left the two disagreeing for as long as it
+        # stayed open — and a screen reader re-reads the title on every
+        # focus change, so the stale name is heard again and again. Applied
+        # here rather than in _on_edit_group_name() because every refresh
+        # lands here, including the one _run_group_edit() fires on a
+        # successful save, and the value used is the one the server just
+        # confirmed rather than what was typed.
+        self._apply_subject_to_title(subject)
 
         # ── Participants ──────────────────────────────────────────────────────
         self._part_list.DeleteAllItems()
@@ -626,29 +658,37 @@ class ConversationDataDialog(wx.Dialog):
             self._part_list.Select(0)
 
         # ── Media ─────────────────────────────────────────────────────────────
-        media_dir  = data_path("media")
-        jid_prefix = self._jid.split("@")[0]
-        # Count media files associated with messages in this group
+        # Count already computed on the background thread — see
+        # _fetch_data()'s own comment for why this can't run here.
+        media_count = data.get("_media_count", 0)
+        self._media_label.SetLabel(
+            i18n.t("media_count").format(count=media_count)
+        )
+
+    def _count_group_media(self) -> int:
+        """Count local media files for messages in this group.
+
+        One os.path.isfile() disk stat per media message — must run off the
+        UI thread (see the call site in _fetch_data()).
+        """
         records = (
             self._chat.get("messages", {})
                       .get("messages", {})
                       .get("records", [])
         )
+
         def _has_media(m):
-            mid = m.get('key',{}).get('id','')
+            mid = m.get('key', {}).get('id', '')
             if "_" in mid:
                 parts = mid.split("_")
                 mid = parts[2] if len(parts) > 2 else parts[-1]
             return os.path.isfile(data_path("media", f"{mid}.wzmedia"))
 
-        media_count = sum(
+        return sum(
             1 for m in records
             if m.get("messageType", "") in
                {"imageMessage", "videoMessage", "documentMessage", "stickerMessage"}
             and _has_media(m)
-        )
-        self._media_label.SetLabel(
-            i18n.t("media_count").format(count=media_count)
         )
 
     # ── Action handlers ───────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ anything — it is checked to confirm it stays gone from every file.
 """
 
 import importlib.util
+import re
 import json
 import pathlib
 
@@ -57,6 +58,10 @@ def _setup_api_module():
 MIRRORED_FILES = [
     "start.js",
     "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
     "decrypt.js",
     "src/config.ts",
     "src/index.ts",
@@ -65,6 +70,15 @@ MIRRORED_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/errors/domain.ts",
+    "src/middleware/errorHandler.ts",
+    "src/services/messageResolver.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
+    "src/tests/middleware/errorHandler.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
@@ -408,3 +422,94 @@ def test_wppconnect_is_not_frozen_in_the_live_package_json():
         f"clone of wppconnect-server 2.10.1 (which wants ^2.2.6) run against a "
         f"stale, incompatible 2.2.4. Let it float on upstream's own range."
     )
+
+
+# Matches `from './x'`, `import '../y'` and `require('./z')` — only the
+# relative forms, since a bare specifier is an npm package resolved from
+# node_modules and has nothing to do with the patch set.
+_RELATIVE_IMPORT = re.compile(
+    r"""(?:from|import|require\()\s*['"](\.[^'"]*)['"]""")
+
+# Resolution order TypeScript itself uses for an extensionless specifier.
+_MODULE_SUFFIXES = ("", ".ts", ".tsx", ".d.ts", ".js", ".json",
+                    "/index.ts", "/index.js")
+
+# package.json is imported by src/index.ts (for the version string) and lives
+# in api_patches/, but is deliberately absent from MIRRORED_FILES: setup_api.py
+# merges a few keys into it instead of restoring it wholesale, so there are
+# legitimately no two identical copies to compare. See this module's docstring.
+_NOT_MIRRORED_BY_DESIGN = {"package.json"}
+
+
+def _resolve_import(importer_rel: str, spec: str):
+    """Where a relative import lands, searched in api_patches/ then api/.
+
+    Returns (rel_path, root) for the first hit, or (None, None). api_patches/
+    is searched first because that is the copy setup_api.py restores from — a
+    module that exists only under api/ is one the next clean setup will not
+    reproduce.
+    """
+    base = pathlib.PurePosixPath(importer_rel).parent
+    target = (base / spec).as_posix()
+    # PurePosixPath keeps '..' segments literal; normalise them away.
+    parts: list[str] = []
+    for part in target.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    candidate = "/".join(parts)
+    for root in (PATCHES, API):
+        for suffix in _MODULE_SUFFIXES:
+            probe = root / (candidate + suffix)
+            if probe.is_file():
+                return candidate + suffix, root
+    return None, None
+
+
+@pytest.mark.parametrize(
+    "rel_path", [f for f in MIRRORED_FILES if f.endswith((".ts", ".js"))])
+def test_every_import_of_a_patched_file_resolves(rel_path):
+    """A patched file must never import a module the patch set does not carry.
+
+    This is the guard that was missing when client/api_patches/ was first made
+    a permanent patch source: the snapshot took a src/routes/index.ts that
+    already did `import ... from '../middleware/instrumentation'` but left the
+    middleware itself behind. Nothing noticed, because every other test
+    compares only the files it already knows about. On any machine whose
+    client/api/ predated the split the import still resolved on disk, while a
+    clean setup_api.py run — a new dev machine, the CI release build, and the
+    ApiSetupDialog flow every end user goes through — produced a tree where
+    `tsc` failed with TS2307 and dist/server.js was never emitted at all.
+
+    Note the blind spot this deliberately keeps: resolution also accepts
+    client/api/, so a stale local clone that still holds a since-removed file
+    passes here. The case that matters is CI, where client/api/ is exactly a
+    fresh upstream clone plus the restored patches — the same tree the release
+    is built from.
+    """
+    patch = PATCHES / rel_path
+    if not patch.exists():
+        pytest.skip(f"client/api_patches/{rel_path} not present")
+    if not API.exists():
+        pytest.skip("client/api/ not present (API not set up here)")
+
+    source = patch.read_text(encoding="utf-8", errors="replace")
+    for spec in sorted(set(_RELATIVE_IMPORT.findall(source))):
+        resolved, root = _resolve_import(rel_path, spec)
+        assert resolved is not None, (
+            f"client/api_patches/{rel_path} imports '{spec}', which exists in "
+            f"neither client/api_patches/ nor client/api/. A clean setup_api.py "
+            f"run will not produce it, so `npm run build` fails at tsc "
+            f"(TS2307) and dist/server.js is never written."
+        )
+        if root is PATCHES and resolved not in _NOT_MIRRORED_BY_DESIGN:
+            assert resolved in MIRRORED_FILES, (
+                f"client/api_patches/{rel_path} imports '{spec}' -> {resolved}, "
+                f"which lives in api_patches/ but is not restored by "
+                f"setup_api.py. Add it to CUSTOM_SRC_FILES (and to "
+                f"MIRRORED_FILES here), or the next clean install ships without it."
+            )

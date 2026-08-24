@@ -139,3 +139,74 @@ class TestWhatMustKeepWorking:
         panel = _Stub(conversation_jid="120363000000000001@g.us")
 
         assert panel._get_quoted_sender(_ctx(ME), _reply()) == "Eu"
+
+
+def _ctx_no_participant(stanza_id="QUOTED1"):
+    return {"participant": "", "stanzaId": stanza_id}
+
+
+def _quoted_msg(msg_id="QUOTED1", from_me=False, participant=""):
+    key = {"id": msg_id, "fromMe": from_me}
+    if participant:
+        key["participant"] = participant
+    return {"key": key}
+
+
+class TestGroupReplyWithNoParticipantInContextInfo:
+    """Reported live: a group reply rendered as "respondendo a Eu" (and was
+    announced that way), but "go to quoted message" landed on a THIRD
+    member's message, not the user's own. contextInfo.participant was empty
+    on that reply — a known-unreliable field from this same API layer (see
+    _get_context_info()'s docstring) — and the old fallback assumed that
+    only ever happens in 1:1 chats, where "no participant" unambiguously
+    means "the other party". Applied to a group it silently guessed "me"
+    instead of admitting it does not actually know.
+    """
+
+    def test_resolves_via_the_quoted_messages_own_recorded_sender(self):
+        """The quoted message IS loaded locally (same as "go to quoted
+        message" would find) — its own key.participant is the source of
+        truth, not a guess."""
+        panel = _Stub(conversation_jid="120363000000000001@g.us")
+        panel._sorted_messages = [_quoted_msg(participant=THIRD)]
+
+        result = panel._get_quoted_sender(_ctx_no_participant(), _reply())
+
+        assert result == f"<lookup:{THIRD}>"
+
+    def test_never_defaults_to_me_when_the_quoted_sender_is_a_third_party(self):
+        panel = _Stub(conversation_jid="120363000000000001@g.us")
+        panel._sorted_messages = [_quoted_msg(participant=THIRD)]
+
+        assert panel._get_quoted_sender(_ctx_no_participant(), _reply()) != "Eu"
+
+    def test_quoting_my_own_message_still_says_me(self):
+        panel = _Stub(conversation_jid="120363000000000001@g.us")
+        panel._sorted_messages = [_quoted_msg(from_me=True)]
+
+        assert panel._get_quoted_sender(_ctx_no_participant(), _reply()) == "Eu"
+
+    def test_quoted_message_not_loaded_locally_says_unknown_not_me(self):
+        """No participant AND the quoted message isn't in _sorted_messages —
+        genuinely unresolvable, must not guess "Eu"."""
+        panel = _Stub(conversation_jid="120363000000000001@g.us")
+        panel._sorted_messages = []
+
+        assert panel._get_quoted_sender(_ctx_no_participant(), _reply()) == "unnamed_participant"
+
+    def test_quoted_message_loaded_but_with_no_sender_on_record_says_unknown(self):
+        panel = _Stub(conversation_jid="120363000000000001@g.us")
+        panel._sorted_messages = [_quoted_msg(participant="")]
+
+        assert panel._get_quoted_sender(_ctx_no_participant(), _reply()) == "unnamed_participant"
+
+    def test_a_1to1_reply_with_no_participant_is_unaffected(self):
+        """1:1 chats keep the pre-existing behavior: no participant there is
+        the normal Baileys shape, not missing data. The reply itself came
+        from the other party (fromMe=False), so per the existing 1:1
+        assumption they must be replying to the user."""
+        panel = _Stub(conversation_jid=OTHER, contact_name="Fulano")
+
+        result = panel._get_quoted_sender(_ctx_no_participant(), _reply(from_me=False))
+
+        assert result == "Eu"
