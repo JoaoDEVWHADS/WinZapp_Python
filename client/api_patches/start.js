@@ -331,17 +331,21 @@ const waVersion = (() => {
   }
 })();
 
+const PINNED_WHATSAPP_VERSION = '2.3000.1044967578-alpha';
+
 function resolveWhatsappVersion() {
   try {
     if (!waVersion) throw new Error('@wppconnect/wa-version could not be resolved');
     const available = waVersion.getAvailableVersions();
     if (!Array.isArray(available) || available.length === 0) return undefined;
-    const newest = available[available.length - 1];
-    // getPageContent throws when the version cannot be served, so only pin what
-    // is known to work: no pin at all beats silently landing in the fallback.
-    waVersion.getPageContent(newest);
-    console.log(`[WinZapp] Pinning WhatsApp Web to ${newest} (of ${available.length} available)`);
-    return newest;
+    // Keep the build used by the known-good 2026-08-11 dependency snapshot.
+    // getPageContent throws if the installed catalogue cannot serve it.
+    waVersion.getPageContent(PINNED_WHATSAPP_VERSION);
+    console.log(
+      `[WinZapp] Pinning WhatsApp Web to ${PINNED_WHATSAPP_VERSION} ` +
+      `(known-good 2026-08-11 build; ${available.length} versions available)`
+    );
+    return PINNED_WHATSAPP_VERSION;
   } catch (e) {
     console.error(
       '[WinZapp] Could not resolve a WhatsApp Web version via @wppconnect/wa-version ' +
