@@ -9997,6 +9997,11 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if not self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
+        elif getattr(self, "_history_still_landing", False):
+            logging.info(
+                "[start_sync] Phase 2 media auto-download deferred — "
+                "RECENT history is still landing.")
+            self._media_sync_deferred = True
         elif not getattr(self, "_sync_completed", False):
             # An incomplete chat-list round will be retried by the health
             # checker. Scanning every cached media record on each such round
@@ -13243,9 +13248,10 @@ class MainWindow(wx.Frame):
                 len(deep_ids), self._DEEP_SYNC_COUNT, self.history_page_target(),
             )
 
-        # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
-        # concurrent requests fine; cap at 6 workers to avoid overloading it.
-        max_workers = min(6, len(valid_chats))
+        # RECENT decoding and message queries share one Puppeteer page. Keep
+        # the initial sweep gentle until the phone finishes feeding history.
+        worker_cap = 2 if getattr(self, "_history_still_landing", False) else 6
+        max_workers = min(worker_cap, len(valid_chats))
         failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             def _job(c):
@@ -13810,9 +13816,13 @@ class MainWindow(wx.Frame):
                 # sweep, not once per chunk. Large queues now move through
                 # several chunks quickly and do not need to hammer this status
                 # endpoint between each one.
-                if (not attempted
-                        and self.refresh_history_still_landing(
-                            context=f"backfill pass {attempt}")):
+                landing_now = getattr(self, "_history_still_landing", False)
+                if not attempted:
+                    landing_now = self.refresh_history_still_landing(
+                        context=f"backfill pass {attempt}")
+                if not landing_now:
+                    self._start_deferred_media_sync()
+                if not attempted and landing_now:
                     # Two things can stall the queue, and both are silent: a
                     # chunk the processing loop will never accept parked at the
                     # head of it, and a loop that simply stopped scheduling
@@ -14265,6 +14275,43 @@ class MainWindow(wx.Frame):
             logging.warning(
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
             return False
+
+    def _start_deferred_media_sync(self) -> None:
+        """Start media downloads after RECENT stops using the browser page."""
+        if not getattr(self, "_media_sync_deferred", False):
+            return
+        if getattr(self, "_media_sync_running", False):
+            return
+        self._media_sync_deferred = False
+
+        def _run():
+            self._media_sync_running = True
+            announced = False
+            try:
+                wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+                if not self.background_mode and self._announce_sync_events_enabled():
+                    announced = True
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+                count = self.sync_media_for_all_chats()
+                logging.info(
+                    "[history-sync] Deferred media phase downloaded %d file(s).",
+                    count)
+                if announced:
+                    connected = getattr(self, "_wa_connected", False)
+                    offline = getattr(self, "offline_mode", False)
+                    result = "sync_media_completed" if connected and not offline else "sync_media_failed"
+                    wx.CallAfter(self.output, self.i18n.t(result))
+            except Exception:
+                logging.exception("[history-sync] Deferred media phase failed")
+                if announced:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
+            finally:
+                self._media_sync_running = False
+                wx.CallAfter(self._set_status, "")
+                wx.CallAfter(self.set_chats)
+
+        threading.Thread(
+            target=_run, daemon=True, name="deferred-media-sync").start()
 
     def sync_media_for_all_chats(self) -> int:
         """Download every not-yet-stored media file across all chats.
