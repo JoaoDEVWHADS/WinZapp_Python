@@ -755,19 +755,26 @@ class WebSocketClient:
             # of the conversation as if they had just been sent — dispatch them
             # to the historical handler to be saved silently instead.
             #
-            # BUT: this assumption only holds for a chat that hasn't been synced
-            # yet (not present in self.chats). Once a chat is already in the
-            # list, WPPConnect can still tag a genuinely new, real-time message
-            # with isMdHistoryMsg=True (observed in practice) — silently routing
-            # it to on_historical_message would save it without a notification,
-            # sound, or unread-count bump, effectively "losing" it from the
-            # user's point of view. So: only take the silent path for chats not
-            # yet in the list; an already-listed chat always gets full live
-            # treatment regardless of the flag.
+            # WPPConnect can also tag a genuinely new message with this flag.
+            # Use the stable socket connection time to distinguish it from a
+            # replayed chunk: old timestamps stay silent even after list-chats
+            # has already populated self.chats, while current messages retain
+            # notifications, sound and unread handling.
             if msg.get("isMdHistoryMsg"):
                 key = msg.get("key", {})
                 remote_jid = self.main_window._normalize_jid(key.get("remoteJid", ""))
-                if remote_jid not in self.main_window.chats:
+                raw_timestamp = msg.get("messageTimestamp") or msg.get("timestamp") or 0
+                try:
+                    message_timestamp = float(raw_timestamp)
+                    if message_timestamp > 1_000_000_000_000:
+                        message_timestamp /= 1000
+                except (TypeError, ValueError):
+                    message_timestamp = 0
+                predates_connection = (
+                    message_timestamp > 0
+                    and message_timestamp < getattr(self, "_connect_time", 0) - 5
+                )
+                if predates_connection or remote_jid not in self.main_window.chats:
                     wx.CallAfter(self.main_window.on_historical_message, msg)
                     return
                 # Chat already known/synced — fall through to live handling below.
@@ -1275,7 +1282,7 @@ class WebSocketClient:
             if session and session != self.instance_name:
                 return
                 
-            if status in ("disconnectedMobile", "notLogged"):
+            if status in ("disconnectedMobile", "notLogged", "UNPAIRED", "UNPAIRED_IDLE"):
                 # Handle permanent WhatsApp logout / disconnection.
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):

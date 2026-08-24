@@ -135,10 +135,10 @@ class TestPaginatedWindow:
 
 class TestDbFetchLimit:
     def test_unread_within_the_page_size_uses_the_configured_limit(self):
-        assert db_fetch_limit(configured_limit=200, unread_count=15) == 200
+        assert db_fetch_limit(configured_limit=200, unread_count=15) == 250
 
     def test_zero_unread_uses_the_configured_limit(self):
-        assert db_fetch_limit(configured_limit=200, unread_count=0) == 200
+        assert db_fetch_limit(configured_limit=200, unread_count=0) == 250
 
     def test_unread_beyond_the_page_size_widens_the_fetch(self):
         """The reported case: 350 unread against a 200-message page size —
@@ -150,7 +150,7 @@ class TestDbFetchLimit:
         assert db_fetch_limit(configured_limit=200, unread_count=50000, cap=2000) == 2000
 
     def test_unread_exactly_at_the_page_size_changes_nothing(self):
-        assert db_fetch_limit(configured_limit=200, unread_count=200) == 200
+        assert db_fetch_limit(configured_limit=200, unread_count=200) == 250
 
 
 # ── When the separator goes away ────────────────────────────────────────────

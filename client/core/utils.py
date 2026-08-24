@@ -746,6 +746,11 @@ def first_unread_index(displayable, unread_count: int) -> int:
     return -1
 
 
+def display_page_fetch_limit(configured_limit: int, cap: int = 2000, buffer: int = 50) -> int:
+    """Raw rows needed to reliably fill a page of visible messages."""
+    return min(configured_limit + buffer, cap)
+
+
 def db_fetch_limit(configured_limit: int, unread_count: int, cap: int = 2000, buffer: int = 50) -> int:
     """How many messages navigate_to_conversation() should pull from the DB.
 
@@ -764,9 +769,10 @@ def db_fetch_limit(configured_limit: int, unread_count: int, cap: int = 2000, bu
     already-read context above it), capped so a corrupt/absurd unread count
     can't pull an unbounded amount of history into memory at once.
     """
+    visible_page = display_page_fetch_limit(configured_limit, cap, buffer)
     if unread_count > configured_limit:
-        return min(unread_count + buffer, cap)
-    return configured_limit
+        return min(max(visible_page, unread_count + buffer), cap)
+    return visible_page
 
 
 def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:

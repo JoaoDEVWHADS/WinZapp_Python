@@ -40,6 +40,8 @@ class _Stub:
     def __init__(self):
         from main import MainWindow
         self._set_wa_connected = MainWindow._set_wa_connected.__get__(self)
+        self._set_preparing_status_if_idle = (
+            MainWindow._set_preparing_status_if_idle.__get__(self))
         self._reset_startup_probe = MainWindow._reset_startup_probe.__get__(self)
         self._announce_sync_events_enabled = MainWindow._announce_sync_events_enabled.__get__(self)
         self._WA_STARTUP_GRACE_SECONDS = MainWindow._WA_STARTUP_GRACE_SECONDS
@@ -64,6 +66,7 @@ class _Stub:
         self._tray_status = "tray_connecting"
         self.ws = None
         self._sync_completed = False
+        self._initial_sync_running = False
         self._last_sync_attempt_ts = 0
         self._sync_retry_count = 0
         self.sync_triggered = 0
@@ -119,6 +122,15 @@ class TestStatusChangesInLockstepWithTheConnectedSound:
         s._set_wa_connected(True, "session-logged")
         assert s.connected_sound.played == 1
         assert s.statuses[-1] == "preparing_to_sync"
+
+    def test_delayed_preparing_callback_cannot_overwrite_an_active_sync(self):
+        s = _Stub()
+        s._initial_sync_running = True
+
+        s._set_preparing_status_if_idle()
+
+        assert s.statuses == []
+        assert s._tray_status == "tray_connecting"
 
     def test_a_later_reconnect_clears_status_instead_of_re_announcing_preparing(self):
         """A drop-and-recover mid-session is not a fresh startup — the

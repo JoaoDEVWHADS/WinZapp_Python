@@ -19,6 +19,10 @@ import time
 import wx
 
 
+class MessageCancelled(Exception):
+    """Internal control-flow signal for a user-cancelled queued send."""
+
+
 class PendingMessage:
     """Data object for a queued outgoing message."""
 
@@ -49,6 +53,7 @@ class PendingMessage:
         self.mentioned_jids = mentioned_jids or []  # JIDs @mentioned in text
         self.fail_count    = 0             # consecutive send failures
         self.last_error    = ""            # last send error shown if retries exhaust
+        self.cancel_event  = threading.Event()
 
 
 class MessageQueue:
@@ -99,6 +104,17 @@ class MessageQueue:
         self._quick_event.set()
         self._media_event.set()
 
+    def cancel(self, local_id: str) -> bool:
+        """Cancel a queued or in-flight message by its local UI identifier."""
+        with self._lock:
+            msg = self._pending.pop(local_id, None)
+            if msg is None:
+                return False
+            msg.cancel_event.set()
+        # Wake the owning worker so a queued cancellation is observed now.
+        self._event_for(msg).set()
+        return True
+
     def stop(self):
         """Signal the worker to exit cleanly (call at app shutdown)."""
         self._stop.set()
@@ -142,6 +158,8 @@ class MessageQueue:
                     break
                 if not getattr(self.main_window, "_wa_connected", True):
                     break
+                if msg.cancel_event.is_set():
+                    continue
                 try:
                     if msg.audio_path:
                         real_id = self.main_window.send_audio_message(
@@ -149,10 +167,16 @@ class MessageQueue:
                             ogg_bytes=msg.ogg_bytes,
                         )
                     elif msg.media_path:
+                        def _media_progress(progress, pending=msg):
+                            if pending.cancel_event.is_set():
+                                raise MessageCancelled(pending.local_id)
+                            if pending.progress_callback is not None:
+                                pending.progress_callback(progress)
+
                         real_id = self.main_window.send_media_attachment(
                             msg.jid, msg.media_path, msg.media_type, msg.caption,
                             quoted=msg.quoted, upload_id=msg.local_id,
-                            progress_callback=msg.progress_callback,
+                            progress_callback=_media_progress,
                         )
                     elif msg.contact_info:
                         real_id = self.main_window.send_contact_attachment(
@@ -247,7 +271,21 @@ class MessageQueue:
                                 msg.last_error,
                                 bool(msg.media_path),  # show dialog for media failures
                             )
+                except MessageCancelled:
+                    with self._lock:
+                        self._pending.pop(msg.local_id, None)
+                    logging.info("[MessageQueue] cancelled by user: %s", msg.local_id)
+                    continue
                 except Exception as exc:
+                    # requests/urllib3 may wrap MessageCancelled raised by the
+                    # streaming body's progress callback in a transport error.
+                    # The cancellation flag is authoritative: never retry it or
+                    # surface a false send-failed dialog.
+                    if msg.cancel_event.is_set():
+                        with self._lock:
+                            self._pending.pop(msg.local_id, None)
+                        logging.info("[MessageQueue] cancelled during transport: %s", msg.local_id)
+                        continue
                     # Only unexpected programming errors reach here — transport
                     # failures are classified inside the send_* methods.
                     msg.fail_count += 1

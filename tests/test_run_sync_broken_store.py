@@ -178,8 +178,7 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
                   "_STORE_SNAPSHOT_TOLERANCE_RATIO",
                   "_STORE_SNAPSHOT_TOLERANCE_MIN",
                   "_STORE_SNAPSHOT_MIN_RATIO",
-                  "_BROKEN_STORE_REPAIR_ROUNDS", "_DEEP_SYNC_TOP_N",
-                  "_DEEP_SYNC_COUNT", "_BACKFILL_CHUNK"):
+                  "_BROKEN_STORE_REPAIR_ROUNDS", "_BACKFILL_CHUNK"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
