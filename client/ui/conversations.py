@@ -50,6 +50,7 @@ from ui.dialogs.emoji_picker import choose_and_insert_emoji
 from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
+from ui.media_viewer import MediaViewerDialog
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime, timedelta
@@ -3145,14 +3146,14 @@ class ConversationsPanel(wx.Panel):
                 audio_ext=".ogg",
             )
 
-        elif msg_type == "videoMessage":
-            video = msg_obj.get("videoMessage") or {}
-            if video.get("gifPlayback"):
-                return  # GIFs have no audio track to play
-            self._play_toggle_video_message(msg)
+        elif msg_type in ("imageMessage", "videoMessage"):
+            # Media opens in the same accessible, maximized viewer used by
+            # statuses. This avoids wx.StaticBitmap clipping and gives video
+            # proper seek/volume/speed controls.
+            self._open_conversation_media_viewer(index)
 
-        elif msg_type in ("imageMessage", "documentMessage", "locationMessage", "liveLocationMessage"):
-            # Enter on an image, document, or location → open in default app
+        elif msg_type in ("documentMessage", "locationMessage", "liveLocationMessage"):
+            # Documents and locations keep their existing system-open behaviour.
             self._on_action_open(None, index=index)
 
         elif msg_type == "contactMessage":
@@ -5249,6 +5250,83 @@ class ConversationsPanel(wx.Panel):
                     if hasattr(os, "startfile"):
                         os.startfile(filepath)
 
+    def _open_conversation_media_viewer(self, index: int):
+        """Open an image/video message in the shared maximized MediaViewer.
+
+        The dialog appears immediately; download/decryption happens through
+        its background loader so the user gets a stable loading state instead
+        of waiting for a second window to appear after the network request.
+        """
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        msg_type = msg.get("messageType", "")
+        if msg_type not in ("imageMessage", "videoMessage"):
+            return
+
+        msg_obj = msg.get("message") or {}
+        inner = msg_obj.get(msg_type) or {}
+        if not isinstance(inner, dict):
+            inner = {}
+        caption = str(inner.get("caption") or "")
+        kind = "image" if msg_type == "imageMessage" else "video"
+        label = self.main_window.i18n.t("photo" if kind == "image" else "video")
+
+        msg_id = msg.get("key", {}).get("id", "")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
+        filename = self._resolve_media_filename(msg)
+        suffix = os.path.splitext(filename)[1]
+        if not suffix:
+            suffix = ".jpg" if kind == "image" else ".mp4"
+
+        def _loader():
+            if not os.path.isfile(media_path):
+                wx.CallAfter(self.main_window.output, self.main_window.i18n.t("downloading"))
+                self.main_window.handle_media_message(msg)
+            if not os.path.isfile(media_path):
+                raise FileNotFoundError(media_path)
+            with open(media_path, "rb") as fh:
+                return decrypt_bytes(fh.read(), self.main_window.key)
+
+        # Do not allow voice playback or the legacy embedded video surface to
+        # keep running underneath the modal viewer.
+        try:
+            self._stop_audio()
+        except Exception:
+            pass
+        try:
+            self._video_player.stop()
+        except Exception:
+            pass
+
+        dlg = MediaViewerDialog(
+            self,
+            self.main_window,
+            [{
+                "kind": kind,
+                "loader": _loader,
+                "extension": suffix,
+                "filename": filename,
+                "caption": caption,
+                "label": label,
+            }],
+        )
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+            if 0 <= index < self.messages_list.GetItemCount():
+                try:
+                    self.messages_list.Focus(index)
+                    self.messages_list.Select(index)
+                    self.messages_list.SetFocus()
+                except Exception:
+                    pass
+
     def _on_action_open(self, event, index=None):
         if index is None:
             index = self.messages_list.GetFirstSelected()
@@ -5265,6 +5343,10 @@ class ConversationsPanel(wx.Panel):
             url = self._location_maps_url(msg)
             if url:
                 self._open_file_safely(url)
+            return
+
+        if msg_type in ("imageMessage", "videoMessage"):
+            self._open_conversation_media_viewer(index)
             return
 
         if msg_type == "documentMessage":
@@ -5594,24 +5676,33 @@ class ConversationsPanel(wx.Panel):
         # Build specific wildcard filter based on target file extension
         ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
         i18n = self.main_window.i18n
+        all_files = i18n.t("all_files")
         if ext_clean:
-            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
+            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{all_files} (*.*)|*.*"
         elif msg_type == "audioMessage":
             # Unknown audio extension: put *.* first so the native save dialog
             # does not silently append the first audio pattern (typically
             # .mp3) to a file whose actual format we could not identify.
-            all_files = i18n.t("all_files") if hasattr(i18n, "t") else "Todos os arquivos"
             wildcard = (
                 f"{all_files} (*.*)|*.*|"
-                "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus)|"
+                f"{i18n.t('file_filter_audio')} (*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus)|"
                 "*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus"
             )
         elif msg_type == "imageMessage":
-            wildcard = "Imagens (*.jpg;*.png;*.webp;*.gif)|*.jpg;*.png;*.webp;*.gif|*.*|*.*"
+            wildcard = (
+                f"{i18n.t('file_filter_images')} (*.jpg;*.png;*.webp;*.gif)|"
+                f"*.jpg;*.png;*.webp;*.gif|{all_files} (*.*)|*.*"
+            )
         elif msg_type == "videoMessage":
-            wildcard = "Vídeos (*.mp4;*.mkv;*.avi;*.mov)|*.mp4;*.mkv;*.avi;*.mov|*.*|*.*"
+            wildcard = (
+                f"{i18n.t('file_filter_videos')} (*.mp4;*.mkv;*.avi;*.mov)|"
+                f"*.mp4;*.mkv;*.avi;*.mov|{all_files} (*.*)|*.*"
+            )
         else:
-            wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
+            wildcard = (
+                f"{i18n.t('file_filter_documents')} (*.pdf;*.doc;*.docx;*.txt;*.zip)|"
+                f"*.pdf;*.doc;*.docx;*.txt;*.zip|{all_files} (*.*)|*.*"
+            )
 
         logging.info(f"[Save As] msg_id={msg_id}, msg_type={msg_type}, is_ptt={is_ptt}, mimetype='{mimetype}', default_file='{default_file}', wildcard='{wildcard}'")
 
