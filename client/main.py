@@ -14393,6 +14393,16 @@ class MainWindow(wx.Frame):
                     logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
         return out
 
+    @classmethod
+    def _needs_display_page_refill(cls, raw_count: int, messages: list,
+                                   page_size: int) -> bool:
+        """Whether hidden records consumed slots in a saturated API page."""
+        if raw_count < page_size:
+            return False
+        visible_count = sum(1 for message in messages
+                            if cls._counts_as_last_message(message))
+        return visible_count < page_size
+
     def _refetch_history_gap(self, remote_jid: str, phone: str, headers: dict,
                              page_size: int, local_records: list,
                              hole_top_ts: int = 0) -> list:
@@ -14476,7 +14486,8 @@ class MainWindow(wx.Frame):
             phone = remote_jid
 
         page_size = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        limit = display_page_fetch_limit(page_size)
+        limit = page_size
+        refill_limit = display_page_fetch_limit(page_size)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -14565,8 +14576,35 @@ class MainWindow(wx.Frame):
                         logging.info(f"[sync_chat_messages] Fetched {len(wpp_messages)} messages from API for {remote_jid}")
                         if not isinstance(wpp_messages, list):
                             wpp_messages = []
-                        all_messages.extend(
-                            self._normalize_fetched_messages(wpp_messages, remote_jid))
+                        normalized_messages = self._normalize_fetched_messages(
+                            wpp_messages, remote_jid)
+                        if (refill_limit > limit and self._needs_display_page_refill(
+                                len(wpp_messages), normalized_messages, page_size)):
+                            refill_url = (
+                                f"{self.wpp_server}:{self.wpp_port}/api/{self.token}"
+                                f"/get-messages/{fetch_jid}?count={refill_limit}"
+                            )
+                            logging.info(
+                                "[sync_chat_messages] %s needs visible-page refill; "
+                                "expanding raw window from %d to %d.",
+                                remote_jid, limit, refill_limit)
+                            try:
+                                refill_response = api_get(
+                                    refill_url, headers=headers, timeout=30)
+                                if refill_response.status_code in (200, 201):
+                                    refill_body = refill_response.json()
+                                    refill_messages = (
+                                        refill_body.get("response", [])
+                                        if isinstance(refill_body, dict) else [])
+                                    if (isinstance(refill_messages, list)
+                                            and len(refill_messages) > len(wpp_messages)):
+                                        normalized_messages = self._normalize_fetched_messages(
+                                            refill_messages, remote_jid)
+                            except Exception as refill_error:
+                                logging.warning(
+                                    "[sync_chat_messages] Visible-page refill failed "
+                                    "for %s: %s", remote_jid, refill_error)
+                        all_messages.extend(normalized_messages)
                         api_ok = True
                         break
                     elif response.status_code in (401, 404, 500):
