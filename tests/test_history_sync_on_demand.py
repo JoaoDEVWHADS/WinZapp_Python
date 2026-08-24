@@ -275,18 +275,21 @@ class TestRefreshHistoryStillLanding:
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
-    def test_an_interrupted_recent_sync_does_not_pin_the_flag(self, monkeypatch):
-        """recentCompleted stays false forever on such a session — keying off it
-        would re-query every short chat on every launch for good."""
+    def test_an_incomplete_recent_sync_keeps_history_landing(self, monkeypatch):
         stub = self._stub(
             {"unprocessedChunks": 0, "initialSyncComplete": True, "recentCompleted": False},
             monkeypatch)
-        assert stub.refresh_history_still_landing() is False
+        assert stub.refresh_history_still_landing() is True
+        assert stub._history_still_landing is True
 
-    def test_an_unreadable_status_is_treated_as_settled(self, monkeypatch):
-        """Better to take a short chat at face value than to re-query 600 of
-        them for the whole budget because the status endpoint is missing."""
+    def test_an_unreadable_status_is_safe_before_the_first_check(self, monkeypatch):
         stub = self._stub(None, monkeypatch)
+        assert stub.refresh_history_still_landing() is True
+        assert stub._history_still_landing is True
+
+    def test_an_unreadable_status_preserves_the_last_known_state(self, monkeypatch):
+        stub = self._stub(None, monkeypatch)
+        stub._history_still_landing = False
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
