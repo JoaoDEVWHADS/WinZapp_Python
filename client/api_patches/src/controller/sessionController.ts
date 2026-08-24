@@ -778,11 +778,30 @@ export async function getMediaByMessage(req: Request, res: Response) {
               try {
                 const w = window as any;
                 if (w.WPP && w.WPP.chat) {
-                  // Find message to get its chat ID
-                  const msg =
-                    typeof w.WPP.chat.getMessageById === 'function'
-                      ? await w.WPP.chat.getMessageById(msgId).catch(() => null)
-                      : null;
+                  // Find message using candidate IDs
+                  const candidateIds = [
+                    msgId,
+                    msgId.replace(/:\d+@/, '@'),
+                    msgId.split('_').slice(0, 3).join('_'),
+                  ];
+                  if (msgId.startsWith('true_')) {
+                    candidateIds.push(msgId.replace(/^true_/, 'false_'));
+                  } else if (msgId.startsWith('false_')) {
+                    candidateIds.push(msgId.replace(/^false_/, 'true_'));
+                  }
+
+                  let foundId = msgId;
+                  let msg: any = null;
+                  if (typeof w.WPP.chat.getMessageById === 'function') {
+                    for (const cid of candidateIds) {
+                      msg = await w.WPP.chat.getMessageById(cid).catch(() => null);
+                      if (msg) {
+                        foundId = cid;
+                        break;
+                      }
+                    }
+                  }
+
                   const chatId =
                     msg?.chatId?._serialized ||
                     msg?.from ||
@@ -791,9 +810,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
                     await w.WPP.chat.openChatAt(chatId).catch(() => null);
                   }
                   if (typeof w.WPP.chat.downloadMedia === 'function') {
-                    const downloadPromise = w.WPP.chat.downloadMedia(msgId);
+                    const downloadPromise = w.WPP.chat.downloadMedia(foundId);
                     const timeoutPromise = new Promise((res) =>
-                      setTimeout(() => res(null), 8000)
+                      setTimeout(() => res(null), 25000)
                     );
                     const blob = await Promise.race([
                       downloadPromise,
