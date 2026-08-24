@@ -13490,7 +13490,11 @@ class MainWindow(wx.Frame):
             _done()
             # `gap and previous is None` queues a gap chat once; from the next
             # pass it is kept only while growing, like any other short chat.
-            if still_landing or grew or (gap and previous is None):
+            # A transiently empty chunk queue does not prove that the store is
+            # finished. Give every first short page one confirming read; if it
+            # is genuinely short, the unchanged second read retires it.
+            first_short_page = previous is None
+            if still_landing or grew or first_short_page:
                 counts[canonical] = count
                 pending.add(canonical)
 
