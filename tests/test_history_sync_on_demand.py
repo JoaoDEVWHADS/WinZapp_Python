@@ -533,6 +533,17 @@ class TestRoutesArePatched:
         assert empty_queue < repair < send
         assert "out.unprocessed = rows.length" in controller
 
+    def test_unchanged_short_pages_request_phone_history(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        main = (root / "client" / "main.py").read_text(encoding="utf-8")
+        retry = main.index("An unchanged short page is not proof")
+        request = main.index("self.request_older_messages(jid)", retry)
+        keep = main.index("self._keep_backfill_pending(jid, now)", retry)
+        completed = main.index("self._completed_backfill_targets(window)", retry)
+        assert retry < request < keep < completed
+
 
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.

@@ -13611,6 +13611,13 @@ class MainWindow(wx.Frame):
                 pending.discard(form)
                 counts.pop(form, None)
 
+    def _keep_backfill_pending(self, jid: str, count: int) -> None:
+        """Keep a short chat eligible while phone history is in flight."""
+        with self._backfill_state_guard():
+            canonical = self._canonical_backfill_jid(jid)
+            self._chats_awaiting_messages.add(canonical)
+            self._partial_history_counts[canonical] = count
+
     def _is_backfill_pending(self, jid: str) -> bool:
         """Whether a conversation is queued under either known address."""
         with self._backfill_state_guard():
@@ -13942,6 +13949,37 @@ class MainWindow(wx.Frame):
                                 fut.result()
                             except Exception as exc:
                                 logging.warning("[backfill] chat sync failed: %s", exc)
+
+                # An unchanged short page is not proof that the conversation
+                # only contains that many messages. It often means the linked
+                # device exhausted its bounded local window (reported live as
+                # dozens of chats stuck at exactly one message). Ask the phone
+                # for older history, a few chats per pass, and keep every such
+                # chat queued while its asynchronous reply is pending.
+                older_requested = getattr(self, "_older_requested_chats", None)
+                if not isinstance(older_requested, dict):
+                    older_requested = self._older_requested_chats = {}
+                requests_attempted = 0
+                requests_sent = 0
+                for jid, was in counts_before.items():
+                    now = self._local_record_count(jid)
+                    if now >= self.history_page_target() or now > was:
+                        continue
+                    asked_at = older_requested.get(jid)
+                    due = (asked_at is None or
+                           time.time() - asked_at >= self._OLDER_REQUEST_GRACE)
+                    if due and requests_attempted < self._BACKFILL_WORKERS:
+                        requests_attempted += 1
+                        result = self.request_older_messages(jid)
+                        if result is True:
+                            older_requested[jid] = time.time()
+                            self._persist_older_requested()
+                            requests_sent += 1
+                    self._keep_backfill_pending(jid, now)
+                if requests_sent:
+                    logging.info(
+                        "[backfill] Requested phone history for %d unchanged "
+                        "short chat(s); keeping them pending.", requests_sent)
 
                 completed = self._completed_backfill_targets(window)
                 grew = sum(1 for j, was in counts_before.items()
