@@ -97,6 +97,9 @@ class _FakeStream:
 
 class _Stub:
     _start_voice_recording = ConversationsPanel._start_voice_recording
+    _silence_send_voice_focus_if_enabled = (
+        ConversationsPanel._silence_send_voice_focus_if_enabled
+    )
 
     def __init__(self):
         self.conversation = {"remoteJid": "5511999999999@s.whatsapp.net"}

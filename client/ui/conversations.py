@@ -2045,6 +2045,29 @@ class ConversationsPanel(wx.Panel):
 
     # ── Voice recording ──────────────────────────────────────────────────────
 
+    def _silence_send_voice_focus_if_enabled(self):
+        """When Settings > Conteúdo Falado's "silence while recording" toggle
+        is on, cut off the screen reader's own focus announcement for the
+        Enviar button right after SetFocus() moves to it.
+
+        A silence() call issued synchronously right after SetFocus() is too
+        early: on Windows the focus WinEvent is dispatched to the screen
+        reader's hook synchronously, but the screen reader itself (NVDA, ...)
+        queues and speaks the announcement asynchronously on its own thread,
+        so calling silence() immediately can run before that speech has even
+        been queued and end up cancelling nothing. Firing once immediately
+        (covers a screen reader that does speak synchronously) and once again
+        a beat later via wx.CallLater (covers the common async case) catches
+        the announcement whichever way the screen reader schedules it —
+        silence() is idempotent, so calling it twice is harmless.
+        """
+        if not self.main_window.settings.get("speech_content", {}).get(
+            "silence_while_recording", False
+        ):
+            return
+        self.main_window.speak_output.silence()
+        wx.CallLater(60, self.main_window.speak_output.silence)
+
     def _start_voice_recording(self):
         """
         Start capturing audio from the default input device.
@@ -2120,10 +2143,7 @@ class ConversationsPanel(wx.Panel):
                 self._voice_panel.Show()
                 self.conversation_panel.Layout()
                 self._send_voice_btn.SetFocus()
-                if self.main_window.settings.get("speech_content", {}).get(
-                    "silence_while_recording", False
-                ):
-                    self.main_window.speak_output.silence()
+                self._silence_send_voice_focus_if_enabled()
 
                 def _bg_start_mic():
                     try:
@@ -2317,10 +2337,7 @@ class ConversationsPanel(wx.Panel):
                 self._discard_voice_btn.SetFocus()
             else:
                 self._send_voice_btn.SetFocus()
-                if self.main_window.settings.get("speech_content", {}).get(
-                    "silence_while_recording", False
-                ):
-                    self.main_window.speak_output.silence()
+                self._silence_send_voice_focus_if_enabled()
 
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 
