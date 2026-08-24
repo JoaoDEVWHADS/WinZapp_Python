@@ -5154,8 +5154,8 @@ class ConversationsPanel(wx.Panel):
     def _on_conv_list_key_down(self, event):
         """Ctrl+Space toggles the focused chat's membership in
         self.selected_chats (the mass actions act on that set) — kept off
-        plain Space for consistency with the messages list. Shift+Down
-        extends the selection to the next row; Shift+Home/Shift+End select
+        plain Space for consistency with the messages list. Shift+Up/Down
+        extend the selection to the previous/next row; Shift+Home/Shift+End select
         every row above/below the focused one and move focus to the
         first/last row; Ctrl+Shift+Space selects every chat, or clears the
         selection if everything is already selected. Opening a conversation
@@ -5177,6 +5177,19 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.add_chats_to_ui()
                     self.selection_sound.play()
                     self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
+            target = (idx - 1) if idx >= 0 else 0
+            if target >= 0:
+                self.conversations_list.Focus(target)
+                self.conversations_list.Select(target, True)
+                self.conversations_list.EnsureVisible(target)
+                if self._select_chat_at(target):
+                    self.main_window.add_chats_to_ui()
+                    self.selection_sound.play()
+                    self.main_window.output(
+                        self.main_window.i18n.t("selected"), interrupt=True)
             return
 
         if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
