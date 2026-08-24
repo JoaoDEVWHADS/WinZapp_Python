@@ -52,7 +52,7 @@ class _Win:
     def _normalize_jid(self, jid):
         return jid
 
-    def refresh_chat_row_text(self, chat_jid):
+    def move_chat_row_to_top(self, chat_jid):
         self.rows_refreshed.append(chat_jid)
         return self._row_refresh_works
 
@@ -245,3 +245,33 @@ def test_a_build_failure_reports_failure_instead_of_raising():
     win = _RowWin(["a@s.whatsapp.net"], ["old"])
     win._build_chat_item_text = lambda chat, name: (_ for _ in ()).throw(RuntimeError("boom"))
     assert win.refresh_chat_row_text("a@s.whatsapp.net") is False
+
+
+class TestAnAckCanAlsoReorderTheList:
+    """Regression: an ack was routed to a repaint-in-place, on the assumption
+    that it never changes a chat's position. That holds for the message's own
+    timestamp, but not for the list: a message you just sent enters as a local
+    pending record and the ack is what settles the chat's real ordering, so the
+    ack can be exactly the event that should float the chat up. Repainting in
+    place left a chat you had just posted to sitting where it was — reported
+    live as a group not rising after sending to it, while groups that merely
+    received messages rose fine (those go through on_new_message, which was
+    never routed to the repaint).
+    """
+
+    def test_the_ack_path_is_the_one_that_can_move_the_row(self):
+        """Whatever the ack calls must be able to reorder, not only repaint."""
+        win = _win_with_message()
+        moved = []
+        win.move_chat_row_to_top = lambda jid: moved.append(jid) or True
+        win.refresh_chat_row_text = lambda jid: pytest.fail(
+            "a repaint-only path cannot reorder; the ack must go through "
+            "move_chat_row_to_top"
+        )
+        win.on_message_status_update(_ack())
+        assert moved == [JID]
+
+    def test_when_the_row_cannot_settle_its_position_the_full_path_runs(self):
+        win = _win_with_message(row_refresh_works=False)
+        win.on_message_status_update(_ack())
+        assert win.scheduled == 1, "the reorder still has to happen somewhere"

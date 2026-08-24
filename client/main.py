@@ -15925,20 +15925,31 @@ class MainWindow(wx.Frame):
         # live as a preview still reading "Pendente" seconds after the message
         # had visibly been sent.
         #
-        # An ack changes one row's text and nothing else — it doesn't move the
-        # chat, because the message's timestamp is untouched. So repaint that
-        # row directly instead of going through set_chats(), which re-resolves
-        # every chat's name and rebuilds every chat's row text; on an account
-        # with several hundred chats that is seconds of work per ack, and it
-        # was the actual reason the preview took so long to leave "Pendente".
-        # _schedule_set_chats() stays as the fallback for when the row can't be
-        # updated in place (filtered out of the current view, list mid-rebuild,
-        # chat not rendered). Skipped entirely when the status isn't part of
-        # the preview, so turning that setting off also turns off the work.
+        # Update this chat's row in the conversations list, cheaply.
+        #
+        # move_chat_row_to_top() rather than refresh_chat_row_text(): an ack
+        # usually only changes the row's TEXT (Pendente -> Enviada), but not
+        # always its position. A message you just sent enters the list as a
+        # local pending record and the ack is what settles the chat's real
+        # ordering timestamp, so an ack genuinely can be the thing that should
+        # float the chat up. Repainting the row in place — which is all
+        # refresh_chat_row_text() does — left a chat you had just posted to
+        # sitting where it was, because the ack had taken over from the
+        # set_chats() call that used to do the reordering. move_chat_row_to_top()
+        # covers both: it repaints in place when the chat is already at the top
+        # of its group, moves the row when it now outranks it, and returns
+        # False (falling back to the full recompute below) whenever the
+        # position isn't something it can settle on its own.
+        #
+        # The point of all three paths is the same: never re-resolve every
+        # chat's name and rebuild every chat's row text just to change one row,
+        # which on an account with several hundred chats is seconds of work per
+        # ack. Skipped entirely when the status isn't part of the preview, so
+        # turning that setting off also turns off the work.
         if found_msg and self.settings.get("user_interface", {}).get(
             "show_delivery_status_in_chat_list", True
         ):
-            if not self.refresh_chat_row_text(found_chat_jid):
+            if not self.move_chat_row_to_top(found_chat_jid):
                 self._schedule_set_chats()
 
 
