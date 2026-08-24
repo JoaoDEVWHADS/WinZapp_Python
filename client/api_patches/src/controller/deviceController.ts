@@ -2572,11 +2572,30 @@ export async function unblockHistorySync(req: Request, res: Response) {
           const source = req_(
             'WAWebHistorySyncNotificationUtils'
           ).HistorySyncScheduleSource;
+          const continueSync =
+            boot?.continueProgressiveHistorySyncProcessingV2;
+          if (typeof continueSync !== 'function') {
+            throw new Error(
+              'continueProgressiveHistorySyncProcessingV2 unavailable'
+            );
+          }
+          // A page reload creates a fresh bootstrap instance after the
+          // persisted initial sync has already completed. Its in-memory
+          // initialChatHistory flag then stays false, and every manual restart
+          // silently exits without touching the queued RECENT chunks.
+          const initialComplete = await req_(
+            'WAWebUserPrefsHistorySync'
+          ).getInitialHistorySyncComplete();
+          if (
+            initialComplete === true &&
+            typeof boot?.setInitialChatHistorySynced === 'function'
+          ) {
+            await boot.setInitialChatHistorySynced();
+            out.bootstrapRehydrated = true;
+          }
           // Fire-and-forget: the job runs for as long as it needs (chunks are
           // ~1.4MB each), and this response must not wait for it.
-          boot?.continueProgressiveHistorySyncProcessingV2?.(
-            source.ManualRestart
-          );
+          continueSync.call(boot, source.ManualRestart);
           out.restarted = true;
         } catch (e) {
           out.restartError = String(e);

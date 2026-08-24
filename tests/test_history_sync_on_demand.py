@@ -374,6 +374,22 @@ class TestUnblockHistorySync:
         monkeypatch.setattr("main.requests.post", _raise)
         assert stub.unblock_history_sync() is None
 
+    def test_restart_rehydrates_bootstrap_after_page_reload(self):
+        """A fresh bootstrap instance otherwise rejects every manual restart."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller"
+            / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+        rehydrate_at = controller.index("setInitialChatHistorySynced")
+        restart_at = controller.index(
+            "continueSync.call(boot, source.ManualRestart)"
+        )
+        assert rehydrate_at < restart_at
+        assert "initialComplete === true" in controller
+
 
 class _FetchStub:
     """Just the exhaustion bookkeeping of fetch_older_messages()."""
