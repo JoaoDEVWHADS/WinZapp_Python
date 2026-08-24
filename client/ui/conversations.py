@@ -47,7 +47,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -95,6 +95,71 @@ def message_caption(msg) -> str:
         if isinstance(media, dict):
             return (media.get("caption") or "").strip()
     return ""
+
+
+def probe_media_duration(path: str):
+    """Best-effort length in whole seconds of a media file, or None if unknown.
+
+    Supports .mp3, .ogg, .wav, .m4a, .flac, .opus, .aac etc. — and .mp4, since
+    BASS opens the container directly through the bass_aac plugin the app
+    already loads at startup (that is how core/video_player.py plays a video's
+    audio track), which is what lets a video with no stated duration be
+    measured from the file. Uses sound_lib / BASS when available, or stdlib
+    wave and header fallback parsers.
+
+    A module-level function rather than only a ConversationsPanel method
+    because MainWindow probes downloaded video from the media-download path,
+    where there is no panel in reach.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+
+    # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
+    try:
+        from sound_lib import stream
+        s = stream.FileStream(file=path)
+        length_bytes = s.get_length()
+        length_secs = s.bytes_to_seconds(length_bytes)
+        s.free()
+        if length_secs and 0 < length_secs < 86400:
+            return int(length_secs)
+    except Exception:
+        pass
+
+    # 2. Try stdlib wave module for .wav files
+    if path.lower().endswith(".wav"):
+        try:
+            import wave
+            with wave.open(path, "rb") as wf:
+                frames = wf.getnframes()
+                rate   = wf.getframerate()
+                if rate > 0:
+                    sec = int(frames / rate)
+                    if 0 < sec < 86400:
+                        return sec
+        except Exception:
+            pass
+
+    # 3. Fallback lightweight header parser for MP3 / OGG
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".mp3":
+            size = os.path.getsize(path)
+            if size > 0:
+                # Estimate based on standard 128kbps (16000 bytes/sec)
+                sec = max(1, int(size / 16000))
+                if 0 < sec < 86400:
+                    return sec
+        elif ext in (".ogg", ".opus"):
+            size = os.path.getsize(path)
+            if size > 0:
+                sec = max(1, int(size / 6000))
+                if 0 < sec < 86400:
+                    return sec
+    except Exception:
+        pass
+
+    return None
 
 
 def _fmt_last_seen(ts, i18n) -> str:
@@ -5395,6 +5460,9 @@ class ConversationsPanel(wx.Panel):
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
                 tmp.write(content)
                 tmp.close()
+                # Now that the file is on disk, it can answer what the message
+                # itself never stated (see video_seconds()).
+                self._learn_video_duration(msg, tmp.name)
                 speed = self._audio_speed_steps[self._audio_speed_index]
                 self._current_video_msg_id = msg_id
                 wx.CallAfter(self._start_video_playback, tmp.name, speed, msg_id)
@@ -5409,6 +5477,41 @@ class ConversationsPanel(wx.Panel):
                 )
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _learn_video_duration(self, msg: dict, path: str):
+        """Fill in a video's length from the decoded file when the message
+        never stated one, then persist it and repaint that row.
+
+        A video whose sender left the duration out of the message renders as
+        a bare "vídeo" (see video_seconds()) — accurate, but the length is
+        knowable the moment the file is on disk, and playing it is exactly
+        when that happens. BASS opens an .mp4 directly (the same bass_aac
+        path core/video_player.py plays it through), so _probe_audio_duration()
+        already works here and no extra process is needed.
+
+        Runs on the playback worker thread: the DB write goes through
+        _persist_message_local_flag()'s own thread, and the repaint is bounced
+        to the UI thread. Repaint rather than repopulate — a full rebuild
+        would move the user's focus in the middle of starting playback, and
+        a row that fails to repaint just keeps reading "vídeo" until the
+        conversation is reopened.
+        """
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            return
+        secs = self._probe_audio_duration(path)
+        if not secs or secs <= 0:
+            return
+        video["seconds"] = secs
+        logging.info(
+            "[_learn_video_duration] %s: message stated no duration, file says %ds",
+            msg.get("key", {}).get("id", ""), secs,
+        )
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if jid:
+            self._persist_message_local_flag(jid, msg)
+            self.main_window._schedule_save(dirty_jid=jid)
+        wx.CallAfter(self._repaint_message_rows, [msg.get("key", {}).get("id", "")])
 
     def _start_video_playback(self, path: str, speed: float, msg_id: str):
         """Runs on the UI thread (via wx.CallAfter from _run() above). Starts
@@ -6587,60 +6690,8 @@ class ConversationsPanel(wx.Panel):
             return ""
 
     def _probe_audio_duration(self, path: str):
-        """Best-effort audio length in whole seconds for any audio format, or None if unknown.
-
-        Supports .mp3, .ogg, .wav, .m4a, .flac, .opus, .aac etc. Uses sound_lib / BASS
-        when available, or stdlib wave and header fallback parsers.
-        """
-        if not path or not os.path.isfile(path):
-            return None
-
-        # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
-        try:
-            from sound_lib import stream
-            s = stream.FileStream(file=path)
-            length_bytes = s.get_length()
-            length_secs = s.bytes_to_seconds(length_bytes)
-            s.free()
-            if length_secs and 0 < length_secs < 86400:
-                return int(length_secs)
-        except Exception:
-            pass
-
-        # 2. Try stdlib wave module for .wav files
-        if path.lower().endswith(".wav"):
-            try:
-                import wave
-                with wave.open(path, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate   = wf.getframerate()
-                    if rate > 0:
-                        sec = int(frames / rate)
-                        if 0 < sec < 86400:
-                            return sec
-            except Exception:
-                pass
-
-        # 3. Fallback lightweight header parser for MP3 / OGG
-        try:
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".mp3":
-                size = os.path.getsize(path)
-                if size > 0:
-                    # Estimate based on standard 128kbps (16000 bytes/sec)
-                    sec = max(1, int(size / 16000))
-                    if 0 < sec < 86400:
-                        return sec
-            elif ext in (".ogg", ".opus"):
-                size = os.path.getsize(path)
-                if size > 0:
-                    sec = max(1, int(size / 6000))
-                    if 0 < sec < 86400:
-                        return sec
-        except Exception:
-            pass
-
-        return None
+        """Method form of probe_media_duration() — see that function."""
+        return probe_media_duration(path)
 
     def _format_duration(self, seconds):
         """Human-readable length, or "" when it isn't known.
@@ -6854,9 +6905,10 @@ class ConversationsPanel(wx.Panel):
             if video.get("gifPlayback"):
                 # Animated GIF — treat identically to sticker
                 return i18n.t("sticker")
-            dur = self._format_duration(video.get("seconds"))
+            dur = self._format_duration(video_seconds(video))
             # Same as the audio branch: an unknown length omits the clause
             # instead of reading "duração: " with nothing after the colon.
+            # For video, "unknown" includes a stated 0 — see video_seconds().
             base = f"{i18n.t('video')}, {i18n.t('duration')}: {dur}" if dur else i18n.t("video")
             caption = (video.get("caption") or "").strip()
             return f"{base}, {caption}" if caption else base

@@ -30,6 +30,8 @@ from typing import Any
 import aiosqlite
 from cryptography.fernet import Fernet
 
+from core.utils import video_seconds
+
 log = logging.getLogger(__name__)
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -697,18 +699,74 @@ class DatabaseManager:
         return (mid, remote_jid, from_me, participant, mtype, msg_enc, ts,
                 _delivery_status(msg))
 
+    async def _with_known_video_duration(self, conn, remote_jid: str, msg: dict) -> dict:
+        """*msg*, with a video duration already on record restored when the
+        incoming copy states none.
+
+        Some videos are handed over by WhatsApp Web with duration 0 forever —
+        the sending client left the field out of the message, and no field on
+        the payload carries the real length. WinZapp measures those from the
+        file itself once it has been downloaded or played, and that
+        measurement lives only in the stored record: the server never learns
+        it. So every resync, which overwrites the row with the server's copy,
+        used to erase it — the length showed up after playing the video and
+        was gone again on the next restart.
+
+        The rule lives here, at the single point every write passes through,
+        rather than in each of the several sync paths that batch-insert
+        messages, so no future one can forget it. A message's video is
+        immutable (WhatsApp has no way to change the media of a sent
+        message), so a duration measured once stays valid for that id. A copy
+        that DOES state a duration always wins — that is the sender's own
+        answer finally arriving — and anything that is not a video without a
+        duration returns untouched without hitting the database at all.
+        """
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            return msg
+        message_id = (msg.get("key") or {}).get("id") or ""
+        if not message_id:
+            return msg
+        cursor = await conn.execute(
+            "SELECT message_json FROM messages WHERE remote_jid=? AND message_id=?",
+            (remote_jid, message_id),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return msg
+        stored = self._decrypt_json(row["message_json"]) or {}
+        known = video_seconds((stored.get("message") or {}).get("videoMessage"))
+        if known is None:
+            return msg
+        log.info(
+            "[messages] %s: keeping the measured %ds duration; the incoming copy states none",
+            message_id, known,
+        )
+        merged = dict(msg)
+        merged["message"] = dict(msg.get("message") or {})
+        merged["message"]["videoMessage"] = {**video, "seconds": known}
+        return merged
+
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
-        """Insert a single message record."""
-        values = self._build_message_values(remote_jid, msg)
-        if values is None:
-            log.warning(
-                "[insert_message] dropping message with empty key.id for %s "
-                "(would collide with any other id-less message in this chat)",
-                remote_jid,
-            )
-            return
+        """Insert a single message record.
+
+        The whole read-then-write sits inside one lock hold: the read is
+        _with_known_video_duration()'s lookup of a duration this row may
+        already carry, and releasing the lock between the two would let
+        another write land in the gap — the very race that helper exists to
+        close.
+        """
         async with self._write_lock:
             conn = await self._ensure_conn()
+            msg = await self._with_known_video_duration(conn, remote_jid, msg)
+            values = self._build_message_values(remote_jid, msg)
+            if values is None:
+                log.warning(
+                    "[insert_message] dropping message with empty key.id for %s "
+                    "(would collide with any other id-less message in this chat)",
+                    remote_jid,
+                )
+                return
             await conn.execute(
                 """INSERT OR REPLACE INTO messages
                    (message_id, remote_jid, from_me, participant,
@@ -730,6 +788,7 @@ class DatabaseManager:
             try:
                 await conn.execute("BEGIN")
                 for msg in msgs:
+                    msg = await self._with_known_video_duration(conn, remote_jid, msg)
                     values = self._build_message_values(remote_jid, msg)
                     if values is None:
                         # See _build_message_values() — an empty id-less

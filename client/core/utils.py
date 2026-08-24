@@ -13,6 +13,79 @@ from cryptography.fernet import Fernet
 SEARCH_NORMALIZATION_MODES = ("off", "nfd", "nfkd")
 
 
+def video_seconds(video: dict):
+    """A video's stated length in whole seconds, or None when it doesn't
+    actually state one.
+
+    Zero counts as "not stated" HERE, unlike audio. WhatsApp Web hands over
+    duration 0 whenever the sending client left the field out of the message
+    (confirmed against /get-messages for such a video: `duration` is the
+    string "0" and no other field on the payload or its mediaData carries the
+    real length). No video lasts no time, so rendering that as "duração: 0
+    segundos" states a length that is certainly wrong — reported as exactly
+    that on a video that plays for minutes. A voice note under a second, by
+    contrast, genuinely reports 0 and WhatsApp itself shows "0:00" for it,
+    which is why the audio path keeps treating 0 as a real answer.
+
+    The value may arrive as an int or as a string, depending on which layer
+    normalized it (WebSocketClient._media_seconds() casts, a record restored
+    straight from a REST sync may not) — "0" is truthy, so this cannot be a
+    plain falsiness check at the call site.
+    """
+    if not isinstance(video, dict):
+        return None
+    raw = video.get("seconds")
+    if raw is None or raw == "":
+        return None
+    try:
+        secs = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return secs if secs > 0 else None
+
+
+def carry_over_video_durations(new_msgs, old_msgs) -> int:
+    """Copy a measured video duration from *old_msgs* onto the matching
+    message in *new_msgs* whenever the new copy states none. Returns how many
+    were carried over.
+
+    A resync replaces the in-memory records of a chat with the server's copy,
+    and the server never learns a duration WinZapp measured from the file
+    itself (see ui/conversations.probe_media_duration) — so without this the
+    length vanished from the list the moment any sync ran, and only came back
+    after the video was played again. The database side of the same rule lives
+    in DatabaseManager._with_known_video_duration(); this one keeps what is on
+    screen right now in step with it.
+
+    A message's video is immutable — WhatsApp has no "edit the media of a sent
+    message" — so a duration measured once stays valid for that message id
+    forever. A new copy that DOES state a duration always wins, since that is
+    the sender's own answer finally arriving.
+    """
+    known = {}
+    for m in old_msgs or ():
+        if not isinstance(m, dict):
+            continue
+        mid = (m.get("key") or {}).get("id")
+        secs = video_seconds(((m.get("message") or {}).get("videoMessage")))
+        if mid and secs is not None:
+            known[mid] = secs
+    if not known:
+        return 0
+    carried = 0
+    for m in new_msgs or ():
+        if not isinstance(m, dict):
+            continue
+        video = (m.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            continue
+        secs = known.get((m.get("key") or {}).get("id"))
+        if secs is not None:
+            video["seconds"] = secs
+            carried += 1
+    return carried
+
+
 def search_normalization_mode(value) -> str:
     """Canonicalize whatever settings.json holds into one of the three modes.
 

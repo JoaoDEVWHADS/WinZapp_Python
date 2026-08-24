@@ -48,7 +48,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, carry_over_video_durations, video_seconds
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -14538,6 +14538,16 @@ class MainWindow(wx.Frame):
             )
 
         if local_records:
+            # A duration WinZapp measured from the file itself is not
+            # something the server knows, so the API copy of that same video
+            # arrives stating none — carry it across before the API copy
+            # replaces the record, or the length disappears from the list on
+            # every sync. The database keeps the same rule on its own side
+            # (DatabaseManager._with_known_video_duration).
+            carried = carry_over_video_durations(all_messages, local_records)
+            if carried:
+                logging.info("[sync_chat_messages] %s: kept %d measured video duration(s)",
+                             remote_jid, carried)
             api_ids = {r.get("key", {}).get("id") for r in all_messages}
             extra   = [r for r in local_records
                        if r.get("key", {}).get("id") and
