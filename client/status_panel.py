@@ -2431,7 +2431,7 @@ class StatusPanel(wx.Panel):
         headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {"base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}"}
         try:
-            resp = api_post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=60)
             ok   = resp.status_code in (200, 201)
             err_msg = "" if ok else f"HTTP {resp.status_code}: {resp.text[:200]}"
         except Exception as exc:
@@ -2478,7 +2478,7 @@ class StatusPanel(wx.Panel):
             }
         }
         try:
-            resp = api_post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=60)
             ok   = resp.status_code in (200, 201)
             logging.info(
                 "[status_post] POST %s -> HTTP %s, body=%.300s",
@@ -2679,7 +2679,7 @@ class StatusPanel(wx.Panel):
             "caption": caption,
         }
         try:
-            resp = api_post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=60)
             ok   = resp.status_code in (200, 201)
             if not ok:
                 logging.warning(
