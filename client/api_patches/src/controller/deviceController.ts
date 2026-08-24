@@ -2290,9 +2290,21 @@ export async function requestOlderMessages(req: Request, res: Response) {
             /* keep the literal */
           }
           out.requestType = kind;
+          let chatModel = req_('WAWebCollections')?.Chat?.get?.(wid);
+          if (!chatModel) {
+            try {
+              chatModel = await req_('WAWebCollections')?.Chat?.find?.(wid);
+            } catch (e) {
+              /* handled below */
+            }
+          }
+          if (!chatModel?.id) {
+            out.error = 'chat model unavailable for on-demand history request';
+            return out;
+          }
+          out.requestPayloadMode = 'chatId';
           await sender.sendPeerDataOperationRequest(kind, {
-            chatId: wid,
-            oldestMsgKey,
+            chatId: chatModel.id,
           });
           out.requested = true;
         } catch (e: any) {
