@@ -1142,6 +1142,11 @@ export async function reactMessage(req: Request, res: Response) {
 
   try {
     if (typeof msgId === 'string' && msgId.includes('status@broadcast')) {
+      req.logger.info(
+        `[status-reaction] begin msgId=${msgId} action=${
+          reaction === false ? 'remove' : 'set'
+        }`
+      );
       // wa-js's WPP.chat.sendReactionToMessage(msgId, reaction) resolves a
       // string id via getMessageById(), which — for any @broadcast id —
       // unconditionally looks the message up in
@@ -1270,11 +1275,23 @@ export async function reactMessage(req: Request, res: Response) {
           const authorWid = WPP.util.createWid(authorText);
           const me = WPP.conn.getMyUserWid();
           const statusWid = WPP.util.createWid('status@broadcast');
+          // randomHex exists inside WA-JS's private module graph but is not
+          // exported on window.WPP.whatsapp in the installed 4.5.0 build.
+          // Using it here failed before the reaction reached WhatsApp. A
+          // cryptographically random 20-hex-character stanza id has the same
+          // shape as WhatsApp Web's generated message ids and needs no
+          // version-sensitive private export.
+          const reactionMessageId = Array.from(
+            crypto.getRandomValues(new Uint8Array(10)),
+            (byte: number) => byte.toString(16).padStart(2, '0')
+          )
+            .join('')
+            .toUpperCase();
           const reactionId = new WPP.whatsapp.MsgKey({
             fromMe: true,
             remote: statusWid,
             participant: me,
-            id: WPP.whatsapp.randomHex(16),
+            id: reactionMessageId,
           });
           const result = await WPP.chat.sendRawMessage(
             statusWid,
@@ -1314,6 +1331,11 @@ export async function reactMessage(req: Request, res: Response) {
           }`
         );
       }
+      req.logger.info(
+        `[status-reaction] accepted msgId=${msgId} detail=${
+          outcome.detail || 'none'
+        }`
+      );
     } else {
       await req.client.sendReactionToMessage(msgId, reaction);
     }
@@ -1329,7 +1351,11 @@ export async function reactMessage(req: Request, res: Response) {
     // showed up in WinZapp's log.log for every failed status reaction
     // ({"level":"error"}, no actual cause). Pull message/stack out
     // explicitly so the next failure is actually diagnosable.
-    req.logger.error(e);
+    req.logger.error(
+      `[status-reaction] failed msgId=${String(msgId)} error=${
+        e && e.message ? e.message : String(e)
+      }`
+    );
     res.status(500).json({
       status: 'error',
       message: 'Error on send reaction to message',

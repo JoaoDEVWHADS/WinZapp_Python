@@ -27,4 +27,9 @@ def test_status_like_uses_targeted_status_reaction_transport():
     assert "status@broadcast" in status_branch
     assert "reactionParentKey: model.id" in status_branch
     assert "broadcastParticipants: [authorWid]" in status_branch
+    assert "crypto.getRandomValues(new Uint8Array(10))" in status_branch
+    assert "WPP.whatsapp.randomHex" not in status_branch
+    assert "[status-reaction] begin" in status_branch
+    assert "[status-reaction] accepted" in status_branch
+    assert "[status-reaction] failed" in status_branch
     assert "sendReactionToMessage(model, reaction)" not in status_branch
