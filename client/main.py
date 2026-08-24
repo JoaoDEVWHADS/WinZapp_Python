@@ -9939,6 +9939,13 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
 
+        # The message sweep can finish while WhatsApp Web is still decoding
+        # RECENT history chunks. Treat the local snapshot as usable, but do
+        # not tell the user that it is synchronized until that queue settles.
+        history_still_landing = self.refresh_history_still_landing(
+            context="before sync completion"
+        )
+
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
@@ -9958,10 +9965,18 @@ class MainWindow(wx.Frame):
             self._sync_completed = True
             self._sync_retry_count = 0
             _completed_run_id = getattr(self, "_sync_run_id", None)
-            logging.info(
-                "[start_sync] Sync run %s completed; scheduling completion "
-                "sound/TTS.", _completed_run_id)
-            wx.CallAfter(self._announce_sync_complete, _completed_run_id)
+            if history_still_landing:
+                self._sync_complete_announcement_pending_run_id = _completed_run_id
+                logging.info(
+                    "[start_sync] Sync run %s is usable, but RECENT history "
+                    "is still landing; deferring completion sound/TTS.",
+                    _completed_run_id,
+                )
+            else:
+                logging.info(
+                    "[start_sync] Sync run %s completed; scheduling completion "
+                    "sound/TTS.", _completed_run_id)
+                wx.CallAfter(self._announce_sync_complete, _completed_run_id)
         else:
             self._sync_completed = False
             self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
@@ -10002,7 +10017,7 @@ class MainWindow(wx.Frame):
         # the loop starts on either signal — chats to re-query, or history still
         # on its way — and it is the loop that decides when to stop.
         pending = len(self._collapse_and_list_backfill_pending())
-        still_landing = self.refresh_history_still_landing(context="after initial sync")
+        still_landing = history_still_landing
         # Unresolved names are a third reason to run, and until the inline
         # pass above was capped there was never a case where they were the
         # ONLY reason — it resolved every one of them before getting here, at
