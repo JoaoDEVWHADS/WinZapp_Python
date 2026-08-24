@@ -51,6 +51,21 @@ class _Stub:
     _local_record_count = MainWindow._local_record_count
 
 
+class TestBackfillGeneration:
+    def test_stale_worker_stops_before_touching_the_chat(self):
+        stub = type("Stub", (), {
+            "_sync_run_id": 8,
+            "sync_chat_messages": MainWindow.sync_chat_messages,
+        })()
+
+        result = stub.sync_chat_messages(
+            {"remoteJid": "5511999999999@s.whatsapp.net"},
+            expected_run_id=7,
+        )
+
+        assert result is False
+
+
 def _chat(records=(), unread=0, t=0):
     c = {"unreadCount": unread, "t": t}
     if records:

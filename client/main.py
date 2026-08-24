@@ -10196,6 +10196,14 @@ class MainWindow(wx.Frame):
         on top of them — resyncing used to silently undo all of those too.
         """
         logging.info("[clear_local_data] Clearing all local caches, media, and database...")
+        # Invalidate every background job before touching shared chat state.
+        # A backfill captures this generation and must not keep querying or
+        # writing after F5/logout has emptied the database underneath it.
+        self._sync_run_id = getattr(self, "_sync_run_id", 0) + 1
+        self._backfill_thread = None
+        with self._backfill_state_guard():
+            self._chats_awaiting_messages.clear()
+            self._partial_history_counts.clear()
         self.chats = {}
         self.contacts = {}
         self._status_updates = {}
@@ -13979,12 +13987,17 @@ class MainWindow(wx.Frame):
                 counts_before = {j: self._local_record_count(j) for j in window}
                 if targets:
                     with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
-                        futs = [pool.submit(self.sync_chat_messages, c) for c in targets]
+                        futs = [pool.submit(
+                            self.sync_chat_messages, c, my_run) for c in targets]
                         for fut in as_completed(futs):
                             try:
                                 fut.result()
                             except Exception as exc:
                                 logging.warning("[backfill] chat sync failed: %s", exc)
+
+                if getattr(self, "_sync_run_id", 0) != my_run:
+                    logging.info("[backfill] A newer sync took over — stopping before phone requests.")
+                    return
 
                 # An unchanged short page is not proof that the conversation
                 # only contains that many messages. It often means the linked
@@ -14472,7 +14485,13 @@ class MainWindow(wx.Frame):
                 break
         return widest
 
-    def sync_chat_messages(self, chat):
+    def sync_chat_messages(self, chat, expected_run_id=None):
+        if (expected_run_id is not None
+                and getattr(self, "_sync_run_id", 0) != expected_run_id):
+            logging.info(
+                "[sync_chat_messages] Skipping stale backfill task from sync run %s.",
+                expected_run_id)
+            return False
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
         
@@ -14521,6 +14540,12 @@ class MainWindow(wx.Frame):
         if getattr(self, "_wa_connected", False):
             max_retries = 3
             for attempt in range(max_retries):
+                if (expected_run_id is not None
+                        and getattr(self, "_sync_run_id", 0) != expected_run_id):
+                    logging.info(
+                        "[sync_chat_messages] Cancelling stale backfill retry for %s.",
+                        remote_jid)
+                    return False
                 if not getattr(self, "_wa_connected", False):
                     logging.info(f"[sync_chat_messages] Connection lost during sync retry loop for {remote_jid}, aborting sync.")
                     break
