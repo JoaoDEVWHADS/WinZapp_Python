@@ -721,6 +721,7 @@
     "auto_download_media_label": "Automatycznie pobieraj multimedia podczas synchronizacji",
     "media_max_days_label": "Pobieraj multimedia sprzed maksymalnie (dni): 0 = bez ograniczeń",
     "media_max_mb_label": "Pobieraj multimedia o rozmiarze maksymalnie (MB): 0 = bez ograniczeń",
+    "probe_video_duration_on_download_label": "Ustal długość filmów, które jej nie podają, zaraz po pobraniu (zamiast dopiero przy odtwarzaniu)",
     "invalid_media_max_days": "Limit dni pobierania multimediów musi być liczbą całkowitą (0 lub większą).",
     "invalid_media_max_mb": "Limit rozmiaru pobieranych multimediów musi być liczbą całkowitą (0 lub większą).",
     "sound_events_list_label": "Zdarzenia dźwiękowe",

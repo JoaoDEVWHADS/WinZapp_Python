@@ -26,6 +26,7 @@ import shutil
 import socket as _socket
 
 import subprocess
+import tempfile
 import threading
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,7 +63,9 @@ if sys.platform == "win32":
 from core.notification_manager import NotificationManager
 from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
-from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
+from ui.conversations import (
+    ConversationsPanel, ArchivedConversationsPanel, probe_media_duration,
+)
 from status_panel import StatusPanel
 from version import __version__
 from window_title import format_window_title
@@ -15091,7 +15094,80 @@ class MainWindow(wx.Frame):
         encrypted = encrypt(content, self.key)
         with open(media_path, "wb") as f:
             f.write(encrypted)
+        self._maybe_probe_video_duration(msg, content)
         return True
+
+    def _maybe_probe_video_duration(self, msg: dict, content: bytes):
+        """Measure a just-downloaded video that never stated its duration, if
+        Settings > Armazenamento says to.
+
+        A video whose sender omitted the duration reads as a bare "vídeo"
+        until it is played, at which point _learn_video_duration() fills the
+        gap for free (the file is decoded for playback anyway). This option
+        trades that wait for one media decode per downloaded video: worth it
+        for someone who wants the length in the list without opening
+        anything, wasted work for someone who doesn't — hence off by default.
+
+        The measurement runs on its own thread. handle_media_message() is
+        called from the UI thread too (the play path downloads on demand
+        before starting), and a BASS decode of a 25 MB video is not something
+        to do inline there. `content` is the bytes already in hand, so the
+        just-written file is never read back and decrypted a second time.
+        """
+        if not self.settings.get("storage", {}).get(
+            "probe_video_duration_on_download", False
+        ):
+            return
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            return
+
+        def _bg():
+            tmp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                secs = probe_media_duration(tmp_path)
+            except Exception:
+                logging.exception("[_maybe_probe_video_duration] probe failed")
+                return
+            finally:
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+            if secs and secs > 0:
+                wx.CallAfter(self._apply_probed_video_duration, msg, secs)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _apply_probed_video_duration(self, msg: dict, seconds: int):
+        """Store a probed video length on the record and show it (UI thread)."""
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            # Playback got there first (_learn_video_duration) — its answer
+            # came from the same file, so there is nothing to correct.
+            return
+        video["seconds"] = seconds
+        msg_id = msg.get("key", {}).get("id", "")
+        jid = self._normalize_jid(msg.get("key", {}).get("remoteJid", ""))
+        logging.info("[_apply_probed_video_duration] %s: file says %ds", msg_id, seconds)
+        if jid and getattr(self, "db", None) is not None:
+            def _bg_persist():
+                try:
+                    self.db.insert_message(jid, msg)
+                except Exception as exc:
+                    logging.warning("[_apply_probed_video_duration] persist failed for %s: %s",
+                                    msg_id, exc)
+            self._msg_bg_executor.submit(_bg_persist)
+            self._schedule_save(dirty_jid=jid)
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None and cp.conversation and cp.conversation.get("remoteJid") == jid:
+            # Repaint only — a rebuild here would move the user's focus for a
+            # row that just gained a duration clause.
+            cp._repaint_message_rows([msg_id])
 
     def _check_wa_connection_closed(self, response) -> bool:
         """Detect a response that means "WhatsApp is not connected".

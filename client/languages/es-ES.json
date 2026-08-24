@@ -721,6 +721,7 @@
     "auto_download_media_label": "Descargar medios automáticamente al sincronizar",
     "media_max_days_label": "Descargar medios de hasta (días): 0 = ilimitado",
     "media_max_mb_label": "Descargar medios de hasta un máximo de (MB): 0 = ilimitado",
+    "probe_video_duration_on_download_label": "Averiguar la duración de los vídeos que no la indican al descargarlos (en lugar de solo al reproducirlos)",
     "invalid_media_max_days": "El límite de días para descargar medios debe ser un número entero (0 o mayor).",
     "invalid_media_max_mb": "El límite de tamaño para descargar medios debe ser un número entero (0 o mayor).",
     "sound_events_list_label": "Eventos de sonido",
