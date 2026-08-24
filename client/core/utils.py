@@ -811,3 +811,77 @@ def reaction_targets_status(msg: dict) -> bool:
         return False
     target = ((msg.get("message") or {}).get("reactionMessage") or {}).get("key") or {}
     return str(target.get("remoteJid") or "").endswith("@broadcast")
+
+
+def plan_row_updates(old_rows: list, new_rows: list, max_ops: "int | None" = None):
+    """Plan how to turn the list-control rows *old_rows* into *new_rows* using
+    only per-row deletes and inserts, instead of clearing the whole control.
+
+    Both arguments are lists of row identities (WinZapp passes chat JIDs, which
+    are unique within a list). Returns a list of ``("delete", index)`` /
+    ``("insert", index)`` operations to apply **in order**, each index being
+    valid against the control as it is being mutated. Returns None when the
+    change isn't worth doing incrementally — the caller then rebuilds.
+
+    Why this exists: a new message (or a reaction, or a read receipt) reorders
+    the chat list, usually moving exactly one chat up. Rebuilding the whole
+    wx.ListCtrl for that is O(rows) native calls plus a DeleteAllItems, which
+    on an account with hundreds of chats is slow enough to see, and it hands
+    screen readers a completely new list every time. One chat moving becomes
+    two operations here regardless of how long the list is.
+
+    The plan is greedy rather than provably minimal: rows that vanished are
+    deleted first, then the remainder is walked against *new_rows* and any row
+    that isn't already in place is moved (delete + insert) or inserted. For the
+    shapes that actually occur — one chat moving, one chat appearing, one chat
+    disappearing — that is already the minimum.
+
+    *max_ops* caps how much churn is accepted before None is returned; it
+    defaults to a third of the new length (minimum 4), past which a rebuild is
+    both simpler and no slower.
+    """
+    if old_rows == new_rows:
+        return []
+    if max_ops is None:
+        max_ops = max(4, len(new_rows) // 3)
+
+    new_set = set(new_rows)
+    # Duplicate identities would make index() below ambiguous and the plan
+    # wrong; the caller's rows are unique, so bail rather than corrupt the list.
+    if len(new_set) != len(new_rows) or len(set(old_rows)) != len(old_rows):
+        return None
+
+    work = list(old_rows)
+    ops: list = []
+
+    # 1. Drop rows that are gone. Walking forward and popping in place keeps
+    #    every recorded index valid at the moment it is applied.
+    i = 0
+    while i < len(work):
+        if work[i] not in new_set:
+            ops.append(("delete", i))
+            work.pop(i)
+        else:
+            i += 1
+
+    # 2. Align what's left against the target order. Everything before
+    #    target_idx already matches, and identities are unique, so a row still
+    #    present in `work` can only be at or after target_idx.
+    for target_idx, row in enumerate(new_rows):
+        if target_idx < len(work) and work[target_idx] == row:
+            continue
+        try:
+            src = work.index(row, target_idx)
+        except ValueError:
+            src = None
+        if src is not None:
+            ops.append(("delete", src))
+            work.pop(src)
+        ops.append(("insert", target_idx))
+        work.insert(target_idx, row)
+        if len(ops) > max_ops:
+            return None
+
+    if len(ops) > max_ops:
+        return None
+    return ops

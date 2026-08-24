@@ -92,6 +92,9 @@ class _FakeMainWindow:
         self.marked_unread = []
         self.deleted_messages = []
         self.deleted_for_everyone = []
+        self.saves = 0
+        self.pin_calls = []
+        self.pin_results = None
 
     def output(self, text, interrupt=False):
         self.announced.append(text)
@@ -117,6 +120,17 @@ class _FakeMainWindow:
     def delete_message_for_everyone(self, jid, key):
         self.deleted_for_everyone.append((jid, key))
         return True
+
+    def _schedule_save(self, *a, **kw):
+        self.saves += 1
+
+    def pin_message(self, jid, key, pin=True):
+        """Server-side pin. pin_results, when set, is consumed one entry per
+        call so a test can make specific messages fail."""
+        self.pin_calls.append((jid, key.get("id", ""), pin))
+        if self.pin_results is None:
+            return True
+        return next(self.pin_results)
 
     def add_chats_to_ui(self):
         pass
@@ -159,6 +173,8 @@ class _Panel:
     _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
     _on_mass_star_messages = ConversationsPanel._on_mass_star_messages
     _on_mass_pin_messages = ConversationsPanel._on_mass_pin_messages
+    _on_mass_pin_failed = ConversationsPanel._on_mass_pin_failed
+    _mass_message_targets = ConversationsPanel._mass_message_targets
     _on_accel_copy_message = ConversationsPanel._on_accel_copy_message
     _bulk_shortcuts_enabled = ConversationsPanel._bulk_shortcuts_enabled
     _group_admin_delete_override = ConversationsPanel._group_admin_delete_override
@@ -198,6 +214,17 @@ class _Panel:
         self.starred = []
         self.pinned = []
         self.copied_files = []
+        # The mass star/pin handlers apply the flag themselves and repaint
+        # once, instead of delegating to the single-message handlers — these
+        # record that they do exactly one repaint / one persist per batch.
+        self.populate_calls = 0
+        self.persisted = []
+
+    def populate_messages(self, preserve_focus=False):
+        self.populate_calls += 1
+
+    def _persist_message_local_flags(self, jid, msgs):
+        self.persisted.append((jid, [m.get("key", {}).get("id", "") for m in msgs]))
 
     def _on_menu_forward(self, msg, msgs_list=None):
         self.forwarded.append((msg, msgs_list))
@@ -989,6 +1016,46 @@ class TestMassMessageActions:
         assert panel.pinned == []
 
 
+class _CapturedThread:
+    """Stands in for threading.Thread so the mass-pin worker can be run
+    synchronously, and so the test can count how many were started."""
+
+    created = []
+
+    def __init__(self, target=None, daemon=None, **kw):
+        self.target = target
+        _CapturedThread.created.append(self)
+
+    def start(self):
+        pass
+
+
+@pytest.fixture
+def run_threads(monkeypatch):
+    """Capture threads started by ui.conversations and return a callable that
+    runs them, plus route wx.CallAfter straight through."""
+    _CapturedThread.created = []
+    monkeypatch.setattr("ui.conversations.threading.Thread", _CapturedThread)
+    monkeypatch.setattr("ui.conversations.wx.CallAfter",
+                        lambda fn, *a, **kw: fn(*a, **kw))
+
+    def _run():
+        for t in list(_CapturedThread.created):
+            if t.target:
+                t.target()
+
+    return _run
+
+
+@pytest.fixture
+def boxes(monkeypatch):
+    """Records every wx.MessageBox raised by ui.conversations."""
+    calls = []
+    monkeypatch.setattr("ui.conversations.wx.MessageBox",
+                        lambda *a, **kw: calls.append(a))
+    return calls
+
+
 @pytest.fixture
 def fake_clipboard(monkeypatch):
     """Fakes pyperclip.copy as used by ui.conversations — records what was
@@ -1113,18 +1180,127 @@ class TestMassStarAndPinMessages:
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_star_messages(None)
-        assert panel.starred == ["m1"]  # m2 skipped, already starred
+        assert msgs[0]["starred"] is True
+        assert panel.persisted == [("grupo@g.us", ["m1"])]  # m2 skipped, already starred
         assert panel.selected_messages == set()
         assert panel.main_window.announced == ["success_star_bulk"]
 
-    def test_pins_every_selected_message_not_already_pinned(self):
+    def test_pins_every_selected_message_not_already_pinned(self, run_threads):
         msgs = [_msg("m1"), _msg("m2")]
         msgs[1]["pinInChat"] = True
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_pin_messages(None)
-        assert panel.pinned == ["m1"]  # m2 skipped, already pinned
+        run_threads()
+        assert msgs[0]["pinInChat"] is True
+        assert panel.persisted[0] == ("grupo@g.us", ["m1"])  # m2 skipped
+        assert [c[1] for c in panel.main_window.pin_calls] == ["m1"]
         assert panel.main_window.announced == ["success_pin_bulk"]
+
+
+class TestMassStarAndPinAreBatched:
+    """Both handlers used to call the single-message _on_menu_star /
+    _on_menu_pin_message once per selected message. Each of those runs a full
+    populate_messages() of its own — and the pin one additionally starts a
+    thread per message and pops a blocking wx.MessageBox per server rejection.
+    A selection of N messages therefore repainted the whole list N times on the
+    UI thread, fired N concurrent requests, and could stack N modal dialogs
+    (the same failure mode c518cce fixed for posting several files as status).
+    """
+
+    def test_starring_a_batch_repaints_once(self):
+        msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2", "m3"}
+        panel._on_mass_star_messages(None)
+        assert all(m["starred"] for m in msgs)
+        assert panel.populate_calls == 1
+        assert panel.persisted == [("grupo@g.us", ["m1", "m2", "m3"])]
+        assert panel.main_window.saves == 1
+
+    def test_pinning_a_batch_repaints_once_and_uses_one_thread(self, run_threads):
+        msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2", "m3"}
+        panel._on_mass_pin_messages(None)
+        assert panel.populate_calls == 1
+        assert len(_CapturedThread.created) == 1, "one worker for the batch, not one per message"
+        run_threads()
+        assert [c[1] for c in panel.main_window.pin_calls] == ["m1", "m2", "m3"]
+        assert panel.populate_calls == 1, "no repaint when nothing failed"
+
+    def test_server_rejections_produce_one_dialog_with_a_count(self, run_threads, boxes):
+        msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
+        panel = _Panel(messages=msgs)
+        panel.main_window.pin_results = iter([True, False, False])
+        panel.selected_messages = {"m1", "m2", "m3"}
+        panel._on_mass_pin_messages(None)
+        run_threads()
+        assert len(boxes) == 1, "one dialog per batch, not one per rejected message"
+        assert "(2/3)" in boxes[0][0]
+
+    def test_rejected_pins_are_rolled_back_together(self, run_threads, boxes):
+        msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
+        panel = _Panel(messages=msgs)
+        panel.main_window.pin_results = iter([True, False, False])
+        panel.selected_messages = {"m1", "m2", "m3"}
+        panel._on_mass_pin_messages(None)
+        run_threads()
+        assert msgs[0]["pinInChat"] is True      # accepted, stays pinned
+        assert msgs[1]["pinInChat"] is False     # rejected, rolled back
+        assert msgs[2]["pinInChat"] is False
+        assert panel.persisted[-1] == ("grupo@g.us", ["m2", "m3"])
+        assert panel.populate_calls == 2, "one repaint to apply, one to roll back"
+
+    def test_a_raising_pin_call_is_treated_as_a_rejection(self, run_threads, boxes):
+        """One message blowing up must not abandon the rest of the batch."""
+        msgs = [_msg("m1"), _msg("m2")]
+        panel = _Panel(messages=msgs)
+
+        def _explode(jid, key, pin=True):
+            panel.main_window.pin_calls.append((jid, key.get("id", ""), pin))
+            if key.get("id") == "m1":
+                raise OSError("connection reset")
+            return True
+
+        panel.main_window.pin_message = _explode
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_pin_messages(None)
+        run_threads()
+        assert [c[1] for c in panel.main_window.pin_calls] == ["m1", "m2"]
+        assert msgs[0]["pinInChat"] is False   # rolled back
+        assert msgs[1]["pinInChat"] is True    # unaffected
+        assert len(boxes) == 1
+
+
+class TestMassStarAndPinAnnounceHonestly:
+    """Success was announced unconditionally, so a selection where every
+    message was already starred/pinned (or was a system event, both filtered
+    out on purpose) told screen-reader users the action had been applied when
+    nothing happened at all. The announcement is the only feedback these
+    actions give."""
+
+    def test_nothing_to_star_says_so_instead_of_claiming_success(self):
+        msgs = [_msg("m1"), _msg("m2")]
+        for m in msgs:
+            m["starred"] = True
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_star_messages(None)
+        assert panel.main_window.announced == ["mass_nothing_to_do"]
+        assert panel.populate_calls == 0
+        assert panel.selected_messages == set()
+
+    def test_nothing_to_pin_says_so_and_calls_no_server(self, run_threads):
+        msgs = [_msg("m1")]
+        msgs[0]["pinInChat"] = True
+        panel = _Panel(messages=msgs)
+        panel.selected_messages = {"m1"}
+        panel._on_mass_pin_messages(None)
+        run_threads()
+        assert panel.main_window.announced == ["mass_nothing_to_do"]
+        assert panel.main_window.pin_calls == []
+        assert _CapturedThread.created == []
 
     @pytest.mark.parametrize("handler,recorder", [
         ("_on_mass_star_messages", "starred"), ("_on_mass_pin_messages", "pinned"),

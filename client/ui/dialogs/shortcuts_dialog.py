@@ -153,6 +153,21 @@ class ShortcutsDialog(wx.Dialog):
             i18n.t("shortcut_shift_home_label"),
             i18n.t("shortcut_shift_end_label"),
             i18n.t("shortcut_ctrl_shift_space_label"),
+            # Per-action shortcuts for the "Ações em massa" submenus (the
+            # messages list first, then the chat list) — these work
+            # regardless of the "Substituir atalhos..." setting the note
+            # below describes, and do nothing while nothing is selected.
+            i18n.t("shortcut_bulk_copy_label"),
+            i18n.t("shortcut_bulk_forward_label"),
+            i18n.t("shortcut_bulk_star_label"),
+            i18n.t("shortcut_bulk_pin_label"),
+            i18n.t("shortcut_bulk_save_label"),
+            i18n.t("shortcut_bulk_delete_label"),
+            i18n.t("shortcut_bulk_clear_chats_label"),
+            i18n.t("shortcut_bulk_delete_chats_label"),
+            i18n.t("shortcut_bulk_archive_chats_label"),
+            i18n.t("shortcut_bulk_read_chats_label"),
+            i18n.t("shortcut_bulk_unread_chats_label"),
             i18n.t("shortcut_bulk_override_note"),
             "",
             section("shortcuts_status_section"),

@@ -61,6 +61,9 @@ class _Stub:
     _on_menu_pin_message = ConversationsPanel._on_menu_pin_message
     _on_pin_message_failed = ConversationsPanel._on_pin_message_failed
     _persist_message_local_flag = ConversationsPanel._persist_message_local_flag
+    # _persist_message_local_flag delegates to the bulk form so both share
+    # one code path (see its docstring) — the stub needs it bound too.
+    _persist_message_local_flags = ConversationsPanel._persist_message_local_flags
     # _is_system_event is a staticmethod on the real class and attribute
     # access unwraps it, so it has to be re-wrapped here.
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)

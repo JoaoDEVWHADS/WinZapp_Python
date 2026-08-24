@@ -48,7 +48,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -4916,8 +4916,17 @@ class MainWindow(wx.Frame):
         # ── Persist in background — debounced so rapid bursts produce one write ─
         self._schedule_save(dirty_jid=remote_jid)
 
-        # ── Update conversation list UI (debounced to avoid rapid rebuilds) ───
-        self._schedule_set_chats()
+        # ── Update conversation list UI ───────────────────────────────────────
+        # A new message moves this chat to the top of its group and changes its
+        # preview — and nothing else in the list changes. move_chat_row_to_top()
+        # does exactly that, comparing this chat's sort key against the current
+        # top of its group so the claim is checked rather than assumed. The
+        # debounced full recompute stays as the fallback: it re-resolves the
+        # display name and rebuilds the row text of EVERY chat, which on an
+        # account with several hundred of them is what made a new message take
+        # seconds to show up in the list.
+        if not self.move_chat_row_to_top(remote_jid):
+            self._schedule_set_chats()
 
         # ── Add message to the open conversation panel (if visible) ──────────
         if hasattr(self, "conversations_panel"):
@@ -12223,50 +12232,11 @@ class MainWindow(wx.Frame):
         # lastMessage are already never set from a non-countable message
         # (see on_new_message()/on_historical_message()), but this also
         # scans every raw record directly, so it needs the same filter.
-        def _chat_last_ts(c):
-            # Fallback to chat's own last activity timestamp (t)
-            chat_ts = int(c.get("t", 0) or 0)
-            if chat_ts > 1_000_000_000_000:
-                chat_ts //= 1000
-            ts = chat_ts
-
-            lm = c.get("lastMessage")
-            if isinstance(lm, dict) and is_countable_message(lm):
-                lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
-                if lm_ts > 1_000_000_000_000:
-                    lm_ts //= 1000
-                if lm_ts > ts:
-                    ts = lm_ts
-
-            records_wrapper = c.get("messages") or {}
-            if isinstance(records_wrapper, dict):
-                inner_wrapper = records_wrapper.get("messages") or {}
-                if isinstance(inner_wrapper, dict):
-                    records_copy = list(inner_wrapper.get("records") or [])
-                    if records_copy:
-                        for m in records_copy:
-                            # Only records the preview would show may move a chat
-                            # — see _counts_as_last_message(), which is stricter
-                            # than is_countable_message() and rejects non-dicts
-                            # itself. Counting silent bookkeeping here (a
-                            # groupNotification for someone joining) floated
-                            # week-old groups above live ones while they still
-                            # displayed their old preview.
-                            if not self._counts_as_last_message(m):
-                                continue
-                            t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
-                            if t > 1_000_000_000_000:
-                                t //= 1000
-                            if t > ts:
-                                ts = t
-
-            return ts if ts else 1
+        _chat_last_ts = self._chat_last_ts
 
         def _sort_key(pair):
             c, n = pair
-            j   = c.get("remoteJid", "")
-            pin = 0 if j in pinned else 1
-            return (pin, -_chat_last_ts(c), n.lower())
+            return self._chat_sort_key(c, n, pinned)
 
         pairs = sorted(zip(main_chats, main_names), key=_sort_key)
         main_chats = [c for c, _ in pairs]
@@ -15945,6 +15915,42 @@ class MainWindow(wx.Frame):
 
         if hasattr(self, "conversations_panel") and not skip_panel_refresh:
             self.conversations_panel.refresh_message_status(msg_id, status)
+
+        # The chat list's preview line carries this message's delivery status
+        # too — _last_msg_preview() appends _map_status(last) to it — but the
+        # only repaint fired above is the open conversation's own row. Nothing
+        # here ever told the conversations list to repaint, so a chat kept
+        # showing "Pendente" until some unrelated event (another message
+        # landing anywhere, a sync) happened to trigger set_chats(). Reported
+        # live as a preview still reading "Pendente" seconds after the message
+        # had visibly been sent.
+        #
+        # Update this chat's row in the conversations list, cheaply.
+        #
+        # move_chat_row_to_top() rather than refresh_chat_row_text(): an ack
+        # usually only changes the row's TEXT (Pendente -> Enviada), but not
+        # always its position. A message you just sent enters the list as a
+        # local pending record and the ack is what settles the chat's real
+        # ordering timestamp, so an ack genuinely can be the thing that should
+        # float the chat up. Repainting the row in place — which is all
+        # refresh_chat_row_text() does — left a chat you had just posted to
+        # sitting where it was, because the ack had taken over from the
+        # set_chats() call that used to do the reordering. move_chat_row_to_top()
+        # covers both: it repaints in place when the chat is already at the top
+        # of its group, moves the row when it now outranks it, and returns
+        # False (falling back to the full recompute below) whenever the
+        # position isn't something it can settle on its own.
+        #
+        # The point of all three paths is the same: never re-resolve every
+        # chat's name and rebuild every chat's row text just to change one row,
+        # which on an account with several hundred chats is seconds of work per
+        # ack. Skipped entirely when the status isn't part of the preview, so
+        # turning that setting off also turns off the work.
+        if found_msg and self.settings.get("user_interface", {}).get(
+            "show_delivery_status_in_chat_list", True
+        ):
+            if not self.move_chat_row_to_top(found_chat_jid):
+                self._schedule_set_chats()
 
 
     def _resolve_jid_name(self, jid_norm: str, chat_jid_norm: str = "") -> str:
@@ -20419,6 +20425,330 @@ class MainWindow(wx.Frame):
                 arch_lst.Select(target_idx)
                 arch_lst.EnsureVisible(target_idx)
 
+    def _chat_last_ts(self, c: dict) -> int:
+        """The timestamp the conversations list sorts a chat by.
+
+        Only counts records the preview would show — a system event (group
+        join/leave, settings change, revoke, ...) stored in this chat's records
+        must never push it back to the top just because its timestamp is the
+        newest one on file. chat["t"]/lastMessage are already never set from a
+        non-countable message (see on_new_message()/on_historical_message()),
+        but this also scans raw records directly, so it needs the same filter.
+
+        Extracted from _compute_chat_lists() so a single chat's position can be
+        worked out without sorting the whole list — see _chat_sort_key() and
+        move_chat_row_to_top().
+        """
+        chat_ts = int(c.get("t", 0) or 0)
+        if chat_ts > 1_000_000_000_000:
+            chat_ts //= 1000
+        ts = chat_ts
+
+        lm = c.get("lastMessage")
+        if isinstance(lm, dict) and is_countable_message(lm):
+            lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
+            if lm_ts > 1_000_000_000_000:
+                lm_ts //= 1000
+            if lm_ts > ts:
+                ts = lm_ts
+
+        records_wrapper = c.get("messages") or {}
+        if isinstance(records_wrapper, dict):
+            inner_wrapper = records_wrapper.get("messages") or {}
+            if isinstance(inner_wrapper, dict):
+                for m in list(inner_wrapper.get("records") or []):
+                    if not self._counts_as_last_message(m):
+                        continue
+                    t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                    if t > 1_000_000_000_000:
+                        t //= 1000
+                    if t > ts:
+                        ts = t
+
+        return ts if ts else 1
+
+    def _chat_sort_key(self, chat: dict, name: str, pinned=None):
+        """The conversations list's ordering: pinned chats first, then
+        most-recent message descending, then alphabetically.
+
+        Single source of truth — _compute_chat_lists() sorts by this, and
+        move_chat_row_to_top() compares against it to place one row without
+        sorting anything.
+        """
+        if pinned is None:
+            pinned = self._pinned_chats
+        j = chat.get("remoteJid", "")
+        pin = 0 if j in pinned else 1
+        return (pin, -self._chat_last_ts(chat), (name or "").lower())
+
+    def move_chat_row_to_top(self, chat_jid: str) -> bool:
+        """Move one chat to the top of its group after a new message, updating
+        only that row. Returns whether it worked; callers fall back to
+        _schedule_set_chats() when it returns False.
+
+        A new message (sent or received) is the other half of the problem
+        refresh_chat_row_text() solved for acks: it changes the row's text AND
+        its position, so the row can't simply be repainted in place. But it
+        does not require re-sorting the list either — a chat that just received
+        the newest message belongs at the top of its own group (pinned or
+        unpinned), and that claim is checked here rather than assumed: the
+        chat's sort key is compared against the key of whatever currently sits
+        at the top of that group, and anything that doesn't come out on top
+        falls back to the full recompute.
+
+        Only two sort keys are computed (this chat's and the incumbent's),
+        instead of _compute_chat_lists() re-resolving names and timestamps for
+        every chat in the account.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        if panel is None:
+            return False
+        displayed = getattr(panel, "_displayed_jids", None)
+        chats_list = getattr(panel, "chats_list", None)
+        names = getattr(panel, "chat_names", None)
+        if not displayed or chats_list is None or names is None:
+            return False
+        lst = panel.conversations_list
+        if not (len(displayed) == len(chats_list) == len(names) == lst.GetItemCount()):
+            return False
+
+        # A search or filter means the displayed list isn't simply the sorted
+        # chat list, so "top of its group" isn't a position this can reason
+        # about. Let the full path handle it.
+        try:
+            if panel.search_field.GetValue().strip():
+                logging.info("[move_chat_row_to_top] %s: search active — full path", chat_jid)
+                return False
+        except Exception:
+            return False
+        if getattr(panel, "_conv_filter", "all") != "all":
+            logging.info("[move_chat_row_to_top] %s: filter %r active — full path",
+                         chat_jid, getattr(panel, "_conv_filter", "all"))
+            return False
+
+        wanted = {chat_jid}
+        stored = self.chats.get(chat_jid)
+        if isinstance(stored, dict) and stored.get("remoteJid"):
+            wanted.add(stored["remoteJid"])
+        idx = next((i for i, j in enumerate(displayed) if j in wanted), None)
+        if idx is None:
+            logging.info("[move_chat_row_to_top] %s: not rendered — full path", chat_jid)
+            return False        # not rendered yet — a brand-new chat needs the full path
+
+        chat = chats_list[idx]
+        name = names[idx]
+        pinned = self._pinned_chats
+        key = self._chat_sort_key(chat, name, pinned)
+
+        # Where this chat's group starts: pinned chats occupy the head of the
+        # list, so an unpinned chat can only rise to just below them.
+        is_pinned = (chat.get("remoteJid", "") in pinned)
+        if is_pinned:
+            group_start = 0
+        else:
+            group_start = 0
+            while group_start < len(chats_list) and (
+                chats_list[group_start].get("remoteJid", "") in pinned
+            ):
+                group_start += 1
+
+        if idx == group_start:
+            # Already at the top of its group — only the text can have changed.
+            logging.info("[move_chat_row_to_top] %s: already at row %s — text only",
+                         chat_jid, idx)
+            return self.refresh_chat_row_text(chat_jid)
+
+        incumbent_key = self._chat_sort_key(chats_list[group_start], names[group_start], pinned)
+        if key >= incumbent_key:
+            # Doesn't actually belong at the top (an older message arriving
+            # late, a clock skew, an alphabetical tie) — don't guess.
+            logging.info(
+                "[move_chat_row_to_top] %s: stays at row %s — key=%s not above "
+                "row %s key=%s; full path", chat_jid, idx, key, group_start, incumbent_key,
+            )
+            return False
+
+        new_texts = list(lst.GetItemText(i, 0) for i in range(lst.GetItemCount()))
+        new_texts.insert(group_start, new_texts.pop(idx))
+        new_texts[group_start] = self._build_chat_item_text(chat, name)
+
+        new_jids = list(displayed)
+        new_jids.insert(group_start, new_jids.pop(idx))
+        focused_jid = None
+        focused_idx = lst.GetFocusedItem()
+        if 0 <= focused_idx < len(displayed):
+            focused_jid = displayed[focused_idx]
+
+        if not self._apply_chat_rows_incrementally(
+            lst, displayed, new_jids, new_texts, focused_jid
+        ):
+            logging.info("[move_chat_row_to_top] %s: row surgery declined — full path", chat_jid)
+            return False
+        logging.info("[move_chat_row_to_top] %s: moved row %s -> %s of %s",
+                     chat_jid, idx, group_start, len(new_jids))
+
+        chats_list.insert(group_start, chats_list.pop(idx))
+        names.insert(group_start, names.pop(idx))
+        panel._displayed_jids = new_jids
+        # _all_chats_list/_all_chat_names back the unfiltered view add_chats_to_ui()
+        # rebuilds from; keep them in step so the next full pass doesn't undo this.
+        for attr in ("_all_chats_list", "_all_chat_names"):
+            seq = getattr(panel, attr, None)
+            if isinstance(seq, list) and len(seq) == len(chats_list):
+                seq[:] = chats_list if attr == "_all_chats_list" else names
+        return True
+
+    def _build_chat_item_text(self, chat: dict, name: str) -> str:
+        """Render one conversations-list row: name, unread badge, preview,
+        presence, and the pinned/muted/blocked/selected suffixes.
+
+        Extracted from add_chats_to_ui() so a single row can be rebuilt on its
+        own — see refresh_chat_row_text().
+        """
+        chat_jid = chat.get("remoteJid", "")
+        unread = effective_unread_count(chat)
+        unread_str = (
+            f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+            if unread > 0 else ""
+        )
+        preview = self._last_msg_preview(chat)
+        text = name + unread_str
+        if preview:
+            text += f" {preview}"
+        chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
+        if chat_jid_norm:
+            presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
+            if presence_label:
+                text += f" {presence_label}"
+        if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
+            text += f" ({self.i18n.t('pinned_suffix')})"
+        if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
+            text += f" ({self.i18n.t('muted')})"
+        if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
+            text += f" ({self.i18n.t('blocked')})"
+        is_selected = bool(chat_jid) and chat_jid in getattr(self.conversations_panel, "selected_chats", ())
+        position = self.settings.get("user_interface", {}).get(
+            "selected_announcement_position", "end"
+        )
+        return append_selected_marker(text, self.i18n.t("selected_suffix"), position, is_selected)
+
+    def refresh_chat_row_text(self, chat_jid: str) -> bool:
+        """Repaint ONE conversation's row in place. Returns whether it worked.
+
+        For a change that alters a chat's row text but not its position in the
+        list — a delivery ack walking "Pendente" to "Enviada" is the archetype,
+        since it leaves the message's timestamp alone — going through
+        set_chats() is enormously disproportionate: _compute_chat_lists()
+        re-resolves the display name of EVERY chat (contact lookups, group name
+        resolution, JID formatting) and add_chats_to_ui() then rebuilds the row
+        text of every chat (each one walking that chat's records for a preview,
+        plus presence/pinned/muted/blocked lookups) — all to change one row.
+        On an account with several hundred chats that is seconds of work, which
+        is exactly the delay reported between a message being sent and its
+        preview leaving "Pendente".
+
+        This touches only the row that changed. Callers must fall back to
+        _schedule_set_chats() when it returns False — the row may be filtered
+        out of the current view, the list may be mid-rebuild, or the chat may
+        not be rendered at all.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        if panel is None:
+            return False
+        displayed = getattr(panel, "_displayed_jids", None)
+        chats_list = getattr(panel, "chats_list", None)
+        names = getattr(panel, "chat_names", None)
+        if not displayed or chats_list is None or names is None:
+            return False
+        # The backing arrays must line up with what's on screen; if they don't,
+        # a targeted SetItem would write the right text into the wrong row.
+        lst = panel.conversations_list
+        if not (len(displayed) == len(chats_list) == len(names) == lst.GetItemCount()):
+            return False
+
+        # Rows are identified by chat["remoteJid"], which is not always the key
+        # the chat is stored under in self.chats (see _compute_chat_lists).
+        wanted = {chat_jid}
+        stored = self.chats.get(chat_jid)
+        if isinstance(stored, dict) and stored.get("remoteJid"):
+            wanted.add(stored["remoteJid"])
+        idx = next((i for i, j in enumerate(displayed) if j in wanted), None)
+        if idx is None:
+            return False
+
+        try:
+            new_text = self._build_chat_item_text(chats_list[idx], names[idx])
+            if lst.GetItemText(idx, 0) != new_text:
+                lst.SetItem(idx, 0, new_text)
+        except Exception:
+            logging.exception("[refresh_chat_row_text] failed for %s; falling back", chat_jid)
+            return False
+        return True
+
+    def _apply_chat_rows_incrementally(self, lst, old_jids: list, new_jids: list,
+                                       new_item_texts: list, focused_jid) -> bool:
+        """Move/insert/delete individual rows of *lst* instead of rebuilding it.
+
+        Returns True when the control now matches *new_jids* exactly; False
+        when the change was too large to be worth it (or a native call
+        refused), in which case the caller falls back to the full rebuild.
+
+        Keyboard focus follows the chat it was on, not the row index — the
+        whole point of the incremental path is that a chat jumping to the top
+        must not drag the user's cursor with it, and must not reset focus to
+        row 0 the way DeleteAllItems() does.
+        """
+        ops = plan_row_updates(old_jids, new_jids)
+        if not ops:
+            # None  -> too churny, rebuild.  []  -> nothing to do, but the
+            # caller only reaches here when the JID lists actually differ, so
+            # an empty plan means the two disagreed about identity; rebuild.
+            return False
+
+        had_focus = (wx.Window.FindFocus() is lst)
+        lst.Freeze()
+        try:
+            for kind, idx in ops:
+                if kind == "delete":
+                    lst.DeleteItem(idx)
+                else:
+                    lst.InsertItem(idx, new_item_texts[idx])
+            # Rows that merely shifted keep their old text (a preview, unread
+            # badge or presence label may have changed on any of them), so
+            # resync every row the same way the SetItem path does.
+            for idx, new_text in enumerate(new_item_texts):
+                if lst.GetItemText(idx, 0) != new_text:
+                    lst.SetItem(idx, 0, new_text)
+        except Exception:
+            # Same defence as the SetItem path: a native call rejected an
+            # index we believed valid. The control is now in an unknown state,
+            # so let the caller rebuild it from scratch rather than leaving it
+            # half-updated.
+            logging.exception("[add_chats_to_ui] incremental row update failed; rebuilding")
+            return False
+        finally:
+            lst.Thaw()
+
+        if lst.GetItemCount() != len(new_jids):
+            logging.warning(
+                "[add_chats_to_ui] incremental update left %s rows for %s chats; rebuilding",
+                lst.GetItemCount(), len(new_jids),
+            )
+            return False
+
+        if focused_jid and focused_jid in new_jids:
+            target_idx = new_jids.index(focused_jid)
+            try:
+                if lst.GetFocusedItem() != target_idx:
+                    lst.Focus(target_idx)
+                if not lst.IsSelected(target_idx):
+                    lst.Select(target_idx)
+                if had_focus:
+                    lst.EnsureVisible(target_idx)
+            except Exception:
+                logging.exception("[add_chats_to_ui] restoring focus after incremental update failed")
+        return True
+
     def add_chats_to_ui(self):
         """Rebuild the conversations list from the current chats data.
 
@@ -20470,33 +20800,7 @@ class MainWindow(wx.Frame):
 
         # Pre-compute the new display list (filtering + item text) so we can
         # choose between a lightweight SetItem path and a full rebuild.
-        def _build_item_text(chat, name):
-            chat_jid = chat.get("remoteJid", "")
-            unread = effective_unread_count(chat)
-            unread_str = (
-                f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
-                if unread > 0 else ""
-            )
-            preview = self._last_msg_preview(chat)
-            text = name + unread_str
-            if preview:
-                text += f" {preview}"
-            chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
-            if chat_jid_norm:
-                presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
-                if presence_label:
-                    text += f" {presence_label}"
-            if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
-                text += f" ({self.i18n.t('pinned_suffix')})"
-            if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
-                text += f" ({self.i18n.t('muted')})"
-            if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
-                text += f" ({self.i18n.t('blocked')})"
-            is_selected = bool(chat_jid) and chat_jid in getattr(self.conversations_panel, "selected_chats", ())
-            position = self.settings.get("user_interface", {}).get(
-                "selected_announcement_position", "end"
-            )
-            return append_selected_marker(text, self.i18n.t("selected_suffix"), position, is_selected)
+        _build_item_text = self._build_chat_item_text
 
         displayed_chats: list = []
         displayed_names: list = []
@@ -20571,7 +20875,38 @@ class MainWindow(wx.Frame):
                 self._refresh_archived_chats_in_ui(arch_focused_jid)
             return
 
+        # ── Incremental path: the same list with a few rows moved/added/gone ──
+        # A new message (or a reaction, or a read receipt) reorders the list —
+        # almost always by moving one chat up — which misses the SetItem path
+        # above and used to fall straight through to the full rebuild below.
+        # That rebuild is a DeleteAllItems() plus one Append() per row, so the
+        # cost of showing a new preview scaled with how many chats the account
+        # has, and screen readers were handed an entirely new list each time.
+        # plan_row_updates() turns "one chat moved" into two native calls
+        # regardless of list length; anything it considers too churny returns
+        # None and rebuilds as before.
+        if (
+            _displayed_jids is not None
+            and lst.GetItemCount() == len(_displayed_jids)
+            and self._apply_chat_rows_incrementally(
+                lst, _displayed_jids, new_jids, new_item_texts, focused_jid
+            )
+        ):
+            self.conversations_panel.chats_list = displayed_chats
+            self.conversations_panel.chat_names = displayed_names
+            self.conversations_panel._displayed_jids = new_jids
+            logging.info("[add_chats_to_ui] incremental path applied (%s rows)", len(new_jids))
+            if hasattr(self, "archived_conversations_panel"):
+                self._refresh_archived_chats_in_ui(arch_focused_jid)
+            return
+
         # ── Full rebuild path: JID order or count changed ────────────────────
+        logging.info(
+            "[add_chats_to_ui] full rebuild (%s rows; displayed_jids=%s, count=%s)",
+            len(new_jids),
+            "none" if _displayed_jids is None else len(_displayed_jids),
+            lst.GetItemCount(),
+        )
         focus_allowed = self._allow_ui_focus_changes()
         _lst_had_focus = (wx.Window.FindFocus() is lst)
         if _lst_had_focus:

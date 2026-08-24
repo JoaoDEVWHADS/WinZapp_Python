@@ -815,8 +815,31 @@ class ConversationsPanel(wx.Panel):
         self.ID_ARCHIVE_LIST        = wx.NewIdRef()
         self.ID_PIN_LIST            = wx.NewIdRef()
         self.ID_CLOSE_CONV_LIST     = wx.NewIdRef()
+        # ── Mass actions (only act while conversations are selected) ─────────
+        # One shortcut per entry of the chat list's "Ações em massa" submenu,
+        # for the same reason the messages list has its own set (see
+        # create_accel_conversation's ID_BULK_* block): with Settings >
+        # Interface do usuário > "Substituir atalhos por ações em massa..."
+        # off, that submenu used to be the only way to reach them.
+        # Letters mirror the single-chat shortcut where Ctrl+Alt+Shift+<letter>
+        # is free — L(impar/clear) — and fall back to a mnemonic where it is
+        # already an app-wide shortcut: archive is Ctrl+Shift+Q but
+        # Ctrl+Alt+Shift+Q exits WinZapp, and read/unread share Ctrl+Shift+M
+        # but Ctrl+Alt+Shift+M marks every chat as read — so archive uses A
+        # and the two read states get one shortcut each (R/U) instead of a
+        # toggle, matching the submenu, which offers them separately.
+        # Delete keeps the Delete key it already has, plus Ctrl+Shift — the
+        # same combo the messages list uses for its own bulk delete, which
+        # never collides: conversation_panel's table wins while a conversation
+        # is open, this one applies otherwise (same split as plain Delete).
+        self.ID_BULK_CLEAR_CHATS    = wx.NewIdRef()  # clear selected    (Ctrl+Alt+Shift+L)
+        self.ID_BULK_DELETE_CHATS   = wx.NewIdRef()  # delete selected   (Ctrl+Shift+Delete)
+        self.ID_BULK_ARCHIVE_CHATS  = wx.NewIdRef()  # archive selected  (Ctrl+Alt+Shift+A)
+        self.ID_BULK_READ_CHATS     = wx.NewIdRef()  # mark read         (Ctrl+Alt+Shift+R)
+        self.ID_BULK_UNREAD_CHATS   = wx.NewIdRef()  # mark unread       (Ctrl+Alt+Shift+U)
         CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
         AS = wx.ACCEL_ALT | wx.ACCEL_SHIFT
+        CAS = wx.ACCEL_CTRL | wx.ACCEL_ALT | wx.ACCEL_SHIFT
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,   ord("F"),        self.ID_CTRL_F),
             (wx.ACCEL_CTRL,   ord("N"),        self.ID_CTRL_N),
@@ -834,6 +857,11 @@ class ConversationsPanel(wx.Panel):
             (CS,              ord("Q"),         self.ID_ARCHIVE_LIST),
             (wx.ACCEL_CTRL,   ord("P"),         self.ID_PIN_LIST),
             (wx.ACCEL_CTRL,   ord("W"),         self.ID_CLOSE_CONV_LIST),
+            (CAS,             ord("L"),         self.ID_BULK_CLEAR_CHATS),
+            (CS,              wx.WXK_DELETE,    self.ID_BULK_DELETE_CHATS),
+            (CAS,             ord("A"),         self.ID_BULK_ARCHIVE_CHATS),
+            (CAS,             ord("R"),         self.ID_BULK_READ_CHATS),
+            (CAS,             ord("U"),         self.ID_BULK_UNREAD_CHATS),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_ctrl_f,                    id=self.ID_CTRL_F)
@@ -848,6 +876,11 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_archive_list,        id=self.ID_ARCHIVE_LIST)
         self.Bind(wx.EVT_MENU, self._on_accel_pin_list,            id=self.ID_PIN_LIST)
         self.Bind(wx.EVT_MENU, self.on_context_menu_close,         id=self.ID_CLOSE_CONV_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_clear_chats,    id=self.ID_BULK_CLEAR_CHATS)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_delete_chats,   id=self.ID_BULK_DELETE_CHATS)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_archive_chats,  id=self.ID_BULK_ARCHIVE_CHATS)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_read_chats,     id=self.ID_BULK_READ_CHATS)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_unread_chats,   id=self.ID_BULK_UNREAD_CHATS)
 
     def create_accel_conversation(self):
         # ── Navigation / recording ──────────────────────────────────────────
@@ -899,6 +932,27 @@ class ConversationsPanel(wx.Panel):
         self.ID_ALT_SHIFT_S     = wx.NewIdRef()  # mute / unmute           (Alt+Shift+S)
         # ── Message star ─────────────────────────────────────────────────────
         self.ID_CTRL_SHIFT_O    = wx.NewIdRef()  # star message            (Ctrl+Shift+O)
+        # ── Mass actions (only act while messages are selected) ──────────────
+        # One shortcut per entry of the context menu's "Ações em massa"
+        # submenu. Deliberately a family of their own instead of relying on
+        # the single-message shortcuts being remapped by Settings > Interface
+        # do usuário > "Substituir atalhos por ações em massa...": that
+        # setting is exactly what a user turns OFF to keep acting on the
+        # focused message while a selection exists, and with it off the
+        # submenu used to be the only way to reach these at all.
+        # Letters follow the single-message shortcut where that letter is
+        # free — C(opy), E (forward, Ctrl+Shift+E), S(ave) — and fall back to
+        # a mnemonic where Ctrl+Alt+Shift+<letter> is already an app-wide
+        # shortcut: star is Ctrl+Shift+O but Ctrl+Alt+Shift+O toggles offline
+        # mode, and pin is Ctrl+Shift+P but Ctrl+Alt+Shift+P is the global
+        # audio play/pause, so those two use F (favoritar) and X (fixar).
+        # Delete keeps the Delete key it already has, plus Ctrl+Shift.
+        self.ID_BULK_COPY       = wx.NewIdRef()  # copy selected           (Ctrl+Alt+Shift+C)
+        self.ID_BULK_FORWARD    = wx.NewIdRef()  # forward selected        (Ctrl+Alt+Shift+E)
+        self.ID_BULK_STAR       = wx.NewIdRef()  # star selected           (Ctrl+Alt+Shift+F)
+        self.ID_BULK_PIN        = wx.NewIdRef()  # pin selected            (Ctrl+Alt+Shift+X)
+        self.ID_BULK_SAVE       = wx.NewIdRef()  # save selected           (Ctrl+Alt+Shift+S)
+        self.ID_BULK_DELETE     = wx.NewIdRef()  # delete selected         (Ctrl+Shift+Delete)
         # ── Audio speed ──────────────────────────────────────────────────────
         self.ID_ALT_COMMA       = wx.NewIdRef()  # decrease audio speed    (Alt+,)
         self.ID_ALT_PERIOD      = wx.NewIdRef()  # increase audio speed    (Alt+.)
@@ -978,6 +1032,12 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_ALT,     ord(","),           self.ID_ALT_COMMA),
             (wx.ACCEL_ALT,     ord("."),           self.ID_ALT_PERIOD),
             (wx.ACCEL_CTRL,    ord("."),           self.ID_CTRL_PERIOD),
+            (CAS,              ord("C"),           self.ID_BULK_COPY),
+            (CAS,              ord("E"),           self.ID_BULK_FORWARD),
+            (CAS,              ord("F"),           self.ID_BULK_STAR),
+            (CAS,              ord("X"),           self.ID_BULK_PIN),
+            (CAS,              ord("S"),           self.ID_BULK_SAVE),
+            (CS,               wx.WXK_DELETE,      self.ID_BULK_DELETE),
         ] + [
             (wx.ACCEL_CTRL, ord(str(d)), self.ID_BOOKMARK[d]) for d in range(10)
         ] + [
@@ -1032,6 +1092,12 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_audio_speed_decrease,      id=self.ID_ALT_COMMA)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_increase,      id=self.ID_ALT_PERIOD)
         self.Bind(wx.EVT_MENU, self._on_open_emoji_picker,          id=self.ID_CTRL_PERIOD)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_copy,            id=self.ID_BULK_COPY)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_forward,         id=self.ID_BULK_FORWARD)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_star,            id=self.ID_BULK_STAR)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_pin,             id=self.ID_BULK_PIN)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_save,            id=self.ID_BULK_SAVE)
+        self.Bind(wx.EVT_MENU, self._on_accel_bulk_delete,          id=self.ID_BULK_DELETE)
         for _d in range(10):
             self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_set_or_jump(d), id=self.ID_BOOKMARK[_d])
             self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_remove(d),      id=self.ID_BOOKMARK_REMOVE[_d])
@@ -2749,19 +2815,29 @@ class ConversationsPanel(wx.Panel):
         if getattr(self, "selected_chats", None):
             mass_menu = wx.Menu()
 
-            clear_item = mass_menu.Append(wx.ID_ANY, i18n.t("clear_selected_chats"))
+            # Each entry carries its own dedicated shortcut (see
+            # create_accelerator_table's ID_BULK_*_CHATS) — those work
+            # whatever "Substituir atalhos por ações em massa..." is set to,
+            # unlike the single-chat shortcuts this submenu's actions used to
+            # be reachable through only when that setting was on.
+            clear_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('clear_selected_chats')}\tCtrl+Alt+Shift+L")
             self.Bind(wx.EVT_MENU, self._on_mass_clear_chats, clear_item)
 
-            delete_item = mass_menu.Append(wx.ID_ANY, i18n.t("delete_selected_chats"))
+            delete_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('delete_selected_chats')}\tCtrl+Shift+Delete")
             self.Bind(wx.EVT_MENU, self._on_mass_delete_chats, delete_item)
 
-            archive_item = mass_menu.Append(wx.ID_ANY, i18n.t("archive_selected_chats"))
+            archive_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('archive_selected_chats')}\tCtrl+Alt+Shift+A")
             self.Bind(wx.EVT_MENU, self._on_mass_archive_chats, archive_item)
 
-            read_item = mass_menu.Append(wx.ID_ANY, i18n.t("mark_selected_read"))
+            read_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('mark_selected_read')}\tCtrl+Alt+Shift+R")
             self.Bind(wx.EVT_MENU, self._on_mass_mark_read_chats, read_item)
 
-            unread_item = mass_menu.Append(wx.ID_ANY, i18n.t("mark_selected_unread"))
+            unread_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('mark_selected_unread')}\tCtrl+Alt+Shift+U")
             self.Bind(wx.EVT_MENU, self._on_mass_mark_unread_chats, unread_item)
 
             menu.AppendSubMenu(mass_menu, i18n.t("mass_actions"))
@@ -3058,22 +3134,33 @@ class ConversationsPanel(wx.Panel):
         if getattr(self, "selected_messages", None):
             mass_menu = wx.Menu()
 
-            copy_selected_item = mass_menu.Append(wx.ID_ANY, i18n.t("copy_selected"))
+            # Each entry carries its own dedicated shortcut (see
+            # create_accel_conversation's ID_BULK_*) — those work whatever
+            # "Substituir atalhos por ações em massa..." is set to, unlike the
+            # single-message shortcuts this submenu's actions used to be
+            # reachable through only when that setting was on.
+            copy_selected_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('copy_selected')}\tCtrl+Alt+Shift+C")
             self.Bind(wx.EVT_MENU, self._on_mass_copy_messages, copy_selected_item)
 
-            fwd_item = mass_menu.Append(wx.ID_ANY, i18n.t("forward_selected"))
+            fwd_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('forward_selected')}\tCtrl+Alt+Shift+E")
             self.Bind(wx.EVT_MENU, self._on_mass_forward_messages, fwd_item)
 
-            star_item = mass_menu.Append(wx.ID_ANY, i18n.t("star_selected"))
+            star_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('star_selected')}\tCtrl+Alt+Shift+F")
             self.Bind(wx.EVT_MENU, self._on_mass_star_messages, star_item)
 
-            pin_item = mass_menu.Append(wx.ID_ANY, i18n.t("pin_selected"))
+            pin_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('pin_selected')}\tCtrl+Alt+Shift+X")
             self.Bind(wx.EVT_MENU, self._on_mass_pin_messages, pin_item)
 
-            save_item = mass_menu.Append(wx.ID_ANY, i18n.t("save_selected"))
+            save_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('save_selected')}\tCtrl+Alt+Shift+S")
             self.Bind(wx.EVT_MENU, self._on_mass_save_messages, save_item)
 
-            delete_item = mass_menu.Append(wx.ID_ANY, i18n.t("delete_selected"))
+            delete_item = mass_menu.Append(
+                wx.ID_ANY, f"{i18n.t('delete_selected')}\tCtrl+Shift+Delete")
             self.Bind(wx.EVT_MENU, self._on_mass_delete_messages, delete_item)
 
             menu.AppendSubMenu(mass_menu, i18n.t("mass_actions"))
@@ -8769,14 +8856,29 @@ class ConversationsPanel(wx.Panel):
         until the write completes (see DatabaseBridge), and this is always
         called from a UI event handler.
         """
+        self._persist_message_local_flags(jid, [msg])
+
+    def _persist_message_local_flags(self, jid: str, msgs: list):
+        """Bulk form of _persist_message_local_flag() — persists several
+        messages' locally-mutated flags on ONE background thread.
+
+        The single-message version delegates here so both share one code
+        path. It exists because the mass actions apply a flag to an entire
+        selection at once: doing that through the single-message helper spun
+        up one thread per message, and every one of them then blocked on the
+        same serialized DatabaseBridge connection anyway (see its docstring —
+        writes go through a single connection with a per-write asyncio.Lock),
+        so the threads bought nothing and only multiplied.
+        """
         db = getattr(self.main_window, "db", None)
-        if db is None:
+        if db is None or not msgs:
             return
-        def _do(j=jid, m=dict(msg)):
-            try:
-                db.insert_message(j, m)
-            except Exception as exc:
-                logging.warning("[_persist_message_local_flag] failed for %s: %s", j, exc)
+        def _do(j=jid, records=[dict(m) for m in msgs]):
+            for record in records:
+                try:
+                    db.insert_message(j, record)
+                except Exception as exc:
+                    logging.warning("[_persist_message_local_flag] failed for %s: %s", j, exc)
         threading.Thread(target=_do, daemon=True).start()
 
     def _on_menu_star(self, msg: dict):
@@ -9202,6 +9304,54 @@ class ConversationsPanel(wx.Panel):
         if index >= 0:
             self._on_menu_delete_message(index)
 
+    # ── Mass-action accelerators ─────────────────────────────────────────────
+    # Their own shortcuts for every entry of the context menu's "Ações em
+    # massa" submenu, so the submenu is no longer the only way to reach them
+    # when Settings > Interface do usuário > "Substituir atalhos por ações em
+    # massa ao selecionar conversas e mensagens" is off (that setting stays
+    # exactly as it was: with it on, the single-message shortcuts act on the
+    # whole selection — see _bulk_shortcuts_enabled).
+
+    def _run_bulk_message_action(self, handler, event):
+        """Shared body of the dedicated mass-action shortcuts below: they are
+        inert without a selection, mirroring how the "Ações em massa" submenu
+        isn't built at all until messages are selected.
+
+        Inert, not silent: a shortcut that does nothing at all reads as
+        broken to a screen-reader user, the same reason
+        _on_action_save_as() announces save_as_nothing_to_save instead of
+        just returning."""
+        if not self.selected_messages:
+            self.main_window.output(
+                self.main_window.i18n.t("bulk_no_message_selection"), interrupt=True
+            )
+            return
+        handler(event)
+
+    def _on_accel_bulk_copy(self, event):
+        """Ctrl+Alt+Shift+C: copy every selected message."""
+        self._run_bulk_message_action(self._on_mass_copy_messages, event)
+
+    def _on_accel_bulk_forward(self, event):
+        """Ctrl+Alt+Shift+E: forward every selected message."""
+        self._run_bulk_message_action(self._on_mass_forward_messages, event)
+
+    def _on_accel_bulk_star(self, event):
+        """Ctrl+Alt+Shift+F: star every selected message."""
+        self._run_bulk_message_action(self._on_mass_star_messages, event)
+
+    def _on_accel_bulk_pin(self, event):
+        """Ctrl+Alt+Shift+X: pin every selected message in the chat."""
+        self._run_bulk_message_action(self._on_mass_pin_messages, event)
+
+    def _on_accel_bulk_save(self, event):
+        """Ctrl+Alt+Shift+S: save every selected message's media."""
+        self._run_bulk_message_action(self._on_mass_save_messages, event)
+
+    def _on_accel_bulk_delete(self, event):
+        """Ctrl+Shift+Delete: delete every selected message."""
+        self._run_bulk_message_action(self._on_mass_delete_messages, event)
+
     def _on_accel_block(self, event):
         """Ctrl+Shift+B: block/unblock the current contact."""
         if self.conversation is None:
@@ -9362,6 +9512,40 @@ class ConversationsPanel(wx.Panel):
             self._on_menu_unpin(jid)
         else:
             self._on_menu_pin(jid)
+
+    def _run_bulk_chat_action(self, handler, event):
+        """Chat-list twin of _run_bulk_message_action(): the dedicated
+        mass-action shortcuts below are inert without a selection, mirroring
+        how the chat list's "Ações em massa" submenu isn't built until
+        conversations are selected — and announce that rather than doing
+        nothing at all, which reads as a broken shortcut to a screen-reader
+        user."""
+        if not self.selected_chats:
+            self.main_window.output(
+                self.main_window.i18n.t("bulk_no_chat_selection"), interrupt=True
+            )
+            return
+        handler(event)
+
+    def _on_accel_bulk_clear_chats(self, event):
+        """Ctrl+Alt+Shift+L: clear every selected conversation."""
+        self._run_bulk_chat_action(self._on_mass_clear_chats, event)
+
+    def _on_accel_bulk_delete_chats(self, event):
+        """Ctrl+Shift+Delete: delete every selected conversation."""
+        self._run_bulk_chat_action(self._on_mass_delete_chats, event)
+
+    def _on_accel_bulk_archive_chats(self, event):
+        """Ctrl+Alt+Shift+A: archive every selected conversation."""
+        self._run_bulk_chat_action(self._on_mass_archive_chats, event)
+
+    def _on_accel_bulk_read_chats(self, event):
+        """Ctrl+Alt+Shift+R: mark every selected conversation as read."""
+        self._run_bulk_chat_action(self._on_mass_mark_read_chats, event)
+
+    def _on_accel_bulk_unread_chats(self, event):
+        """Ctrl+Alt+Shift+U: mark every selected conversation as unread."""
+        self._run_bulk_chat_action(self._on_mass_mark_unread_chats, event)
 
     def _on_accel_copy_message(self, event):
         """Ctrl+C: copy focused message text or media file (with original
@@ -11502,48 +11686,132 @@ class ConversationsPanel(wx.Panel):
         self._refresh_message_rows_by_ids(copied_ids)
         self.main_window.output(i18n.t("messages_copied_bulk"), interrupt=True)
 
+    def _mass_message_targets(self, flag: str) -> "tuple[list, list]":
+        """(messages to act on, all selected ids) for a mass message action.
+
+        Targets are real messages in the current selection that don't already
+        carry *flag* — system events are filtered here rather than left to
+        each single-message handler's own _reject_system_event_action guard,
+        so a mixed selection doesn't announce "unavailable" once per system
+        event. Order follows _sorted_messages, not set iteration order, same
+        as every other mass message action.
+        """
+        targets = [
+            m for m in self._sorted_messages
+            if not self._is_separator(m)
+            and not self._is_system_event(m)
+            and m.get("key", {}).get("id") in self.selected_messages
+            and not m.get(flag)
+        ]
+        return targets, list(self.selected_messages)
+
     def _on_mass_star_messages(self, event):
         """Star every selected message (the local-only flag _on_menu_star
         toggles) — always stars, never toggles off, so a selection mixing
         already-starred and unstarred messages doesn't end up partially
-        undone. System events are pre-filtered rather than left to
-        _on_menu_star's own _reject_system_event_action guard, so a mixed
-        selection doesn't announce "unavailable" once per system event."""
+        undone.
+
+        Applies the flag to the whole batch and repaints ONCE, rather than
+        calling _on_menu_star() per message: that handler runs a full
+        populate_messages() of its own every time, so a selection of N
+        messages repainted the entire list N times on the UI thread and gave
+        screen readers N floods of accessibility events (the exact thing
+        CLAUDE.md's Freeze()/Thaw() note warns about). Same aggregate shape
+        the older mass actions (_on_mass_forward_messages,
+        _on_mass_delete_messages) already use.
+        """
         if not self.selected_messages: return
-        to_star = [
-            m for m in self._sorted_messages
-            if not self._is_separator(m)
-            and not self._is_system_event(m)
-            and m.get("key", {}).get("id") in self.selected_messages
-            and not m.get("starred")
-        ]
-        ids = list(self.selected_messages)
+        i18n = self.main_window.i18n
+        to_star, ids = self._mass_message_targets("starred")
         self.selected_messages.clear()
-        self._refresh_message_rows_by_ids(ids)
+        if not to_star:
+            # Everything selected was already starred (or was a system event).
+            # Announcing success here told screen-reader users the action had
+            # been applied when nothing happened at all.
+            self._refresh_message_rows_by_ids(ids)
+            self.main_window.output(i18n.t("mass_nothing_to_do"), interrupt=True)
+            return
+
         for m in to_star:
-            self._on_menu_star(m)
-        self.main_window.output(self.main_window.i18n.t("success_star_bulk"), interrupt=True)
+            m["starred"] = True
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if jid:
+            self._persist_message_local_flags(jid, to_star)
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        self.main_window.output(i18n.t("success_star_bulk"), interrupt=True)
 
     def _on_mass_pin_messages(self, event):
         """Pin every not-yet-pinned selected message via WhatsApp's own
-        message-pin feature — reuses _on_menu_pin_message's optimistic
-        update + per-message server rollback for each one. Already-pinned
-        messages and system events are skipped up front, same reasoning as
-        _on_mass_star_messages above."""
+        message-pin feature (visible to everyone in the chat, unlike star).
+
+        Like _on_mass_star_messages, applies the optimistic update to the
+        whole batch and repaints once. The server calls additionally run on
+        ONE background thread, sequentially, and their failures are collected
+        into a single rollback + a single dialog reporting the count —
+        _on_menu_pin_message() starts a thread per message and pops its own
+        blocking wx.MessageBox per rejection, so pinning a selection the
+        server refuses used to fire N concurrent requests at the local
+        WPPConnect server and then stack N modal dialogs, one per message.
+        (Same failure mode c518cce fixed for posting several files as status.)
+        """
         if not self.selected_messages: return
-        to_pin = [
-            m for m in self._sorted_messages
-            if not self._is_separator(m)
-            and not self._is_system_event(m)
-            and m.get("key", {}).get("id") in self.selected_messages
-            and not m.get("pinInChat")
-        ]
-        ids = list(self.selected_messages)
+        i18n = self.main_window.i18n
+        to_pin, ids = self._mass_message_targets("pinInChat")
         self.selected_messages.clear()
-        self._refresh_message_rows_by_ids(ids)
+        if not to_pin:
+            self._refresh_message_rows_by_ids(ids)
+            self.main_window.output(i18n.t("mass_nothing_to_do"), interrupt=True)
+            return
+
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            self._refresh_message_rows_by_ids(ids)
+            return
+
         for m in to_pin:
-            self._on_menu_pin_message(m)
-        self.main_window.output(self.main_window.i18n.t("success_pin_bulk"), interrupt=True)
+            m["pinInChat"] = True
+        self._persist_message_local_flags(jid, to_pin)
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        self.main_window.output(i18n.t("success_pin_bulk"), interrupt=True)
+
+        # Keys are copied now: the message dicts can be replaced underneath us
+        # by a resync while the requests are still in flight.
+        pending = [(m, dict(m.get("key", {}))) for m in to_pin]
+        total   = len(pending)
+
+        def _do(j=jid, items=pending, n=total):
+            failed = []
+            for m, k in items:
+                try:
+                    ok = self.main_window.pin_message(j, k, True)
+                except Exception as exc:
+                    logging.warning("[_on_mass_pin_messages] pin_message raised for %s: %s",
+                                    k.get("id", ""), exc)
+                    ok = False
+                if not ok:
+                    failed.append(m)
+            if failed:
+                wx.CallAfter(self._on_mass_pin_failed, failed, j, n)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_mass_pin_failed(self, failed: list, jid: str, total: int):
+        """Roll back the optimistic pins the server rejected, all at once
+        (main thread) — one repaint and one dialog carrying the count, rather
+        than _on_pin_message_failed()'s per-message repaint + modal."""
+        for m in failed:
+            m["pinInChat"] = False
+        self._persist_message_local_flags(jid, failed)
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        i18n = self.main_window.i18n
+        wx.MessageBox(
+            f"{i18n.t('pin_message_failed')} ({len(failed)}/{total})",
+            i18n.t("pin_message"),
+            wx.OK | wx.ICON_WARNING,
+        )
 
     def _on_mass_forward_messages(self, event):
         if not self.selected_messages: return

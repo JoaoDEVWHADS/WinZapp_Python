@@ -674,3 +674,64 @@ class TestVoiceStatusHostApiFallback:
         assert stub._recording_starting is False
         assert stub._is_recording is False
         assert len(boxes) == 1
+
+
+class TestABatchSurvivesAHelperRaising:
+    """A per-file helper that RAISES (instead of returning False) used to tear
+    out of _send_all_media_statuses_bg()'s loop: every remaining file was
+    skipped and the aggregate failure dialog at the end of that loop was never
+    reached, so the batch stopped in total silence on a background thread.
+
+    The concrete path was _send_status_voice_bg()'s try/finally with no
+    except around reading the converted OGG — fixed at the source — but the
+    loop must not depend on each helper remembering to catch everything.
+    """
+
+    def test_a_raising_audio_helper_does_not_abort_the_batch(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img1  = _touch(tmp_path, "pic1.png")
+        audio = _touch(tmp_path, "song.mp3")
+        img2  = _touch(tmp_path, "pic2.png")
+        boxes, attempted = [], []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                            lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        def _raising_voice(path, **kw):
+            attempted.append(path)
+            raise OSError("the converted OGG vanished")
+
+        def _ok_media(path, caption, **kw):
+            attempted.append(path)
+            return True
+
+        monkeypatch.setattr(stub, "_send_status_voice_bg", _raising_voice)
+        monkeypatch.setattr(stub, "_send_media_status_bg", _ok_media)
+
+        stub._send_all_media_statuses_bg([img1, audio, img2], "")
+
+        # The file AFTER the raising one was still attempted.
+        assert attempted == [img1, audio, img2]
+        # And the user was told, exactly once, that one file failed.
+        assert len(boxes) == 1
+        assert "(1/3)" in boxes[0][0]
+
+    def test_the_ogg_read_failing_is_reported_not_raised(self, tmp_path, monkeypatch):
+        """_send_status_voice_bg() itself must return False on an unreadable
+        OGG rather than letting the exception escape."""
+        stub = _Stub(convert_result=str(tmp_path / "never-written.ogg"))
+        audio = _touch(tmp_path, "song.mp3")
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox", lambda *a, **kw: None)
+
+        # _convert_wav_to_ogg reports success, but the file isn't really there
+        # to be read — os.path.isfile() is what the earlier guard checks, so
+        # make it pass and let open() be the thing that fails.
+        monkeypatch.setattr(status_panel_module.os.path, "isfile", lambda p: True)
+
+        ok = stub._send_status_voice_bg(audio, report_result=False)
+
+        assert ok is False
+        # The user's own picked file must still be there — only the temp OGG
+        # is ever unlinked.
+        assert os.path.isfile(audio)
