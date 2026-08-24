@@ -40,9 +40,9 @@
     "@aws-sdk/client-s3": "^3.1019.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@puppeteer/browsers": "^3.2.0",
-    "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git",
-    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
-    "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git",
+    "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git#b24c075454a68bc4aba3e2392850b6476c06c3b0",
+    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git#090c692e79394bc8e88c38643e98c6cba8946d0d",
+    "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git#929455dcba59250167aa27871039e8c1e48f1ce3",
     "puppeteer": "^25.7.0",
     "archiver": "^7.0.1",
     "axios": "^1.14.0",
@@ -130,10 +130,10 @@
     "redis": "^4.7.1"
   },
   "overrides": {
-    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
+    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git#090c692e79394bc8e88c38643e98c6cba8946d0d",
     "puppeteer": "^25.7.0"
   },
   "resolutions": {
-    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git"
+    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git#090c692e79394bc8e88c38643e98c6cba8946d0d"
   }
 }
