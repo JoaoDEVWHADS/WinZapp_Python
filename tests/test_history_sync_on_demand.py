@@ -605,37 +605,3 @@ class TestDocumentOnlyInterception:
         # why the old call was wrong and legitimately names it.
         assert "await (window as any).WAPI.loadEarlierMessages(" not in controller
         assert "await (window as any).WPP.chat.loadEarlierMessages(" not in controller
-
-
-class TestWaitForRecentHistoryBeforeMessageSync:
-    class Stub:
-        _RECENT_HISTORY_WAIT = 360
-        wait_for_recent_history_before_message_sync = (
-            MainWindow.wait_for_recent_history_before_message_sync)
-
-        def __init__(self, statuses):
-            self.statuses = list(statuses)
-            self.unblocked = 0
-
-        def _should_abort_sync_for_offline(self):
-            return False
-
-        def fetch_history_sync_status(self):
-            return self.statuses.pop(0)
-
-        def unblock_history_sync(self):
-            self.unblocked += 1
-
-    def test_ready_store_does_not_wait_or_recover(self):
-        stub = self.Stub([{"recentCompleted": True}])
-        stub.wait_for_recent_history_before_message_sync()
-        assert stub.unblocked == 0
-
-    def test_incomplete_store_is_observed_without_restarting_chunks(self, monkeypatch):
-        stub = self.Stub([
-            {"recentCompleted": False, "unprocessedChunks": 2},
-            {"recentCompleted": True, "unprocessedChunks": 0},
-        ])
-        monkeypatch.setattr("main.time.sleep", lambda _seconds: None)
-        stub.wait_for_recent_history_before_message_sync()
-        assert stub.unblocked == 0

@@ -9792,7 +9792,6 @@ class MainWindow(wx.Frame):
         unblock_result = self.unblock_history_sync()
         if isinstance(unblock_result, dict) and unblock_result.get("restarted"):
             self.wait_for_restarted_history_sync()
-        self.wait_for_recent_history_before_message_sync()
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13298,7 +13297,6 @@ class MainWindow(wx.Frame):
     _BACKFILL_CHUNK_DELAY = 5      # pause between chunks in the same full sweep
     _BACKFILL_MAX_DELAY   = 300    # ceiling once passes stop recovering anything
     _BACKFILL_BUDGET      = 45 * 60  # total wall-clock the backfill may run for
-    _RECENT_HISTORY_WAIT = 6 * 60
     # Renewal ceiling for a session whose history is still arriving — a fresh
     # pairing delivers and decodes for far longer than the ordinary budget.
     _BACKFILL_LANDING_BUDGET = 4 * 60 * 60
@@ -13362,36 +13360,6 @@ class MainWindow(wx.Frame):
                               .get("messages_page_size", 200)))
         except (AttributeError, TypeError, ValueError):
             return 200
-
-    def wait_for_recent_history_before_message_sync(self) -> None:
-        """Wait for the RECENT store before taking the first chat snapshot."""
-        deadline = time.monotonic() + self._RECENT_HISTORY_WAIT
-        last_signature = None
-        while time.monotonic() < deadline:
-            if self._should_abort_sync_for_offline():
-                return
-            status = self.fetch_history_sync_status()
-            if not isinstance(status, dict):
-                return
-            if status.get("recentCompleted") is not False:
-                logging.info(
-                    "[history-sync] RECENT history is ready before message sync.")
-                return
-            signature = (
-                status.get("unprocessedChunks"),
-                tuple(sorted((status.get("chunkStatus") or {}).values())),
-            )
-            if signature != last_signature:
-                logging.info(
-                    "[history-sync] Waiting for RECENT history before reading "
-                    "conversations (unprocessed=%s).",
-                    status.get("unprocessedChunks"))
-                last_signature = signature
-            time.sleep(10)
-        logging.warning(
-            "[history-sync] RECENT history did not settle within %ss; "
-            "continuing with automatic backfill enabled.",
-            self._RECENT_HISTORY_WAIT)
 
     def refresh_history_still_landing(self, context: str = "") -> bool:
         """Note whether more history is still on its way into WhatsApp Web.
