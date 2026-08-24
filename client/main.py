@@ -48,7 +48,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -14464,7 +14464,8 @@ class MainWindow(wx.Frame):
         else:
             phone = remote_jid
 
-        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        page_size = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        limit = display_page_fetch_limit(page_size)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -14620,7 +14621,7 @@ class MainWindow(wx.Frame):
                              .get("messages", {})
                              .get("messages", {})
                              .get("records") or [])
-            if history_gap_detected(all_messages, gap_reference, limit):
+            if history_gap_detected(all_messages, gap_reference, page_size):
                 # Ceiling of the hole: the oldest message the narrow page
                 # reached. Everything stored below it is the far side we are
                 # trying to get back down to.
@@ -14630,7 +14631,7 @@ class MainWindow(wx.Frame):
                     "message(s) — widening the window.",
                     remote_jid, len(all_messages), len(gap_reference))
                 wider = self._refetch_history_gap(
-                    remote_jid, fetch_jid, headers, limit, gap_reference, hole_top_ts)
+                    remote_jid, fetch_jid, headers, page_size, gap_reference, hole_top_ts)
                 if len(wider) > len(all_messages):
                     all_messages = wider
                 if not history_gap_closed(all_messages, gap_reference, hole_top_ts):
