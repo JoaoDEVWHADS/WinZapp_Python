@@ -20506,10 +20506,13 @@ class MainWindow(wx.Frame):
         # about. Let the full path handle it.
         try:
             if panel.search_field.GetValue().strip():
+                logging.info("[move_chat_row_to_top] %s: search active — full path", chat_jid)
                 return False
         except Exception:
             return False
         if getattr(panel, "_conv_filter", "all") != "all":
+            logging.info("[move_chat_row_to_top] %s: filter %r active — full path",
+                         chat_jid, getattr(panel, "_conv_filter", "all"))
             return False
 
         wanted = {chat_jid}
@@ -20518,6 +20521,7 @@ class MainWindow(wx.Frame):
             wanted.add(stored["remoteJid"])
         idx = next((i for i, j in enumerate(displayed) if j in wanted), None)
         if idx is None:
+            logging.info("[move_chat_row_to_top] %s: not rendered — full path", chat_jid)
             return False        # not rendered yet — a brand-new chat needs the full path
 
         chat = chats_list[idx]
@@ -20539,12 +20543,18 @@ class MainWindow(wx.Frame):
 
         if idx == group_start:
             # Already at the top of its group — only the text can have changed.
+            logging.info("[move_chat_row_to_top] %s: already at row %s — text only",
+                         chat_jid, idx)
             return self.refresh_chat_row_text(chat_jid)
 
         incumbent_key = self._chat_sort_key(chats_list[group_start], names[group_start], pinned)
         if key >= incumbent_key:
             # Doesn't actually belong at the top (an older message arriving
             # late, a clock skew, an alphabetical tie) — don't guess.
+            logging.info(
+                "[move_chat_row_to_top] %s: stays at row %s — key=%s not above "
+                "row %s key=%s; full path", chat_jid, idx, key, group_start, incumbent_key,
+            )
             return False
 
         new_texts = list(lst.GetItemText(i, 0) for i in range(lst.GetItemCount()))
@@ -20561,7 +20571,10 @@ class MainWindow(wx.Frame):
         if not self._apply_chat_rows_incrementally(
             lst, displayed, new_jids, new_texts, focused_jid
         ):
+            logging.info("[move_chat_row_to_top] %s: row surgery declined — full path", chat_jid)
             return False
+        logging.info("[move_chat_row_to_top] %s: moved row %s -> %s of %s",
+                     chat_jid, idx, group_start, len(new_jids))
 
         chats_list.insert(group_start, chats_list.pop(idx))
         names.insert(group_start, names.pop(idx))
@@ -20871,11 +20884,18 @@ class MainWindow(wx.Frame):
             self.conversations_panel.chats_list = displayed_chats
             self.conversations_panel.chat_names = displayed_names
             self.conversations_panel._displayed_jids = new_jids
+            logging.info("[add_chats_to_ui] incremental path applied (%s rows)", len(new_jids))
             if hasattr(self, "archived_conversations_panel"):
                 self._refresh_archived_chats_in_ui(arch_focused_jid)
             return
 
         # ── Full rebuild path: JID order or count changed ────────────────────
+        logging.info(
+            "[add_chats_to_ui] full rebuild (%s rows; displayed_jids=%s, count=%s)",
+            len(new_jids),
+            "none" if _displayed_jids is None else len(_displayed_jids),
+            lst.GetItemCount(),
+        )
         focus_allowed = self._allow_ui_focus_changes()
         _lst_had_focus = (wx.Window.FindFocus() is lst)
         if _lst_had_focus:
