@@ -14346,11 +14346,16 @@ class MainWindow(wx.Frame):
         cp = getattr(self, "conversations_panel", None)
         if cp is None or cp.conversation is None:
             return
-        if cp.conversation.get("remoteJid") != remote_jid:
+        active_jid = cp.conversation.get("remoteJid", "")
+        if not self._chat_jids_equivalent(active_jid, remote_jid):
             return
 
-        def _apply(new_chat=chat):
-            if cp.conversation is not None and cp.conversation.get("remoteJid") == remote_jid:
+        def _apply(new_chat=chat, expected_jid=active_jid):
+            current_jid = (
+                cp.conversation.get("remoteJid", "")
+                if cp.conversation is not None else ""
+            )
+            if self._chat_jids_equivalent(current_jid, expected_jid):
                 cp.conversation = new_chat
                 cp.refresh_messages_if_changed()
         wx.CallAfter(_apply)
