@@ -9964,7 +9964,6 @@ class MainWindow(wx.Frame):
         # also the state a restart lands in, so the walk had no way to resume
         # either: the SQLite anchor survives, but nothing ever came back for it.
         deep_pending = len(self._chats_needing_deep_history())
-        first_short_pass_done = None
         if pending or still_landing or unnamed or deep_pending:
             logging.info(
                 "[backfill] Scheduling backfill: %d chat(s) short of a full page, "
@@ -9973,21 +9972,9 @@ class MainWindow(wx.Frame):
                 pending, unnamed, deep_pending, still_landing)
             existing = getattr(self, "_backfill_thread", None)
             if existing is None or not existing.is_alive():
-                if pending:
-                    first_short_pass_done = threading.Event()
-                    self._backfill_first_short_pass_done = first_short_pass_done
                 self._backfill_thread = threading.Thread(
                     target=self._backfill_empty_chats, daemon=True, name="chat-backfill")
                 self._backfill_thread.start()
-
-        # The first short-page confirmation owns the API before media starts.
-        # This wait is on the sync worker, never the wx UI thread.
-        if first_short_pass_done is not None:
-            logging.info(
-                "[backfill] Waiting for the first short-page batch before media sync.")
-            if not first_short_pass_done.wait(timeout=180):
-                logging.warning(
-                    "[backfill] First short-page batch exceeded 180s; releasing media sync.")
 
         # ── Phase 2: download media ──────────────────────────────────────────
         # Opt-out via Settings > Armazenamento > "Baixar mídias automaticamente
@@ -13531,12 +13518,12 @@ class MainWindow(wx.Frame):
             grew = previous is not None and count > previous
             still_landing = getattr(self, "_history_still_landing", False)
             _done()
-            # A gap chat gets one confirming read after the chunk queue drains;
-            # from the next pass it is kept only while its store is growing.
-            # Ordinary chats below the configured page target are genuinely
-            # short unless chunks are still landing, so they must not keep the
-            # initial sync alive just because they contain fewer than 200 rows.
-            if still_landing or grew or (gap and previous is None):
+            # A short first page is ambiguous: it may be a genuinely short
+            # conversation, or merely the bounded linked-device window before
+            # older phone history arrives. Queue one background confirmation;
+            # this no longer blocks the initial-sync completion path.
+            first_short_page = previous is None
+            if still_landing or grew or first_short_page:
                 counts[canonical] = count
                 pending.add(canonical)
 
@@ -13720,8 +13707,6 @@ class MainWindow(wx.Frame):
         re-reads the queue and re-kicks it if needed.
         """
         my_run = getattr(self, "_sync_run_id", 0)
-        first_short_pass_done = getattr(
-            self, "_backfill_first_short_pass_done", None)
         deadline = time.monotonic() + self._BACKFILL_BUDGET
         # A fresh pairing can take longer to deliver and decode its history than
         # the ordinary budget allows, and stopping halfway leaves conversations
@@ -13945,11 +13930,29 @@ class MainWindow(wx.Frame):
                 # dozens of chats stuck at exactly one message). Ask the phone
                 # for older history, a few chats per pass, and keep every such
                 # chat queued while its asynchronous reply is pending.
+                phone_requests_left = 2
                 for jid, was in counts_before.items():
                     now = self._local_record_count(jid)
                     if now >= self.history_page_target() or now > was:
                         continue
                     self._keep_backfill_pending(jid, now)
+                    asked_at = getattr(self, "_older_requested_chats", {}).get(jid)
+                    request_due = asked_at is None or (
+                        time.time() - asked_at >= self._OLDER_REQUEST_GRACE)
+                    if not request_due or phone_requests_left <= 0:
+                        continue
+                    phone_requests_left -= 1
+                    requested = self.request_older_messages(jid)
+                    if requested is True:
+                        if not hasattr(self, "_older_requested_chats"):
+                            self._older_requested_chats = {}
+                        self._older_requested_chats[jid] = time.time()
+                        self._persist_older_requested()
+                    elif requested is False:
+                        # The API answered definitively that it did not send a
+                        # request (normally primaryHasMore=false). This is the
+                        # evidence that distinguishes a genuinely short chat.
+                        self._remove_backfill_pending(jid)
 
                 completed = self._completed_backfill_targets(window)
                 grew = sum(1 for j, was in counts_before.items()
@@ -13957,9 +13960,6 @@ class MainWindow(wx.Frame):
                 logging.info(
                     "[backfill] Pass %d: %d chat(s) gained messages, %d no longer pending "
                     "(of %d).", attempt, grew, completed, before)
-                if first_short_pass_done is not None:
-                    first_short_pass_done.set()
-                    first_short_pass_done = None
                 made_progress = (grew > 0 or completed > 0 or named > 0
                                  or deep_stored > 0)
                 sweep_made_progress = sweep_made_progress or made_progress
@@ -13984,9 +13984,6 @@ class MainWindow(wx.Frame):
                     still, unnamed)
         except Exception:
             logging.exception("[backfill] Unhandled error in the backfill loop")
-        finally:
-            if first_short_pass_done is not None:
-                first_short_pass_done.set()
 
     # ── History-sync health ─────────────────────────────────────────────────
     # WhatsApp's multi-device design keeps older history on the phone and only
@@ -14208,7 +14205,7 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning(
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
-            return False
+            return None
 
     def _start_deferred_media_sync(self) -> None:
         """Start media downloads after RECENT stops using the browser page."""

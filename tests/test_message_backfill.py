@@ -182,11 +182,11 @@ class TestShortOfAPage:
         s._note_backfill_state("a@lid", _chat(records=_records(640), t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
-    def test_a_short_chat_is_taken_at_face_value_after_queue_drains(self):
-        """Below the configured target alone does not prove missing history."""
+    def test_a_short_chat_gets_one_background_confirmation_after_queue_drains(self):
+        """Below the configured target is ambiguous until the phone answers."""
         s = _Stub(page_size=200, chunks_pending=False)
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
-        assert s._chats_awaiting_messages == set()
+        assert s._chats_awaiting_messages == {"a@lid"}
 
     def test_a_gap_chat_gets_one_confirming_retry_after_queue_drains(self):
         s = _Stub(page_size=200, chunks_pending=False)
