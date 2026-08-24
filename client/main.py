@@ -13387,7 +13387,6 @@ class MainWindow(wx.Frame):
                     "conversations (unprocessed=%s).",
                     status.get("unprocessedChunks"))
                 last_signature = signature
-            self.unblock_history_sync()
             time.sleep(10)
         logging.warning(
             "[history-sync] RECENT history did not settle within %ss; "

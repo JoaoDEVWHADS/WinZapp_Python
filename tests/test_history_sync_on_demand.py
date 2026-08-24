@@ -631,11 +631,11 @@ class TestWaitForRecentHistoryBeforeMessageSync:
         stub.wait_for_recent_history_before_message_sync()
         assert stub.unblocked == 0
 
-    def test_incomplete_store_is_recovered_before_chat_reads(self, monkeypatch):
+    def test_incomplete_store_is_observed_without_restarting_chunks(self, monkeypatch):
         stub = self.Stub([
             {"recentCompleted": False, "unprocessedChunks": 2},
             {"recentCompleted": True, "unprocessedChunks": 0},
         ])
         monkeypatch.setattr("main.time.sleep", lambda _seconds: None)
         stub.wait_for_recent_history_before_message_sync()
-        assert stub.unblocked == 1
+        assert stub.unblocked == 0
