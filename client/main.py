@@ -15149,6 +15149,7 @@ class MainWindow(wx.Frame):
 
         quoted_id = None
         quote_stripped = False
+        is_status_reply = False
 
         if mentioned_jids:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
@@ -15171,7 +15172,17 @@ class MainWindow(wx.Frame):
             }
         else:
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
+            # A status quote that failed to serialize (e.g. incomplete status
+            # metadata missing key.id) must never silently fall through to a
+            # plain DM below — that's the exact "reply degrades to a normal
+            # message" bug this is meant to fix, just triggered by malformed
+            # data instead of a WPPConnect failure.
+            quoted_is_status = (
+                bool(quoted) and isinstance(quoted, dict)
+                and (quoted.get("key") or {}).get("remoteJid") == "status@broadcast"
+            )
             if quoted_id:
+                is_status_reply = "status@broadcast" in quoted_id
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
@@ -15187,6 +15198,9 @@ class MainWindow(wx.Frame):
                     }
                 }
                 logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
+            elif quoted_is_status:
+                logging.error("[send_text_message] status reply has no serializable quote id (key.id missing?) — refusing to send as a plain message")
+                return {"ok": False, "error": "status reply missing a serializable message id", "retry": False}
             else:
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
@@ -15257,9 +15271,12 @@ class MainWindow(wx.Frame):
                     if response.status_code in (200, 201):
                         logging.info("[send_text_message] legacy retry with %s succeeded", fb_phone)
 
-                # 2. If it's still failing and we had a quote, strip the quote and
-                #    try a plain send to whichever address we last used.
-                if response.status_code not in (200, 201) and quoted_id:
+                # 2. If it's still failing and we had an ordinary chat quote,
+                #    strip the quote and try a plain send.  A status reply must
+                #    never take this fallback: a plain DM is observably the
+                #    wrong operation, so report failure and let the user retry
+                #    instead of claiming that an unquoted reply succeeded.
+                if response.status_code not in (200, 201) and quoted_id and not is_status_reply:
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote on %s...",
                                     response.status_code, active_dest)
                     wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))

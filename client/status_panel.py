@@ -1757,15 +1757,12 @@ class StatusPanel(wx.Panel):
     def _send_status_reply_bg(self, poster_jid: str, text: str, status: dict):
         mw = self.main_window
         try:
-            # Deliberately NOT quoted — same reasoning as _on_like_status():
-            # WPPConnect's send-reply endpoint can't resolve a status as a
-            # quote target (it's never indexed anywhere reachable from the
-            # poster's own chat), so quoting it always failed server-side
-            # and silently fell back to a plain send anyway, just after an
-            # extra round trip and a confusing "Não foi possível citar a
-            # mensagem original" notice for something that was never going
-            # to work.
-            result = mw.send_text_message(poster_jid, text)
+            # Status messages live in WhatsApp Web's per-poster StatusV3Model,
+            # not in the ordinary chat message collection.  The patched Node
+            # send-reply route resolves this serialized status key in that
+            # model before sending, so keep the status as the quote target
+            # here instead of degrading the reply to a normal DM.
+            result = mw.send_text_message(poster_jid, text, quoted=status)
         except Exception:
             logging.exception(
                 "[status-reply] send_text_message raised for %s", poster_jid)
