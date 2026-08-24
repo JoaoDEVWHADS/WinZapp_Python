@@ -24,7 +24,6 @@ if sys.platform == 'win32':
 
 import shutil
 import socket as _socket
-import io
 
 import subprocess
 import threading
@@ -78,21 +77,6 @@ _orig_get = requests.get
 _orig_post = requests.post
 
 
-class _UploadProgressFile(io.BufferedReader):
-    """File wrapper that reports multipart upload progress as it is read."""
-
-    def __init__(self, raw, size: int, callback):
-        super().__init__(raw)
-        self._size = max(size, 1)
-        self._callback = callback
-        self._uploaded = 0
-
-    def read(self, size=-1):
-        chunk = super().read(size)
-        if chunk:
-            self._uploaded += len(chunk)
-            self._callback(min(self._uploaded / self._size, 1.0))
-        return chunk
 
 def _patched_get(*args, **kwargs):
     return _http_session.get(*args, **kwargs)
@@ -19223,6 +19207,7 @@ class MainWindow(wx.Frame):
         import mimetypes
         from core.audio_transcode import prepare_audio_for_whatsapp
         from core.video_transcode import prepare_video_for_whatsapp
+        from core.multipart_stream import StreamingMultipartBody
         try:
             file_size = os.path.getsize(file_path)
         except Exception as exc:
@@ -19315,18 +19300,20 @@ class MainWindow(wx.Frame):
                 post_data["isGroup"] = "true"
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
-            with open(upload_path, "rb") as raw_file:
-                fh = (
-                    _UploadProgressFile(raw_file, file_size, progress_callback)
-                    if progress_callback else raw_file
-                )
-                return api_post(
-                    url,
-                    headers=headers,
-                    data=post_data,
-                    files={"file": (filename, fh, mime)},
-                    timeout=timeout,
-                )
+            body = StreamingMultipartBody(
+                file_path=upload_path,
+                filename=filename,
+                mime_type=mime,
+                fields=post_data,
+                progress_callback=progress_callback,
+            )
+            stream_headers = dict(headers, **{"Content-Type": body.content_type})
+            return api_post(
+                url,
+                headers=stream_headers,
+                data=body,
+                timeout=timeout,
+            )
 
         try:
             r = _post(phone_val)
