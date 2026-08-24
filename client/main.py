@@ -1291,6 +1291,13 @@ class MainWindow(wx.Frame):
         self._msg_bg_executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="msg-bg"
         )
+        # jid -> Future of the most recent message insert submitted for an
+        # @lid chat, so _merge_lid_into_phone() can wait for it before moving
+        # that chat's rows to the phone JID (see its own comment). Only @lid
+        # chats are tracked: they are the only ones a merge can rename, and
+        # tracking every chat would keep a dict of completed futures around
+        # for nothing.
+        self._pending_lid_inserts: dict = {}
         # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
         # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
@@ -4301,15 +4308,51 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
-        
-        def _bg_delete_chat():
-            try:
-                self.db.delete_chat(lid_jid)
-            except Exception as e:
-                logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
-        threading.Thread(target=_bg_delete_chat, daemon=True).start()
 
-        
+        # The in-memory merge above is only half the job: navigate_to_conversation()
+        # reloads a conversation's messages straight from the database by its
+        # JID, and get_messages()'s _jid_variants() knows @c.us <-> @s.whatsapp.net
+        # but nothing about @lid. So any message already filed under lid_jid has
+        # to be MOVED to phone_jid, not dropped — this used to call
+        # db.delete_chat(lid_jid), which deletes that chat's message rows
+        # outright. A first message from a contact whose @lid wasn't cached yet
+        # (on_new_message stores it under the raw @lid until /contact/pn-lid
+        # answers) was therefore deleted from the database moments after
+        # arriving: the chat-list preview still showed it, because the merged
+        # in-memory records are what the preview reads, and opening the
+        # conversation replaced those records with an empty DB read. Reported
+        # as a message from a long-quiet contact that appeared in the list and
+        # was gone by the time the conversation opened.
+        #
+        # merge_or_rename_chat() is the same operation deduplicate_chats()
+        # already uses for the sync path: it moves every row it safely can and
+        # only deletes an old_jid row once an equivalent survives under new_jid.
+        pending_insert = self._pending_lid_inserts.pop(lid_jid, None)
+
+        def _bg_merge_chat(fut=pending_insert):
+            # A just-arrived message for this @lid may still be queued for the
+            # messages table (on_new_message hands the insert to a pool
+            # thread). Renaming the chat before that insert lands would file it
+            # under a JID nothing queries again, so wait for it first. Waiting
+            # on a dedicated thread rather than inside _msg_bg_executor: a
+            # bounded pool whose workers block on other tasks from the same
+            # pool can deadlock.
+            if fut is not None:
+                try:
+                    fut.result(timeout=30)
+                except Exception as e:
+                    logging.warning(
+                        "[merge_lid] insert still pending for %s after waiting: %s",
+                        lid_jid, e,
+                    )
+            try:
+                self.db.merge_or_rename_chat(lid_jid, phone_jid)
+                logging.info("[merge_lid] moved %s -> %s in the database", lid_jid, phone_jid)
+            except Exception as e:
+                logging.error(f"[merge_lid] Failed to merge LID chat {lid_jid} into {phone_jid}: {e}")
+        threading.Thread(target=_bg_merge_chat, daemon=True).start()
+
+
         # Redirect active conversation if it was the merged LID chat, or refresh if it is the destination phone chat
         if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
             active_jid = self.conversations_panel.conversation.get("remoteJid", "")
@@ -4863,7 +4906,16 @@ class MainWindow(wx.Frame):
                 self.db.insert_message(remote_jid, msg)
             except Exception as e:
                 logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
-        self._msg_bg_executor.submit(_bg_insert_msg)
+        _insert_fut = self._msg_bg_executor.submit(_bg_insert_msg)
+        if remote_jid.endswith("@lid"):
+            # This message is being filed under a JID that a later merge will
+            # rename (the @lid is only resolved to a phone JID once
+            # /contact/pn-lid answers). _merge_lid_into_phone() waits on this
+            # future so it never moves the chat out from under an insert that
+            # hasn't landed yet — that leaves the message under a JID nothing
+            # queries again, which is exactly how a first message from a
+            # contact could vanish on opening the conversation.
+            self._pending_lid_inserts[remote_jid] = _insert_fut
 
         # ── Update unread count (only for messages we received) ───────────────
         # System events never count as unread — see is_countable_message().
