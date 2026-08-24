@@ -151,6 +151,8 @@
     "discard_voice_message": "Descartar mensagem de voz",
     "pause_recording": "Colocar gravação em pausa",
     "resume_recording": "Retomar a gravação",
+    "play_recorded_audio": "Reproduzir áudio gravado",
+    "stop_recorded_audio_playback": "Parar reprodução",
     "send_voice_message": "Enviar mensagem de voz",
     "conversation_data": "Detalhes da conversa",
     "group_data": "Detalhes do grupo",

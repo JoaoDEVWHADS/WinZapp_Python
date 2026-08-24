@@ -144,6 +144,16 @@ class AccessibleSendVoiceMessage(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+R")
 
 
+class AccessiblePlayRecordedAudio(wx.Accessible):
+    """Reports Ctrl+P as the keyboard shortcut for the Play/Stop
+    recorded-audio-preview button — same shortcut whether the button is
+    currently offering to play or to stop, so it stays accurate across the
+    label swap."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+P")
+
+
 class AccessibleNewConversationButton(wx.Accessible):
     """Reports Ctrl+N as the keyboard shortcut for the New Conversation button."""
 

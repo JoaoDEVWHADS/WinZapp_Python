@@ -151,6 +151,8 @@
     "discard_voice_message": "Discard voice message",
     "pause_recording": "Pause recording",
     "resume_recording": "Resume recording",
+    "play_recorded_audio": "Play recorded audio",
+    "stop_recorded_audio_playback": "Stop playback",
     "send_voice_message": "Send voice message",
     "conversation_data": "Chat info",
     "group_data": "Group info",

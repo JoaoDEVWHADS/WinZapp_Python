@@ -37,6 +37,7 @@ from ui.accessible import (
     AccessibleDiscardVoiceMessage,
     AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
+    AccessiblePlayRecordedAudio,
     AccessibleSearchInConversation,
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
@@ -205,6 +206,10 @@ class ConversationsPanel(wx.Panel):
         # Actual rate/channels are resolved at open time (stereo → mono fallback).
         self._recording_actual_rate: int = 48000
         self._recording_actual_ch:   int = 1
+        # Playback of what's been recorded so far, offered only while paused
+        # (see _toggle_play_recorded_audio / _stop_recorded_audio_preview).
+        self._recorded_audio_sound      = None
+        self._recorded_audio_temp_path  = None
         # True while a background thread is opening the PyAudio input stream
         # (pa.open() can block for seconds negotiating with the driver — it
         # must never run on the UI thread). Guards on_record_voice_message
@@ -760,6 +765,22 @@ class ConversationsPanel(wx.Panel):
         self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording())
         self._pause_resume_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_recording)
         voice_sizer.Add(self._pause_resume_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        # Only shown while the recording is paused (_toggle_pause_recording) —
+        # plays back everything captured so far. Timer created once here and
+        # just Start()/Stop()ed on each play, rather than per-play, so it
+        # never ends up with more than one wx.EVT_TIMER handler bound.
+        self._play_recorded_btn = wx.Button(
+            self._voice_panel, label=i18n.t("play_recorded_audio")
+        )
+        self._play_recorded_btn.SetAccessible(AccessiblePlayRecordedAudio())
+        self._play_recorded_btn.Bind(wx.EVT_BUTTON, self._toggle_play_recorded_audio)
+        voice_sizer.Add(self._play_recorded_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._play_recorded_btn.Hide()
+        self._recorded_audio_timer = wx.Timer(self._play_recorded_btn)
+        self._play_recorded_btn.Bind(
+            wx.EVT_TIMER, self._on_recorded_audio_timer, self._recorded_audio_timer
+        )
 
         self._send_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("send_voice_message")
@@ -1518,6 +1539,10 @@ class ConversationsPanel(wx.Panel):
             self._pause_resume_btn.SetLabel(i18n.t("resume_recording"))
         else:
             self._pause_resume_btn.SetLabel(i18n.t("pause_recording"))
+        self._play_recorded_btn.SetLabel(
+            i18n.t("stop_recorded_audio_playback") if self._recorded_audio_sound is not None
+            else i18n.t("play_recorded_audio")
+        )
         # Update conv-data button label
         if self.conversation is not None:
             jid = self.conversation.get("remoteJid", "")
@@ -2257,6 +2282,8 @@ class ConversationsPanel(wx.Panel):
     def _hide_voice_panel(self):
         """Hide the voice panel and restore the message field / record /
         send button visibility (sent or discarded — both call this)."""
+        self._stop_recorded_audio_preview()
+        self._play_recorded_btn.Hide()
         self._voice_panel.Hide()
         self.message_field.Show()
         if hasattr(self, "_emoji_btn"):
@@ -2292,6 +2319,95 @@ class ConversationsPanel(wx.Panel):
         self._recording_paused = not self._recording_paused
         label_key = "resume_recording" if self._recording_paused else "pause_recording"
         self._pause_resume_btn.SetLabel(self.main_window.i18n.t(label_key))
+        if self._recording_paused:
+            self._play_recorded_btn.Show()
+        else:
+            # Resuming appends new frames again — the paused-audio preview
+            # would go on playing a now-stale snapshot, so stop it outright.
+            self._stop_recorded_audio_preview()
+            self._play_recorded_btn.Hide()
+        self.conversation_panel.Layout()
+
+    def _toggle_play_recorded_audio(self, event):
+        """Play back everything recorded so far, or stop that playback if
+        it's already going. Ctrl+P / the "Reproduzir áudio gravado" button
+        next to "Continuar gravação" — only ever reachable while paused,
+        both because the button is hidden otherwise and because frames stay
+        stable only while paused (the PyAudio callback skips appending while
+        self._recording_paused, see on_record_voice_message's _callback)."""
+        if not self._is_recording or not self._recording_paused:
+            return
+        if self._recorded_audio_sound is not None:
+            self._stop_recorded_audio_preview()
+            return
+
+        frames = self._recording_frames
+        if not frames:
+            return
+
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.close()
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(self._recording_actual_ch)
+                wf.setsampwidth(2)   # 16-bit PCM — matches how _send_voice_message writes it
+                wf.setframerate(self._recording_actual_rate)
+                wf.writeframes(b"".join(frames))
+        except Exception as exc:
+            logging.warning("[voice] failed to write recorded-audio preview WAV: %s", exc)
+            return
+        self._recorded_audio_temp_path = tmp.name
+
+        # A plain sl_stream.FileStream, not the app's Sound/load_sound
+        # wrapper: Sound.play() reroutes to Settings > Audio Devices'
+        # separate "effects" device when one is configured, which is meant
+        # for short UI cue sounds, not the user's own recorded voice. This
+        # is exactly how _play_audio() opens a real incoming voice message
+        # (sl_stream.FileStream direct) — it just inherits BASS's current
+        # process-wide default device, i.e. the configured Output device.
+        try:
+            snd = sl_stream.FileStream(file=self._recorded_audio_temp_path)
+            snd.play()
+        except Exception as exc:
+            logging.warning("[voice] failed to play recorded-audio preview: %s", exc)
+            self._cleanup_recorded_audio_temp_file()
+            return
+        self._recorded_audio_sound = snd
+        self._play_recorded_btn.SetLabel(self.main_window.i18n.t("stop_recorded_audio_playback"))
+        self._recorded_audio_timer.Start(300)
+
+    def _on_recorded_audio_timer(self, event):
+        """sound_lib has no playback-finished callback (see
+        AlertPreviewController's identical polling in core/sound_system.py)
+        — reaching the end of the preview must still be a full stop, not
+        just leaving the button stuck on "Parar reprodução"."""
+        if self._recorded_audio_sound is None or not self._recorded_audio_sound.is_playing:
+            self._stop_recorded_audio_preview()
+
+    def _stop_recorded_audio_preview(self):
+        """Full stop (not pause) of the recorded-audio preview and reset of
+        the button back to "Reproduzir áudio gravado" — called whether
+        playback finished on its own, the user clicked "Parar reprodução",
+        the recording was resumed, or the voice panel is going away
+        (discard/send). Safe to call when nothing is playing."""
+        self._recorded_audio_timer.Stop()
+        if self._recorded_audio_sound is not None:
+            try:
+                self._recorded_audio_sound.stop()
+            except Exception:
+                pass
+            self._recorded_audio_sound = None
+        self._cleanup_recorded_audio_temp_file()
+        if hasattr(self, "_play_recorded_btn"):
+            self._play_recorded_btn.SetLabel(self.main_window.i18n.t("play_recorded_audio"))
+
+    def _cleanup_recorded_audio_temp_file(self):
+        if self._recorded_audio_temp_path is not None:
+            try:
+                os.unlink(self._recorded_audio_temp_path)
+            except Exception:
+                pass
+            self._recorded_audio_temp_path = None
 
     def _send_voice_message(self, event):
         """Stop recording and enqueue the audio for delivery."""
@@ -9229,6 +9345,13 @@ class ConversationsPanel(wx.Panel):
             self._on_menu_archive(jid)
 
     def _on_accel_pin_list(self, event):
+        """Play/stop the recorded-audio preview while the voice recording is
+        paused; otherwise pin/unpin the focused conversation. Both share
+        this one accelerator (Ctrl+P) — mutually exclusive contexts, same
+        pattern as _on_ctrl_shift_p uses for Ctrl+Shift+P."""
+        if self._is_recording and self._recording_paused:
+            self._toggle_play_recorded_audio(event)
+            return
         chat = self._selected_chat_from_list()
         if not chat:
             return
