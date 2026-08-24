@@ -8373,7 +8373,8 @@ class MainWindow(wx.Frame):
         never paired has an empty database and needs the pairing dialog now, not
         a poll cycle later, so that path is never gated on this.
         """
-        if status not in ("notLogged", "QRCODE"):
+        import connection_state as cs
+        if status not in cs.UNLINKED_STATES:
             self._logout_strikes = 0
             self._logout_first_seen = None
             return False
@@ -8760,7 +8761,8 @@ class MainWindow(wx.Frame):
                 # Any status other than the two unlinked ones clears the logout
                 # tally, so only *consecutive* readings can ever confirm one —
                 # see _LOGOUT_CONFIRM_STRIKES.
-                if status not in ("notLogged", "QRCODE"):
+                import connection_state as cs
+                if status not in cs.UNLINKED_STATES:
                     self._logout_strikes = 0
                     self._resume_fail_strikes = 0
                     self._last_strike_ts = 0.0
@@ -8862,13 +8864,13 @@ class MainWindow(wx.Frame):
                     # mid-boot status that must NOT flip the UI to "offline".
                     self._set_wa_connected(
                         False, f"status-session {status}",
-                        confirmed=status in ("notLogged", "QRCODE"),
+                        confirmed=status in cs.UNLINKED_STATES,
                     )
                     logging.info(
                         "[check_wa_connection_http] Session is in active state '%s' — skipping /start-session to avoid browser conflict.",
                         status,
                     )
-                    if status in ("notLogged", "QRCODE"):
+                    if status in cs.UNLINKED_STATES:
                         self._wa_connected = False
 
                         def _logout_with_warning():
