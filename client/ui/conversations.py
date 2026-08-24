@@ -4786,6 +4786,19 @@ class ConversationsPanel(wx.Panel):
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
+        if not hasattr(self, "_reached_server_start"):
+            self._reached_server_start = {}
+        if self._reached_server_start.get(phone_jid):
+            self._is_loading_more = False
+            try:
+                self.main_window.output(
+                    self.main_window.i18n.t("start_of_conversation", "Início da conversa"),
+                    interrupt=True,
+                )
+            except Exception:
+                pass
+            return
+
         now = time.time()
         if not hasattr(self, "_last_server_history_attempt"):
             self._last_server_history_attempt = {}
@@ -4834,6 +4847,7 @@ class ConversationsPanel(wx.Panel):
                     fetched = self.main_window.wait_for_older_messages(
                         phone_jid_val,
                         oldest_msg,
+                        timeout=5.0,
                         should_continue=lambda: bool(
                             self.conversation
                             and self.conversation.get("remoteJid") == phone_jid_val
@@ -4844,16 +4858,13 @@ class ConversationsPanel(wx.Panel):
                         "wait_for_older_messages returned %s",
                         len(fetched) if fetched is not None else "None",
                     )
-                if fetched is not None:
-                    if fetched:
-                        wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
-                    else:
-                        wx.CallAfter(self._set_reached_start, phone_jid_val)
+                if fetched is not None and fetched:
+                    wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
                 else:
-                    wx.CallAfter(self._clear_loading_more, phone_jid_val)
+                    wx.CallAfter(self._set_reached_start, phone_jid_val)
             except Exception as e:
                 logging.exception(f"[_load_older_messages_from_server] thread error: {e}")
-                wx.CallAfter(self._clear_loading_more, phone_jid_val)
+                wx.CallAfter(self._set_reached_start, phone_jid_val)
             finally:
                 self.main_window._end_interactive_history_request(phone_jid_val)
 
