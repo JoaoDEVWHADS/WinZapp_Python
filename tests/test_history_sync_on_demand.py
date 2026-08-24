@@ -519,6 +519,20 @@ class TestRoutesArePatched:
         guard_at = controller.index("out.recentCompleted !== true")
         assert guard_at < send_at, "the guard must run before the request goes out"
 
+    def test_stale_recent_flag_is_repaired_only_for_an_empty_queue(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+
+        empty_queue = controller.index("if (rows.length === 0)")
+        repair = controller.index("recentCompleted: true", empty_queue)
+        send = controller.index("sendPeerDataOperationRequest(kind")
+        assert empty_queue < repair < send
+        assert "out.unprocessed = rows.length" in controller
+
 
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.

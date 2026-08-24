@@ -2236,10 +2236,36 @@ export async function requestOlderMessages(req: Request, res: Response) {
         // own UI only offers the "older messages" banner once the recent sync is
         // done, so this refusal keeps us to what the real client would do.
         try {
-          const status = await req_(
-            'WAWebUserPrefsHistorySync'
-          ).getHistorySyncStatus();
+          const prefs = req_('WAWebUserPrefsHistorySync');
+          const status = await prefs.getHistorySyncStatus();
           out.recentCompleted = status?.recentCompleted === true;
+          if (out.recentCompleted !== true) {
+            const table = req_(
+              'WAWebSchemaHistorySyncNotification'
+            ).getHistorySyncNotificationTable();
+            const rows = await table.equals(['processed'], 0, {
+              shouldDecrypt: false,
+            });
+            out.unprocessed = rows.length;
+
+            // Interrupted RECENT syncs can leave the persisted flag false even
+            // after every notification was applied. In that exact state the
+            // old guard made short chats permanent: no work remained that
+            // could ever flip the flag, while on-demand recovery was refused.
+            // Repair the getter used by WhatsApp's own ON_DEMAND processor, but
+            // only after the notification table proves there is no chunk that
+            // could be overtaken or deadlocked.
+            if (rows.length === 0) {
+              const original = prefs.getHistorySyncStatus.bind(prefs);
+              prefs.getHistorySyncStatus = async (...args: any[]) => {
+                const current = await original(...args);
+                return { ...(current || {}), recentCompleted: true };
+              };
+              const repaired = await prefs.getHistorySyncStatus();
+              out.recentCompleted = repaired?.recentCompleted === true;
+              out.recentCompletedRepaired = out.recentCompleted;
+            }
+          }
         } catch (e) {
           out.recentCompleted = null;
         }
