@@ -1423,9 +1423,21 @@ export default class CreateSessionUtil {
     // MainWindow.on_new_message() (client/main.py's _apply_possible_edit())
     // that was already built for exactly this — it just never received a
     // live edit event to actually detect until now.
-    await client.onMessageEdit(async (chat: any, id: string, message: any) => {
+    await client.onMessageEdit(async (eventOrChat: any, _id: string, legacyMessage: any) => {
+      // Current WPPConnect emits one { chat, id, msg } object even though its
+      // public type still declares the legacy three-argument callback.
+      const message = legacyMessage ?? eventOrChat?.msg;
+      if (!message || typeof message !== 'object') {
+        req.logger.warn(
+          `[${client.session}] onMessageEdit emitted without a serialized message`
+        );
+        return;
+      }
       message.session = client.session;
-      req.io.emit('received-message', { response: message });
+      req.io.emit('received-message', {
+        response: message,
+        session: client.session,
+      });
       callWebHook(client, req, 'onmessageedit', message);
     });
 

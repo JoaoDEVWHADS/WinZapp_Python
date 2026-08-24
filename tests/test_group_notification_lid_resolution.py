@@ -80,6 +80,17 @@ def test_unresolved_lid_triggers_a_background_resolution_call():
     assert mw.resolve_calls == [[LID]]
 
 
+def test_passive_render_of_unresolved_lid_does_not_create_a_thread():
+    mw = _FakeMainWindow()
+    panel = _PanelStub(mw)
+
+    result = panel._get_participant_name(LID, resolve_missing=False)
+
+    assert result == "123456789012345"
+    assert not mw._resolved_event.wait(timeout=0.1)
+    assert mw.resolve_calls == []
+
+
 def test_already_resolved_lid_does_not_trigger_a_call():
     mw = _FakeMainWindow()
     mw._lid_to_phone[LID] = "5511999999999@s.whatsapp.net"

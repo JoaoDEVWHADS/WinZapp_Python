@@ -1106,7 +1106,6 @@ class WebSocketClient:
                             "pushName": push,
                             "profilePicUrl": contact.get("profilePicUrl") or "",
                             "type": "contact",
-                            "isSaved": True,
                         }
                         self.main_window.contacts[jid] = entry
                         updated = True

@@ -135,13 +135,6 @@ class NewConversationDialog(wx.Dialog):
 
         def _name_for_chat(chat):
             jid = chat.get("remoteJid", "")
-            if jid.endswith("@g.us"):
-                # Groups carry their name under name/subject/groupMetadata
-                # subject — not in the contact store — so resolve it there
-                # first, or a named group would fall through to its raw JID.
-                group_name = mw._group_name_from_chat_dict(chat)
-                if group_name:
-                    return group_name
             return (
                 mw._resolve_contact_name(chat)
                 or mw.find_name_through_messages(chat)
@@ -152,6 +145,8 @@ class NewConversationDialog(wx.Dialog):
 
         # ── Search existing chats ─────────────────────────────────────────────
         for jid, chat in mw.chats.items():
+            if not jid or jid.endswith(("@g.us", "@broadcast", "@newsletter")):
+                continue
             name = _name_for_chat(chat)
             if not self._name_is_usable(name):
                 continue
@@ -160,15 +155,32 @@ class NewConversationDialog(wx.Dialog):
                     seen.add(self._dedup_key(jid))
                     self._results.append((name, jid, chat))
 
-        # ── Search contacts not yet in chats ──────────────────────────────────
+        # contacts is also a name cache for group participants and other
+        # identities learned from events. Only WhatsApp contacts or contacts
+        # explicitly created in WinZapp belong in this picker.
         for jid, contact in mw.contacts.items():
-            if self._dedup_key(jid) in seen:
+            if not jid or jid.endswith(("@g.us", "@broadcast", "@newsletter")):
+                continue
+            is_saved_contact = (
+                contact.get("isMyContact") is True
+                or contact.get("isMe") is True
+                or (
+                    contact.get("isSaved") is True
+                    and bool((contact.get("name") or "").strip())
+                )
+            )
+            if not is_saved_contact:
+                continue
+            key = self._dedup_key(jid)
+            if jid.endswith("@lid") and key == jid.split("@", 1)[0]:
+                continue
+            if key in seen:
                 continue
             name = contact.get("name") or contact.get("pushName") or format_number(jid)
             if not self._name_is_usable(name):
                 continue
             if qlow in name.lower() or qlow in format_number(jid).lower():
-                seen.add(self._dedup_key(jid))
+                seen.add(key)
                 self._results.append((name, jid, None))
 
         # ── If query looks like a phone number, add direct option ─────────────
@@ -214,7 +226,10 @@ class NewConversationDialog(wx.Dialog):
         # Chats may be stored under either @c.us or @s.whatsapp.net depending on
         # which format WPPConnect used when the event arrived, so check both.
         norm_jid = mw._normalize_jid(jid)
-        existing = mw.chats.get(norm_jid) or mw.chats.get(jid)
+        get_chat = getattr(mw, "get_chat", None)
+        existing = get_chat(norm_jid) if get_chat is not None else None
+        if existing is None:
+            existing = mw.chats.get(norm_jid) or mw.chats.get(jid)
         if existing is None:
             chat["remoteJid"] = norm_jid
             mw.chats[norm_jid] = chat

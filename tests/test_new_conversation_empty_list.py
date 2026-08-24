@@ -116,8 +116,14 @@ def _chat(jid, name):
     return {"remoteJid": jid, "name": name}
 
 
-def _contact(jid, name):
-    return {"id": jid, "remoteJid": jid, "name": name}
+def _contact(jid, name, **flags):
+    return {
+        "id": jid,
+        "remoteJid": jid,
+        "name": name,
+        "isMyContact": True,
+        **flags,
+    }
 
 
 class TestEmptyQueryListsEverything:
@@ -175,10 +181,7 @@ class TestEmptyQueryListsEverything:
 
         assert [n for n, _, _ in stub._results] == ["Zé"]
 
-    def test_named_group_shows_its_name_not_the_raw_jid(self):
-        """A group WITH a name (name/subject/groupMetadata.subject) must
-        appear under that name, sorted with the rest — not fall through to
-        its raw 18-digit id."""
+    def test_named_group_is_not_listed(self):
         jid = "120363000000000001@g.us"
         mw = _FakeMw(
             chats={
@@ -190,7 +193,61 @@ class TestEmptyQueryListsEverything:
 
         stub._do_search("")
 
-        assert [n for n, _, _ in stub._results] == ["Ana", "Família"]
+        assert [n for n, _, _ in stub._results] == ["Ana"]
+
+    def test_named_group_participant_is_not_listed_as_a_contact(self):
+        jid = "5511888888888@s.whatsapp.net"
+        contact = _contact(jid, "Participante")
+        contact.pop("isMyContact")
+        mw = _FakeMw(contacts={jid: contact})
+        stub = _Stub(mw)
+
+        stub._do_search("")
+
+        assert stub._results == []
+
+    def test_private_chat_remains_available_as_a_recent_conversation(self):
+        jid = "5511888888888@s.whatsapp.net"
+        mw = _FakeMw(chats={jid: _chat(jid, "Conversa recente")})
+        stub = _Stub(mw)
+
+        stub._do_search("")
+
+        assert [n for n, _, _ in stub._results] == ["Conversa recente"]
+
+    def test_locally_created_contact_is_listed(self):
+        jid = "5511777777777@s.whatsapp.net"
+        contact = _contact(jid, "Contato local", isSaved=True)
+        contact.pop("isMyContact")
+        mw = _FakeMw(contacts={jid: contact})
+        stub = _Stub(mw)
+
+        stub._do_search("")
+
+        assert [n for n, _, _ in stub._results] == ["Contato local"]
+
+    def test_event_push_name_marked_saved_without_local_name_is_not_listed(self):
+        jid = "5511666666666@s.whatsapp.net"
+        contact = {
+            "remoteJid": jid,
+            "pushName": "Nome de evento",
+            "isSaved": True,
+        }
+        mw = _FakeMw(contacts={jid: contact})
+        stub = _Stub(mw)
+
+        stub._do_search("")
+
+        assert stub._results == []
+
+    def test_unresolved_lid_contact_is_not_listed(self):
+        jid = "10000000000001@lid"
+        mw = _FakeMw(contacts={jid: _contact(jid, "LID sem telefone")})
+        stub = _Stub(mw)
+
+        stub._do_search("")
+
+        assert stub._results == []
 
     def test_contact_with_only_a_phone_number_is_filtered_out(self):
         mw = _FakeMw(

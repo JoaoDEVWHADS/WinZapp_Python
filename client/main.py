@@ -16150,7 +16150,13 @@ class MainWindow(wx.Frame):
                 self._schedule_set_chats()
 
 
-    def _resolve_jid_name(self, jid_norm: str, chat_jid_norm: str = "") -> str:
+    def _resolve_jid_name(
+        self,
+        jid_norm: str,
+        chat_jid_norm: str = "",
+        *,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback).
 
         chat_jid_norm: the group this participant belongs to, when known —
@@ -16241,11 +16247,12 @@ class MainWindow(wx.Frame):
             # group is opened) shows the real name instead of the
             # placeholder forever. resolve_lid_jids_via_api dedupes
             # concurrent/repeat requests for the same jid internally.
-            threading.Thread(
-                target=self.resolve_lid_jids_via_api,
-                args=([jid_norm],),
-                daemon=True,
-            ).start()
+            if resolve_missing:
+                threading.Thread(
+                    target=self.resolve_lid_jids_via_api,
+                    args=([jid_norm],),
+                    daemon=True,
+                ).start()
             # `local` here is just the raw @lid digits, meaningless to a user
             # ("Fulano está digitando" showing a bare numeric ID instead of a
             # name/phone). A generic placeholder is far more useful than
@@ -16259,7 +16266,13 @@ class MainWindow(wx.Frame):
             return self.i18n.t("unnamed_participant")
         return format_number(jid_norm)
 
-    def _presence_label_for_chat(self, chat_jid_norm: str, is_group: bool) -> str:
+    def _presence_label_for_chat(
+        self,
+        chat_jid_norm: str,
+        is_group: bool,
+        *,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return the typing/recording label to append to a chat-list row, or ''."""
         active = getattr(self, "_composing_chats", {}).get(chat_jid_norm, {})
         if not active:
@@ -16272,7 +16285,14 @@ class MainWindow(wx.Frame):
         else:
             return ""
         if is_group:
-            name = self._resolve_jid_name(participant_jid, chat_jid_norm)
+            if resolve_missing:
+                name = self._resolve_jid_name(participant_jid, chat_jid_norm)
+            else:
+                name = self._resolve_jid_name(
+                    participant_jid,
+                    chat_jid_norm,
+                    resolve_missing=False,
+                )
             if name:
                 return self.i18n.t("group_presence_indicator").format(
                     name=name, action=action_label
@@ -20356,7 +20376,9 @@ class MainWindow(wx.Frame):
                         name = "eu"
                     else:
                         if hasattr(self, "conversations_panel"):
-                            name = self.conversations_panel._get_participant_name(jid)
+                            name = self.conversations_panel._get_participant_name(
+                                jid, resolve_missing=False
+                            )
                         else:
                             name = ""
                     
@@ -20814,7 +20836,11 @@ class MainWindow(wx.Frame):
             text += f" {preview}"
         chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
         if chat_jid_norm:
-            presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
+            presence_label = self._presence_label_for_chat(
+                chat_jid_norm,
+                chat_jid_norm.endswith("@g.us"),
+                resolve_missing=False,
+            )
             if presence_label:
                 text += f" {presence_label}"
         if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
