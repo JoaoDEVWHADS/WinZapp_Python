@@ -337,6 +337,9 @@ class DatabaseBridge:
             self._db.upsert_status_update(participant, msg)
         )
 
+    def delete_status_update(self, message_id: str) -> int:
+        return self._call(self._db.delete_status_update(message_id))
+
     def delete_expired_status_updates(self, cutoff_ts: int) -> int:
         return self._call(self._db.delete_expired_status_updates(cutoff_ts))
 

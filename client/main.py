@@ -10142,6 +10142,29 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
+    def remove_failed_status_update(self, message_id: str, refresh: bool = True) -> None:
+        """Remove a rejected or reconciled own status from memory and SQLite."""
+        if not message_id:
+            return
+        removed = False
+        for participant in list(getattr(self, "_status_updates", {}).keys()):
+            bucket = self._status_updates.get(participant) or []
+            kept = [m for m in bucket if m.get("key", {}).get("id") != message_id]
+            if len(kept) != len(bucket):
+                removed = True
+                if kept:
+                    self._status_updates[participant] = kept
+                else:
+                    self._status_updates.pop(participant, None)
+        try:
+            self.db.delete_status_update(message_id)
+        except Exception:
+            logging.exception("[status] Failed to delete cached status %s", message_id)
+        if removed and refresh:
+            sp = getattr(getattr(self, "navigation_panel", None), "status_panel", None)
+            if sp:
+                threading.Thread(target=sp._load_statuses, daemon=True).start()
+
     def clear_local_data(self, wipe_metadata: bool = True):
         """Wipe all cached chats, contacts, messages, media, and mapping caches.
 

@@ -835,6 +835,11 @@ class StatusPanel(wx.Panel):
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
         my_statuses, contacts = self._fetch_statuses_from_api()
+        api_ok = getattr(self, "_last_status_api_ok", False)
+        # A successful WhatsApp response is authoritative for own stories.
+        # An empty list must clear stale local optimistic rows.
+        if api_ok:
+            self._reconcile_my_status_cache(my_statuses)
         # Merge, never replace: the API's StatusV3Store may only hold the
         # pages loaded so far, while _status_updates (seeded from the DB at
         # startup) keeps the stories that arrived via status@broadcast
@@ -850,6 +855,34 @@ class StatusPanel(wx.Panel):
             my_statuses = self._merge_status_lists(my_statuses, fb_my)
             contacts = self._merge_status_contacts(contacts, fb_contacts)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
+
+    def _reconcile_my_status_cache(self, remote_my_statuses: list) -> None:
+        """Delete cached own stories absent from authoritative WhatsApp."""
+        mw = self.main_window
+        remote_ids = {
+            (status.get("key") or {}).get("id")
+            for status in remote_my_statuses
+            if isinstance(status, dict)
+        }
+        local_records = [
+            status
+            for bucket in getattr(mw, "_status_updates", {}).values()
+            for status in bucket
+        ]
+        local_my, _ = self._parse_statuses(local_records, mw.i18n)
+        stale_ids = {
+            (status.get("key") or {}).get("id")
+            for status in local_my
+            if isinstance(status, dict)
+        } - remote_ids
+        for message_id in stale_ids:
+            if message_id:
+                mw.remove_failed_status_update(message_id, refresh=False)
+        if stale_ids:
+            logging.info(
+                "[status_panel] Removed %d local own status(es) absent from WhatsApp",
+                len(stale_ids),
+            )
 
     @staticmethod
     def _merge_status_lists(a: list, b: list) -> list:
@@ -914,13 +947,16 @@ class StatusPanel(wx.Panel):
             headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
             resp = api_get(url, headers=headers, timeout=15)
             if resp.status_code not in (200, 201):
+                self._last_status_api_ok = False
                 return [], []
             body = resp.json() or {}
             data = body.get("response") if isinstance(body, dict) else None
         except Exception as exc:
             logging.warning("[status_panel] statuses API failed, falling back to WebSocket cache: %s", exc)
+            self._last_status_api_ok = False
             return [], []
         if not isinstance(data, dict):
+            self._last_status_api_ok = False
             return [], []
 
         ws  = getattr(mw, "ws", None)
@@ -942,6 +978,7 @@ class StatusPanel(wx.Panel):
                 except Exception as exc:
                     logging.warning("[status_panel] failed to normalize API status: %s", exc)
             records.append(wm)
+        self._last_status_api_ok = True
         return self._parse_statuses(records, i18n)
 
     def _parse_statuses(self, items, i18n) -> tuple:
@@ -966,15 +1003,21 @@ class StatusPanel(wx.Panel):
         # status@broadcast entries, which is how WhatsApp encodes them).
         grouped: dict = {}
         for item in items:
-            # A reaction to a status (fromMe or not) arrives through the
-            # exact same status@broadcast channel as a real status update
-            # (on_new_message() in main.py routes any @broadcast message to
-            # _store_status_update() before it ever checks messageType) —
-            # without this it showed up as a bogus extra "story" entry in
-            # this list. It's still available in raw _status_updates for
-            # StatusReactionsDialog to scan; only excluded from becoming a
-            # displayed story here.
-            if item.get("messageType") == "reactionMessage":
+            if not isinstance(item, dict):
+                continue
+            # StatusV3 can retain administrative tombstones after a story is
+            # revoked, deleted or expired. They are not displayable stories.
+            msg_type = str(item.get("messageType") or "")
+            raw_type = str(item.get("type") or "").lower()
+            if msg_type in ("protocolMessage", "reactionMessage") or raw_type in (
+                "revoked", "protocol", "protocolmessage",
+                "reaction", "reactionmessage",
+            ):
+                continue
+            if any(bool(item.get(flag)) for flag in (
+                "isRevoked", "revoked", "isDeleted", "deleted",
+                "isExpired", "expired", "isStatusExpired",
+            )):
                 continue
 
             key = item.get("key", {})

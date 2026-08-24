@@ -643,6 +643,22 @@ class TestStatusUpdates:
         updates = await in_memory_db.get_status_updates()
         assert "a@w" in updates
 
+    async def test_delete_status_update_removes_only_requested_message(self, in_memory_db):
+        for message_id in ("keep", "remove"):
+            await in_memory_db.upsert_status_update("me@w", {
+                "key": {"id": message_id, "participant": "me@w"},
+                "messageTimestamp": 500_000,
+                "messageType": "conversation",
+            })
+
+        deleted = await in_memory_db.delete_status_update("remove")
+
+        assert deleted == 1
+        updates = await in_memory_db.get_status_updates()
+        assert [m["key"]["id"] for m in updates["me@w"]] == ["keep"]
+        assert await in_memory_db.delete_status_update("missing") == 0
+        assert await in_memory_db.delete_status_update("") == 0
+
 
 # =============================================================================
 #  Bulk Import / Export (Migration)
