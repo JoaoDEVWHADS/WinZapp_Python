@@ -28,6 +28,13 @@ class _Stub:
     on_chat_unread_update = MainWindow.on_chat_unread_update
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _remote_read_confirmed = staticmethod(MainWindow._remote_read_confirmed)
+    # Bridges the @lid / phone identities of the incoming event before the
+    # handler looks the chat up — see tests/test_chats_update_lid_resolution.py.
+    _resolve_chat_for_event = MainWindow._resolve_chat_for_event
+    # _locally_read_at is persisted to DB metadata now (it has to survive a
+    # restart — see tests/test_locally_read_at_persisted.py); the real method
+    # is a no-op without a `db` attribute, which this stub deliberately lacks.
+    _persist_locally_read_at = MainWindow._persist_locally_read_at
 
     def __init__(self, chat):
         self.chats = {"5511999999999@s.whatsapp.net": chat}
@@ -98,6 +105,27 @@ class TestStaleServerCountAfterLocalRead:
         stub.on_chat_unread_update(JID, 3)
 
         assert stub.chats[JID]["unreadCount"] == 3
+
+    def test_a_second_stale_update_after_the_read_ack_was_consumed_is_dropped(self):
+        """Reported live: a chat read locally, then one genuinely new message
+        arrives (on_new_message bumps unreadCount 0 -> 1 and _new_since_read to
+        1). The first chats.update after that consumes and pops
+        _locally_read_at (see the `elif read_at_t is not None` branch), which
+        is correct and expected. But a second, later chats.update for the same
+        chat can still arrive — now with no read_at_t left to protect it —
+        reporting an even higher total (e.g. 2) that still counts a message
+        already read locally days earlier. Before this guard, that inflated
+        total was accepted verbatim, which is exactly what pulled an
+        already-read message back into "unread" (first_unread_index() places
+        the separator by counting backwards from unreadCount)."""
+        stub = _Stub(_chat(t=2000))
+        stub.chats[JID]["unreadCount"] = 1
+        stub._new_since_read[JID] = 1
+        # _locally_read_at has no entry for JID — already consumed/popped.
+
+        stub.on_chat_unread_update(JID, 2, previous_unread=1)
+
+        assert stub.chats[JID]["unreadCount"] == 1
 
 class _CP:
     """Conversation panel stub.
@@ -272,3 +300,57 @@ class TestOpenConversationSurvivesSpuriousServerZeros:
         stub.on_chat_unread_update(JID, 0)
 
         assert stub.chats[JID]["unreadCount"] == 0
+
+
+class TestReadOnAnotherDeviceAfterALocalRead:
+    """Reported live: a 1:1 chat read locally, then a new audio arrives, then
+    the user reads it on the phone — WinZapp kept showing "1 mensagem não
+    lida" for it.
+
+    WhatsApp Web reports that read as unreadCount=0 with previousUnreadCount=1,
+    which _remote_read_confirmed() recognizes as a genuine read elsewhere. But
+    the read-ack branch (chat["t"] newer than _locally_read_at) restored the
+    badge from _new_since_read without ever consulting it, treating the
+    confirmed read exactly like the uninformative zero WA-JS emits when it
+    loads a chat into the Store. Groups looked fine because they take the
+    `unread_count < old_count` guard, which already checked _remote_read.
+    """
+
+    def test_a_confirmed_remote_read_clears_a_message_newer_than_the_read_ack(self):
+        chat = _chat(t=2000)
+        chat["unreadCount"] = 1
+        stub = _Stub(chat)
+        stub._locally_read_at[JID] = 1000  # read here first...
+        stub._new_since_read[JID] = 1      # ...then one new message arrived
+
+        # ...and then the phone read it: 1 -> 0.
+        stub.on_chat_unread_update(JID, 0, 1)
+
+        assert stub.chats[JID]["unreadCount"] == 0
+
+    def test_an_uninformative_zero_still_keeps_the_badge(self):
+        """The protection this branch exists for is untouched: a zero with no
+        previous count behind it (WA-JS loading the chat into the Store) must
+        still leave what arrived after the read-ack counted."""
+        chat = _chat(t=2000)
+        chat["unreadCount"] = 1
+        stub = _Stub(chat)
+        stub._locally_read_at[JID] = 1000
+        stub._new_since_read[JID] = 1
+
+        stub.on_chat_unread_update(JID, 0, None)
+
+        assert stub.chats[JID]["unreadCount"] == 1
+
+    def test_a_zero_whose_previous_was_also_zero_keeps_the_badge(self):
+        """previousUnreadCount=0 is the load-time signature, not a read: the
+        count did not fall from anything."""
+        chat = _chat(t=2000)
+        chat["unreadCount"] = 3
+        stub = _Stub(chat)
+        stub._locally_read_at[JID] = 1000
+        stub._new_since_read[JID] = 3
+
+        stub.on_chat_unread_update(JID, 0, 0)
+
+        assert stub.chats[JID]["unreadCount"] == 3

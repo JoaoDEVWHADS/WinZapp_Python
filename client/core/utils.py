@@ -68,6 +68,81 @@ def normalize_for_search(text: str, mode="off") -> str:
     )
 
 
+_UNICODE_LINE_SEPARATORS = {
+    "\u2028",  # LINE SEPARATOR
+    "\u2029",  # PARAGRAPH SEPARATOR
+    "\u0085",  # NEXT LINE (NEL)
+    "\x0b",    # VERTICAL TAB
+    "\x0c",    # FORM FEED
+    "\r",      # lone CR (CRLF handled below, before this set applies)
+}
+
+
+def normalize_line_separators(text) -> str:
+    """Collapse every Unicode line/paragraph separator into plain ``\\n``.
+
+    Rich clipboard sources — Google Docs, Word, websites, Apple apps — copy
+    U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR (and the rarer NEL,
+    VT, FF) where a plain editor stores ``\\n``. A ``wx.TextCtrl`` keeps them
+    verbatim: the native control does not render them as breaks (a paste
+    looks like a single line, and NVDA reads it as one), yet WhatsApp
+    renders U+2029 as a paragraph break on the receiving side. The result is
+    the classic "it looks fine here but arrives full of weird breaks"
+    report. Normalizing to ``\\n`` makes the field, the screen reader and
+    the recipient all agree on the same line structure.
+    """
+    text = (text or "").replace("\r\n", "\n")
+    for sep in _UNICODE_LINE_SEPARATORS:
+        text = text.replace(sep, "\n")
+    return text
+
+
+_FORWARDABLE_SUB_KEYS = (
+    "extendedTextMessage", "audioMessage", "imageMessage",
+    "videoMessage", "documentMessage", "stickerMessage",
+    "locationMessage", "contactMessage", "buttonsMessage",
+    "listMessage",
+)
+
+
+def is_message_forwarded(msg) -> bool:
+    """True when contextInfo.isForwarded is set — a real WhatsApp protocol
+    field present on any forwarded message, from anyone, not only ones this
+    app itself forwarded (WebSocketClient._normalize_wpp_message threads it
+    through from WPPConnect's own Message.isForwarded).
+
+    Shared by ui/conversations.py (to skip offering forward-related actions
+    it doesn't apply to) and main.py's on_new_message() (to make sure a
+    forwarded copy's own contextInfo/key fields — which can carry residual
+    provenance about whoever originally sent the message being forwarded —
+    are never mistaken for identifying WHO SENT THIS COPY)."""
+    if not isinstance(msg, dict):
+        return False
+    top_ctx = msg.get("contextInfo")
+    if isinstance(top_ctx, dict) and top_ctx.get("isForwarded"):
+        return True
+    msg_obj = msg.get("message") or {}
+    if not isinstance(msg_obj, dict):
+        return False
+    for sub_key in _FORWARDABLE_SUB_KEYS:
+        sub = msg_obj.get(sub_key)
+        if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
+            if sub["contextInfo"].get("isForwarded"):
+                return True
+    return False
+
+
+def append_selected_marker(text: str, word: str, position: str, is_selected: bool) -> str:
+    """Add the localized "selected" marker word to a list-row string when
+    *is_selected*, at the configured *position* ("start" or anything else,
+    treated as "end"). Used by both the messages list and the conversations
+    list so a screen-reader user with sound events disabled still gets a
+    persistent, textual cue for which rows are part of the bulk selection."""
+    if not is_selected:
+        return text
+    return f"{word} {text}" if position == "start" else f"{text} {word}"
+
+
 def get_downloads_folder() -> str:
     """Return the current user's Downloads folder.
 
@@ -128,6 +203,9 @@ DEFAULT_SETTINGS = {
         "language": "",
         "notifications_enabled": True,
         "updates_enabled": True,
+        # Alpha channel (one build per commit on main) — opt-in, see
+        # client/updater.py's select_release().
+        "alpha_updates_enabled": False,
         "noise_reduction_enabled": False,
         "first_run": True,
         "autostart": False,
@@ -144,6 +222,10 @@ DEFAULT_SETTINGS = {
     "status": {
         "messages_set_completed": False
     },
+    "calls": {
+        "alerts_enabled": True,
+        "popup_enabled": True
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
@@ -153,7 +235,9 @@ DEFAULT_SETTINGS = {
         "show_listbox_item_count": False,
         "page_up_down_step": 10,
         "self_reference_mode": "eu",
-        "self_reference_custom_word": ""
+        "self_reference_custom_word": "",
+        "show_yesterday_label": True,
+        "show_link_previews": True
     },
     "audio_playback": {
         "audio_default_speed": 1.0
@@ -163,11 +247,16 @@ DEFAULT_SETTINGS = {
         "effects_output_device_name": "",
         "input_device_name": ""
     },
+    "accessibility": {
+        "extended_sr_compat_enabled": True,
+        "sapi_fallback_enabled": True
+    },
     "speech_content": {
         "announce_typing": True,
         "announce_recording": True,
         "speak_active_conv_messages": True,
-        "speak_other_conv_messages": True
+        "speak_other_conv_messages": True,
+        "silence_while_recording": False
     },
     "active_sound_pack": "default",
     "sound_events": {},
@@ -517,20 +606,59 @@ def format_number(string_number):
 
     local = digits[len(cc):]
 
-    if cc == "55":
+    # A Brazilian mobile/landline number is always DDD(2) + 8 or 9 digits —
+    # 10 or 11 digits total after the country code. E.164 codes are
+    # prefix-free (no other country's code starts with "55"), so a genuine
+    # phone number matching "55" here really is Brazilian — but a
+    # non-standard-length id (e.g. a WhatsApp internal identifier that
+    # slipped past the @lid/length guard above, or a malformed contact
+    # entry) can still coincidentally start with "55" digits without being
+    # a real Brazilian number. Forcing the DDD/dash split on it produced a
+    # string that *looked* like a valid Brazilian number even though it
+    # wasn't one — reported live for shared contacts whose actual country
+    # was something else entirely (issue #35). Only apply the Brazil-
+    # specific shape when the length actually fits; anything else falls
+    # through to the plain "+55 <digits>" international format below,
+    # which at least never fabricates a fake area code/dash grouping.
+    if cc == "55" and len(local) in (10, 11):
         ddd = local[:2]
         rest = local[2:]
-        if not ddd:
-            return f"+{cc}"
-        if not rest:
-            return f"+{cc} {ddd}"
         if len(rest) == 9:
             return f"+{cc} {ddd} {rest[:5]}-{rest[5:]}"
-        split = max(len(rest) - 4, 1)
-        return f"+{cc} {ddd} {rest[:split]}-{rest[split:]}"
+        return f"+{cc} {ddd} {rest[:4]}-{rest[4:]}"
 
-    # Generic international
+    # Generic international (also covers "55" matches of the wrong length)
     return f"+{cc} {local}" if local else f"+{cc}"
+
+
+def contact_dedup_key(main_window, jid: str) -> str:
+    """Canonical key identifying *the same person* across JID formats.
+
+    The same contact can be stored in main_window.contacts under @lid, @c.us
+    or @s.whatsapp.net (and with the Brazilian 8- vs 9-digit mobile variant),
+    so keying a dedup on the raw JID string lets the same person appear more
+    than once — reported live in the "attach a contact" picker as every
+    contact showing up twice, once in international format and once in
+    Brazilian formatting (issue #70). Collapse all the formats the app
+    already knows how to unify: device suffix stripped, @c.us →
+    @s.whatsapp.net, @lid bridged to its phone number, and the 55-prefixed
+    9th digit dropped. Groups keep their full unique JID.
+    """
+    normalize_jid = getattr(main_window, "_normalize_jid", None)
+    norm = normalize_jid(jid) if normalize_jid else jid
+    if norm.endswith("@g.us"):
+        return norm
+    if norm.endswith("@lid"):
+        lid_map = getattr(main_window, "_lid_to_phone", {}) or {}
+        phone = lid_map.get(norm, "")
+        if phone:
+            norm = phone
+    local = norm.split("@", 1)[0]
+    # Brazilian mobile 8/9-digit interchangeability: 5511999999999 ↔ 551199999999
+    if local.startswith("55") and len(local) == 13 and local[4] == "9":
+        local = local[:4] + local[5:]
+    return local
+
 
 def parse_bool_flag(value):
     """Interpret a WPPConnect boolean-ish field, or None when it says nothing.
@@ -670,3 +798,92 @@ def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
     if adjusted < 0:
         adjusted = -1
     return offset, adjusted
+
+
+def reaction_targets_status(msg: dict) -> bool:
+    """True when this reaction is aimed at a status (story), not a chat message.
+
+    A reaction carries the key of the message it reacts to, and for a status
+    that key's remoteJid is status@broadcast. The distinction matters because a
+    status has no counterpart in any conversation: it is kept in
+    _status_updates for the Status tab, so a reaction to one has nothing to
+    attach itself to and disappears the moment the conversation is rebuilt.
+    """
+    if msg.get("messageType") != "reactionMessage":
+        return False
+    target = ((msg.get("message") or {}).get("reactionMessage") or {}).get("key") or {}
+    return str(target.get("remoteJid") or "").endswith("@broadcast")
+
+
+def plan_row_updates(old_rows: list, new_rows: list, max_ops: "int | None" = None):
+    """Plan how to turn the list-control rows *old_rows* into *new_rows* using
+    only per-row deletes and inserts, instead of clearing the whole control.
+
+    Both arguments are lists of row identities (WinZapp passes chat JIDs, which
+    are unique within a list). Returns a list of ``("delete", index)`` /
+    ``("insert", index)`` operations to apply **in order**, each index being
+    valid against the control as it is being mutated. Returns None when the
+    change isn't worth doing incrementally — the caller then rebuilds.
+
+    Why this exists: a new message (or a reaction, or a read receipt) reorders
+    the chat list, usually moving exactly one chat up. Rebuilding the whole
+    wx.ListCtrl for that is O(rows) native calls plus a DeleteAllItems, which
+    on an account with hundreds of chats is slow enough to see, and it hands
+    screen readers a completely new list every time. One chat moving becomes
+    two operations here regardless of how long the list is.
+
+    The plan is greedy rather than provably minimal: rows that vanished are
+    deleted first, then the remainder is walked against *new_rows* and any row
+    that isn't already in place is moved (delete + insert) or inserted. For the
+    shapes that actually occur — one chat moving, one chat appearing, one chat
+    disappearing — that is already the minimum.
+
+    *max_ops* caps how much churn is accepted before None is returned; it
+    defaults to a third of the new length (minimum 4), past which a rebuild is
+    both simpler and no slower.
+    """
+    if old_rows == new_rows:
+        return []
+    if max_ops is None:
+        max_ops = max(4, len(new_rows) // 3)
+
+    new_set = set(new_rows)
+    # Duplicate identities would make index() below ambiguous and the plan
+    # wrong; the caller's rows are unique, so bail rather than corrupt the list.
+    if len(new_set) != len(new_rows) or len(set(old_rows)) != len(old_rows):
+        return None
+
+    work = list(old_rows)
+    ops: list = []
+
+    # 1. Drop rows that are gone. Walking forward and popping in place keeps
+    #    every recorded index valid at the moment it is applied.
+    i = 0
+    while i < len(work):
+        if work[i] not in new_set:
+            ops.append(("delete", i))
+            work.pop(i)
+        else:
+            i += 1
+
+    # 2. Align what's left against the target order. Everything before
+    #    target_idx already matches, and identities are unique, so a row still
+    #    present in `work` can only be at or after target_idx.
+    for target_idx, row in enumerate(new_rows):
+        if target_idx < len(work) and work[target_idx] == row:
+            continue
+        try:
+            src = work.index(row, target_idx)
+        except ValueError:
+            src = None
+        if src is not None:
+            ops.append(("delete", src))
+            work.pop(src)
+        ops.append(("insert", target_idx))
+        work.insert(target_idx, row)
+        if len(ops) > max_ops:
+            return None
+
+    if len(ops) > max_ops:
+        return None
+    return ops

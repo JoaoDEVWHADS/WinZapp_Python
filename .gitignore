@@ -18,6 +18,7 @@ client/data/voice_messages/
 client/data/log/
 # Per-account and install-global runtime data (multi-account: one subfolder per
 # account id holding its own media/voice_messages/db/token — never committed)
+client/WinZapp.spec
 client/data/accounts/
 client/data/global/
 client/logs/

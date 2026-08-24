@@ -9,7 +9,9 @@
     "general": {
         "language": "",
         "notifications_enabled": true,
+        "keep_muted_chats_silent_when_open": true,
         "updates_enabled": true,
+        "alpha_updates_enabled": false,
         "noise_reduction_enabled": false,
         "first_run": true,
         "autostart": false,
@@ -22,6 +24,10 @@
     "status": {
         "messages_set_completed": false
     },
+    "calls": {
+        "alerts_enabled": true,
+        "popup_enabled": true
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
@@ -31,7 +37,13 @@
         "show_listbox_item_count": false,
         "page_up_down_step": 10,
         "self_reference_mode": "eu",
-        "self_reference_custom_word": ""
+        "self_reference_custom_word": "",
+        "show_delivery_status_in_chat_list": true,
+        "preserve_typed_text_as_attachment_caption": true,
+        "bulk_action_shortcuts": true,
+        "auto_focus_next_audio": true,
+        "selected_announcement_position": "end",
+        "show_yesterday_label": true
     },
     "audio_playback": {
         "audio_default_speed": 1.0
@@ -40,6 +52,10 @@
         "output_device_name": "",
         "input_device_name": "",
         "effects_output_device_name": ""
+    },
+    "accessibility": {
+        "extended_sr_compat_enabled": true,
+        "sapi_fallback_enabled": true
     },
     "speech_content": {
         "announce_typing": true,

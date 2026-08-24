@@ -379,6 +379,7 @@ SOUND_EVENTS: list[tuple[str, str]] = [
     ("message_current", "message_current.ogg"),
     ("message_foreground", "message_foreground.ogg"),
     ("message_background", "message_background.ogg"),
+    ("call_incoming", "call_incoming.ogg"),
     ("message_sent", "message_sent.ogg"),
     ("audio_transition_next", "audio_transition_next.ogg"),
     ("audio_transition_end", "audio_transition_end.ogg"),
@@ -601,7 +602,8 @@ class NullSound:
 
 
 class Sound(stream.FileStream):
-    def __init__(self, sound_system, file, event_key=None, pack_id=None, *args, **kwargs):
+    def __init__(self, sound_system, file, event_key=None, pack_id=None,
+                 looping=False, *args, **kwargs):
         self.sound_system = sound_system
         self.event_key = event_key
         # Which soundpack this event's enabled/path settings live under —
@@ -612,6 +614,8 @@ class Sound(stream.FileStream):
             self.file = os.path.join(self.sound_system.sound_dir, file)
         else: #sound is coming from memory
             self.file = file
+        if looping:
+            kwargs["flags"] = kwargs.get("flags", 0) | stream.BASS_SAMPLE_LOOP
         super().__init__(*args, file=self.file, **kwargs)
 
     def play(self):
@@ -638,7 +642,15 @@ class Sound(stream.FileStream):
                     self.set_device(dev)
                 except Exception as exc:
                     logging.debug("[sound_system] effect set_device(%s) failed: %s", dev, exc)
-            super().play()
+            # restart=True: sound_lib's Channel.play() defaults to False,
+            # which resumes from wherever BASS_ChannelStop above left the
+            # read position instead of seeking back to 0. Two consecutive
+            # play() calls close together (e.g. two messages arriving back
+            # to back) would stop the still-playing channel and then resume
+            # it near its own tail — audibly indistinguishable from a single
+            # play, which is exactly the "sounds like only one message
+            # arrived" bug this was reported as.
+            super().play(restart=True)
         except Exception:
             # The configured output device may have gone away mid-session
             # (unplugged, disabled) after having worked fine earlier — fall
@@ -659,10 +671,13 @@ class Sound(stream.FileStream):
                     pass
 
 
-def load_sound(sound_system, file, event_key=None, pack_id=None):
+def load_sound(sound_system, file, event_key=None, pack_id=None, looping=False):
     """Create a Sound, returning NullSound if the file can't be opened."""
     try:
-        return Sound(sound_system, file, event_key=event_key, pack_id=pack_id)
+        return Sound(
+            sound_system, file, event_key=event_key, pack_id=pack_id,
+            looping=looping,
+        )
     except Exception as e:
         logging.warning("[sound_system] Could not load sound '%s': %s", file, e)
         return NullSound()

@@ -53,7 +53,11 @@ class TestNudgeWhatsappSocketStream:
         assert len(calls) == 1
         url, headers, timeout = calls[0]
         assert url == "http://127.0.0.1:6300/api/test-token/reconnect-socket-stream"
-        assert headers == {"Authorization": "Bearer test-token"}
+        assert headers["Authorization"] == "Bearer test-token"
+        # Every call now carries a correlation id the Node side reuses in its
+        # own log line (core/api_client.py). Asserting the whole dict equal
+        # would break on that by design.
+        assert headers["X-Request-Id"]
         assert timeout == 10
 
     def test_never_raises_when_the_request_fails(self, monkeypatch):

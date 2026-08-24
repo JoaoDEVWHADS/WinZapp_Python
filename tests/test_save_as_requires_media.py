@@ -38,6 +38,7 @@ class _FakeMainWindow:
     def __init__(self):
         self.i18n = _FakeI18n()
         self.outputs = []
+        self.settings = {"user_interface": {}}
 
     def output(self, text, interrupt=False):
         self.outputs.append(text)
@@ -60,11 +61,13 @@ class _Stub:
 
     _is_separator = ConversationsPanel._is_separator
     _on_action_save_as = ConversationsPanel._on_action_save_as
+    _bulk_shortcuts_enabled = ConversationsPanel._bulk_shortcuts_enabled
 
     def __init__(self, sorted_messages, selected=0):
         self._sorted_messages = sorted_messages
         self.messages_list = _FakeMessagesList(selected)
         self.main_window = _FakeMainWindow()
+        self.selected_messages = set()
 
 
 def _msg(msg_type, text="oi"):
@@ -84,7 +87,6 @@ class TestMessagesWithNoFile:
         "extendedTextMessage",   # text with a link/quote
         "stickerMessage",
         "locationMessage",
-        "contactMessage",
         "reactionMessage",
         "protocolMessage",       # system events
         "groupNotification",
@@ -110,6 +112,22 @@ class TestMessagesWithNoFile:
 
         panel._on_action_save_as(None)
 
+        assert panel.main_window.outputs == []
+
+
+class TestContactMessageRoutesToSaveContactInstead:
+    """contactMessage has a file-less "save" of its own — adding the contact
+    locally (see tests/test_contact_message_actions.py) — so it must never
+    fall into the generic "nothing to save" refusal above."""
+
+    def test_gets_routed_to_save_contact_message(self):
+        calls = []
+        panel = _Stub([_msg("contactMessage")])
+        panel._on_save_contact_message = lambda event: calls.append(event)
+
+        panel._on_action_save_as(None)
+
+        assert calls == [None]
         assert panel.main_window.outputs == []
 
 

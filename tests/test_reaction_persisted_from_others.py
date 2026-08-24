@@ -50,6 +50,9 @@ class _FakeMessagesList:
     def Append(self, row):
         self.items.append(row[0])
 
+    def GetFocusedItem(self):
+        return -1
+
     def SetItemText(self, pos, text):
         self.items[pos] = text
 
@@ -84,6 +87,8 @@ class _FakeMainWindow:
 
 class _Stub:
     on_incoming_message      = ConversationsPanel.on_incoming_message
+    apply_incoming_reaction  = ConversationsPanel.apply_incoming_reaction
+    _matches_open_conversation = ConversationsPanel._matches_open_conversation
     _persist_reaction_record = ConversationsPanel._persist_reaction_record
     _reactor_key_from_msg    = ConversationsPanel._reactor_key_from_msg
     _is_separator            = ConversationsPanel._is_separator

@@ -57,6 +57,7 @@ class _MainWindowStub:
     _resolve_contact_name      = MainWindow._resolve_contact_name
     _last_msg_preview          = MainWindow._last_msg_preview
     _track_last_reaction       = MainWindow._track_last_reaction
+    _reconstruct_last_reactions_from_records = MainWindow._reconstruct_last_reactions_from_records
     _counts_as_last_message    = classmethod(MainWindow._counts_as_last_message.__func__)
     _PREVIEW_MESSAGE_TYPES     = MainWindow._PREVIEW_MESSAGE_TYPES
 

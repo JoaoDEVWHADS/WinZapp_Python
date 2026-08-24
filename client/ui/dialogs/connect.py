@@ -5,6 +5,7 @@ import threading
 import socketio
 import wx
 import requests
+from core.api_client import api_get, api_post, redact_api_url
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from app_paths import data_path, resource_path
@@ -70,7 +71,7 @@ class Connect:
         headers = self._wpp_headers(use_global_key=True)
 
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            response = api_post(url, json=payload, headers=headers, timeout=15)
             # 200, 201 are success. 400 might mean session already active which is fine.
             if response.status_code in (200, 201, 400):
                 return token
@@ -133,7 +134,7 @@ class Connect:
                     url = (
                         f"{mw.wpp_server}:{mw.wpp_port}/api/{tok}/close-session"
                     )
-                    requests.post(
+                    api_post(
                         url,
                         headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
                         timeout=5,
@@ -179,7 +180,7 @@ class Connect:
                 f":{self.main_window.wpp_port}/api/{_session_name}/check-connection-session"
             )
             headers = {"Authorization": f"Bearer {_bearer}", "Content-Type": "application/json"}
-            check_resp = requests.get(check_url, headers=headers, timeout=5)
+            check_resp = api_get(check_url, headers=headers, timeout=5)
             is_paired = private_info.get("paired", False)
             if check_resp.status_code in (401, 403):
                 logging.warning("[check_connection_status] check-connection-session returned unauthorized (HTTP %s).", check_resp.status_code)
@@ -236,7 +237,7 @@ class Connect:
                         _s = token.split(':')[0]
                         def _close(s=_s):
                             try:
-                                requests.post(
+                                api_post(
                                     f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
                                     headers=self._wpp_headers(use_global_key=True),
                                     timeout=5,
@@ -252,7 +253,7 @@ class Connect:
                 f"{self.main_window.wpp_server}"
                 f":{self.main_window.wpp_port}/api/{token}/status-session"
             )
-            resp = requests.get(url, headers=headers, timeout=5)
+            resp = api_get(url, headers=headers, timeout=5)
             if resp.status_code in (401, 403):
                 logging.warning("[check_connection_status] status-session returned unauthorized (HTTP %s).", resp.status_code)
                 if is_paired:
@@ -333,7 +334,7 @@ class Connect:
                     _s = token.split(':')[0]
                     def _close(s=_s):
                         try:
-                            requests.post(
+                            api_post(
                                 f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
                                 headers=self._wpp_headers(use_global_key=True),
                                 timeout=5,
@@ -533,8 +534,9 @@ class Connect:
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
-                    logging.info("[_close_active_session] Sending close-session request to: %s", close_url)
-                    resp = requests.post(close_url, headers=headers, timeout=5)
+                    logging.info("[_close_active_session] Sending close-session request to: %s",
+                                 redact_api_url(close_url))
+                    resp = api_post(close_url, headers=headers, timeout=5)
                     logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
                     logging.error("[_close_active_session] Error sending close-session request: %s", e)
@@ -601,7 +603,7 @@ class Connect:
             def _generate_hash(raw: str) -> str:
                 """Call generate-token and return 'raw:hash'. Raises on failure."""
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
-                res = requests.post(url, timeout=10)
+                res = api_post(url, timeout=10)
                 if res.status_code in (200, 201):
                     hash_token = res.json().get("token") or ""
                     if hash_token:
@@ -642,7 +644,7 @@ class Connect:
                 _prev_session = _prev_token.split(':')[0]
                 def _close_prev():
                     try:
-                        requests.post(
+                        api_post(
                             f"{server_base}/api/{_prev_session}/close-session",
                             headers=self._wpp_headers(use_global_key=True),
                             timeout=5
@@ -686,7 +688,7 @@ class Connect:
                 f":{self.main_window.wpp_port}/api/{self.main_window.token}/status-session"
             )
             try:
-                response = requests.get(
+                response = api_get(
                     url,
                     headers=self._wpp_headers(),
                     timeout=5,
@@ -933,7 +935,7 @@ class Connect:
                     raw_token = self.generate_random_token()
                     url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{raw_token}/{self.main_window.wpp_api_key}/generate-token"
                     try:
-                        res = requests.post(url, timeout=10)
+                        res = api_post(url, timeout=10)
                         if res.status_code in (200, 201):
                             hash_token = res.json().get("token")
                             self.main_window.token = f"{raw_token}:{hash_token}"
@@ -962,7 +964,7 @@ class Connect:
                             f"{self.main_window.wpp_server}"
                             f":{self.main_window.wpp_port}/api/{_session_name}/close-session"
                         )
-                        requests.post(close_url, headers=_close_headers, timeout=10)
+                        api_post(close_url, headers=_close_headers, timeout=10)
                         logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code: %s", _session_name)
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
@@ -1006,7 +1008,7 @@ class Connect:
 
                 def _call_start_session():
                     try:
-                        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+                        resp = api_post(url, json=payload, headers=headers, timeout=120)
                         # Diagnostics only — deliberately does not change the
                         # control flow below (the fallback event.set() still
                         # covers a non-2xx response exactly as before): this
@@ -1422,8 +1424,9 @@ class Connect:
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
-                    logging.info("[cleanup_pairing_session] Sending close-session request to: %s", close_url)
-                    resp = requests.post(close_url, headers=headers, timeout=5)
+                    logging.info("[cleanup_pairing_session] Sending close-session request to: %s",
+                                 redact_api_url(close_url))
+                    resp = api_post(close_url, headers=headers, timeout=5)
                     logging.info("[cleanup_pairing_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
                     logging.error("[cleanup_pairing_session] Error sending close-session request: %s", e)

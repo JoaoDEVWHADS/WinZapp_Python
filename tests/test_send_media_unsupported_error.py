@@ -45,6 +45,10 @@ class _FakeResponse:
 class _Stub:
     send_media_attachment = MainWindow.send_media_attachment
     _check_wa_connection_closed = MainWindow._check_wa_connection_closed
+    # video sends now probe for ffmpeg (see core/video_transcode.py) even
+    # for an already-compatible .mp4, which short-circuits before actually
+    # needing a working binary — real staticmethod is fine to reuse as-is.
+    _find_api_ffmpeg = staticmethod(MainWindow._find_api_ffmpeg)
 
     def __init__(self):
         self.wpp_server = "http://127.0.0.1"

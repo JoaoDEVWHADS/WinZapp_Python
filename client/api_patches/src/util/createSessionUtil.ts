@@ -224,12 +224,17 @@ async function restoreStatusSender(page: any, logger: any, session: string) {
 
           sendModule.encryptAndSendMsg = async function (
             sendMsgRecord: any,
-            metricsReporter: any
+            metricsReporter: any,
+            ...additionalArgs: any[]
           ) {
             if (
               sendMsgRecord?.data?.to?.toString?.() !== 'status@broadcast'
             ) {
-              return original.apply(this, arguments as any);
+              return original.apply(this, [
+                sendMsgRecord,
+                metricsReporter,
+                ...additionalArgs,
+              ]);
             }
 
             await sendStatus({
@@ -769,6 +774,7 @@ export default class CreateSessionUtil {
     }
 
     await this.onUnreadCountChanged(client, req);
+    await this.onIncomingCallDirect(client, req);
   }
 
   /**
@@ -791,6 +797,16 @@ export default class CreateSessionUtil {
    * `WPP.on` lives on the page and is re-injected fresh on every WhatsApp
    * Web reload, same as the msgKey._serialized shim above — re-install on
    * 'load' too, or the first reload silently drops this listener.
+   *
+   * The install itself polls (same setInterval pattern as the
+   * MsgKey._serialized/status-sender shims above), instead of trusting the
+   * single attempt the first version of this patch made: wireListeners()
+   * runs before isConnected() is confirmed, so window.WPP routinely isn't
+   * injected yet at that point, and WhatsApp Web's SPA never fires a second
+   * 'load' once connected — so a failed first try used to mean the listener
+   * never existed for the rest of the session. Measured live: zero
+   * chats-update events for unreadCount over 24+ minutes of active message
+   * traffic with the single-attempt version.
    */
   async onUnreadCountChanged(client: WhatsAppServer, req: Request) {
     try {
@@ -812,70 +828,113 @@ export default class CreateSessionUtil {
     const installListener = () => {
       client.page
         .evaluate(() => {
-          const WPP = (window as any).WPP;
-          if (
-            !WPP ||
-            !WPP.on ||
-            (window as any).__winzappUnreadListenerInstalled
-          ) {
-            return;
-          }
-          (window as any).__winzappUnreadListenerInstalled = true;
-          WPP.on('chat.unread_count_changed', (evt: any) => {
+          // Everything in here is wrapped, and the "installed" flag is only
+          // set once WPP.on() has actually returned: `WPP.on` is foreign,
+          // minified code that can throw even once the `!WPP.on` guard has
+          // passed (wa-js present, emitter not bootstrapped). Marking the
+          // context as installed first would leave it permanently claiming a
+          // listener it never registered, and letting the throw escape is
+          // worse still — on the first attempt it rejects the whole evaluate
+          // so the retry below is never even scheduled, and from inside the
+          // retry it skips clearInterval(), leaving a timer firing every 500ms
+          // for the life of the page. Same shape as restoreStatusSender above,
+          // for the same reason.
+          const install = () => {
             try {
-            const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
-            if (!chatId) return;
-            // The count this chat held BEFORE the change, forwarded so the
-            // client can tell a real read apart from a meaningless zero.
-            // A chat merely being loaded into the Store reports unreadCount=0
-            // with nothing behind it, and is indistinguishable from "the user
-            // just read this chat on their phone" unless you know whether the
-            // count actually fell from something.
-            //
-            // Measured against a live session: the field really is a plain
-            // number, matching wa-js's own typing. Three consecutive messages
-            // in one group came through as unreadCount 1/2/3 with
-            // previousUnreadCount 0/1/2 — tracking exactly one step behind.
-            // The suspicion it might be Backbone's options object (wa-js
-            // emits it straight from the Store's `change:unreadCount`
-            // callback, whose third argument is options in every other
-            // handler of that shape) did not hold. The `.previous()` fallback
-            // stays anyway: it costs nothing, and it is what keeps this
-            // working if a future wa-js changes the payload — silently, since
-            // nothing else here would notice. Neither being a number sends
-            // null, and the client then keeps its own conservative count.
-            // Deriving `previous` must never be able to suppress the event
-            // itself: the unread count is the payload that matters and the
-            // previous value is an extra, so it is computed defensively and
-            // the emit happens regardless. Reading `.previous` off a Store
-            // model is a property access on foreign, minified code that can
-            // throw or be a getter with side effects, and a throw anywhere in
-            // this callback silently takes the whole listener down — the
-            // client then stops being told about unread counts at all, with
-            // nothing in any log to say so. Measured, not hypothetical: an
-            // earlier version of this block computed `previous` inline and
-            // the chats-update stream stopped dead.
-            let previous: any = null;
-            try {
-              const raw = evt?.previousUnreadCount;
-              if (typeof raw === 'number') {
-                previous = raw;
-              } else if (typeof evt?.chat?.previous === 'function') {
-                const p = evt.chat.previous('unreadCount');
-                previous = typeof p === 'number' ? p : null;
+            const WPP = (window as any).WPP;
+            if (!WPP || !WPP.on) return false;
+            if ((window as any).__winzappUnreadListenerInstalled) return true;
+            WPP.on('chat.unread_count_changed', (evt: any) => {
+              try {
+              const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
+              if (!chatId) return;
+                  // The count this chat held BEFORE the change, forwarded so the
+                  // client can tell a real read apart from a meaningless zero.
+                  // A chat merely being loaded into the Store reports unreadCount=0
+                  // with nothing behind it, and is indistinguishable from "the user
+                  // just read this chat on their phone" unless you know whether the
+                  // count actually fell from something.
+                  //
+                  // Measured against a live session: the field really is a plain
+                  // number, matching wa-js's own typing. Three consecutive messages
+                  // in one group came through as unreadCount 1/2/3 with
+                  // previousUnreadCount 0/1/2 — tracking exactly one step behind.
+                  // The suspicion it might be Backbone's options object (wa-js
+                  // emits it straight from the Store's `change:unreadCount`
+                  // callback, whose third argument is options in every other
+                  // handler of that shape) did not hold. The `.previous()` fallback
+                  // stays anyway: it costs nothing, and it is what keeps this
+                  // working if a future wa-js changes the payload — silently, since
+                  // nothing else here would notice. Neither being a number sends
+                  // null, and the client then keeps its own conservative count.
+                  // Deriving `previous` must never be able to suppress the event
+                  // itself: the unread count is the payload that matters and the
+                  // previous value is an extra, so it is computed defensively and
+                  // the emit happens regardless. Reading `.previous` off a Store
+                  // model is a property access on foreign, minified code that can
+                  // throw or be a getter with side effects, and a throw anywhere in
+                  // this callback silently takes the whole listener down — the
+                  // client then stops being told about unread counts at all, with
+                  // nothing in any log to say so. Measured, not hypothetical: an
+                  // earlier version of this block computed `previous` inline and
+                  // the chats-update stream stopped dead.
+              let previous: any = null;
+              try {
+                const raw = evt?.previousUnreadCount;
+                if (typeof raw === 'number') {
+                  previous = raw;
+                } else if (typeof evt?.chat?.previous === 'function') {
+                  const p = evt.chat.previous('unreadCount');
+                  previous = typeof p === 'number' ? p : null;
+                }
+              } catch (e) {
+                previous = null;
               }
+              (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount, previous);
+              } catch (e) {
+                // Anything unexpected in here costs at most this one event.
+                // Never the listener: WhatsApp Web's own objects are foreign
+                // and minified, and losing this stream means unread counts
+                // silently stop updating everywhere in the app.
+              }
+            });
+            (window as any).__winzappUnreadListenerInstalled = true;
+            return true;
             } catch (e) {
-              previous = null;
+              return false;
             }
-            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount, previous);
-            } catch (e) {
-              // Anything unexpected in here costs at most this one event.
-              // Never the listener: WhatsApp Web's own objects are foreign
-              // and minified, and losing this stream means unread counts
-              // silently stop updating everywhere in the app.
+          };
+          if (install()) return 'installed';
+          // wa-js is injected asynchronously, so the first try above usually
+          // finds no window.WPP at all — poll instead of giving up, exactly
+          // like the MsgKey._serialized and status sender shims. See this
+          // method's own doc comment for why a single attempt was never
+          // enough here.
+          let tries = 0;
+          const timer = setInterval(() => {
+            if (install() || ++tries > 60) {
+              clearInterval(timer);
+              // The evaluate below can only ever log 'scheduled' — it returns
+              // long before this loop resolves — so without this line the log
+              // cannot tell "installed three seconds later" apart from "gave
+              // up after 30s and this session will never see an unread event",
+              // which is exactly the blind spot that let the single-attempt
+              // version go unnoticed for 24 minutes. The page console is
+              // already bridged into log.log for anything tagged
+              // '[browser-evaluate]' (see the page.on('console') handler where
+              // the client is created).
+              console.log(
+                (window as any).__winzappUnreadListenerInstalled
+                  ? `[browser-evaluate] onUnreadCountChanged listener: installed after ${tries} retries`
+                  : '[browser-evaluate] onUnreadCountChanged listener: GAVE UP after 60 retries — wa-js never appeared, unread counts will not update'
+              );
             }
-          });
+          }, 500);
+          return 'scheduled (wa-js not ready yet)';
         })
+        .then((result: string) =>
+          req.logger.info(`[${client.session}] onUnreadCountChanged listener: ${result}`)
+        )
         .catch((e: any) =>
           req.logger.warn(
             `[onUnreadCountChanged] install failed: ${e?.message || e}`
@@ -887,6 +946,377 @@ export default class CreateSessionUtil {
     // starts undefined again along with everything else wa-js re-injects), so
     // re-running installListener() here is exactly the reinstall the reload
     // needs — no separate reset step required.
+    client.page.on('load', installListener);
+    installListener();
+  }
+
+  /**
+   * WinZapp patch: detect incoming WhatsApp calls by injecting a listener
+   * directly into the WhatsApp Web page via page.evaluate, bypassing
+   * wppconnect's own client.onIncomingCall() wrapper which stopped working
+   * after a WhatsApp Web VoIP stack change (wa-js 4.5.0 bug, fixed in 4.6.0).
+   *
+   * Uses the same page.exposeFunction + page.evaluate pattern as
+   * onUnreadCountChanged above. Two detection layers are installed:
+   *
+   *   1. WPP.on('call.incoming_call') — the wa-js event itself, in case the
+   *      issue is only in wppconnect's wrapper and not in wa-js's internal
+   *      registration.
+   *   2. Direct Store access — if WPP exposes the internal CallStore/CallCollection,
+   *      we hook its 'add' event directly, bypassing wa-js's event plumbing
+   *      entirely.
+   *
+   * If both layers fire for the same call, the Python side receives two
+   * events. This is harmless: the sound plays idempotently and the toast
+   * deduplicates by nature (Windows suppresses identical toasts within a
+   * short window).
+   *
+   * If neither layer works (WhatsApp changed too much), nothing breaks —
+   * every call is wrapped in try/catch and failures are logged.
+   */
+  async onIncomingCallDirect(client: WhatsAppServer, req: Request) {
+    try {
+      await client.page.exposeFunction(
+        '__winzappOnIncomingCall',
+        (
+          event: string,
+          state: string,
+          peerJid: string,
+          callId: string,
+          isVideo: boolean,
+          isGroup: boolean,
+          groupJid: string,
+          callTimestamp: number,
+          observedAt: number
+        ) => {
+          req.io.emit('incomingcall', {
+            session: client.session,
+            data: {
+              event: event,
+              state: state,
+              peerJid: peerJid,
+              id: callId,
+              isVideo: isVideo,
+              isGroup: isGroup,
+              groupJid: groupJid,
+              timestamp: callTimestamp,
+              observedAt: observedAt,
+            },
+          });
+        }
+      );
+    } catch (e) {
+      // exposeFunction throws if a prior session already registered this
+      // name on the same page (e.g. a reconnect reusing the browser) —
+      // harmless, the existing binding still works.
+    }
+
+    const installListener = () => {
+      // CallStore is hydrated from persisted WhatsApp Web state at startup.
+      // Its `add` event therefore does not necessarily mean "a call started
+      // now". Refresh the boundary on every page load and reject older calls.
+      const listenerStartedAt = Date.now();
+      client.page
+        .evaluate((listenerStartedAt: number) => {
+          const WPP = (window as any).WPP;
+          if (
+            !WPP ||
+            !WPP.on ||
+            (window as any).__winzappIncomingCallInstalled
+          ) {
+            return;
+          }
+          (window as any).__winzappIncomingCallInstalled = true;
+
+          // WA-JS 4.5 only exposes the incoming offer publicly. Later states
+          // live in CallStore, and some WhatsApp builds mutate them without
+          // firing the expected Backbone event, so retain and poll by call id.
+          const trackedCalls = new Map<string, any>();
+          const ignoredHistoricalCallIds = new Set<string>();
+          const CALL_START_GRACE_MS = 5000;
+          const stores = [
+            WPP?.whatsapp?.CallStore,
+            WPP?.whatsapp?.CallCollection,
+            (window as any).Store?.Call,
+          ].filter((store, index, all) => store && all.indexOf(store) === index);
+          const callIdOf = (call: any) =>
+            String(call?.id?._serialized || call?.id || '');
+          const groupJidOf = (call: any) =>
+            String(
+              call?.groupJid?._serialized ||
+              call?.groupJid?.toString?.() ||
+              ''
+            );
+          const callStateOf = (call: any) => {
+            const raw = String(
+              call?.getState?.() || call?.state || call?.get?.('state') || ''
+            );
+            // WhatsApp Web 2.3000 may return its newer numeric VoIP enum even
+            // though WA-JS 4.5 types still advertise strings. ReceivedCall (3)
+            // and ReceivedCallWithoutOffer (8) both mean it is still ringing.
+            const numericStates: Record<string, string> = {
+              '0': 'NONE',
+              '1': 'CALLING',
+              '2': 'PREACCEPT_RECEIVED',
+              '3': 'INCOMING_RING',
+              '4': 'ACCEPT_SENT',
+              '5': 'ACCEPT_RECEIVED',
+              '6': 'ACTIVE',
+              '7': 'HANDLED_REMOTELY',
+              '8': 'INCOMING_RING',
+              '9': 'REJOINING',
+              '10': 'LINK',
+              '11': 'CONNECTED_LONELY',
+              '12': 'PRE_CALLING',
+              '13': 'ENDED',
+              '14': 'CALL_B_STARTING',
+            };
+            return numericStates[raw] || raw;
+          };
+          const callTimestampOf = (call: any) => {
+            const raw =
+              call?.offerTime ??
+              call?.timestamp ??
+              call?.t ??
+              call?.startTime ??
+              call?.createdAt ??
+              call?.get?.('offerTime') ??
+              call?.get?.('timestamp') ??
+              call?.get?.('t') ??
+              0;
+            const numeric = Number(raw);
+            if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+            if (numeric >= 1e15) return Math.floor(numeric / 1000);
+            if (numeric >= 1e12) return Math.floor(numeric);
+            if (numeric >= 1e9) return Math.floor(numeric * 1000);
+            return 0;
+          };
+          const isHistoricalIncomingCall = (call: any, source: string) => {
+            const id = callIdOf(call);
+            if (id && ignoredHistoricalCallIds.has(id)) return true;
+            const timestamp = callTimestampOf(call);
+            const receivedWhileOffline =
+              call?.offerReceivedWhileOffline === true ||
+              call?.get?.('offerReceivedWhileOffline') === true;
+            const predatesListener =
+              timestamp > 0 &&
+              timestamp < listenerStartedAt - CALL_START_GRACE_MS;
+            // A timestamp-less Store add is ambiguous because this collection
+            // also hydrates persisted models. Fail closed; the public event
+            // still covers a genuine live call when WA-JS provides it.
+            const timestampLessStoreEvent = !timestamp && source === 'store';
+            if (
+              receivedWhileOffline ||
+              predatesListener ||
+              timestampLessStoreEvent
+            ) {
+              if (id) ignoredHistoricalCallIds.add(id);
+              return true;
+            }
+            return false;
+          };
+          const emitCall = (event: string, call: any, state = '') => {
+            const peerJid =
+              call?.peerJid?._serialized ||
+              call?.peerJid?.toString?.() ||
+              call?.sender?._serialized ||
+              call?.sender?.toString?.() ||
+              call?.from?._serialized ||
+              call?.from?.toString?.() ||
+              '';
+            if (!peerJid) return;
+            (window as any).__winzappOnIncomingCall(
+              event,
+              state,
+              peerJid,
+              callIdOf(call),
+              !!call?.isVideo || !!call?.isVideoCall,
+              !!call?.isGroup || !!call?.isGroupCall,
+              groupJidOf(call),
+              Math.floor(callTimestampOf(call) / 1000),
+              Math.floor(Date.now() / 1000)
+            );
+          };
+          const rememberCall = (call: any) => {
+            const id = callIdOf(call);
+            if (!id || ignoredHistoricalCallIds.has(id)) return;
+            const previous = trackedCalls.get(id) || {};
+            trackedCalls.set(id, {
+              call: call || previous.call,
+              startedAt: previous.startedAt || Date.now(),
+              missingSince: 0,
+              foundInStore: previous.foundInStore || false,
+            });
+          };
+          const findCall = (id: string) => {
+            for (const store of stores) {
+              try {
+                const direct = store?.get?.(id);
+                if (direct) return direct;
+                const models =
+                  store?.getModelsArray?.() || store?._models || store?.models || [];
+                const found = models.find?.((model: any) => callIdOf(model) === id);
+                if (found) return found;
+              } catch (e) {
+                // Try the next exported alias.
+              }
+            }
+            return null;
+          };
+          const emitIncomingOffer = (
+            call: any,
+            attempt = 0,
+            source = 'wpp'
+          ) => {
+            const id = callIdOf(call);
+            const richCall = findCall(id) || call;
+            if (isHistoricalIncomingCall(richCall, source)) return;
+            const isGroup = !!richCall?.isGroup || !!richCall?.isGroupCall;
+            if (isGroup && !groupJidOf(richCall) && attempt < 10) {
+              window.setTimeout(() => {
+                // A terminal Store event removes this id. Do not resurrect a
+                // call that ended while we were waiting for group metadata.
+                if (trackedCalls.has(id))
+                  emitIncomingOffer(call, attempt + 1, source);
+              }, 100);
+              return;
+            }
+            emitCall('offer', richCall, 'INCOMING_RING');
+          };
+
+          // ── Layer 1: WPP.on('call.incoming_call') ──────────────────
+          // Uses wa-js's own event, which MAY work if the bug is only
+          // in wppconnect's Node-side wrapper rather than in wa-js's
+          // internal event registration.
+          try {
+            WPP.on('call.incoming_call', (call: any) => {
+              try {
+                if (isHistoricalIncomingCall(call, 'wpp')) return;
+                rememberCall(call);
+                // The public WA-JS event can be a reduced object: it says the
+                // call is a group call but omits groupJid. CallStore's model
+                // contains the group id, so briefly wait for it before
+                // announcing. The direct Store listener may win this race;
+                // Python deduplicates both events by call id.
+                emitIncomingOffer(call, 0, 'wpp');
+              } catch (e) {
+                // Never let one event kill the listener
+              }
+            });
+          } catch (e) {
+            // WPP.on might not support this event in this version
+          }
+
+          // ── Layer 2: direct internal CallStore access ──────────────
+          // If wa-js exposes the raw WhatsApp Web Store for calls, hook
+          // its collection's 'add' event directly. This bypasses wa-js's
+          // event plumbing entirely.
+          try {
+            for (const store of stores) {
+              if (store && typeof store.on === 'function') {
+                store.on('add', (call: any) => {
+                  try {
+                    // Only trigger for incoming calls (not outgoing)
+                    const isIncoming =
+                      call?.getState?.() === 'INCOMING_RING' ||
+                      call?.isIncoming ||
+                      call?.direction === 'incoming' ||
+                      !call?.outgoing;
+                    if (!isIncoming) return;
+
+                    if (isHistoricalIncomingCall(call, 'store')) return;
+
+                    const initialState = String(call?.getState?.() || 'INCOMING_RING');
+                    emitCall('offer', call, initialState);
+                    rememberCall(call);
+                  } catch (e) {
+                    // Never let one event kill the listener
+                  }
+                });
+                const onStateChange = (call: any) => {
+                  try {
+                    const id = callIdOf(call);
+                    if (ignoredHistoricalCallIds.has(id)) {
+                      const ignoredState = callStateOf(call);
+                      if (ignoredState && ignoredState !== 'INCOMING_RING') {
+                        ignoredHistoricalCallIds.delete(id);
+                      }
+                      return;
+                    }
+                    const nextState = callStateOf(call);
+                    if (!nextState) return;
+                    emitCall('state', call, nextState);
+                    if (nextState === 'INCOMING_RING') rememberCall(call);
+                    else trackedCalls.delete(callIdOf(call));
+                  } catch (e) {
+                    // A malformed state update must not remove the listener.
+                  }
+                };
+                // Collections re-emit model changes, including for a CallModel
+                // that existed before our `add` listener saw it.
+                store.on('change:state', onStateChange);
+                store.on('change', onStateChange);
+                store.on('remove', (call: any) => {
+                  try {
+                    const id = callIdOf(call);
+                    if (ignoredHistoricalCallIds.delete(id)) return;
+                    emitCall('ended', call, 'ENDED');
+                    trackedCalls.delete(callIdOf(call));
+                  } catch (e) {
+                    // Never let one event kill the listener
+                  }
+                });
+              }
+            }
+          } catch (e) {
+            // Store access failed — not critical
+          }
+
+          // Poll only active incoming calls. If a model disappears for 2.5s,
+          // WhatsApp has removed it after answer/rejection/caller cancellation.
+          (window as any).__winzappIncomingCallPoll = window.setInterval(() => {
+            const now = Date.now();
+            for (const [id, tracked] of trackedCalls.entries()) {
+              try {
+                const liveCall = findCall(id);
+                const currentCall = liveCall || tracked.call;
+                const state = callStateOf(currentCall);
+                if (state && state !== 'INCOMING_RING') {
+                  emitCall('state', currentCall, state);
+                  trackedCalls.delete(id);
+                  continue;
+                }
+                if (liveCall) {
+                  tracked.call = liveCall;
+                  tracked.missingSince = 0;
+                  tracked.foundInStore = true;
+                  continue;
+                }
+
+                if (tracked.foundInStore) {
+                  tracked.missingSince = tracked.missingSince || now;
+                }
+                if (tracked.foundInStore && now - tracked.missingSince >= 2500) {
+                  emitCall('ended', tracked.call, 'ENDED');
+                  trackedCalls.delete(id);
+                } else if (now - tracked.startedAt >= 120000) {
+                  emitCall('timeout', tracked.call, 'NOT_ANSWERED');
+                  trackedCalls.delete(id);
+                }
+              } catch (e) {
+                // The next poll can recover from a transient Store mutation.
+              }
+            }
+          }, 500);
+        }, listenerStartedAt)
+        .catch((e: any) =>
+          req.logger.warn(
+            `[onIncomingCallDirect] install failed: ${e?.message || e}`
+          )
+        );
+    };
+
+    // Re-install on page reload (fresh JS context loses the listener)
     client.page.on('load', installListener);
     installListener();
   }
@@ -945,6 +1375,8 @@ export default class CreateSessionUtil {
   }
 
   async listenMessages(client: WhatsAppServer, req: Request) {
+    const incomingCallListenerStartedAt = Date.now();
+
     await client.onMessage(async (message: any) => {
       eventEmitter.emit(`mensagem-${client.session}`, client, message);
       callWebHook(client, req, 'onmessage', message);
@@ -998,7 +1430,33 @@ export default class CreateSessionUtil {
     });
 
     await client.onIncomingCall(async (call) => {
-      req.io.emit('incomingcall', { ...call, session: client.session });
+      const rawOfferTime = Number((call as any)?.offerTime || 0);
+      const offerTimeMs =
+        rawOfferTime >= 1e15
+          ? Math.floor(rawOfferTime / 1000)
+          : rawOfferTime >= 1e12
+          ? Math.floor(rawOfferTime)
+          : rawOfferTime >= 1e9
+          ? Math.floor(rawOfferTime * 1000)
+          : 0;
+      const receivedWhileOffline =
+        (call as any)?.offerReceivedWhileOffline === true;
+      const predatesListener =
+        offerTimeMs > 0 && offerTimeMs < incomingCallListenerStartedAt - 5000;
+
+      if (receivedWhileOffline || predatesListener) {
+        req.logger.info(
+          '[incomingcall] ignored historical offer from WhatsApp state hydration'
+        );
+        return;
+      }
+
+      req.io.emit('incomingcall', {
+        ...call,
+        session: client.session,
+        timestamp: offerTimeMs ? Math.floor(offerTimeMs / 1000) : 0,
+        observedAt: Math.floor(Date.now() / 1000),
+      });
       callWebHook(client, req, 'incomingcall', call);
     });
   }

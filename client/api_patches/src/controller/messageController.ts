@@ -297,6 +297,19 @@ export async function sendFile(req: Request, res: Response) {
           // Videos/Audio menu options, and always uploads as a document
           // otherwise). Respect the type WinZapp explicitly requested.
           type: type || 'auto-detect',
+          // The bounded/chunked transfer sender.layer.js's patched sendFile()
+          // uses for large uploads (see
+          // client/core/wppconnect_sender_layer_patch.py) rebuilds the file
+          // entirely from raw bytes in the browser — it never sees multer's
+          // own req.file.mimetype, only options.mimetype, which nothing set
+          // before this. Without it the reconstructed File always fell back
+          // to 'application/octet-stream', so a large video/audio/image
+          // routed through that path arrived with the wrong content type
+          // (still tagged the right WhatsApp message TYPE via options.type
+          // above, but not necessarily playable/previewable as one on the
+          // receiving end). multer already knows the real one from the
+          // multipart upload's own Content-Type.
+          mimetype: req.file?.mimetype,
           ...options,
         })
       );
@@ -1051,6 +1064,247 @@ export async function sendStatusVoice64(req: Request, res: Response) {
   }
 }
 
+/**
+ * Parse a JSON string handed back from a page.evaluate() call, throwing a
+ * descriptive error (including `label`) on malformed input instead of a
+ * bare JSON.parse SyntaxError.
+ */
+function parseEvaluateJson(raw: string | null | undefined, label: string): any {
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : null;
+  } catch (parseError) {
+    throw new Error(`Invalid ${label}: ${String(parseError)}`);
+  }
+}
+
+/**
+ * WinZapp patch: reply to a contact's status (WhatsApp "story") with a real
+ * quote back to the original status, instead of a plain DM.
+ *
+ * A contact's status is not indexed in the ordinary MsgStore used by
+ * client.reply()/getMessageById().  WhatsApp Web keeps it in that contact's
+ * StatusV3Model, so resolve the real MsgModel there and serialize that model
+ * as WA-JS's supported quotedMsgPayload.  Current WhatsApp Web models from
+ * StatusV3Store incorrectly expose isStatusV3=false; passing the live model
+ * as quotedMsg therefore hits WA-JS's ordinary-chat canReply guard.
+ * Rehydrated payloads bypass that stale flag and still use
+ * MsgModel.msgContextInfo(), which emits the correct status stanza,
+ * participant and status@broadcast JID.
+ */
+async function replyToStatusMessage(
+  req: Request,
+  contato: string,
+  message: string,
+  serializedId: string
+): Promise<any> {
+  const probeKey = `winzapp_status_reply_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  const directJson = await req.client.page.evaluate(
+    async ({ to, content, serializedId, probeKey }) => {
+      const pageWindow = window as any;
+      const WPP = pageWindow.WPP;
+      const parts = serializedId.split('_');
+      const rawId = parts.length > 2 ? parts[2] : serializedId;
+      const posterJid = parts.length > 3 ? parts[3] : '';
+      const store = WPP?.whatsapp?.StatusV3Store;
+      const probes = (pageWindow.__winzappStatusReplyProbes ||= {});
+      const probe: any = (probes[probeKey] = {
+        phase: 'started',
+        statusId: rawId,
+        posterJid,
+        destination: to,
+      });
+
+      try {
+        // Prefer the expected poster, but also scan StatusV3Store.  The
+        // Python side deliberately prefers @lid for sends while the
+        // status collection can still be keyed by the legacy @c.us JID;
+        // limiting lookup to WPP.status.get(posterJid) would therefore
+        // miss a status that is visibly present in the panel.
+        const statusModels: any[] = [];
+        const expected = posterJid
+          ? WPP?.status?.get?.(posterJid)
+          : undefined;
+        if (expected) statusModels.push(expected);
+        const storedModels =
+          (typeof store?.getModels === 'function' && store.getModels()) ||
+          (Array.isArray(store?._models) && store._models) ||
+          (Array.isArray(store?.models) && store.models) ||
+          [];
+        for (const model of storedModels) {
+          if (model && !statusModels.includes(model)) {
+            statusModels.push(model);
+          }
+        }
+
+        let quoted: any = null;
+        let matchedPoster = '';
+        let messagesSeen = 0;
+        for (const model of statusModels) {
+          const msgs =
+            (typeof model?.getAllMsgs === 'function' &&
+              model.getAllMsgs()) ||
+            (typeof model?.msgs?.getModelsArray === 'function' &&
+              model.msgs.getModelsArray()) ||
+            [];
+          messagesSeen += msgs.length;
+          quoted = msgs.find((item: any) => {
+            const itemId = item?.id?.id || '';
+            const itemSerialized = item?.id?._serialized || '';
+            return itemId === rawId || itemSerialized === serializedId;
+          });
+          if (quoted) {
+            matchedPoster =
+              model?.id?._serialized || model?.id?.toString?.() || '';
+            break;
+          }
+        }
+        if (!quoted) {
+          throw new Error(
+            `Status message not found for reply: id=${rawId}, ` +
+              `poster=${posterJid || '<missing>'}, ` +
+              `models=${statusModels.length}, messages=${messagesSeen}`
+          );
+        }
+        Object.assign(probe, {
+          phase: 'status-found',
+          statusModelsSeen: statusModels.length,
+          statusMessagesSeen: messagesSeen,
+          matchedPoster,
+          quotedIsStatusV3: Boolean(quoted.isStatusV3),
+        });
+        const quotedPayload = JSON.stringify(
+          typeof quoted.toJSON === 'function' ? quoted.toJSON() : quoted
+        );
+        const sendResult = await WPP.chat.sendTextMessage(to, content, {
+          quotedMsgPayload: quotedPayload,
+          linkPreview: false,
+          waitForAck: true,
+        });
+        const sentId =
+          typeof sendResult?.id === 'string'
+            ? sendResult.id
+            : sendResult?.id?.toString?.() || '';
+        const ack = Number(sendResult?.ack ?? 0);
+        const messageSendResult = String(
+          sendResult?.sendMsgResult?.messageSendResult ?? ''
+        );
+        const sendError = String(
+          sendResult?.sendMsgResult?.error ??
+            sendResult?.sendMsgResult?.errorCode ??
+            ''
+        );
+        Object.assign(probe, {
+          phase: 'send-returned',
+          id: sentId,
+          ack,
+          messageSendResult,
+          error: sendError,
+        });
+        if (!sentId) {
+          throw new Error(
+            `Status reply returned no message id: status=${rawId}, ` +
+              `poster=${matchedPoster || posterJid}, ` +
+              `result=${JSON.stringify(sendResult)}`
+          );
+        }
+        if (!['SUCCESS', 'OK'].includes(messageSendResult) || ack < 1) {
+          throw new Error(
+            `Status reply rejected by WhatsApp: status=${rawId}, ` +
+              `result=${messageSendResult || '<missing>'}, ack=${ack}, ` +
+              `error=${sendError || '<missing>'}`
+          );
+        }
+        probe.phase = 'validated';
+      } catch (error) {
+        probe.phase = 'error';
+        probe.error = String((error as any)?.message || error);
+        probe.stack = String((error as any)?.stack || '');
+      }
+
+      // The return value after sendTextMessage is lost by this
+      // WPPConnect/Puppeteer combination. Keep returning it for versions
+      // where it works, but the Node side also reads the probe in a
+      // separate evaluate call below when it is.
+      //
+      // The common case (this return value actually arrives) cleans up
+      // after itself right here — the fallback evaluate below is the only
+      // one that still needs to read AND delete the stored probe.
+      delete probes[probeKey];
+      return JSON.stringify(probe);
+    },
+    {
+      to: contato,
+      content: message,
+      serializedId,
+      probeKey,
+    }
+  );
+  // Only pay for a second Puppeteer round-trip when the first evaluate's
+  // return value was actually lost (see the comment inside it above) — the
+  // common case already has everything it needs in directJson, and already
+  // cleaned up its own probe entry.
+  const probeJson =
+    typeof directJson === 'string'
+      ? null
+      : await req.client.page.evaluate(
+          ({ probeKey }) => {
+            const pageWindow = window as any;
+            const probes = pageWindow.__winzappStatusReplyProbes;
+            const probe = probes?.[probeKey] ?? null;
+            if (probes) delete probes[probeKey];
+            return JSON.stringify(probe);
+          },
+          { probeKey }
+        );
+  const sentJson = typeof directJson === 'string' ? directJson : probeJson;
+  const sent = parseEvaluateJson(sentJson, 'serialized status reply result');
+  if (
+    !sent ||
+    sent.phase !== 'validated' ||
+    typeof sent.id !== 'string' ||
+    !sent.id ||
+    Number(sent.ack) < 1 ||
+    !['SUCCESS', 'OK'].includes(String(sent.messageSendResult))
+  ) {
+    throw new Error(
+      `Invalid status reply result returned by WhatsApp Web: ${JSON.stringify(
+        sent
+      )}`
+    );
+  }
+  const storedJson = await req.client.page.evaluate(
+    async ({ messageId }) => {
+      // MsgStore may not have indexed the just-sent message yet the instant
+      // sendTextMessage() resolves — retry briefly before giving up, rather
+      // than reporting an already-confirmed send (ack>=1, SUCCESS/OK, just
+      // validated above) as a failure.
+      let stored: any = null;
+      for (let attempt = 0; attempt < 3 && !stored; attempt++) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        stored = await (window as any).WAPI?.getMessageById?.(messageId);
+      }
+      return JSON.stringify(stored ?? null);
+    },
+    { messageId: sent.id }
+  );
+  const stored = parseEvaluateJson(storedJson, 'stored status reply result');
+  if (!stored || stored.erro === true || stored.error === true) {
+    throw new Error(
+      `Status reply was acknowledged but not found in MsgStore: ${JSON.stringify(
+        stored
+      )}`
+    );
+  }
+  req.logger.info(
+    `[status-reply] sent ${serializedId}: ` + JSON.stringify(sent)
+  );
+  return sent;
+}
+
 export async function replyMessage(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]
@@ -1093,7 +1347,16 @@ export async function replyMessage(req: Request, res: Response) {
   try {
     const results: any = [];
     for (const contato of phone) {
-      results.push(await req.client.reply(contato, message, messageId));
+      if (
+        typeof messageId === 'string' &&
+        messageId.includes('status@broadcast')
+      ) {
+        results.push(
+          await replyToStatusMessage(req, contato, message, messageId)
+        );
+      } else {
+        results.push(await req.client.reply(contato, message, messageId));
+      }
     }
 
     if (results.length === 0) res.status(400).json('Error sending message');

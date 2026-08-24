@@ -11,9 +11,13 @@ from ui.accessible import (
     AccessibleRecordVoiceMessage, AccessibleDiscardVoiceMessage, AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
 )
-from core.utils import format_number, get_downloads_folder
+from core.api_client import api_get, api_post, redact_api_url
+from core.utils import format_number, get_downloads_folder, normalize_line_separators
 from core.video_player import VideoPlayer
-from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
+from core.audio_devices import (
+    find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
+)
+from ui.dialogs.emoji_picker import choose_and_insert_emoji
 
 try:
     import pyaudio
@@ -264,7 +268,9 @@ class MyStatusDialog(wx.Dialog):
             sizer.Add(self._play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 8)
             self._play_pause_btn.Hide()
 
-            self._video_player = VideoPlayer(self._mw, self._video_bitmap)
+            self._video_player = VideoPlayer(
+                self._mw, self._video_bitmap, on_frame_size=self._on_video_frame_size_known
+            )
             self._video_local_path = None
             self._video_download_status_id = None
             self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -321,6 +327,12 @@ class MyStatusDialog(wx.Dialog):
         self._video_local_path = None
         self._video_download_status_id = None
         self._video_bitmap.Hide()
+        # Undo whatever shrink-to-content _on_video_frame_size_known() did
+        # for the video just left behind — otherwise the NEXT video's first
+        # frame gets fitted against that leftover (often much smaller) box
+        # instead of the real 320x240 baseline, compounding smaller and
+        # smaller across consecutive status videos.
+        self._video_bitmap.SetMinSize((320, 240))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
         is_video = msg_type == "videoMessage"
         is_audio = msg_type == "audioMessage"
@@ -359,6 +371,17 @@ class MyStatusDialog(wx.Dialog):
     # since this dialog and StatusPanel track their own current-status state
     # independently (self._statuses/self._current here vs.
     # self._status_contacts/self._selected_contact_idx there).
+
+    def _on_video_frame_size_known(self, width: int, height: int):
+        """VideoPlayer callback (see core/video_player.py's own comment):
+        fires once per playback with the first frame's actual on-screen
+        size, so the fixed 320x240 placeholder box can shrink-wrap to it —
+        same as a still photo is sized to its own content, instead of
+        leaving a blank gap around a video whose aspect ratio doesn't match
+        that box (reported live as the video "not showing completely" even
+        once it was no longer literally clipped)."""
+        self._video_bitmap.SetMinSize((width, height))
+        self.Layout()
 
     def _on_play_pause_video(self, event):
         if not self._statuses:
@@ -479,7 +502,9 @@ class StatusPanel(wx.Panel):
         self.init_UI()
         self._create_accelerators()
 
-        self._video_player = VideoPlayer(main_window, self._video_bitmap)
+        self._video_player = VideoPlayer(
+            main_window, self._video_bitmap, on_frame_size=self._on_video_frame_size_known
+        )
         # Stop playback (audio + frame decoding) whenever this panel is
         # hidden — Alt+1/Alt+4 switching away from the Status tab, or the
         # window closing — regardless of which of the several call sites in
@@ -603,6 +628,12 @@ class StatusPanel(wx.Panel):
         )
         post_sizer.Add(self._post_text_field, 0, wx.EXPAND | wx.ALL, 5)
 
+        self._post_emoji_btn = wx.Button(
+            self._post_panel, label=i18n.t("emoji_button")
+        )
+        self._post_emoji_btn.Bind(wx.EVT_BUTTON, self._on_open_post_emoji_picker)
+        post_sizer.Add(self._post_emoji_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
         self._caption_label = wx.StaticText(self._post_panel, label=i18n.t("status_caption_hint"))
         post_sizer.Add(self._caption_label, 0, wx.LEFT, 5)
 
@@ -702,6 +733,17 @@ class StatusPanel(wx.Panel):
         self._recording_channels = 1
         self._recording_paused  = False
         self._is_recording      = False
+        # True while a background thread is opening the PyAudio input stream.
+        # pa.open() (and find_input_device_index()'s device enumeration) can
+        # block for seconds negotiating with the driver, and this used to run
+        # straight on the wx thread — freezing the window, and the screen
+        # reader with it, for as long as the driver took. Mirrors
+        # ConversationsPanel's own recording open (client/ui/conversations.py):
+        # _recording_starting guards against re-entry, _recording_open_token
+        # lets a discard/close that happens mid-open throw the stream away
+        # once it finally arrives.
+        self._recording_starting   = False
+        self._recording_open_token = 0
 
         self.SetSizer(sizer)
 
@@ -715,6 +757,7 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_SHIFT_P  = wx.NewIdRef()
         self.ID_CTRL_SHIFT_D  = wx.NewIdRef()
         self.ID_F5            = wx.NewIdRef()
+        self.ID_CTRL_PERIOD   = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL,                    wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
@@ -724,6 +767,7 @@ class StatusPanel(wx.Panel):
             (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("P"),      self.ID_CTRL_SHIFT_P),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("D"),      self.ID_CTRL_SHIFT_D),
+            (wx.ACCEL_CTRL,                    ord("."),      self.ID_CTRL_PERIOD),
             # Same combo ConversationsPanel already uses for "save as"
             # (client/ui/conversations.py's ID_CTRL_SHIFT_S) — consistent
             # muscle memory across both places media can be saved from.
@@ -739,6 +783,7 @@ class StatusPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p_shortcut,id=self.ID_CTRL_SHIFT_P)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d_shortcut,id=self.ID_CTRL_SHIFT_D)
         self.Bind(wx.EVT_MENU, self._on_refresh_status_btn,   id=self.ID_F5)
+        self.Bind(wx.EVT_MENU, self._on_open_post_emoji_picker, id=self.ID_CTRL_PERIOD)
 
     def _on_refresh_status_btn(self, event):
         """Manually reload statuses from WPPConnect API."""
@@ -866,7 +911,7 @@ class StatusPanel(wx.Panel):
         try:
             url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/statuses"
             headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = api_get(url, headers=headers, timeout=15)
             if resp.status_code not in (200, 201):
                 return [], []
             body = resp.json() or {}
@@ -1270,6 +1315,12 @@ class StatusPanel(wx.Panel):
         self._video_local_path = None
         self._video_download_status_id = None
         self._video_bitmap.Hide()
+        # Undo whatever shrink-to-content _on_video_frame_size_known() did
+        # for the video just left behind — otherwise the NEXT video's first
+        # frame gets fitted against that leftover (often much smaller) box
+        # instead of the real 320x240 baseline, compounding smaller and
+        # smaller across consecutive status videos.
+        self._video_bitmap.SetMinSize((320, 240))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
 
         # Kept for the action handlers below (copy text, save media, open
@@ -1515,6 +1566,17 @@ class StatusPanel(wx.Panel):
     # and its picture is decoded by that same ffmpeg binary as a capped-rate
     # JPEG frame sequence drawn into self._video_bitmap.
 
+    def _on_video_frame_size_known(self, width: int, height: int):
+        """VideoPlayer callback (see core/video_player.py's own comment):
+        fires once per playback with the first frame's actual on-screen
+        size, so the fixed 320x240 placeholder box can shrink-wrap to it —
+        same as a still photo is sized to its own content, instead of
+        leaving a blank gap around a video whose aspect ratio doesn't match
+        that box (reported live as the video "not showing completely" even
+        once it was no longer literally clipped)."""
+        self._video_bitmap.SetMinSize((width, height))
+        self.Layout()
+
     def _on_play_pause_video(self, event):
         """Play/pause the current status's media — video (picture + audio)
         or audio-only. Named for video since that's what this predates, but
@@ -1680,7 +1742,7 @@ class StatusPanel(wx.Panel):
             return
         if status.get("key", {}).get("fromMe"):
             return  # no reply UI for own statuses — see _show_current_status()
-        text = self._reply_field.GetValue().strip()
+        text = normalize_line_separators(self._reply_field.GetValue()).strip()
         if not text:
             return
         poster_jid = entry.get("jid", "")
@@ -1695,16 +1757,15 @@ class StatusPanel(wx.Panel):
     def _send_status_reply_bg(self, poster_jid: str, text: str, status: dict):
         mw = self.main_window
         try:
-            # Deliberately NOT quoted — same reasoning as _on_like_status():
-            # WPPConnect's send-reply endpoint can't resolve a status as a
-            # quote target (it's never indexed anywhere reachable from the
-            # poster's own chat), so quoting it always failed server-side
-            # and silently fell back to a plain send anyway, just after an
-            # extra round trip and a confusing "Não foi possível citar a
-            # mensagem original" notice for something that was never going
-            # to work.
-            result = mw.send_text_message(poster_jid, text)
+            # Status messages live in WhatsApp Web's per-poster StatusV3Model,
+            # not in the ordinary chat message collection.  The patched Node
+            # send-reply route resolves this serialized status key in that
+            # model before sending, so keep the status as the quote target
+            # here instead of degrading the reply to a normal DM.
+            result = mw.send_text_message(poster_jid, text, quoted=status)
         except Exception:
+            logging.exception(
+                "[status-reply] send_text_message raised for %s", poster_jid)
             result = None
         # send_text_message() returns a message-id string or True on success,
         # or a dict ({"ok": False, ...}) on a definite failure.
@@ -1712,6 +1773,18 @@ class StatusPanel(wx.Panel):
         if ok:
             wx.CallAfter(self._on_status_reply_sent)
         else:
+            # The dialog can only say "it failed"; this is the only place that
+            # can say WHY. Reported live — "ao teclar enter deu Não foi
+            # possível enviar a resposta ao status", and the same text sent
+            # fine from the button seconds later — and the log held nothing at
+            # all about it, so there was no way to tell a rejected JID from a
+            # dropped connection from a server-side refusal. Enter and the
+            # button are the same handler (see the two Bind calls in
+            # _build_viewer), so the difference was never the key pressed.
+            logging.warning(
+                "[status-reply] failed for poster=%s (result=%r, text_len=%d)",
+                poster_jid, result, len(text),
+            )
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_reply_error"),
@@ -1752,6 +1825,12 @@ class StatusPanel(wx.Panel):
         self._caption_field.SetValue("")
         self.Layout()
         self._post_text_field.SetFocus()
+
+    def _on_open_post_emoji_picker(self, event):
+        """Open the shared picker while composing a text status."""
+        if not self._post_panel.IsShown() or not self._post_text_field.IsEnabled():
+            return
+        choose_and_insert_emoji(self, self._post_text_field, self.main_window.i18n)
 
     def _on_choose_media_status(self, event):
         i18n = self.main_window.i18n
@@ -1828,7 +1907,8 @@ class StatusPanel(wx.Panel):
         If voice post panel is shown: start recording if idle, or send if recording."""
         if self._voice_post_panel.IsShown():
             if not self._is_recording:
-                self._start_voice_recording()
+                if not self._recording_starting:
+                    self._start_voice_recording()
             else:
                 self._on_send_voice_status(None)
         else:
@@ -1846,7 +1926,8 @@ class StatusPanel(wx.Panel):
 
     def _on_record_voice_button(self, event):
         if not self._is_recording:
-            self._start_voice_recording()
+            if not self._recording_starting:
+                self._start_voice_recording()
         else:
             self._on_send_voice_status(event)
 
@@ -1887,39 +1968,111 @@ class StatusPanel(wx.Panel):
             return None, None, None
 
         configured_name = getattr(self.main_window, "effective_input_device_name", "") or ""
-        input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
 
-        stream, rate, ch = _try_open(input_device_index)
-        if stream is None and input_device_index is not None:
-            stream, rate, ch = _try_open(None)
+        # Everything up to here is cheap. find_input_device_index() and
+        # pa.open() are not: both talk to the audio driver and can block for
+        # seconds, and they used to run right here on the wx thread — the
+        # window (and the screen reader reading it) froze for the duration.
+        self._recording_starting = True
+        self._recording_open_token += 1
+        my_token = self._recording_open_token
 
-        if stream is None:
-            wx.MessageBox(
-                self.main_window.i18n.t("voice_recording_unavailable"),
-                self.main_window.app_name,
-                wx.OK | wx.ICON_WARNING, self,
-            )
-            return
+        def _bg_open_stream():
+            # An exception escaping this function would die unseen in a daemon
+            # thread and take the wx.CallAfter with it, leaving
+            # _recording_starting stuck True — and both entry points
+            # (_on_record_voice_button, _on_ctrl_r_shortcut) refuse to start
+            # while it is, so the record control would go dead for the rest of
+            # the session. _on_stream_opened() is the only thing that clears
+            # the flag, so it is scheduled from a finally and runs either way.
+            stream = rate = ch = None
+            try:
+                input_device_index = (
+                    find_input_device_index(configured_name, pa) if configured_name else None
+                )
+                stream, rate, ch = _try_open(input_device_index)
+                if stream is None and input_device_index is not None:
+                    stream, rate, ch = _try_open(None)
 
-        self._recording_stream   = stream
-        self._recording_rate     = rate
-        self._recording_channels = ch
-        self._is_recording       = True
+                if stream is None:
+                    # Same last resort as ConversationsPanel, and kept
+                    # deliberately identical to it: _try_open(None) only
+                    # covers the default host API's default device, so a
+                    # microphone that refuses MME but answers on WASAPI is
+                    # still reachable by index. Posting a voice status and
+                    # sending a voice message have no reason to disagree
+                    # about which microphones exist — this panel already
+                    # drifted behind the other one once.
+                    for idx in fallback_input_device_indices(pa, exclude=(input_device_index,)):
+                        stream, rate, ch = _try_open(idx)
+                        if stream is not None:
+                            logging.info(
+                                "[status audio] Default input device failed; recording via "
+                                "enumerated device index %s instead.", idx,
+                            )
+                            break
+            except Exception:
+                logging.exception(
+                    "[status audio] Failed to open the recording stream (device=%r).",
+                    configured_name,
+                )
+            finally:
+                wx.CallAfter(_on_stream_opened, stream, rate, ch)
 
-        if hasattr(self.main_window, "voicemsg_startrecording_sound"):
-            self.main_window.voicemsg_startrecording_sound.play()
+        def _on_stream_opened(stream, rate, ch):
+            # Discard the result if the panel was closed or the recording
+            # discarded while the stream was still opening — otherwise a
+            # stream nobody asked for any more starts capturing in silence.
+            if my_token != self._recording_open_token:
+                if stream is not None:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                return
 
-        i18n = self.main_window.i18n
-        self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
-        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
-        self._voice_close_btn.Show()
-        self._voice_start_btn.Hide()
-        self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
-        self._voice_pause_btn.Show()
-        self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
-        self._voice_send_btn.Show()
-        self.Layout()
-        self._voice_send_btn.SetFocus()
+            self._recording_starting = False
+
+            if stream is None:
+                # voice_recording_unavailable means "PyAudio isn't installed"
+                # (see the top of _start_voice_recording) — reused here it
+                # pointed at the wrong cause entirely, since PyAudio is
+                # plainly present if we got as far as trying to open a
+                # stream. The device-specific message tells the user the one
+                # thing that is actionable: check the mic and its Windows
+                # permission.
+                logging.warning(
+                    "[status audio] No input stream could be opened — recording not started."
+                )
+                wx.MessageBox(
+                    self.main_window.i18n.t("voice_recording_device_failed"),
+                    self.main_window.app_name,
+                    wx.OK | wx.ICON_WARNING, self,
+                )
+                return
+
+            self._recording_stream   = stream
+            self._recording_rate     = rate
+            self._recording_channels = ch
+            self._is_recording       = True
+
+            if hasattr(self.main_window, "voicemsg_startrecording_sound"):
+                self.main_window.voicemsg_startrecording_sound.play()
+
+            i18n = self.main_window.i18n
+            self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
+            self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
+            self._voice_close_btn.Show()
+            self._voice_start_btn.Hide()
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+            self._voice_pause_btn.Show()
+            self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
+            self._voice_send_btn.Show()
+            self.Layout()
+            self._voice_send_btn.SetFocus()
+
+        threading.Thread(target=_bg_open_stream, daemon=True).start()
 
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:
@@ -1948,6 +2101,11 @@ class StatusPanel(wx.Panel):
             self._recording_stream = None
 
     def _on_close_voice_panel(self, event):
+        # Bump the token so a stream still opening on a background thread (see
+        # _start_voice_recording) is closed and discarded when it arrives,
+        # instead of starting to capture into a panel the user just dismissed.
+        self._recording_open_token += 1
+        self._recording_starting = False
         if self._is_recording and hasattr(self.main_window, "voicemsg_discard_sound"):
             try:
                 self.main_window.voicemsg_discard_sound.play()
@@ -2002,7 +2160,7 @@ class StatusPanel(wx.Panel):
             daemon=True,
         ).start()
 
-    def _send_status_voice_bg(self, path: str, is_temp_file: bool = False):
+    def _send_status_voice_bg(self, path: str, is_temp_file: bool = False, report_result: bool = True) -> bool:
         """Background: convert *path* to OGG/Opus (WhatsApp's own voice-
         message codec — main_window._convert_wav_to_ogg() despite the name
         just runs it through ffmpeg, which reads the real container/codec
@@ -2017,6 +2175,13 @@ class StatusPanel(wx.Panel):
         recorded WAV) — deleting *path* unconditionally used to also
         delete the user's own picked file (e.g. an .mp3 chosen from the
         media picker) right out from under them.
+
+        *report_result* controls whether a failure pops its own MessageBox
+        here. _send_all_media_statuses_bg() passes False and aggregates
+        instead — one popup per file used to stack into a flood of blocking
+        dialogs when several files in a batch failed at once (same failure
+        mode already fixed for save_data(), see main.py's
+        _SAVE_ERROR_DIALOG_COOLDOWN comment).
         """
         mw = self.main_window
         ogg_path = mw._convert_wav_to_ogg(path)
@@ -2026,16 +2191,37 @@ class StatusPanel(wx.Panel):
             except Exception:
                 pass
         if not ogg_path or not os.path.isfile(ogg_path):
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("audio_convert_failed"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
+            logging.error("[status audio] Failed to convert %s to OGG/Opus", path)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("audio_convert_failed"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
         try:
             with open(ogg_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
+        except Exception as exc:
+            # try/finally with no except let this propagate. Harmless while
+            # this method was a thread target on its own, but
+            # _send_all_media_statuses_bg() now calls it inside a loop: the
+            # exception tore out of the loop, so the files after this one were
+            # never even attempted AND the aggregate failure dialog at the end
+            # of that loop was never reached — the batch just stopped, in
+            # total silence, on a background thread. Report it like the
+            # image/video path already does (_send_media_status_bg) and let
+            # the batch carry on.
+            logging.error("[status audio] Failed to read/encode %s: %s", ogg_path, exc)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
         finally:
             try:
                 os.unlink(ogg_path)
@@ -2046,7 +2232,7 @@ class StatusPanel(wx.Panel):
         headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {"base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}"}
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             err_msg = "" if ok else f"HTTP {resp.status_code}: {resp.text[:200]}"
         except Exception as exc:
@@ -2057,18 +2243,20 @@ class StatusPanel(wx.Panel):
             wx.CallAfter(self._on_status_sent)
         else:
             logging.error("[status audio] send-status-voice-base64 failed: %s", err_msg)
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+        return ok
 
     # ── Send text status ─────────────────────────────────────────────────────
 
     def _on_send_text_status(self, event):
-        text    = self._post_text_field.GetValue().strip()
-        caption = self._caption_field.GetValue().strip()
+        text    = normalize_line_separators(self._post_text_field.GetValue()).strip()
+        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
         if not text and not caption:
             return
         content = text or caption
@@ -2091,7 +2279,7 @@ class StatusPanel(wx.Panel):
             }
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             logging.info(
                 "[status_post] POST %s -> HTTP %s, body=%.300s",
@@ -2111,7 +2299,8 @@ class StatusPanel(wx.Panel):
                     pass
         except Exception as exc:
             ok = False
-            logging.warning("[status_post] POST failed for %s: %s", url, exc)
+            logging.warning("[status_post] POST failed for %s: %s",
+                            redact_api_url(url), exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
         else:
@@ -2189,7 +2378,7 @@ class StatusPanel(wx.Panel):
     def _on_send_media_status(self, event):
         if not self._selected_media_paths:
             return
-        caption = self._media_caption_field.GetValue().strip()
+        caption = normalize_line_separators(self._media_caption_field.GetValue()).strip()
         paths = list(self._selected_media_paths)
         threading.Thread(
             target=self._send_all_media_statuses_bg,
@@ -2198,20 +2387,51 @@ class StatusPanel(wx.Panel):
         ).start()
 
     def _send_all_media_statuses_bg(self, paths: list, caption: str):
+        """Send every file in *paths* sequentially, then report once.
+
+        Each per-file helper is called with report_result=False so a batch
+        where several files fail doesn't stack one blocking MessageBox per
+        failure — that used to flood the screen with "status_error" dialogs
+        one after another. Failures are still logged individually by the
+        helpers; only the popup is deferred to a single summary here.
+
+        Every call is additionally wrapped: a helper that raises instead of
+        returning False would otherwise tear out of this loop, skipping every
+        remaining file AND the summary dialog below — the batch would just
+        stop, silently, on a background thread. That really happened via
+        _send_status_voice_bg()'s try/finally-with-no-except; it is fixed at
+        the source too, but the loop shouldn't depend on each helper
+        remembering to catch everything.
+        """
+        mw = self.main_window
+        failures = 0
         for path in paths:
             ext = os.path.splitext(path)[1].lower()
-            if ext in (".mp3", ".ogg", ".wav", ".m4a", ".aac"):
-                # A picked audio file goes through the real voice-status
-                # path (transcodes to OGG/Opus via ffmpeg first) — same
-                # endpoint a recorded voice status uses, not the image/
-                # video one below, which has no audio branch at all. Voice
-                # notes don't carry a caption in the official client either,
-                # so it's intentionally dropped here.
-                self._send_status_voice_bg(path)
-            else:
-                self._send_media_status_bg(path, caption)
+            try:
+                if ext in (".mp3", ".ogg", ".wav", ".m4a", ".aac"):
+                    # A picked audio file goes through the real voice-status
+                    # path (transcodes to OGG/Opus via ffmpeg first) — same
+                    # endpoint a recorded voice status uses, not the image/
+                    # video one below, which has no audio branch at all. Voice
+                    # notes don't carry a caption in the official client either,
+                    # so it's intentionally dropped here.
+                    ok = self._send_status_voice_bg(path, report_result=False)
+                else:
+                    ok = self._send_media_status_bg(path, caption, report_result=False)
+            except Exception:
+                logging.exception("[status] Unexpected failure sending %s as status", path)
+                ok = False
+            if not ok:
+                failures += 1
+        if failures:
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{mw.i18n.t('status_error')} ({failures}/{len(paths)})",
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
 
-    def _send_media_status_bg(self, path: str, caption: str):
+    def _send_media_status_bg(self, path: str, caption: str, report_result: bool = True) -> bool:
         mw = self.main_window
         ext      = os.path.splitext(path)[1].lower()
         mimetype = mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -2220,25 +2440,29 @@ class StatusPanel(wx.Panel):
         elif ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
             media_type = "image"
         else:
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
+            logging.error("[status media] Unsupported file extension for status: %s", path)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
 
         try:
             with open(path, "rb") as fh:
                 data_b64 = base64.b64encode(fh.read()).decode("utf-8")
-        except Exception:
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
+        except Exception as exc:
+            logging.error("[status media] Failed to read/encode %s: %s", path, exc)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
 
         endpoint = "send-image-storie" if media_type == "image" else "send-video-storie"
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/{endpoint}"
@@ -2256,19 +2480,26 @@ class StatusPanel(wx.Panel):
             "caption": caption,
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
-        except Exception:
+            if not ok:
+                logging.warning(
+                    "[status media] %s failed: HTTP %s: %s",
+                    endpoint, resp.status_code, (resp.text or "")[:200],
+                )
+        except Exception as exc:
             ok = False
+            logging.warning("[status media] %s failed: %s", endpoint, exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
-        else:
+        elif report_result:
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_error"),
                 mw.app_name,
                 wx.OK | wx.ICON_ERROR,
             )
+        return ok
 
     # ── Labels refresh ───────────────────────────────────────────────────────
 
@@ -2301,6 +2532,7 @@ class StatusPanel(wx.Panel):
                         i18n.t("status_unlike") if is_liked else i18n.t("status_like")
                     )
         self._post_send_btn.SetLabel(i18n.t("status_send"))
+        self._post_emoji_btn.SetLabel(i18n.t("emoji_button"))
         self._post_text_label.SetLabel(i18n.t("status_text_label"))
         self._media_send_btn.SetLabel(i18n.t("status_send"))
         self._media_add_more_btn.SetLabel(i18n.t("add_more_files"))

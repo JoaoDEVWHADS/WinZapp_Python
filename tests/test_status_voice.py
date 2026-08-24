@@ -32,6 +32,7 @@ of this test suite (test_status_panel.py).
 """
 
 import os
+import types
 
 import status_panel as status_panel_module
 from status_panel import StatusPanel
@@ -233,8 +234,8 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         stub = _Stub()
         audio = _touch(tmp_path, "note.mp3")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([audio], "ignored caption")
 
@@ -244,8 +245,8 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         stub = _Stub()
         img = _touch(tmp_path, "pic.png")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([img], "legenda")
 
@@ -256,12 +257,45 @@ class TestAudioFilesAreRoutedToTheVoiceStatusPath:
         img   = _touch(tmp_path, "pic.png")
         audio = _touch(tmp_path, "note.ogg")
         calls = []
-        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
-        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path, **kw: calls.append(("voice", path)) or True)
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: calls.append(("media", path)) or True)
 
         stub._send_all_media_statuses_bg([img, audio], "")
 
         assert calls == [("media", img), ("voice", audio)]
+
+    def test_batch_failures_produce_a_single_aggregated_dialog(self, tmp_path, monkeypatch):
+        """The exact bug: posting several files where more than one fails must
+        show ONE summary MessageBox, not one blocking dialog per failure."""
+        stub = _Stub()
+        img1 = _touch(tmp_path, "pic1.png")
+        img2 = _touch(tmp_path, "pic2.png")
+        img3 = _touch(tmp_path, "pic3.png")
+        boxes = []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                             lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        results = iter([True, False, False])
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: next(results))
+
+        stub._send_all_media_statuses_bg([img1, img2, img3], "")
+
+        assert len(boxes) == 1, "one popup per batch, not one per failed file"
+        assert stub.status_sent_calls == 0  # not routed through the per-file success path in this test
+
+    def test_batch_all_succeed_shows_no_dialog(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img1 = _touch(tmp_path, "pic1.png")
+        img2 = _touch(tmp_path, "pic2.png")
+        boxes = []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                             lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption, **kw: True)
+
+        stub._send_all_media_statuses_bg([img1, img2], "")
+
+        assert boxes == []
 
 
 class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
@@ -361,3 +395,343 @@ class TestChooseVoiceStatusDegradesGracefullyWithoutPyaudio:
 
         assert stub.main_window.output_calls == []
         assert stub._recording_stream is None
+
+
+class _FakeStream:
+    def __init__(self):
+        self.stopped = False
+        self.closed = False
+
+    def start_stream(self):
+        pass
+
+    def stop_stream(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeRecordingPyAudio:
+    """Stands in for a live pyaudio.PyAudio instance: records every open()
+    so a test can assert the driver was NOT touched on the wx thread."""
+
+    def __init__(self, works=True):
+        self.works = works
+        self.opened_with = []
+
+    def open(self, rate, channels, format, input, input_device_index,
+             frames_per_buffer, stream_callback):
+        self.opened_with.append((rate, channels))
+        if not self.works:
+            raise OSError(-9996, "Device unavailable")
+        return _FakeStream()
+
+
+class _RecordingStub(_Stub):
+    """_Stub plus the attributes the background stream open touches."""
+
+    _start_voice_recording = StatusPanel._start_voice_recording
+    _on_close_voice_panel  = StatusPanel._on_close_voice_panel
+    _on_record_voice_button = StatusPanel._on_record_voice_button
+
+    def __init__(self, pa_works=True, device_name="Microfone USB"):
+        super().__init__()
+        self.main_window.effective_input_device_name = device_name
+        self._recording_pa = _FakeRecordingPyAudio(works=pa_works)
+        self._recording_starting = False
+        self._recording_open_token = 0
+        self._recording_rate = 48000
+        self._recording_channels = 1
+        self._status_list = _FakeButton()
+
+
+class _CapturedThread:
+    """Captures the thread target instead of running it, so the test controls
+    exactly when the "background" work happens."""
+
+    created = []
+
+    def __init__(self, target=None, daemon=None, **_kw):
+        self.target = target
+        self.daemon = daemon
+        self.started = False
+        _CapturedThread.created.append(self)
+
+    def start(self):
+        self.started = True
+
+
+class TestVoiceStatusRecordingOpensOffTheUiThread:
+    """find_input_device_index() and pa.open() both negotiate with the audio
+    driver and can block for seconds. In StatusPanel they ran directly on the
+    wx thread, so starting a voice status froze the window — and the screen
+    reader reading it — for however long the driver took. ConversationsPanel
+    had the same bug and was fixed first (see
+    tests/test_recording_open_failure.py); this is the same treatment for the
+    status panel, including the finally that guarantees the flag is released.
+    """
+
+    def _patch(self, monkeypatch, call_after, message_boxes=None):
+        _CapturedThread.created = []
+        monkeypatch.setattr(status_panel_module.threading, "Thread", _CapturedThread)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter",
+                            lambda func, *a, **kw: call_after.append((func, a)))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                            lambda *a, **kw: (message_boxes if message_boxes is not None else []).append(a))
+        monkeypatch.setattr(status_panel_module, "pyaudio",
+                            types.SimpleNamespace(paInt16=8, paContinue=0))
+
+    def test_the_driver_is_not_touched_before_the_thread_runs(self, monkeypatch):
+        scheduled = []
+        self._patch(monkeypatch, scheduled)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+
+        # Returned immediately: the open is queued, not done.
+        assert stub._recording_starting is True
+        assert stub._is_recording is False
+        assert stub._recording_pa.opened_with == [], "pa.open() ran on the wx thread"
+        assert len(_CapturedThread.created) == 1
+        assert _CapturedThread.created[0].daemon is True
+        assert _CapturedThread.created[0].started is True
+
+    def test_successful_open_arms_the_panel_from_the_callback(self, monkeypatch):
+        scheduled = []
+        self._patch(monkeypatch, scheduled)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()          # the "background" work
+
+        assert stub._recording_pa.opened_with == [(48000, 1)]
+        func, args = scheduled[0]
+        func(*args)                                   # what wx would dispatch
+
+        assert stub._is_recording is True
+        assert stub._recording_starting is False
+        assert stub._voice_status_lbl.label == "recording_in_progress"
+
+    def test_open_failure_releases_the_flag_and_warns(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        stub = _RecordingStub(pa_works=False)
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert stub._recording_starting is False
+        assert stub._is_recording is False
+        assert len(boxes) == 1
+
+    def test_an_exception_still_schedules_the_callback(self, monkeypatch):
+        """The finally: an escaping exception would die unseen in a daemon
+        thread, leaving _recording_starting stuck True and both entry points
+        refusing to ever start recording again."""
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+
+        def _boom(*_a, **_kw):
+            raise OSError("no default host API")
+
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", _boom)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+
+        assert len(scheduled) == 1, "exception swallowed the wx.CallAfter"
+        func, args = scheduled[0]
+        func(*args)
+        assert stub._recording_starting is False
+
+        # The user-visible symptom: pressing record again must get through.
+        reached = []
+        stub._start_voice_recording = lambda: reached.append(True)
+        stub._on_record_voice_button(None)
+        assert reached == [True], "record control stayed dead after a failed open"
+
+    def test_a_stream_that_arrives_after_discard_is_thrown_away(self, monkeypatch):
+        scheduled = []
+        self._patch(monkeypatch, scheduled)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+
+        # User closes the voice panel while the stream is still opening.
+        stub._on_close_voice_panel(None)
+
+        func, args = scheduled[0]
+        func(*args)
+
+        opened_stream = args[0]
+        assert opened_stream.closed is True, "orphan stream left capturing"
+        assert stub._is_recording is False
+        assert stub._recording_stream is None
+
+
+class _FakeSelectivePyAudio:
+    """Like _FakeRecordingPyAudio, but only ONE device index opens — the shape
+    of a machine whose default host API refuses the microphone that another
+    host API accepts. Records every attempted index, in order."""
+
+    def __init__(self, working_index=None):
+        self.working_index = working_index
+        self.opened_indices = []
+        self.opened_with = []
+
+    def open(self, rate, channels, format, input, input_device_index,
+             frames_per_buffer, stream_callback):
+        self.opened_indices.append(input_device_index)
+        self.opened_with.append((rate, channels))
+        if self.working_index is None or input_device_index != self.working_index:
+            raise OSError(-9999, "Unanticipated host error")
+        return _FakeStream()
+
+
+class TestVoiceStatusHostApiFallback:
+    """Same last resort as ConversationsPanel, and deliberately identical to
+    it: posting a voice status and sending a voice message have no reason to
+    disagree about which microphones exist. This panel already drifted behind
+    the other one once — it kept opening the stream on the wx thread long
+    after the conversations panel had stopped (see
+    TestVoiceStatusRecordingOpensOffTheUiThread above).
+    """
+
+    def _patch(self, monkeypatch, call_after, message_boxes=None):
+        _CapturedThread.created = []
+        monkeypatch.setattr(status_panel_module.threading, "Thread", _CapturedThread)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter",
+                            lambda func, *a, **kw: call_after.append((func, a)))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                            lambda *a, **kw: (message_boxes if message_boxes is not None else []).append(a))
+        monkeypatch.setattr(status_panel_module, "pyaudio",
+                            types.SimpleNamespace(paInt16=8, paContinue=0))
+
+    def test_a_failed_default_falls_back_to_an_enumerated_device(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: None)
+        monkeypatch.setattr(status_panel_module, "fallback_input_device_indices",
+                            lambda pa, exclude=(): [12])
+
+        stub = _RecordingStub(device_name="")
+        stub._recording_pa = _FakeSelectivePyAudio(working_index=12)
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert stub._recording_pa.opened_indices[0] is None
+        assert 12 in stub._recording_pa.opened_indices
+        assert stub._is_recording is True
+        assert stub._recording_starting is False
+        assert boxes == [], "recording started — there was nothing to warn about"
+
+    def test_the_pinned_device_is_not_tried_a_second_time(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        seen = {}
+
+        def _candidates(pa, exclude=()):
+            seen["exclude"] = exclude
+            return []
+
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        monkeypatch.setattr(status_panel_module, "fallback_input_device_indices", _candidates)
+
+        stub = _RecordingStub(pa_works=False)
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert 3 in seen["exclude"]
+
+    def test_every_candidate_failing_still_warns(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: None)
+        monkeypatch.setattr(status_panel_module, "fallback_input_device_indices",
+                            lambda pa, exclude=(): [12, 18])
+
+        stub = _RecordingStub(device_name="")
+        stub._recording_pa = _FakeSelectivePyAudio(working_index=None)
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert 12 in stub._recording_pa.opened_indices
+        assert 18 in stub._recording_pa.opened_indices
+        assert stub._recording_starting is False
+        assert stub._is_recording is False
+        assert len(boxes) == 1
+
+
+class TestABatchSurvivesAHelperRaising:
+    """A per-file helper that RAISES (instead of returning False) used to tear
+    out of _send_all_media_statuses_bg()'s loop: every remaining file was
+    skipped and the aggregate failure dialog at the end of that loop was never
+    reached, so the batch stopped in total silence on a background thread.
+
+    The concrete path was _send_status_voice_bg()'s try/finally with no
+    except around reading the converted OGG — fixed at the source — but the
+    loop must not depend on each helper remembering to catch everything.
+    """
+
+    def test_a_raising_audio_helper_does_not_abort_the_batch(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img1  = _touch(tmp_path, "pic1.png")
+        audio = _touch(tmp_path, "song.mp3")
+        img2  = _touch(tmp_path, "pic2.png")
+        boxes, attempted = [], []
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                            lambda *a, **kw: boxes.append(a))
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        def _raising_voice(path, **kw):
+            attempted.append(path)
+            raise OSError("the converted OGG vanished")
+
+        def _ok_media(path, caption, **kw):
+            attempted.append(path)
+            return True
+
+        monkeypatch.setattr(stub, "_send_status_voice_bg", _raising_voice)
+        monkeypatch.setattr(stub, "_send_media_status_bg", _ok_media)
+
+        stub._send_all_media_statuses_bg([img1, audio, img2], "")
+
+        # The file AFTER the raising one was still attempted.
+        assert attempted == [img1, audio, img2]
+        # And the user was told, exactly once, that one file failed.
+        assert len(boxes) == 1
+        assert "(1/3)" in boxes[0][0]
+
+    def test_the_ogg_read_failing_is_reported_not_raised(self, tmp_path, monkeypatch):
+        """_send_status_voice_bg() itself must return False on an unreadable
+        OGG rather than letting the exception escape."""
+        stub = _Stub(convert_result=str(tmp_path / "never-written.ogg"))
+        audio = _touch(tmp_path, "song.mp3")
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox", lambda *a, **kw: None)
+
+        # _convert_wav_to_ogg reports success, but the file isn't really there
+        # to be read — os.path.isfile() is what the earlier guard checks, so
+        # make it pass and let open() be the thing that fails.
+        monkeypatch.setattr(status_panel_module.os.path, "isfile", lambda p: True)
+
+        ok = stub._send_status_voice_bg(audio, report_result=False)
+
+        assert ok is False
+        # The user's own picked file must still be there — only the temp OGG
+        # is ever unlinked.
+        assert os.path.isfile(audio)

@@ -22,6 +22,8 @@ instantiated without a running wx.App — same approach as
 tests/test_message_backfill.py.
 """
 
+import threading
+
 import pytest
 
 from main import MainWindow, history_gap_closed, history_gap_detected
@@ -239,10 +241,13 @@ class TestRefetchHistoryGap:
 
 class _BackfillStub:
     _note_backfill_state = MainWindow._note_backfill_state
+    _backfill_state_guard = MainWindow._backfill_state_guard
+    _canonical_backfill_jid = MainWindow._canonical_backfill_jid
     _jid_address_forms = MainWindow._jid_address_forms
     history_page_target = MainWindow.history_page_target
 
     def __init__(self, gap_jids=(), still_landing=False):
+        self._backfill_state_lock = threading.RLock()
         self.settings = {"user_interface": {"messages_page_size": PAGE}}
         self._history_gap_jids = set(gap_jids)
         self._history_still_landing = still_landing

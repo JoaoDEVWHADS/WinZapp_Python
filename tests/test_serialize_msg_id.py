@@ -74,3 +74,44 @@ class TestSerializeStatusBroadcastId:
         key = {"id": "M1", "fromMe": False, "remoteJid": "5521999999999@s.whatsapp.net"}
         result = s._serialize_msg_id("5521999999999@s.whatsapp.net", key)
         assert result == "false_5521999999999@c.us_M1"
+
+
+class TestSerialize1on1IdPrefersLid:
+    """Regression test: quoting your own message in a private (1-on-1) chat
+    always failed ("não foi possível citar a mensagem"), private chats only
+    — groups worked fine. Root cause: send_text_message() et al. resolve the
+    actual send destination to @lid whenever the contact is cached (see
+    MainWindow._resolve_jid_for_send()'s docstring) — WhatsApp Web indexes
+    every message of a @lid-addressed chat, including our own outgoing ones,
+    under that @lid. But the "chat" segment of a quoted-id built from a
+    locally-stored own message (self.conversation["remoteJid"], captured at
+    compose time) stayed in whatever phone/@c.us form the chat happened to
+    be keyed under — never resolved to @lid — so it stopped matching
+    WhatsApp Web's Store and the quote silently failed. A message just
+    RECEIVED from the other party doesn't hit this: its remoteJid, reported
+    live for an already-@lid chat, already arrives in @lid form.
+    """
+
+    def test_own_message_prefers_the_cached_lid(self):
+        s = _Stub(phone_to_lid={"5521999999999@s.whatsapp.net": "111222333@lid"})
+        key = {"id": "OWN1", "fromMe": True, "remoteJid": "5521999999999@s.whatsapp.net"}
+        result = s._serialize_msg_id("5521999999999@s.whatsapp.net", key)
+        assert result == "true_111222333@lid_OWN1"
+
+    def test_received_message_also_prefers_the_cached_lid(self):
+        s = _Stub(phone_to_lid={"5521999999999@s.whatsapp.net": "111222333@lid"})
+        key = {"id": "RECV1", "fromMe": False, "remoteJid": "5521999999999@s.whatsapp.net"}
+        result = s._serialize_msg_id("5521999999999@s.whatsapp.net", key)
+        assert result == "false_111222333@lid_RECV1"
+
+    def test_falls_back_to_c_us_when_no_lid_is_cached(self):
+        s = _Stub()
+        key = {"id": "OWN2", "fromMe": True, "remoteJid": "5521999999999@s.whatsapp.net"}
+        result = s._serialize_msg_id("5521999999999@s.whatsapp.net", key)
+        assert result == "true_5521999999999@c.us_OWN2"
+
+    def test_already_lid_addressed_chat_is_left_alone(self):
+        s = _Stub()
+        key = {"id": "OWN3", "fromMe": True, "remoteJid": "111222333@lid"}
+        result = s._serialize_msg_id("111222333@lid", key)
+        assert result == "true_111222333@lid_OWN3"

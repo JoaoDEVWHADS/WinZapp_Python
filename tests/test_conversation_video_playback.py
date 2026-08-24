@@ -38,12 +38,21 @@ class _FakeVideoPlayer:
 class _FakeWidget:
     def __init__(self):
         self.shown = False
+        # Last size the sizer was asked to reserve for this control. Video
+        # playback installs ConversationsPanel._VIDEO_BITMAP_SIZE here and
+        # releases it (-1, -1) again afterwards — see _start_video_playback /
+        # _hide_all_media_controls, and core/video_player.fit_frame_size for
+        # why the box has to exist at all.
+        self.min_size = (-1, -1)
 
     def Show(self, show=True):
         self.shown = bool(show)
 
     def Hide(self):
         self.shown = False
+
+    def SetMinSize(self, size):
+        self.min_size = tuple(size)
 
 
 class _FakeMainWindow:
@@ -67,6 +76,7 @@ def _video_msg(mid="v1"):
 
 
 class _Stub:
+    _VIDEO_BITMAP_SIZE           = ConversationsPanel._VIDEO_BITMAP_SIZE
     _play_toggle_video_message   = ConversationsPanel._play_toggle_video_message
     _hide_all_media_controls     = ConversationsPanel._hide_all_media_controls
     _update_links_panel          = lambda self, links: None
@@ -84,6 +94,7 @@ class _Stub:
         self._action_download_btn  = _FakeWidget()
         self._buttons_container    = _FakeWidget()
         self._contact_converse_btn = _FakeWidget()
+        self._contact_save_btn     = _FakeWidget()
         self._contact_msg_jid      = None
         self.conversation_panel    = _FakeWidget()
         self.conversation_panel.IsShown = lambda: False
@@ -119,6 +130,14 @@ class TestHideAllMediaControlsAlwaysStopsTheVideoPlayer:
 
         assert stub._video_player.stop_calls == 1
         assert stub._current_video_msg_id is None
+
+    def test_releases_the_video_sized_box_so_thumbnails_size_themselves_again(self):
+        stub = _Stub([], is_playing=True, current_video_msg_id="v1")
+        stub._media_bitmap.SetMinSize(ConversationsPanel._VIDEO_BITMAP_SIZE)
+
+        stub._hide_all_media_controls()
+
+        assert stub._media_bitmap.min_size == (-1, -1)
 
     def test_stops_the_player_even_when_nothing_was_playing(self):
         stub = _Stub([], is_playing=False)
@@ -167,6 +186,7 @@ class _FakeSettingsMainWindow(_FakeMainWindow):
 
 
 class _ControlsStub:
+    _VIDEO_BITMAP_SIZE    = ConversationsPanel._VIDEO_BITMAP_SIZE
     _start_video_playback = ConversationsPanel._start_video_playback
     _focused_msg_id       = ConversationsPanel._focused_msg_id
     _is_separator         = ConversationsPanel._is_separator
@@ -252,6 +272,19 @@ class TestStartVideoPlaybackShowsSharedControls:
         stub._start_video_playback("/tmp/v1.mp4", 1.0, "v1")
 
         assert stub._media_bitmap.shown is True
+
+    def test_gives_the_bitmap_a_video_sized_box_to_render_into(self):
+        """wx.StaticBitmap clips rather than scales, so a 480 px-wide frame
+        drawn into a control still sized for a <=200 px thumbnail (or for
+        nothing at all) showed only a corner of the picture — reported as
+        "os videos so abrem pela metade". The player scales each frame down
+        into whatever box it finds (core/video_player.fit_frame_size), so a
+        real box has to be installed before playback starts."""
+        stub = _ControlsStub([_video_msg("v1")], focused=0)
+
+        stub._start_video_playback("/tmp/v1.mp4", 1.0, "v1")
+
+        assert stub._media_bitmap.min_size == ConversationsPanel._VIDEO_BITMAP_SIZE
 
     def test_does_not_show_controls_when_a_different_row_is_focused(self):
         stub = _ControlsStub([_video_msg("v1"), _video_msg("v2")], focused=1)

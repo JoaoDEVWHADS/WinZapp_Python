@@ -18,6 +18,7 @@
         "message_foreground": "message_foreground.ogg",
         "message_sent": "message_sent.ogg",
         "message_background": "message_background.ogg",
+        "call_incoming": "call_incoming.ogg",
         "audio_transition_next": "audio_transition_next.ogg",
         "audio_transition_end": "audio_transition_end.ogg"
     },

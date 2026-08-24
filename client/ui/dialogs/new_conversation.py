@@ -12,7 +12,7 @@ import re
 import threading
 import wx
 
-from core.utils import format_number
+from core.utils import format_number, is_phone_like, looks_like_binary_blob, contact_dedup_key
 
 
 class NewConversationDialog(wx.Dialog):
@@ -28,6 +28,7 @@ class NewConversationDialog(wx.Dialog):
         )
         self._results: list = []  # list of (display_name, jid, chat_or_None)
         self._build_ui(i18n)
+        self._do_search("")  # populate the list immediately, before any typing
         self.SetMinSize((440, 380))
         self.SetSize((440, 480))
         self.CentreOnParent()
@@ -97,11 +98,35 @@ class NewConversationDialog(wx.Dialog):
             self._results_list.Select(0)
             self._results_list.SetFocus()
 
+    def _dedup_key(self, jid: str) -> str:
+        """Canonical key identifying *the same person* across JID formats.
+
+        See core.utils.contact_dedup_key() — shared with attach_contact_dialog.py.
+        """
+        return contact_dedup_key(self._mw, jid)
+
+    def _name_is_usable(self, name) -> bool:
+        """Whether a resolved name is a real display name.
+
+        Raw JIDs and phone-number fallbacks (nameless groups resolving to
+        their 18-digit id, contacts with only a number) must not appear in
+        the list — NVDA would read out the raw digits and they are useless
+        as a pick-this-contact label. Reuses MainWindow._is_bad_contact_name
+        when available (groups/private chats follow the same rules as
+        everywhere else in the app), with a local fallback otherwise.
+        """
+        if not name or not isinstance(name, str):
+            return False
+        is_bad = getattr(self._mw, "_is_bad_contact_name", None)
+        if is_bad is not None:
+            return not is_bad(name)
+        name = name.strip()
+        return bool(name) and not name.isdigit() and not is_phone_like(name) \
+            and not looks_like_binary_blob(name)
+
     def _do_search(self, query: str):
         self._results = []
         self._results_list.DeleteAllItems()
-        if not query:
-            return
 
         mw       = self._mw
         i18n     = mw.i18n
@@ -110,6 +135,13 @@ class NewConversationDialog(wx.Dialog):
 
         def _name_for_chat(chat):
             jid = chat.get("remoteJid", "")
+            if jid.endswith("@g.us"):
+                # Groups carry their name under name/subject/groupMetadata
+                # subject — not in the contact store — so resolve it there
+                # first, or a named group would fall through to its raw JID.
+                group_name = mw._group_name_from_chat_dict(chat)
+                if group_name:
+                    return group_name
             return (
                 mw._resolve_contact_name(chat)
                 or mw.find_name_through_messages(chat)
@@ -121,33 +153,48 @@ class NewConversationDialog(wx.Dialog):
         # ── Search existing chats ─────────────────────────────────────────────
         for jid, chat in mw.chats.items():
             name = _name_for_chat(chat)
+            if not self._name_is_usable(name):
+                continue
             if qlow in name.lower() or qlow in format_number(jid).lower():
-                if jid not in seen:
-                    seen.add(jid)
+                if self._dedup_key(jid) not in seen:
+                    seen.add(self._dedup_key(jid))
                     self._results.append((name, jid, chat))
-                    self._results_list.Append((name,))
 
         # ── Search contacts not yet in chats ──────────────────────────────────
         for jid, contact in mw.contacts.items():
-            if jid in seen:
+            if self._dedup_key(jid) in seen:
                 continue
             name = contact.get("name") or contact.get("pushName") or format_number(jid)
-            if qlow in (name or "").lower() or qlow in format_number(jid).lower():
-                seen.add(jid)
-                self._results.append((name or format_number(jid), jid, None))
-                self._results_list.Append((name or format_number(jid),))
+            if not self._name_is_usable(name):
+                continue
+            if qlow in name.lower() or qlow in format_number(jid).lower():
+                seen.add(self._dedup_key(jid))
+                self._results.append((name, jid, None))
 
         # ── If query looks like a phone number, add direct option ─────────────
         digits = re.sub(r"\D", "", query)
         if len(digits) >= 7:
             direct_jid = digits + "@s.whatsapp.net"
-            if direct_jid not in seen:
+            if self._dedup_key(direct_jid) not in seen:
                 display = format_number(direct_jid)
                 self._results.append((display, direct_jid, None))
-                self._results_list.Append((display,))
+
+        # Sort alphabetically, case-insensitively, so the list is predictable
+        # for keyboard/screen-reader navigation instead of dict-insertion order.
+        self._results.sort(key=lambda r: r[0].lower())
+        for name, jid, chat in self._results:
+            self._results_list.Append((name,))
 
         if not self._results:
             self._results_list.Append((self._mw.i18n.t("no_results"),))
+        else:
+            # First row focused+selected by default, same as every other
+            # list in the app (conversations, messages) — without moving
+            # keyboard focus there: the search field keeps it, so typing
+            # keeps filtering uninterrupted, but Enter/Tab immediately act
+            # on row 0 instead of requiring an explicit arrow-down first.
+            self._results_list.Focus(0)
+            self._results_list.Select(0)
 
     # ── Activation ────────────────────────────────────────────────────────────
 

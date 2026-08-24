@@ -18,12 +18,16 @@ from ui.conversations import ConversationsPanel
 class _FakeWidget:
     def __init__(self):
         self.shown = False
+        self.label = None
 
     def Show(self, show=True):
         self.shown = bool(show)
 
     def Hide(self):
         self.shown = False
+
+    def SetLabel(self, text):
+        self.label = text
 
 
 class _FakeTextCtrl(_FakeWidget):
@@ -38,8 +42,28 @@ class _FakeTextCtrl(_FakeWidget):
         self._value = value
 
 
+class _FakeTimer:
+    def Start(self, ms=0):
+        pass
+
+    def Stop(self):
+        pass
+
+
+class _FakeI18n:
+    def t(self, key):
+        return key
+
+
+class _FakeMainWindow:
+    def __init__(self):
+        self.i18n = _FakeI18n()
+
+
 class _Stub:
     _hide_voice_panel = ConversationsPanel._hide_voice_panel
+    _stop_recorded_audio_preview = ConversationsPanel._stop_recorded_audio_preview
+    _cleanup_recorded_audio_temp_file = ConversationsPanel._cleanup_recorded_audio_temp_file
 
     def __init__(self, message_field_value=""):
         self._voice_panel           = _FakeWidget()
@@ -49,6 +73,11 @@ class _Stub:
         self._add_attachment_btn    = _FakeWidget()
         self.conversation_panel     = _FakeWidget()
         self.conversation_panel.Layout = lambda: None
+        self._play_recorded_btn     = _FakeWidget()
+        self._recorded_audio_timer      = _FakeTimer()
+        self._recorded_audio_sound      = None
+        self._recorded_audio_temp_path  = None
+        self.main_window = _FakeMainWindow()
 
 
 class TestHideVoicePanelRestoresMessageField:

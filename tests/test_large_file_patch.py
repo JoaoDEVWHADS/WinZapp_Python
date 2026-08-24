@@ -86,5 +86,39 @@ def test_document_limits_match_the_1gb_whatsapp_ceiling():
     )
     main = (ROOT / "client" / "main.py").read_text(encoding="utf-8")
 
-    assert "_MAX_DOC_BYTES      = 1 * 1024 * 1024 * 1024" in conversations
+    assert "_MAX_ATTACHMENT_BYTES = 1 * 1024 * 1024 * 1024" in conversations
     assert "MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024" in main
+
+
+def test_media_and_document_ceilings_match():
+    """Image/video/audio used to be capped at 70MB in the UI's own
+    pre-check, well under what sender.layer.js's bounded transfer can now
+    actually move (see wppconnect_sender_layer_patch.py) — that gap is what
+    used to force a 500 for any media send past 70MB."""
+    conversations = (ROOT / "client" / "ui" / "conversations.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "_MAX_ATTACHMENT_MB    = 1024" in conversations
+    assert "70  * 1024 * 1024" not in conversations
+
+
+def test_wpp_media_size_limit_matches_the_document_ceiling():
+    websocket_client = (ROOT / "client" / "core" / "websocket_client.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '("maxMediaSize", 1 * 1024 * 1024 * 1024)' in websocket_client
+
+
+def test_sender_patch_widens_bounded_transfer_to_every_attachment_type():
+    """PATCHED_FILE_LOADING_V1 (document-only) must still migrate an
+    already-patched sender.layer.js to the widened PATCHED_FILE_LOADING —
+    otherwise a machine that already has the old patch applied never picks
+    up the fix on an ordinary restart (see
+    tests/test_reapply_node_modules_patches.py for why that reapply path
+    matters)."""
+    assert (sender_patch.PATCHED_FILE_LOADING_V1, sender_patch.PATCHED_FILE_LOADING) in sender_patch.ALL_PATCHES
+    for kind in ("document", "image", "video", "audio"):
+        assert f"'{kind}'" in sender_patch.PATCHED_FILE_LOADING
+    assert "options.type === 'document'" not in sender_patch.PATCHED_FILE_LOADING

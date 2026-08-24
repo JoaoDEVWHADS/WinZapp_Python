@@ -4,7 +4,9 @@ import time
 import socketio
 import wx
 import requests
+from core.api_client import api_get, api_post
 from core.i18n import I18n
+from core.sync_contracts import observe_payload
 from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 # ── Message delivery status ──────────────────────────────────────────────────
@@ -48,7 +50,42 @@ def ack_to_status(wpp_ack):
     return _ACK_TO_STATUS.get(wpp_ack)
 
 
+def _media_seconds(wpp_msg: dict):
+    """Duration in whole seconds, or None when the payload never stated one.
+
+    None and 0 are different answers and must stay that way. A voice note
+    shorter than a second legitimately reports 0 — WhatsApp itself shows
+    "0:00" for those — while a message whose duration simply never arrived
+    (a forwarded media message echoed over the live socket, issue #43) has
+    no duration at all. Writing 0 for both made the second case look like
+    the first, so the UI stated a length that was certainly wrong instead of
+    staying quiet about one it did not know.
+    """
+    dur = wpp_msg.get("duration")
+    if dur is None:
+        dur = wpp_msg.get("seconds")
+    if dur is None and isinstance(wpp_msg.get("mediaData"), dict):
+        dur = wpp_msg["mediaData"].get("duration")
+    if dur is None or dur == "":
+        return None
+    try:
+        return int(float(dur))
+    except (TypeError, ValueError):
+        return None
+
+
 class WebSocketClient:
+    # How long on_disconnect() waits, with the socket still down, before
+    # declaring the app auto-offline. Was 5.0s — too short to ride out an
+    # ordinary Wi-Fi power-save/NAT-rebind blip or a brief hiccup against the
+    # local WPPConnect server (reported live as flipping to "modo offline"
+    # far more often than any real WhatsApp outage would). python-socketio's
+    # own reconnection backoff above (2s, doubling up to 60s) gets through
+    # several attempts within this window before the app gives up and
+    # believes it — a genuine outage is still caught either by this (a
+    # little later) or by the 30-second HTTP health check regardless.
+    _DISCONNECT_CONFIRM_SECONDS = 20.0
+
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
         self.connect = connect
@@ -81,6 +118,7 @@ class WebSocketClient:
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
         self.sio.on("media-upload-progress", self.on_media_upload_progress)
+        self.sio.on("incomingcall", self.on_wpp_incoming_call)
         # These two handlers existed but were never registered — contact
         # name/photo updates and presence changes only ever reached the app
         # through onpresencechanged and the 5-minute contacts poll, so a
@@ -168,10 +206,10 @@ class WebSocketClient:
         # _recheck_connection_after_connect() saw the reconnect, force a full
         # resync every time — even though WhatsApp itself never actually went
         # down and outgoing sends (which go over the REST API, not this
-        # socket) were never actually blocked. Wait a few seconds and only
-        # declare it if the socket is STILL down by then; a genuine outage is
-        # still caught either by this (a little later) or by the 30-second
-        # health check regardless.
+        # socket) were never actually blocked. Wait _DISCONNECT_CONFIRM_SECONDS
+        # and only declare it if the socket is STILL down by then; a genuine
+        # outage is still caught either by this (a little later) or by the
+        # 30-second health check regardless.
         if self._disconnect_timer is not None:
             self._disconnect_timer.cancel()
 
@@ -180,7 +218,7 @@ class WebSocketClient:
                 self.main_window._set_wa_connected(False, "socket disconnected", False)
 
         self._disconnect_timer = threading.Timer(
-            5.0, lambda: wx.CallAfter(_confirm_still_disconnected)
+            self._DISCONNECT_CONFIRM_SECONDS, lambda: wx.CallAfter(_confirm_still_disconnected)
         )
         self._disconnect_timer.daemon = True
         self._disconnect_timer.start()
@@ -392,7 +430,7 @@ class WebSocketClient:
         if old_token:
             def _close():
                 try:
-                    requests.post(
+                    api_post(
                         f"{mw.wpp_server}:{mw.wpp_port}/api/{old_token}/close-session",
                         headers={"Authorization": f"Bearer {old_token}", "Content-Type": "application/json"},
                         timeout=5,
@@ -696,6 +734,18 @@ class WebSocketClient:
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
 
+            # See on_wpp_message_received()'s own breadcrumb for why this is
+            # unconditional — pins down exactly which branch below (history-
+            # sync echo, own-send echo, or a genuine live dispatch) a given
+            # message id took, instead of only knowing the event arrived.
+            key = msg.get("key", {})
+            logging.info(
+                "[WebSocketClient] on_messages_upsert: id=%s remoteJid=%s fromMe=%s "
+                "type=%s isMdHistoryMsg=%s",
+                key.get("id", ""), key.get("remoteJid", ""), key.get("fromMe"),
+                msg.get("messageType", ""), msg.get("isMdHistoryMsg"),
+            )
+
             # ── Skip history-sync echoes ───────────────────────────────────────
             # WPPConnect/Baileys fires messages.upsert for historical messages
             # (isMdHistoryMsg=True) during its initial sync phase. These are
@@ -812,6 +862,9 @@ class WebSocketClient:
         try:
             if not isinstance(info, dict) or not self._belongs_to_this_session(info):
                 return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -836,6 +889,16 @@ class WebSocketClient:
                         previous = int(previous) if previous is not None else None
                     except (TypeError, ValueError):
                         previous = None
+                    # Logged on arrival, before any of MainWindow's guards can
+                    # discard it: this is the only place that can tell "WhatsApp
+                    # Web never emitted the event" apart from "it arrived and
+                    # something dropped it", and the whole path used to be
+                    # silent — a read made on the phone that never reached the
+                    # badge left no trace at all in log.log to work from.
+                    logging.info(
+                        "[unread] chats-update in: %s unread=%s previous=%s",
+                        jid, unread, previous,
+                    )
                     wx.CallAfter(
                         self.main_window.on_chat_unread_update,
                         jid, int(unread), previous,
@@ -888,6 +951,9 @@ class WebSocketClient:
         try:
             if not isinstance(info, dict) or not self._belongs_to_this_session(info):
                 return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             data      = info.get("data", {})
             jid       = data.get("id", "")
             presences = data.get("presences", {})
@@ -918,7 +984,19 @@ class WebSocketClient:
             if not chat_jid:
                 return
 
-            is_group = bool(info.get("isGroup", False))
+            # WPPConnect's own `isGroup` flag has been observed false for a
+            # real group event (id ending @g.us) right after a fresh pairing
+            # — reported live as EVERY group's typing indicator showing
+            # "Participante sem nome" for everyone, even after re-pairing
+            # from scratch: with is_group wrongly False, this fell into the
+            # single-chat branch below and keyed presences by the group's
+            # own jid instead of by participant, which is exactly the shape
+            # _resolve_jid_name() (main.py) already has a guard for — that
+            # guard just means "no participant identified", not "not a
+            # group". The @g.us suffix is authoritative and doesn't depend
+            # on wa-js's own state being warmed up yet, so it's checked
+            # first regardless of what isGroup says.
+            is_group = chat_jid.endswith("@g.us") or bool(info.get("isGroup", False))
             
             # We want to format this into the presences dict that main.py expects:
             # presences: {participant_jid: {"lastKnownPresence": state, "lastSeen": timestamp}}
@@ -1126,7 +1204,7 @@ class WebSocketClient:
                 "Authorization": f"Bearer {self.main_window.token}",
                 "Content-Type": "application/json",
             }
-            res = requests.get(url, headers=headers, timeout=5)
+            res = api_get(url, headers=headers, timeout=5)
             if res.status_code in (200, 201):
                 res_data = res.json()
                 resp = res_data.get("response", res_data)
@@ -1148,9 +1226,21 @@ class WebSocketClient:
     def _set_wpp_limits(self):
         """Push raised file-size limits into WhatsApp Web via the setLimit API.
 
-        WPPConnect documented maximums:
+        WPPConnect documented defaults:
           maxMediaSize — 70 MB  (images, videos, audio)
           maxFileSize  — 1 GB   (documents)
+
+        maxMediaSize now matches maxFileSize: the 70 MB ceiling only ever
+        existed because non-document sends had no way to move a large file
+        into Chromium without building one giant in-memory base64 string
+        and passing it as a single CDP argument. Now that sender.layer.js's
+        bounded/chunked transfer covers image/video/audio too (see
+        core/wppconnect_sender_layer_patch.py), there is no longer a reason
+        for WhatsApp Web's own client-side guard to reject a large media
+        send before WinZapp ever gets a chance to use that path — matches
+        the single client-side cap every attachment type now shares
+        (ui/conversations.py's _MAX_ATTACHMENT_BYTES; the separate, lower
+        _MAX_MEDIA_BYTES it replaced no longer exists).
         """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
@@ -1159,12 +1249,12 @@ class WebSocketClient:
             "Content-Type": "application/json",
         }
         limits = [
-            ("maxMediaSize", 70 * 1024 * 1024),    # 70 MB
+            ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
             ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
         ]
         for limit_type, value in limits:
             try:
-                requests.post(
+                api_post(
                     url,
                     json={"type": limit_type, "value": value},
                     headers=headers,
@@ -1264,12 +1354,42 @@ class WebSocketClient:
 
     def on_wpp_message_received(self, data):
         try:
-            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
+            # Unconditional breadcrumb, logged before any filtering below —
+            # reported live: a message shows up in the chat list (unread
+            # count bumped) with no toast/sound/local notification at all,
+            # only surfacing minutes later once a periodic get_remote_chats()
+            # poll catches the stale unread count. This method previously
+            # logged nothing on its normal path, so there was no way to tell
+            # "the received-message Socket.IO event never arrived at all"
+            # apart from "it arrived and was silently filtered somewhere in
+            # here" after the fact — both looked identical: nothing in
+            # log.log. This line alone answers that: its absence around the
+            # time a message went missing means the event never reached this
+            # handler in the first place (a WPPConnect/Baileys-side delivery
+            # gap, not a WinZapp bug in this file); its presence, combined
+            # with which of the checks below actually returns early, pins
+            # down exactly where the drop happened instead.
+            is_dict = isinstance(data, dict)
+            session_ok = is_dict and self._belongs_to_this_session(data)
+            has_response = is_dict and bool(data.get("response"))
+            logging.info(
+                "[WebSocketClient] received-message event: session_ok=%s has_response=%s",
+                session_ok, has_response,
+            )
+            if not session_ok:
                 return
             wpp_msg = data.get("response")
             if not wpp_msg:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
+            # When this message reached WinZapp, so on_new_message() can say how
+            # much of the delay before the screen reader speaks was its own.
+            # Kept out of the stored record by prune_message_record()'s caller
+            # popping it at the notification point.
+            normalized["_arrived_at"] = time.monotonic()
             self.on_messages_upsert({"data": normalized})
         except Exception:
             # A message is dropped entirely if this raises — log the full
@@ -1347,10 +1467,73 @@ class WebSocketClient:
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_reaction error")
 
+    @staticmethod
+    def _call_timestamp_seconds(value):
+        """Normalize WhatsApp call timestamps to epoch seconds.
+
+        The public IncomingCall contract uses seconds, but internal CallStore
+        models and custom bridges may expose milliseconds or microseconds.
+        Invalid/relative values intentionally become zero so they cannot be
+        mistaken for a trustworthy session-age signal.
+        """
+        if isinstance(value, bool):
+            return 0
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if numeric >= 1_000_000_000_000_000:
+            numeric /= 1_000_000
+        elif numeric >= 1_000_000_000_000:
+            numeric /= 1_000
+        if numeric < 1_000_000_000:
+            return 0
+        return int(numeric)
+
+    def on_wpp_incoming_call(self, data):
+        """Forward WPPConnect call lifecycle events to the wx main thread."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            payload = data.get("data") if isinstance(data.get("data"), dict) else data
+            call_timestamp = self._call_timestamp_seconds(
+                payload.get("timestamp")
+                or payload.get("offerTime")
+                or payload.get("t")
+                or payload.get("startTime")
+            )
+            observed_at = self._call_timestamp_seconds(payload.get("observedAt"))
+            normalized = {
+                "event": str(payload.get("event") or payload.get("status") or "offer"),
+                "state": str(payload.get("state") or ""),
+                "id": str(payload.get("id") or ""),
+                "peerJid": self._clean_jid(
+                    payload.get("peerJid") or payload.get("sender") or payload.get("from")
+                ),
+                "groupJid": self._clean_jid(payload.get("groupJid")),
+                "isVideo": bool(payload.get("isVideo", False)),
+                "isGroup": bool(payload.get("isGroup", False)),
+                "timestamp": call_timestamp,
+                "observedAt": observed_at,
+                "receivedWhileOffline": bool(
+                    payload.get("offerReceivedWhileOffline", False)
+                ),
+            }
+            if not normalized["id"] and not normalized["peerJid"]:
+                logging.warning("[WebSocketClient] incomingcall without id or peer: %r", data)
+                return
+            logging.info("[WebSocketClient] incomingcall event: %r", normalized)
+            wx.CallAfter(self.main_window.on_incoming_call_event, normalized)
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_incoming_call error")
+
     def on_wpp_ack(self, data):
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             wpp_ack = data.get("ack")
             status = ack_to_status(wpp_ack)
             if status is None:
@@ -1389,6 +1572,13 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_ack error")
 
     def _normalize_wpp_message(self, wpp_msg):
+        # Everything below reads this payload with .get()/defaults, which is
+        # the only way to survive WhatsApp Web — but it also means a field that
+        # stops arriving looks exactly like one that was never set. Checked
+        # here, on the way in, so the log names the field instead of leaving a
+        # symptom to be diagnosed three layers away. Observation only: the
+        # payload is returned untouched and nothing below changes behaviour.
+        observe_payload([wpp_msg], "get-messages", where="wpp message")
         msg_id = wpp_msg.get("id")
         if isinstance(msg_id, dict):
             msg_id = msg_id.get("_serialized", "")
@@ -1439,6 +1629,28 @@ class WebSocketClient:
         msg_type = wpp_msg.get("type", "chat")
         conversation = wpp_msg.get("body", "") or wpp_msg.get("text", "")
 
+        # WPPConnect's own message model flattens WhatsApp's OG link-preview
+        # metadata (title/description/canonicalUrl — same proto fields
+        # sender.layer.js's own sendLinkPreview() writes on the way out)
+        # straight onto the raw message object rather than nesting it, and
+        # most link-preview text still arrives with type "chat" like any
+        # other plain text message — not "extendedText". Promoting those to
+        # extendedTextMessage (like a real quote/mention already does further
+        # down) is what makes _get_message_content() render the preview at
+        # all; a "chat" message never carries anything but conversation text.
+        _link_preview_title = wpp_msg.get("title") or ""
+        _link_preview_description = wpp_msg.get("description") or ""
+        _link_preview_url = wpp_msg.get("canonicalUrl") or wpp_msg.get("matchedText") or ""
+        _has_link_preview = bool(_link_preview_title or _link_preview_description)
+
+        def _with_link_preview(ext):
+            if _has_link_preview:
+                ext["title"] = _link_preview_title
+                ext["description"] = _link_preview_description
+                if _link_preview_url:
+                    ext["canonicalUrl"] = _link_preview_url
+            return ext
+
         def _safe_media_key(val):
             if not val:
                 return ""
@@ -1452,23 +1664,22 @@ class WebSocketClient:
             return ""
 
         message_content = {}
+        _promoted_to_extended_text = False
         if msg_type == "chat":
-            message_content = {"conversation": conversation}
+            if _has_link_preview:
+                message_content = {
+                    "extendedTextMessage": _with_link_preview({"text": conversation})
+                }
+                _promoted_to_extended_text = True
+            else:
+                message_content = {"conversation": conversation}
         elif msg_type == "extendedText":
             message_content = {
-                "extendedTextMessage": {
-                    "text": conversation
-                }
+                "extendedTextMessage": _with_link_preview({"text": conversation})
             }
         elif msg_type in ("audio", "ptt"):
             media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
-            dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
-            if not dur:
-                dur = media_data.get("duration")
-            try:
-                seconds_val = int(float(dur)) if dur else 0
-            except Exception:
-                seconds_val = 0
+            seconds_val = _media_seconds(wpp_msg)
 
             # Keep the original audio metadata.  Save As resolves the filename
             # extension from these values; dropping them here made every
@@ -1523,13 +1734,7 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "video":
-            dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
-            if not dur and isinstance(wpp_msg.get("mediaData"), dict):
-                dur = wpp_msg.get("mediaData", {}).get("duration")
-            try:
-                seconds_val = int(float(dur)) if dur else 0
-            except Exception:
-                seconds_val = 0
+            seconds_val = _media_seconds(wpp_msg)
             vid_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(vid_caption):
                 vid_caption = ""
@@ -1694,6 +1899,8 @@ class WebSocketClient:
             "liveLocation": "liveLocationMessage",
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
+        if _promoted_to_extended_text:
+            mapped_type = "extendedTextMessage"
 
         ack = wpp_msg.get("ack")
         message_updates = []

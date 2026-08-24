@@ -161,8 +161,25 @@ class SettingsDialog(wx.Dialog):
         )
         self._lang_codes = list(LANGUAGE_NAMES.keys())
         self._restart_required = False
+        # Dirty-tracking for the Apply button — see _mark_dirty()'s docstring.
+        self._dirty = False
+        self._loading_values = False
         self._build_ui()
+        self._loading_values = True
         self._load_values()
+        self._loading_values = False
+        self._apply_btn.Hide()
+        # Catches every checkbox/radio/combo/text change anywhere in the
+        # dialog via wx's normal command-event propagation (a control-level
+        # handler that doesn't call event.Skip() would otherwise swallow it —
+        # see _mark_dirty()'s docstring for the handlers that needed one
+        # added). Bound after _load_values() so SetValue()-driven text
+        # events fired while populating the controls (see _load_values()
+        # itself) are covered by _loading_values rather than by binding order.
+        self.Bind(wx.EVT_CHECKBOX, self._mark_dirty)
+        self.Bind(wx.EVT_RADIOBUTTON, self._mark_dirty)
+        self.Bind(wx.EVT_COMBOBOX, self._mark_dirty)
+        self.Bind(wx.EVT_TEXT, self._mark_dirty)
         self.Fit()
         self.SetMinSize((360, -1))
         self.Centre()
@@ -207,6 +224,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._notifications_check, 0, wx.ALL, 8)
 
+        self._keep_muted_silent_check = wx.CheckBox(
+            self._general_page, label=i18n.t("keep_muted_chats_silent_when_open_label")
+        )
+        gen_sizer.Add(self._keep_muted_silent_check, 0, wx.ALL, 8)
+
         self._announce_sync_check = wx.CheckBox(
             self._general_page, label=i18n.t("announce_sync_events_label")
         )
@@ -243,6 +265,17 @@ class SettingsDialog(wx.Dialog):
             self._general_page, label=i18n.t("updates_label")
         )
         gen_sizer.Add(self._updates_check, 0, wx.ALL, 8)
+
+        # Alpha channel opt-in: with this ticked the updater also considers the
+        # per-commit alpha builds published by .github/workflows/alpha-release.yml
+        # (see select_release() in client/updater.py). Placed right under the
+        # updates checkbox it depends on, so it reads as a sub-option in tab
+        # order too.
+        self._alpha_updates_check = wx.CheckBox(
+            self._general_page, label=i18n.t("alpha_updates_label")
+        )
+        self._alpha_updates_check.SetToolTip(i18n.t("alpha_updates_tooltip"))
+        gen_sizer.Add(self._alpha_updates_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         self._hotkey_label = wx.StaticText(self._general_page, label=i18n.t("global_hotkey_label"))
         gen_sizer.Add(
@@ -400,8 +433,86 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(self_ref_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._show_delivery_status_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_delivery_status_in_chat_list")
+        )
+        ui_sizer.Add(self._show_delivery_status_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        self._preserve_typed_caption_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_preserve_typed_text_as_caption")
+        )
+        ui_sizer.Add(
+            self._preserve_typed_caption_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._bulk_action_shortcuts_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_bulk_action_shortcuts")
+        )
+        ui_sizer.Add(
+            self._bulk_action_shortcuts_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._auto_focus_next_audio_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_auto_focus_next_audio")
+        )
+        ui_sizer.Add(
+            self._auto_focus_next_audio_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._selected_announce_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_selected_announce_position_label")
+        )
+        selected_announce_sizer = wx.StaticBoxSizer(self._selected_announce_box, wx.VERTICAL)
+
+        self._selected_announce_start_rb = wx.RadioButton(
+            self._ui_page,
+            label=i18n.t("ui_selected_announce_position_start"),
+            style=wx.RB_GROUP,
+        )
+        selected_announce_sizer.Add(self._selected_announce_start_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._selected_announce_end_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_selected_announce_position_end")
+        )
+        selected_announce_sizer.Add(
+            self._selected_announce_end_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+        )
+
+        ui_sizer.Add(selected_announce_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._show_yesterday_label_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_yesterday_label")
+        )
+        ui_sizer.Add(
+            self._show_yesterday_label_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._show_link_previews_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_link_previews_label")
+        )
+        ui_sizer.Add(
+            self._show_link_previews_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
+
+        # ── Accessibility tab ────────────────────────────────────────────────
+        self._accessibility_page = wx.Panel(self._notebook)
+        accessibility_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._extended_sr_compat_check = wx.CheckBox(
+            self._accessibility_page, label=i18n.t("accessibility_extended_sr_compat_label")
+        )
+        accessibility_sizer.Add(self._extended_sr_compat_check, 0, wx.ALL, 8)
+
+        self._sapi_fallback_check = wx.CheckBox(
+            self._accessibility_page, label=i18n.t("accessibility_sapi_fallback_label")
+        )
+        accessibility_sizer.Add(self._sapi_fallback_check, 0, wx.ALL, 8)
+
+        self._accessibility_page.SetSizer(accessibility_sizer)
+        self._notebook.AddPage(self._accessibility_page, i18n.t("tab_accessibility"))
 
         # ── Spoken content tab ───────────────────────────────────────────────
         self._speech_page = wx.Panel(self._notebook)
@@ -426,6 +537,11 @@ class SettingsDialog(wx.Dialog):
             self._speech_page, label=i18n.t("speech_speak_other_conv_label")
         )
         speech_sizer.Add(self._speak_other_conv_check, 0, wx.ALL, 8)
+
+        self._silence_while_recording_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_silence_while_recording_label")
+        )
+        speech_sizer.Add(self._silence_while_recording_check, 0, wx.ALL, 8)
 
         self._speech_page.SetSizer(speech_sizer)
         self._notebook.AddPage(self._speech_page, i18n.t("tab_speech_content"))
@@ -675,6 +791,26 @@ class SettingsDialog(wx.Dialog):
         self._audio_page.SetSizer(audio_sizer)
         self._notebook.AddPage(self._audio_page, i18n.t("tab_audio_playback"))
 
+        # ── Calls tab ───────────────────────────────────────────────────────
+        # Native checkboxes keep the complete feature reachable and clearly
+        # announced by NVDA/JAWS/Narrator without a custom accessibility layer.
+        self._calls_page = wx.Panel(self._notebook)
+        calls_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._call_alerts_check = wx.CheckBox(
+            self._calls_page, label=i18n.t("calls_alerts_enabled_label")
+        )
+        calls_sizer.Add(self._call_alerts_check, 0, wx.ALL, 8)
+
+        self._call_popup_check = wx.CheckBox(
+            self._calls_page, label=i18n.t("calls_popup_enabled_label")
+        )
+        calls_sizer.Add(self._call_popup_check, 0, wx.ALL, 8)
+
+        self._calls_page.SetSizer(calls_sizer)
+        self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
+        self._call_alerts_check.Bind(wx.EVT_CHECKBOX, self._on_call_alerts_toggle)
+
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("ok"))
@@ -707,6 +843,16 @@ class SettingsDialog(wx.Dialog):
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
 
+        call_settings = self.main_window.settings.get("calls", {})
+        self._call_alerts_check.SetValue(call_settings.get("alerts_enabled", True))
+        self._call_popup_check.SetValue(call_settings.get("popup_enabled", True))
+        self._update_call_fields_state()
+
+        keep_muted_silent = self.main_window.settings.get("general", {}).get(
+            "keep_muted_chats_silent_when_open", True
+        )
+        self._keep_muted_silent_check.SetValue(keep_muted_silent)
+
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
         self._announce_sync_check.SetValue(announce_sync)
 
@@ -725,6 +871,13 @@ class SettingsDialog(wx.Dialog):
 
         updates = self.main_window.settings.get("general", {}).get("updates_enabled", True)
         self._updates_check.SetValue(updates)
+
+        # Off unless explicitly enabled — including on installs whose
+        # settings.json predates the option and has no key at all.
+        alpha_updates = self.main_window.settings.get("general", {}).get(
+            "alpha_updates_enabled", False
+        )
+        self._alpha_updates_check.SetValue(alpha_updates)
 
         hk = self.main_window.settings.get("general", {}).get("global_hotkey")
         if hk and isinstance(hk, dict) and hk.get("vk"):
@@ -785,6 +938,43 @@ class SettingsDialog(wx.Dialog):
         )
         self._show_listbox_count_cb.SetValue(bool(show_listbox_count))
 
+        show_delivery_status = self.main_window.settings.get("user_interface", {}).get(
+            "show_delivery_status_in_chat_list", True
+        )
+        self._show_delivery_status_cb.SetValue(bool(show_delivery_status))
+
+        preserve_typed_caption = self.main_window.settings.get("user_interface", {}).get(
+            "preserve_typed_text_as_attachment_caption", True
+        )
+        self._preserve_typed_caption_cb.SetValue(bool(preserve_typed_caption))
+
+        bulk_action_shortcuts = self.main_window.settings.get("user_interface", {}).get(
+            "bulk_action_shortcuts", True
+        )
+        self._bulk_action_shortcuts_cb.SetValue(bool(bulk_action_shortcuts))
+
+        auto_focus_next_audio = self.main_window.settings.get("user_interface", {}).get(
+            "auto_focus_next_audio", True
+        )
+        self._auto_focus_next_audio_cb.SetValue(bool(auto_focus_next_audio))
+
+        selected_announce_position = self.main_window.settings.get("user_interface", {}).get(
+            "selected_announcement_position", "end"
+        )
+        if selected_announce_position == "start":
+            self._selected_announce_start_rb.SetValue(True)
+        else:
+            self._selected_announce_end_rb.SetValue(True)
+
+        show_yesterday_label = self.main_window.settings.get("user_interface", {}).get(
+            "show_yesterday_label", True
+        )
+        self._show_yesterday_label_cb.SetValue(bool(show_yesterday_label))
+
+        show_link_previews = self.main_window.settings.get("user_interface", {}).get(
+            "show_link_previews", True
+        )
+        self._show_link_previews_cb.SetValue(bool(show_link_previews))
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -802,11 +992,16 @@ class SettingsDialog(wx.Dialog):
         )
         self._update_self_reference_field_state()
 
+        accessibility = self.main_window.settings.get("accessibility", {})
+        self._extended_sr_compat_check.SetValue(accessibility.get("extended_sr_compat_enabled", True))
+        self._sapi_fallback_check.SetValue(accessibility.get("sapi_fallback_enabled", True))
+
         speech = self.main_window.settings.get("speech_content", {})
         self._announce_typing_check.SetValue(speech.get("announce_typing", True))
         self._announce_recording_check.SetValue(speech.get("announce_recording", True))
         self._speak_active_conv_check.SetValue(speech.get("speak_active_conv_messages", True))
         self._speak_other_conv_check.SetValue(speech.get("speak_other_conv_messages", True))
+        self._silence_while_recording_check.SetValue(speech.get("silence_while_recording", False))
 
         conn = self.main_window.settings.get("connection", {})
         custom_api = conn.get("wpp_custom_api", False)
@@ -1046,6 +1241,7 @@ class SettingsDialog(wx.Dialog):
         self._current_pack_id = self._sound_pack_ids[idx]
         self._load_sound_events_display(self._current_pack_id)
         self._reload_alert_tone_choices()
+        event.Skip()
 
     def _on_import_sound_pack_folder(self, event):
         i18n = self.main_window.i18n
@@ -1090,6 +1286,10 @@ class SettingsDialog(wx.Dialog):
 
         self.main_window.refresh_sound_packs()
         self._reload_sound_pack_choices(select_pack_id=new_pack_id)
+        # Selects the new pack programmatically (SetSelection(), which fires
+        # no event) — mark dirty directly, same reason _toggle_current_sound_
+        # event()/_set_all_sound_events() below do.
+        self._mark_dirty()
         wx.MessageBox(
             i18n.t("soundpack_import_success"),
             i18n.t("settings_title"),
@@ -1108,6 +1308,7 @@ class SettingsDialog(wx.Dialog):
 
     def _on_self_reference_toggle(self, event):
         self._update_self_reference_field_state()
+        event.Skip()
 
     # ── Sound events tab ─────────────────────────────────────────────────────
 
@@ -1137,6 +1338,9 @@ class SettingsDialog(wx.Dialog):
         entry["enabled"] = not entry.get("enabled", True)
         self._sound_events_list.SetString(idx, self._sound_event_label(key, entry["enabled"]))
         self._sound_events_list.SetSelection(idx)
+        # SetString()/SetSelection() on a ListBox fire no change event of
+        # their own to bubble up to _mark_dirty() — mark directly.
+        self._mark_dirty()
 
     def _on_sound_event_path_changed(self, event):
         idx = self._sound_events_list.GetSelection()
@@ -1146,6 +1350,7 @@ class SettingsDialog(wx.Dialog):
         settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
         entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
         entry["path"] = self._sound_event_path_field.GetValue()
+        event.Skip()
 
     def _set_all_sound_events(self, value: bool):
         settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
@@ -1153,6 +1358,7 @@ class SettingsDialog(wx.Dialog):
             entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
             entry["enabled"] = value
             self._sound_events_list.SetString(idx, self._sound_event_label(key, value))
+        self._mark_dirty()
 
     # ── Alert tones tab ──────────────────────────────────────────────────────
 
@@ -1175,6 +1381,7 @@ class SettingsDialog(wx.Dialog):
             self._alert_private_preview.stop()
         else:
             self._alert_group_preview.stop()
+        event.Skip()
 
     def _resolve_alert_preview_path(self, kind: str) -> str:
         """Resolve whatever the private/group Alert Tones combo currently
@@ -1200,6 +1407,15 @@ class SettingsDialog(wx.Dialog):
         except (ValueError, TypeError):
             speed_idx = 0
         self._audio_speed_combo.SetSelection(speed_idx)
+        event.Skip()
+
+    def _on_call_alerts_toggle(self, event):
+        self._update_call_fields_state()
+        event.Skip()
+
+    def _update_call_fields_state(self):
+        """A popup is meaningful only while incoming-call alerts are enabled."""
+        self._call_popup_check.Enable(self._call_alerts_check.GetValue())
 
     def _validate(self) -> bool:
         """Return True if all values are valid; show an error and return False otherwise."""
@@ -1279,7 +1495,7 @@ class SettingsDialog(wx.Dialog):
             if max_days < 0:
                 raise ValueError
         except ValueError:
-            self._notebook.SetSelection(7)
+            self._notebook.SetSelection(8)
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_media_max_days"),
                 self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
@@ -1295,7 +1511,7 @@ class SettingsDialog(wx.Dialog):
             if max_mb < 0:
                 raise ValueError
         except ValueError:
-            self._notebook.SetSelection(7)
+            self._notebook.SetSelection(8)
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_media_max_mb"),
                 self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
@@ -1319,7 +1535,7 @@ class SettingsDialog(wx.Dialog):
                 continue
             override = (cfg.get("path") or "").strip()
             if override and not os.path.isfile(override):
-                self._notebook.SetSelection(5)
+                self._notebook.SetSelection(6)
                 self._sound_events_list.SetSelection(idx)
                 self._update_sound_event_path_display()
                 self._sound_event_path_field.SetFocus()
@@ -1336,7 +1552,7 @@ class SettingsDialog(wx.Dialog):
         if self._alert_private_combo.GetSelection() == last_idx:
             path = self._alert_private_custom_field.GetValue().strip()
             if not path or not os.path.isfile(path):
-                self._notebook.SetSelection(6)
+                self._notebook.SetSelection(7)
                 self._alert_private_custom_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
@@ -1348,7 +1564,7 @@ class SettingsDialog(wx.Dialog):
         if self._alert_group_combo.GetSelection() == last_idx:
             path = self._alert_group_custom_field.GetValue().strip()
             if not path or not os.path.isfile(path):
-                self._notebook.SetSelection(6)
+                self._notebook.SetSelection(7)
                 self._alert_group_custom_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
@@ -1375,7 +1591,7 @@ class SettingsDialog(wx.Dialog):
         output_sel = self._audio_output_combo.GetSelection()
         output_name = self._audio_output_device_names[output_sel - 1] if output_sel > 0 else ""
         if not self.main_window.sound_system.apply_output_device(output_name):
-            self._notebook.SetSelection(4)
+            self._notebook.SetSelection(5)
             self._audio_output_combo.SetFocus()
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_audio_output_device"),
@@ -1388,7 +1604,7 @@ class SettingsDialog(wx.Dialog):
         effects_sel = self._audio_effects_combo.GetSelection()
         effects_name = self._audio_effects_device_names[effects_sel - 1] if effects_sel > 0 else ""
         if not self.main_window.sound_system.apply_effects_device(effects_name):
-            self._notebook.SetSelection(4)
+            self._notebook.SetSelection(5)
             self._audio_effects_combo.SetFocus()
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_audio_output_device"),
@@ -1407,7 +1623,7 @@ class SettingsDialog(wx.Dialog):
                     input_index = idx
                     break
             if input_index is None or not test_input_device(input_index):
-                self._notebook.SetSelection(4)
+                self._notebook.SetSelection(5)
                 self._audio_input_combo.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_audio_input_device"),
@@ -1472,6 +1688,27 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "show_listbox_item_count"
         ] = self._show_listbox_count_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_delivery_status_in_chat_list"
+        ] = self._show_delivery_status_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "preserve_typed_text_as_attachment_caption"
+        ] = self._preserve_typed_caption_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "bulk_action_shortcuts"
+        ] = self._bulk_action_shortcuts_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "auto_focus_next_audio"
+        ] = self._auto_focus_next_audio_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "selected_announcement_position"
+        ] = "start" if self._selected_announce_start_rb.GetValue() else "end"
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_yesterday_label"
+        ] = self._show_yesterday_label_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_link_previews"
+        ] = self._show_link_previews_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -1495,6 +1732,14 @@ class SettingsDialog(wx.Dialog):
             "self_reference_custom_word"
         ] = self_reference_custom_word
 
+        # Accessibility
+        self.main_window.settings.setdefault("accessibility", {})[
+            "extended_sr_compat_enabled"
+        ] = self._extended_sr_compat_check.GetValue()
+        self.main_window.settings.setdefault("accessibility", {})[
+            "sapi_fallback_enabled"
+        ] = self._sapi_fallback_check.GetValue()
+
         # Spoken content: typing/recording announcements
         self.main_window.settings.setdefault("speech_content", {})[
             "announce_typing"
@@ -1508,6 +1753,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("speech_content", {})[
             "speak_other_conv_messages"
         ] = self._speak_other_conv_check.GetValue()
+        self.main_window.settings.setdefault("speech_content", {})[
+            "silence_while_recording"
+        ] = self._silence_while_recording_check.GetValue()
 
         # Connection settings
         custom_api = self._custom_api_check.GetValue()
@@ -1556,6 +1804,22 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("general", {})["notifications_enabled"] = (
             self._notifications_check.GetValue()
         )
+        self.main_window.settings.setdefault("general", {})["keep_muted_chats_silent_when_open"] = (
+            self._keep_muted_silent_check.GetValue()
+        )
+
+        # Incoming calls live in their own settings namespace so future call
+        # options do not overload the unrelated General/notification settings.
+        calls = self.main_window.settings.setdefault("calls", {})
+        calls["alerts_enabled"] = self._call_alerts_check.GetValue()
+        calls["popup_enabled"] = self._call_popup_check.GetValue()
+        if not calls["alerts_enabled"]:
+            stop_alerts = getattr(self.main_window, "stop_all_incoming_call_alerts", None)
+            if stop_alerts is not None:
+                stop_alerts()
+        sync_call_bar = getattr(self.main_window, "_sync_incoming_call_bar", None)
+        if sync_call_bar is not None:
+            sync_call_bar()
 
         # Sync/media/auto-offline announcements
         self.main_window.settings.setdefault("general", {})["announce_sync_events"] = (
@@ -1584,6 +1848,9 @@ class SettingsDialog(wx.Dialog):
         # Updates
         self.main_window.settings.setdefault("general", {})["updates_enabled"] = (
             self._updates_check.GetValue()
+        )
+        self.main_window.settings.setdefault("general", {})["alpha_updates_enabled"] = (
+            self._alpha_updates_check.GetValue()
         )
 
         # Account switch behavior
@@ -1709,19 +1976,24 @@ class SettingsDialog(wx.Dialog):
         self.SetTitle(i18n.t("settings_title"))
         self._notebook.SetPageText(0, i18n.t("tab_general"))
         self._notebook.SetPageText(1, i18n.t("tab_ui"))
-        self._notebook.SetPageText(2, i18n.t("tab_speech_content"))
-        self._notebook.SetPageText(3, i18n.t("tab_connection"))
-        self._notebook.SetPageText(4, i18n.t("tab_audio_devices"))
-        self._notebook.SetPageText(5, i18n.t("tab_sound_events"))
-        self._notebook.SetPageText(6, i18n.t("tab_alert_tones"))
-        self._notebook.SetPageText(7, i18n.t("tab_storage"))
-        self._notebook.SetPageText(8, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(2, i18n.t("tab_accessibility"))
+        self._notebook.SetPageText(3, i18n.t("tab_speech_content"))
+        self._notebook.SetPageText(4, i18n.t("tab_connection"))
+        self._notebook.SetPageText(5, i18n.t("tab_audio_devices"))
+        self._notebook.SetPageText(6, i18n.t("tab_sound_events"))
+        self._notebook.SetPageText(7, i18n.t("tab_alert_tones"))
+        self._notebook.SetPageText(8, i18n.t("tab_storage"))
+        self._notebook.SetPageText(9, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(10, i18n.t("tab_calls"))
         self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
         self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
         self._audio_effects_label.SetLabel(i18n.t("audio_effects_output_device_label"))
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
+        self._call_alerts_check.SetLabel(i18n.t("calls_alerts_enabled_label"))
+        self._call_popup_check.SetLabel(i18n.t("calls_popup_enabled_label"))
+        self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._search_norm_radio.SetLabel(i18n.t("search_normalization_label"))
         for _i, _key in enumerate((
@@ -1733,6 +2005,8 @@ class SettingsDialog(wx.Dialog):
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
+        self._alpha_updates_check.SetLabel(i18n.t("alpha_updates_label"))
+        self._alpha_updates_check.SetToolTip(i18n.t("alpha_updates_tooltip"))
         self._focus_box.SetLabel(i18n.t("ui_focus_label"))
         self._focus_message_field_rb.SetLabel(i18n.t("ui_focus_message_field"))
         self._focus_unread_or_last_rb.SetLabel(i18n.t("ui_focus_unread_or_last"))
@@ -1748,10 +2022,19 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
         self._self_ref_other_rb.SetLabel(i18n.t("ui_self_reference_other"))
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
+        self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
+        self._show_link_previews_cb.SetLabel(i18n.t("ui_show_link_previews_label"))
+        self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
+        self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
+        self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))
+        self._selected_announce_box.SetLabel(i18n.t("ui_selected_announce_position_label"))
+        self._selected_announce_start_rb.SetLabel(i18n.t("ui_selected_announce_position_start"))
+        self._selected_announce_end_rb.SetLabel(i18n.t("ui_selected_announce_position_end"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._speak_active_conv_check.SetLabel(i18n.t("speech_speak_active_conv_label"))
         self._speak_other_conv_check.SetLabel(i18n.t("speech_speak_other_conv_label"))
+        self._silence_while_recording_check.SetLabel(i18n.t("speech_silence_while_recording_label"))
         self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetAccessibleName(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))
@@ -1828,8 +2111,48 @@ class SettingsDialog(wx.Dialog):
 
     def _on_apply(self, event):
         if self._apply_values():
+            self._loading_values = True
             self._refresh_dialog_labels()
+            self._loading_values = False
             self._maybe_warn_restart_required()
+            self._dirty = False
+            self._apply_btn.Hide()
+            self.Layout()
+
+    def _mark_dirty(self, event=None):
+        """Show the Apply button the moment any setting actually changes,
+        instead of leaving it visible unconditionally — reported live as
+        confusing since it never went away even with nothing to apply.
+
+        Bound once at the dialog level (see __init__) so it catches every
+        checkbox/radio/combo/text control anywhere in the dialog via wx's
+        normal command-event propagation, rather than wiring a per-control
+        handler. A handful of controls already had their own dedicated
+        handler (_on_self_reference_toggle, _on_custom_api_toggle,
+        _on_call_alerts_toggle, _on_alert_choice_changed,
+        _on_sound_pack_selected, _on_sound_event_path_changed) — an
+        unhandled wx.CommandEvent propagates to the parent automatically,
+        but one a lower-level handler actually processes does NOT unless
+        that handler calls event.Skip(), so those six now do just to let
+        this one still fire after them. A few settings changes never fire
+        any of the bound event types at all (toggling a sound event
+        enabled/disabled, "activate/deactivate all", importing a sound
+        pack) — those call this directly instead.
+
+        Guarded by _loading_values: _load_values() populates every control
+        from the current settings when the dialog opens (and _on_apply()
+        re-syncs labels afterwards), and wx.TextCtrl.SetValue() — unlike the
+        CheckBox/RadioButton/ComboBox setters — does fire wx.EVT_TEXT, which
+        would otherwise mark the dialog dirty before the user touched
+        anything.
+        """
+        if event is not None:
+            event.Skip()
+        if self._loading_values or self._dirty:
+            return
+        self._dirty = True
+        self._apply_btn.Show()
+        self.Layout()
 
     def _maybe_warn_restart_required(self):
         if self._restart_required:

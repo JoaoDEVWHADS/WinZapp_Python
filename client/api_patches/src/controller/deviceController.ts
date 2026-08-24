@@ -16,6 +16,17 @@
 import { Chat } from '@wppconnect-team/wppconnect';
 import { Request, Response } from 'express';
 
+import {
+  countJidFallback,
+  countStoreRecovery,
+  observeEvaluate,
+} from '../middleware/instrumentation';
+import {
+  observePayload,
+  SyncChatListSchema,
+  SyncContactListSchema,
+  SyncMessageListSchema,
+} from '../dto/sync';
 import { contactToArray, unlinkAsync } from '../util/functions';
 import { clientsArray } from '../util/sessionUtil';
 
@@ -151,6 +162,186 @@ export async function getAllChats(req: Request, res: Response) {
   }
 }
 
+/**
+ * Read the chat list without trusting WhatsApp Web's in-memory ChatStore to
+ * already be hydrated.
+ *
+ * A large linked account can have every chat safely persisted in the
+ * `model-storage` IndexedDB while `WPP.chat.list()` returns [] (or even throws
+ * while serialising an undefined collection).  Retrying the same call does not
+ * repair that split-brain state: the captured 937-chat session returned an
+ * empty list 99 times while get-messages continued to read IndexedDB normally.
+ *
+ * On that exact failure only, load the persisted chat ids and ask wa-js to
+ * `find()` them. find() is the supported API that creates/loads a ChatModel and
+ * registers it in ChatStore. Work is chunked, bounded, and single-flight inside
+ * the page so Python's retry loop cannot start several 900-chat recoveries at
+ * once. The healthy path still performs one ordinary WPP.chat.list() call.
+ */
+async function listChatsWithStoreRecovery(
+  req: Request,
+  options: Record<string, any>
+): Promise<any[]> {
+  const result: any = await observeEvaluate('list-chats', () =>
+    req.client.page.evaluate(
+    async ({ listOptions }) => {
+      const root = globalThis as any;
+
+      const serialise = async () => {
+        try {
+          const models = await root.WPP?.chat?.list?.(listOptions);
+          if (!Array.isArray(models)) {
+            return { chats: [], error: 'WPP.chat.list returned a non-array value' };
+          }
+          const serializer = root.WAPI?._serializeChatObj;
+          if (typeof serializer !== 'function') {
+            return { chats: [], error: 'WAPI._serializeChatObj is unavailable' };
+          }
+          return { chats: models.map((chat: any) => serializer(chat)) };
+        } catch (error: any) {
+          return { chats: [], error: error?.message || String(error) };
+        }
+      };
+
+      const first = await serialise();
+      if (first.chats.length > 0) {
+        return { ...first, recovered: false };
+      }
+
+      // Every concurrent list-chats request awaits the same recovery, and a
+      // later, genuinely new store loss can still be repaired once this one
+      // finishes. The in-flight promise alone is not enough to guarantee that:
+      // it is cleared the moment the recovery settles, which is BEFORE the
+      // requests waiting on it have re-read the store, so a request arriving
+      // in that window would start a second 900-chat scan over a store that
+      // was just rebuilt. The cooldown closes it — the single-flight promise
+      // covers requests that arrive during the scan, the timestamp covers the
+      // ones that arrive right after it.
+      const RECOVERY_COOLDOWN_MS = 30_000;
+      const recoveredAt = root.__winzappChatStoreRecoveredAt || 0;
+      const coolingDown = Date.now() - recoveredAt < RECOVERY_COOLDOWN_MS;
+      if (!root.__winzappChatStoreRecoveryPromise && !coolingDown) {
+        root.__winzappChatStoreRecoveryPromise = (async () => {
+          const ids = await new Promise<string[]>((resolve) => {
+            let open: IDBOpenDBRequest;
+            try {
+              open = indexedDB.open('model-storage');
+            } catch (_error) {
+              resolve([]);
+              return;
+            }
+            open.onerror = () => resolve([]);
+            open.onsuccess = () => {
+              const db = open.result;
+              const found = new Set<string>();
+              const jidPattern = /(?:^|_)([^_\s]+@(c\.us|s\.whatsapp\.net|lid|g\.us|newsletter|broadcast))$/;
+
+              const add = (candidate: any) => {
+                if (candidate && typeof candidate === 'object') {
+                  candidate =
+                    candidate._serialized || candidate.id || candidate.jid ||
+                    candidate.remoteJid || candidate.chatId;
+                }
+                if (typeof candidate !== 'string') return;
+                const match = candidate.match(jidPattern);
+                if (match?.[1]) found.add(match[1]);
+              };
+
+              try {
+                const transaction = db.transaction('chat', 'readonly');
+                const store = transaction.objectStore('chat');
+                const cursor = store.openCursor();
+                cursor.onerror = () => {
+                  db.close();
+                  resolve(Array.from(found));
+                };
+                cursor.onsuccess = () => {
+                  const current = cursor.result;
+                  if (!current || found.size >= 5000) {
+                    db.close();
+                    resolve(Array.from(found));
+                    return;
+                  }
+                  const value: any = current.value;
+                  add(current.primaryKey);
+                  add(current.key);
+                  add(value);
+                  add(value?.id);
+                  add(value?.jid);
+                  add(value?.remoteJid);
+                  add(value?.chatId);
+                  add(value?.key);
+                  add(value?.value?.id);
+                  add(value?.data?.id);
+                  current.continue();
+                };
+              } catch (_error) {
+                db.close();
+                resolve([]);
+              }
+            };
+          });
+
+          const findChat = root.WPP?.chat?.find;
+          if (typeof findChat !== 'function' || ids.length === 0) {
+            return { indexedDbChats: ids.length, rehydrated: 0, failed: ids.length };
+          }
+
+          let rehydrated = 0;
+          let failed = 0;
+          const batchSize = 24;
+          for (let offset = 0; offset < ids.length; offset += batchSize) {
+            const batch = ids.slice(offset, offset + batchSize);
+            const settled = await Promise.allSettled(
+              batch.map((jid) => findChat(jid))
+            );
+            for (const item of settled) {
+              if (item.status === 'fulfilled' && item.value) rehydrated++;
+              else failed++;
+            }
+          }
+          return { indexedDbChats: ids.length, rehydrated, failed };
+        })().finally(() => {
+          root.__winzappChatStoreRecoveredAt = Date.now();
+          delete root.__winzappChatStoreRecoveryPromise;
+        });
+      }
+
+      // Read the property once: within the cooldown there is no promise to
+      // await, and the store is simply re-read — a scan that just finished is
+      // not worth repeating for every request in the retry loop behind it.
+      const pending = root.__winzappChatStoreRecoveryPromise;
+      const recovery = pending
+        ? await pending
+        : { skipped: 'recovery ran recently' };
+      const second = await serialise();
+      return {
+        ...second,
+        recovered: true,
+        firstError: first.error,
+        recovery,
+      };
+    },
+    { listOptions: options }
+    )
+  );
+
+  if (result?.recovered) {
+    countStoreRecovery(
+      (result?.chats?.length || 0) > 0 ? 'recovered' : 'still_empty'
+    );
+    req.logger.warn(
+      `[listChats] ChatStore was empty/invalid; IndexedDB recovery: ${JSON.stringify(
+        result.recovery || {}
+      )}; recovered list has ${result?.chats?.length || 0} chat(s)`
+    );
+  }
+  if (result?.error && !result?.chats?.length) {
+    req.logger.warn(`[listChats] ${result.error}`);
+  }
+  return Array.isArray(result?.chats) ? result.chats : [];
+}
+
 export async function listChats(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Chat"]
@@ -249,8 +440,7 @@ export async function listChats(req: Request, res: Response) {
     if (ignoreGroupMetadata !== undefined)
       options.ignoreGroupMetadata = ignoreGroupMetadata;
 
-    const response = await req.client.listChats(options);
-    const chats = Array.isArray(response) ? response : [];
+    const chats = await listChatsWithStoreRecovery(req, options);
 
     // WhatsApp Web creates one-to-one ChatStore entries for group participants
     // when it receives only an encryption-key notification from them. These are
@@ -268,7 +458,12 @@ export async function listChats(req: Request, res: Response) {
       return hasActivity || isKnownConversation;
     });
 
-    res.status(200).json(visibleChats);
+    res.status(200).json(
+      observePayload(SyncChatListSchema, visibleChats, {
+        logger: req.logger,
+        endpoint: 'list-chats',
+      })
+    );
   } catch (e) {
     req.logger.error(e);
     res
@@ -1900,16 +2095,45 @@ export async function getMessages(req: Request, res: Response) {
         { chatId: phone, targetCount }
       );
     }
-    res.status(200).json({ status: 'success', response: response });
+    res.status(200).json({
+      status: 'success',
+      response: observePayload(SyncMessageListSchema, response, {
+        logger: req.logger,
+        endpoint: 'get-messages',
+      }),
+    });
   } catch (e: any) {
+    // Every internal failure used to answer 401 "Error on open list", so a
+    // chat that does not exist, a page whose WhatsApp layer is not injected
+    // yet, and a genuine crash were indistinguishable from the caller's side
+    // — and 401 claims "unauthenticated", which none of them are. The Python
+    // client retries 401, 404 and 500 alike, so naming them costs nothing in
+    // behaviour and makes both the log and the response say what happened.
+    const detail = String(e?.message || e || '');
+    const notFound = /not found|no such chat|chat not exist/i.test(detail);
+    // The page not being ready is the one case the original message was
+    // actually about.
+    const notReady =
+      /WAPI is not defined|not connected|Session (closed|not active)|Execution context/i.test(
+        detail
+      );
+    const status = notFound ? 404 : notReady ? 401 : 500;
+    const reason = notFound
+      ? 'chat_not_found'
+      : notReady
+        ? 'session_not_ready'
+        : 'internal_error';
     req.logger.error(
-      `Error in getMessages: ${e?.message || e}\nStack: ${e?.stack || ''}`
+      `Error in getMessages (${reason}, HTTP ${status}): ${detail}\nStack: ${
+        e?.stack || ''
+      }`
     );
-    res.status(401).json({
+    res.status(status).json({
       status: 'error',
+      reason,
       response: 'Error on open list',
       error: {
-        message: e?.message || String(e),
+        message: detail,
         stack: e?.stack || '',
       },
     });
@@ -2969,7 +3193,22 @@ export async function getAllContacts(req: Request, res: Response) {
      }
    */
   try {
-    let response = await req.client.getAllContacts();
+    let response;
+    try {
+      response = await req.client.getAllContacts();
+    } catch (firstError: any) {
+      // ContactStore and ChatStore disappear together in the captured broken
+      // session. Rehydrating the persisted chats also restores their contact
+      // models; retry once instead of turning a transient store loss into a
+      // permanent 500 for the whole sync.
+      req.logger.warn(
+        `[getAllContacts] Initial read failed; attempting ChatStore recovery: ${
+          firstError?.message || firstError
+        }`
+      );
+      await listChatsWithStoreRecovery(req, { ignoreGroupMetadata: true });
+      response = await req.client.getAllContacts();
+    }
 
     if (Array.isArray(response)) {
       // Was req.client.getAllChats() — the deprecated, heavier WAPI call
@@ -2987,9 +3226,9 @@ export async function getAllContacts(req: Request, res: Response) {
       // to actually finish. listChats() wraps the same modern, non-
       // deprecated WPP.chat.list() the list-chats route already uses, with
       // the same ignoreGroupMetadata skip.
-      const chats = await req.client
-        .listChats({ ignoreGroupMetadata: true } as any)
-        .catch(() => []);
+      const chats = await listChatsWithStoreRecovery(req, {
+        ignoreGroupMetadata: true,
+      });
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
@@ -3003,7 +3242,13 @@ export async function getAllContacts(req: Request, res: Response) {
       });
     }
 
-    res.status(200).json({ status: 'success', response: response });
+    res.status(200).json({
+      status: 'success',
+      response: observePayload(SyncContactListSchema, response, {
+        logger: req.logger,
+        endpoint: 'all-contacts',
+      }),
+    });
   } catch (error) {
     req.logger.error(error);
     res.status(500).json({

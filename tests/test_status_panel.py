@@ -28,6 +28,8 @@ same approach as tests/test_message_bookmarks.py.
 import pytest
 import wx
 
+import main as main_module
+from main import MainWindow
 from status_panel import StatusPanel, _status_content_label, _status_media_save_info
 
 
@@ -71,6 +73,9 @@ class _FakeWidget:
 
     def SetLabel(self, text):
         self.label = text
+
+    def SetMinSize(self, size):
+        pass
 
 
 class _FakeTextCtrl(_FakeWidget):
@@ -1345,14 +1350,14 @@ class TestEscapeClosesTheViewer:
         assert stub._video_player.stop_calls == 0
 
 
-class TestStatusReplySendsWithoutQuoting:
-    """Same reasoning as TestLikeStatusSendsAPlainEmojiMessage: WPPConnect
-    can't resolve a status as a quote target from the poster's own chat,
-    so send-reply always failed server-side and silently fell back to a
-    plain send anyway — reported live as "Não foi possível citar a
-    mensagem original"."""
+class TestStatusReplyKeepsTheStatusQuote:
+    """A status reply must arrive as a reply to that status, not a plain DM.
 
-    def test_reply_is_sent_without_the_quoted_kwarg(self, monkeypatch):
+    The Node route resolves the status in the poster's StatusV3Model, which
+    means the UI must pass the complete selected status as the quote target.
+    """
+
+    def test_reply_passes_the_selected_status_as_quote(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
         stub = _Stub()
@@ -1363,8 +1368,73 @@ class TestStatusReplySendsWithoutQuoting:
         stub._on_send_status_reply(None)
 
         assert stub.main_window.send_text_calls == [
-            ("poster@s.whatsapp.net", "valeu!", None)
+            ("poster@s.whatsapp.net", "valeu!", status)
         ]
+
+
+class TestFailedStatusReplyNeverDegradesToPlainMessage:
+    """If the quote cannot be created, reporting failure is safer than
+    silently delivering a normal DM and calling it a successful status reply.
+    """
+
+    class _Response:
+        status_code = 500
+        text = "status quote not found"
+
+    class _MainStub:
+        send_text_message = MainWindow.send_text_message
+
+        def __init__(self):
+            self.wpp_server = "http://127.0.0.1"
+            self.wpp_port = 21465
+            self.token = "session:token"
+            self.i18n = _FakeI18n()
+            self.outputs = []
+
+        def _resolve_jid_for_send(self, jid):
+            return jid.replace("@s.whatsapp.net", "@c.us")
+
+        def _serialize_quoted_id(self, quoted, fallback_jid=None):
+            return "false_status@broadcast_s1_poster@c.us"
+
+        def _legacy_phone_for_send(self, jid):
+            return ""
+
+        def _check_wa_connection_closed(self, response):
+            return False
+
+        def _set_wa_connected(self, connected, reason):
+            pass
+
+        def _classify_send_exception(self, exc, where):
+            raise AssertionError(f"unexpected exception in {where}: {exc}")
+
+        def output(self, text, interrupt=False):
+            self.outputs.append(text)
+
+    def test_http_failure_is_not_retried_through_send_message(self, monkeypatch):
+        calls = []
+
+        def _post(url, **kwargs):
+            calls.append((url, kwargs["json"]))
+            return self._Response()
+
+        monkeypatch.setattr(main_module, "api_post", _post)
+        stub = self._MainStub()
+
+        result = stub.send_text_message(
+            "poster@s.whatsapp.net",
+            "valeu!",
+            quoted=_text_status("oi"),
+        )
+
+        assert result["ok"] is False
+        assert len(calls) == 1
+        assert calls[0][0].endswith("/send-reply")
+        assert calls[0][1]["messageId"].startswith(
+            "false_status@broadcast_"
+        )
+        assert stub.outputs == []
 
 
 class TestStatusReplySentRefocusesTheField:
