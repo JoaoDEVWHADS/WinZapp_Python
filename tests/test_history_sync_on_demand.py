@@ -344,6 +344,24 @@ class TestWaitForRestartedHistorySync:
 
         assert stub.wait_for_restarted_history_sync(timeout=8) is True
 
+    def test_incomplete_recent_waits_even_when_queue_was_not_restarted(self):
+        payload = {
+            "restarted": False,
+            "recentCompleted": False,
+            "unprocessed": 0,
+        }
+
+        assert MainWindow._recent_history_needs_wait(payload) is True
+
+    def test_completed_recent_does_not_wait(self):
+        payload = {
+            "restarted": False,
+            "recentCompleted": True,
+            "unprocessed": 0,
+        }
+
+        assert MainWindow._recent_history_needs_wait(payload) is False
+
     def test_a_disconnected_status_stops_history_landing(self, monkeypatch):
         stub = self._stub(None, monkeypatch)
         stub._history_status_disconnected = True

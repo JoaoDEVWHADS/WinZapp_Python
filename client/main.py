@@ -9771,7 +9771,7 @@ class MainWindow(wx.Frame):
         # decide whether a chat that came back short is worth re-querying while
         # the rest of its history is still landing.
         unblock_result = self.unblock_history_sync()
-        if isinstance(unblock_result, dict) and unblock_result.get("restarted"):
+        if self._recent_history_needs_wait(unblock_result):
             if not self.wait_for_restarted_history_sync():
                 logging.warning(
                     "[start_sync] RECENT history is still incomplete; deferring "
@@ -9779,6 +9779,12 @@ class MainWindow(wx.Frame):
                 )
                 self._sync_completed = False
                 return
+            # list-chats was captured before the phone finished its transfer.
+            # Refresh it now so chats delivered during the wait are part of
+            # this same sync instead of waiting for a later health-check round.
+            self.get_remote_chats()
+            self.chats = self.normalize_chats(self.chats)
+            wx.CallAfter(self.set_chats)
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13453,6 +13459,14 @@ class MainWindow(wx.Frame):
             "deferring the REST message sync.", timeout,
         )
         return False
+
+    @staticmethod
+    def _recent_history_needs_wait(unblock_result) -> bool:
+        """Whether the phone's RECENT transfer must finish before REST sync."""
+        return isinstance(unblock_result, dict) and (
+            unblock_result.get("restarted") is True
+            or unblock_result.get("recentCompleted") is False
+        )
 
     def _note_backfill_state(self, remote_jid: str, chat: dict, api_ok: bool) -> None:
         """Track chats that still owe us history.
