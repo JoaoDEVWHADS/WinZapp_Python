@@ -203,6 +203,23 @@ def _fast(monkeypatch):
 
 
 class TestTheCapturedSessions:
+    def test_completion_announcement_waits_for_recent_history(self, monkeypatch):
+        stub = _make([3, 3], wa_web=3, local_chats=3)
+        stub._sync_run_id = 41
+        stub.refresh_history_still_landing = lambda context="": True
+        monkeypatch.setattr(
+            main.threading,
+            "Thread",
+            lambda **_kw: types.SimpleNamespace(
+                start=lambda: None, is_alive=lambda: False
+            ),
+        )
+
+        stub._run_sync()
+
+        assert stub._sync_completed is True
+        assert stub._sync_complete_announcement_pending_run_id == 41
+
     def test_snapshot_tolerance_cannot_hide_half_of_a_small_account(self):
         assert MainWindow.snapshot_matches_page_store(1, 2) is False
         assert MainWindow.snapshot_matches_page_store(9, 10) is False
