@@ -26,11 +26,22 @@ class AccessibleSpeechOutput:
       queries the screen reader live — so turning the screen reader off
       mid-session silences WinZapp immediately instead of keeping whatever
       was active at startup.
+
+    ``suppressed_getter``, when given, is polled on every ``output()`` call:
+    while it returns True, the call is dropped silently instead of being
+    spoken. This backs Settings > Conteúdo Falado's "silence while recording
+    a voice message" toggle — sounds still play (they don't go through this
+    class), only speech is muted. ``silence()`` bypasses this check on
+    purpose: it exists specifically to cut off speech that's already in
+    flight (e.g. the screen reader's own focus announcement on the Enviar
+    button when a recording starts), which must run even though the
+    suppression window is what triggered it.
     """
 
-    def __init__(self, auto_output, settings_getter):
+    def __init__(self, auto_output, settings_getter, suppressed_getter=None):
         self._auto = auto_output
         self._settings_getter = settings_getter
+        self._suppressed_getter = suppressed_getter
 
     def _resolve_output(self):
         cfg = self._settings_getter().get("accessibility", {})
@@ -44,9 +55,19 @@ class AccessibleSpeechOutput:
         return None
 
     def output(self, text, **options):
+        if self._suppressed_getter is not None and self._suppressed_getter():
+            return
         output = self._resolve_output()
         if output:
             output.speak(text, **options)
 
     def speak(self, text, **options):
         self.output(text, **options)
+
+    def silence(self):
+        """Immediately cancel whatever the resolved output is currently
+        saying or has queued. Used to cut off a screen reader's own focus
+        announcement, not just future output() calls."""
+        output = self._resolve_output()
+        if output and hasattr(output, "silence"):
+            output.silence()

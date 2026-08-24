@@ -653,6 +653,7 @@
     "speech_announce_recording_label": "Anunciar cuando un contacto está grabando un audio en una conversación",
     "speech_speak_active_conv_label": "Hablar mensajes automáticamente en la conversación activa",
     "speech_speak_other_conv_label": "Hablar mensajes automáticamente en otras conversaciones mientras el programa está abierto",
+    "speech_silence_while_recording_label": "Silenciar los anuncios de contenido hablado y el botón de enviar mientras se graba un mensaje de voz",
     "invalid_messages_page_size": "El número de mensajes por página debe ser un entero positivo.",
     "invalid_page_jump_size": "El número de mensajes a saltar con Av Pág/Re Pág debe ser un entero positivo.",
     "forward_search_label": "&Buscar",

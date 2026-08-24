@@ -531,6 +531,11 @@ class SettingsDialog(wx.Dialog):
         )
         speech_sizer.Add(self._speak_other_conv_check, 0, wx.ALL, 8)
 
+        self._silence_while_recording_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_silence_while_recording_label")
+        )
+        speech_sizer.Add(self._silence_while_recording_check, 0, wx.ALL, 8)
+
         self._speech_page.SetSizer(speech_sizer)
         self._notebook.AddPage(self._speech_page, i18n.t("tab_speech_content"))
 
@@ -984,6 +989,7 @@ class SettingsDialog(wx.Dialog):
         self._announce_recording_check.SetValue(speech.get("announce_recording", True))
         self._speak_active_conv_check.SetValue(speech.get("speak_active_conv_messages", True))
         self._speak_other_conv_check.SetValue(speech.get("speak_other_conv_messages", True))
+        self._silence_while_recording_check.SetValue(speech.get("silence_while_recording", False))
 
         conn = self.main_window.settings.get("connection", {})
         custom_api = conn.get("wpp_custom_api", False)
@@ -1732,6 +1738,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("speech_content", {})[
             "speak_other_conv_messages"
         ] = self._speak_other_conv_check.GetValue()
+        self.main_window.settings.setdefault("speech_content", {})[
+            "silence_while_recording"
+        ] = self._silence_while_recording_check.GetValue()
 
         # Connection settings
         custom_api = self._custom_api_check.GetValue()
@@ -2009,6 +2018,7 @@ class SettingsDialog(wx.Dialog):
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._speak_active_conv_check.SetLabel(i18n.t("speech_speak_active_conv_label"))
         self._speak_other_conv_check.SetLabel(i18n.t("speech_speak_other_conv_label"))
+        self._silence_while_recording_check.SetLabel(i18n.t("speech_silence_while_recording_label"))
         self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetAccessibleName(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))

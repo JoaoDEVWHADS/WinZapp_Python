@@ -653,6 +653,7 @@
     "speech_announce_recording_label": "Ogłaszaj, gdy kontakt nagrywa wiadomość audio w rozmowie",
     "speech_speak_active_conv_label": "Automatycznie odczytuj wiadomości w aktywnej rozmowie",
     "speech_speak_other_conv_label": "Automatycznie odczytuj wiadomości w innych rozmowach, gdy program jest otwarty",
+    "speech_silence_while_recording_label": "Wycisz zapowiedzi treści mówionej i przycisk Wyślij podczas nagrywania wiadomości głosowej",
     "invalid_messages_page_size": "Liczba wiadomości na stronę musi być dodatnią liczbą całkowitą.",
     "invalid_page_jump_size": "Liczba wiadomości przeskakiwanych klawiszami Page Up/Page Down musi być dodatnią liczbą całkowitą.",
     "forward_search_label": "&Szukaj",

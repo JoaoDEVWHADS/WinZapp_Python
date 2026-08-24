@@ -653,6 +653,7 @@
     "speech_announce_recording_label": "Announce when a contact is recording an audio message in a chat",
     "speech_speak_active_conv_label": "Automatically speak messages in the active conversation",
     "speech_speak_other_conv_label": "Automatically speak messages in other conversations while the program is open",
+    "speech_silence_while_recording_label": "Mute spoken content announcements and the Send button while recording a voice message",
     "invalid_messages_page_size": "The messages per page value must be a positive integer.",
     "invalid_page_jump_size": "The Page Up/Page Down jump size must be a positive integer.",
     "forward_search_label": "&Search",

@@ -2120,6 +2120,10 @@ class ConversationsPanel(wx.Panel):
                 self._voice_panel.Show()
                 self.conversation_panel.Layout()
                 self._send_voice_btn.SetFocus()
+                if self.main_window.settings.get("speech_content", {}).get(
+                    "silence_while_recording", False
+                ):
+                    self.main_window.speak_output.silence()
 
                 def _bg_start_mic():
                     try:
@@ -2313,6 +2317,10 @@ class ConversationsPanel(wx.Panel):
                 self._discard_voice_btn.SetFocus()
             else:
                 self._send_voice_btn.SetFocus()
+                if self.main_window.settings.get("speech_content", {}).get(
+                    "silence_while_recording", False
+                ):
+                    self.main_window.speak_output.silence()
 
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 

@@ -896,7 +896,9 @@ class MainWindow(wx.Frame):
         # module's docstring. The settings dict isn't loaded yet at this point
         # in __init__ (load_settings() runs right below), so the getter reads
         # self.settings live rather than capturing today's (empty) value.
-        self.speak_output = AccessibleSpeechOutput(outputs.auto.Auto(), lambda: self.settings)
+        self.speak_output = AccessibleSpeechOutput(
+            outputs.auto.Auto(), lambda: self.settings, self._voice_recording_silence_active
+        )
 
         # Settings must exist before the sound system loads, since
         # load_sounds()/get_active_sound_pack() read self.settings to resolve
@@ -6969,6 +6971,17 @@ class MainWindow(wx.Frame):
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
+
+    def _voice_recording_silence_active(self):
+        """True while Settings > Conteúdo Falado's "silence while recording"
+        toggle should be muting all speech — i.e. the setting is on AND a
+        voice message is actually being recorded right now. Passed as
+        AccessibleSpeechOutput's suppressed_getter, so it's ignored entirely
+        (returns False) whenever no recording is in progress."""
+        if not self.settings.get("speech_content", {}).get("silence_while_recording", False):
+            return False
+        cp = getattr(self, "conversations_panel", None)
+        return bool(cp is not None and getattr(cp, "_is_recording", False))
 
     # ── Language selection ────────────────────────────────────────────────────
 
