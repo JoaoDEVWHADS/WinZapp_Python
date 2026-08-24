@@ -73,9 +73,15 @@ class _Stub:
         self.main_window = main_window
         self.conversation = {"remoteJid": "5521999999999@s.whatsapp.net"}
         self.populate_calls = []
+        self.repainted = []
 
     def populate_messages(self, preserve_focus=False):
         self.populate_calls.append(preserve_focus)
+
+    def _repaint_or_repopulate(self, msg_ids):
+        # The real one repaints the affected rows and only rebuilds the list
+        # when it can't — see ConversationsPanel._repaint_message_rows().
+        self.repainted.append(sorted(i for i in msg_ids if i))
 
 
 def _msg(mid="a", pinned=False):
@@ -115,7 +121,7 @@ class TestPinMessage:
 
         assert msg["pinInChat"] is True
         assert mw.save_calls >= 1
-        assert s.populate_calls, "list should be re-rendered after the toggle"
+        assert s.repainted == [["a"]], "the message's own row should be re-rendered after the toggle"
         assert mw.pin_calls == [("5521999999999@s.whatsapp.net", {"id": "a", "fromMe": True}, True)]
         assert mw.db.inserted[0][1]["pinInChat"] is True, (
             "the optimistic pin must be written to the message's own DB row too — "

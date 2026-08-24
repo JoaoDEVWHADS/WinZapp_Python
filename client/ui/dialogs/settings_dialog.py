@@ -753,6 +753,15 @@ class SettingsDialog(wx.Dialog):
         self._media_max_mb_field = wx.TextCtrl(self._storage_page, style=wx.TE_DONTWRAP)
         storage_sizer.Add(self._media_max_mb_field, 0, wx.EXPAND | wx.ALL, 8)
 
+        # Off by default: it costs one media decode per downloaded video, and
+        # a video that never states its duration simply reads as "vídeo" until
+        # it is played, which already fills the gap for free (see
+        # ConversationsPanel._learn_video_duration).
+        self._probe_video_duration_check = wx.CheckBox(
+            self._storage_page, label=i18n.t("probe_video_duration_on_download_label")
+        )
+        storage_sizer.Add(self._probe_video_duration_check, 0, wx.ALL, 8)
+
         self._storage_page.SetSizer(storage_sizer)
         self._notebook.AddPage(self._storage_page, i18n.t("tab_storage"))
 
@@ -1049,6 +1058,9 @@ class SettingsDialog(wx.Dialog):
         self._auto_download_media_check.SetValue(storage.get("auto_download_media", True))
         self._media_max_days_field.SetValue(str(storage.get("media_max_days", 30)))
         self._media_max_mb_field.SetValue(str(storage.get("media_max_mb", 100)))
+        self._probe_video_duration_check.SetValue(
+            storage.get("probe_video_duration_on_download", False)
+        )
 
     def _set_alert_combo(self, combo, choice_key: str):
         try:
@@ -1925,6 +1937,7 @@ class SettingsDialog(wx.Dialog):
             "auto_download_media": self._auto_download_media_check.GetValue(),
             "media_max_days": int(self._media_max_days_field.GetValue().strip()),
             "media_max_mb": int(self._media_max_mb_field.GetValue().strip()),
+            "probe_video_duration_on_download": self._probe_video_duration_check.GetValue(),
         })
 
         # Persist and propagate

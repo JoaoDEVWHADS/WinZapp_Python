@@ -102,6 +102,14 @@ class _Stub:
         self.hide_audio_calls = 0
         self.hide_all_media_calls = 0
         self.refresh_calls = 0
+        self.repainted = []
+        self.repaint_ok = True
+
+    def _repaint_message_rows(self, msg_ids):
+        # Stands in for the real per-row repaint (which needs the whole
+        # rendering stack); repaint_ok drives the "couldn't repaint" branch.
+        self.repainted.append(sorted(i for i in msg_ids if i))
+        return self.repaint_ok
 
     def _stop_audio(self):
         self.stop_audio_calls += 1
@@ -202,8 +210,18 @@ class TestOnMessageRevokedStopsPlayback:
 
         assert s.hide_all_media_calls == 1
 
-    def test_still_refreshes_the_conversation(self):
+    def test_repaints_only_the_revoked_row(self):
+        """A revoke swaps one row's text for "Mensagem apagada" and moves
+        nothing, so re-rendering every row of the conversation for it was
+        disproportionate."""
         s = _Stub(sorted_messages=[_msg("A")])
+        s.on_message_revoked("A")
+        assert s.repainted == [["A"]]
+        assert s.refresh_calls == 0
+
+    def test_falls_back_to_the_full_refresh_when_the_row_cannot_be_repainted(self):
+        s = _Stub(sorted_messages=[_msg("A")])
+        s.repaint_ok = False
         s.on_message_revoked("A")
         assert s.refresh_calls == 1
 
