@@ -12033,15 +12033,30 @@ class ConversationsPanel(wx.Panel):
                     self._unread_sep_idx = sep_pos
                     self._sep_from_open = True
 
-            # ── Pagination: show only last N messages ────────────────────────────
-            self._all_sorted_messages = displayable
-            limit = int(
-                self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
-            )
-            self._messages_offset, self._unread_sep_idx = paginated_window(
-                len(displayable), limit, self._unread_sep_idx
-            )
-            paginated = displayable[self._messages_offset:]
+            # ── Pagination: show only last N messages, preserving older history if loaded ────
+            if preserve_focus and self._all_sorted_messages and len(self._all_sorted_messages) > len(displayable):
+                merged = self._deduplicate_messages(self._all_sorted_messages + displayable)
+                self._all_sorted_messages = merged
+                old_visible_count = len(self._sorted_messages)
+                if old_visible_count > len(displayable):
+                    paginated = merged[max(0, len(merged) - old_visible_count):]
+                else:
+                    limit = int(
+                        self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
+                    )
+                    self._messages_offset, self._unread_sep_idx = paginated_window(
+                        len(merged), limit, self._unread_sep_idx
+                    )
+                    paginated = merged[self._messages_offset:]
+            else:
+                self._all_sorted_messages = displayable
+                limit = int(
+                    self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
+                )
+                self._messages_offset, self._unread_sep_idx = paginated_window(
+                    len(displayable), limit, self._unread_sep_idx
+                )
+                paginated = displayable[self._messages_offset:]
 
             # A chat with no displayable history (e.g. WhatsApp Web's own store
             # never loaded this conversation's messages, so all WinZapp captured
