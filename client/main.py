@@ -9804,34 +9804,18 @@ class MainWindow(wx.Frame):
         if refreshed is not None:
             self.chats = refreshed
 
-        # Resolve all unresolved @lid JIDs in our chat list via WPPConnect API
+        # Leave unresolved @lid JIDs to the background name backfill. Resolving
+        # even one chunk here is serial and keeps the client in "synchronizing"
+        # after every conversation and its messages are already available.
         unresolved_lids = [
             jid for jid in self.chats.keys() 
             if jid.endswith("@lid") and jid not in getattr(self, "_lid_to_phone", {})
         ]
         if unresolved_lids:
-            # One chunk here, the rest to the backfill. This pass is serial by
-            # design — resolve_lid_jids_via_api() sleeps 0.5 s per JID so it
-            # cannot hammer the single Puppeteer page — and it sits between
-            # the message phase and the "conversations synchronized"
-            # announcement, so its cost is time the user waits with no idea
-            # anything is happening. Measured on a live sync: 728 unresolved
-            # LIDs, six and a half minutes, on a sync whose message phase took
-            # 58 seconds.
-            #
-            # Nothing is dropped. _backfill_names() already resolves exactly
-            # this list, in chunks of the same size, on its own thread, with
-            # an adaptive delay — the chunked-and-paced pass this used to
-            # duplicate serially. The backfill scheduler below is what
-            # guarantees it runs.
-            head = unresolved_lids[:self._BACKFILL_CHUNK]
             logging.info(
-                "[Sync] Resolving %d of %d unresolved @lid chat(s) via API now; "
-                "the backfill takes the remaining %d in the background.",
-                len(head), len(unresolved_lids), len(unresolved_lids) - len(head),
+                "[Sync] Deferring %d unresolved @lid chat(s) to background name backfill.",
+                len(unresolved_lids),
             )
-            self.resolve_lid_jids_via_api(head)
-            self.chats = self.deduplicate_chats(self.chats)
 
         # Conversations are fully sorted as soon as messages are synced.
         # Sort, display, play sync-complete sound, and announce to the user
