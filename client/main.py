@@ -14032,7 +14032,7 @@ class MainWindow(wx.Frame):
             logging.info("[history-sync] unblock endpoint unavailable: %s", exc)
             return None
 
-    def request_older_messages(self, remote_jid: str, timeout: int = 60) -> bool:
+    def request_older_messages(self, remote_jid: str, timeout: int = 60) -> bool | None:
         """Ask the phone for history older than what this device holds.
 
         Fire-and-forget by nature: the phone answers with a history-sync chunk
@@ -14087,6 +14087,13 @@ class MainWindow(wx.Frame):
                     "%s (primary_has_more=%s).", jid, payload.get("primaryHasMore"),
                 )
                 return True
+            if isinstance(payload, dict) and "recent history sync" in str(
+                    payload.get("error", "")).lower():
+                logging.info(
+                    "[history-sync] Deferring older-message request for %s "
+                    "until RECENT history finishes.", jid,
+                )
+                return None
             logging.info(
                 "[history-sync] Older-message request for %s did not go out "
                 "(status=%s, payload=%s).", jid, response.status_code,
@@ -17460,6 +17467,7 @@ class MainWindow(wx.Frame):
                 # it must not do is leave the chat in _exhausted_chats, or the
                 # early-return at the top of this method would refuse to look
                 # again even after the messages have landed.
+                history_pending = False
                 if not wpp_messages:
                     if not hasattr(self, "_exhausted_chats"):
                         self._exhausted_chats = set()
@@ -17472,13 +17480,30 @@ class MainWindow(wx.Frame):
                         asked_at = time.time()
                         self._older_requested_chats[remote_jid] = asked_at
                         self._persist_older_requested()
-                        requested = self.request_older_messages(remote_jid)
+                        request_result = self.request_older_messages(remote_jid)
+                        requested = request_result is True
+                        if request_result is None:
+                            # The API deliberately refuses ON_DEMAND while the
+                            # RECENT queue is incomplete. Nothing was sent, so
+                            # do not start the grace clock and never interpret
+                            # this temporary refusal as end-of-history.
+                            self._older_requested_chats.pop(remote_jid, None)
+                            self._persist_older_requested()
+                            history_pending = True
                     waited = max(0.0, time.time() - asked_at)
                     if requested:
+                        history_pending = True
                         logging.info(
                             "[fetch_older_messages] No local history left for %s — "
                             "asked the phone for older messages; leaving the chat "
                             "re-queryable so the reply can be picked up.", remote_jid,
+                        )
+                    elif history_pending or waited < self._OLDER_REQUEST_GRACE:
+                        history_pending = True
+                        logging.info(
+                            "[fetch_older_messages] History for %s is still "
+                            "pending (waited %.0fs); keeping it re-queryable.",
+                            remote_jid, waited,
                         )
                     else:
                         # In-memory always, so the chat leaves the deep-backfill
@@ -17554,7 +17579,7 @@ class MainWindow(wx.Frame):
                                 self.save_data(self.chats, self.contacts)
                     return fetched_messages
                 else:
-                    return []
+                    return None if history_pending else []
             else:
                 err_msg = response.text[:300]
                 try:
