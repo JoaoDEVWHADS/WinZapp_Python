@@ -1222,23 +1222,11 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] Failed to fetch host device JID")
 
     def _set_wpp_limits(self):
-        """Push raised file-size limits into WhatsApp Web via the setLimit API.
+        """Raise WhatsApp Web's effective document file-size limit to 1 GB.
 
-        WPPConnect documented defaults:
-          maxMediaSize — 70 MB  (images, videos, audio)
-          maxFileSize  — 1 GB   (documents)
-
-        maxMediaSize now matches maxFileSize: the 70 MB ceiling only ever
-        existed because non-document sends had no way to move a large file
-        into Chromium without building one giant in-memory base64 string
-        and passing it as a single CDP argument. Now that sender.layer.js's
-        bounded/chunked transfer covers image/video/audio too (see
-        core/wppconnect_sender_layer_patch.py), there is no longer a reason
-        for WhatsApp Web's own client-side guard to reject a large media
-        send before WinZapp ever gets a chance to use that path — matches
-        the single client-side cap every attachment type now shares
-        (ui/conversations.py's _MAX_ATTACHMENT_BYTES; the separate, lower
-        _MAX_MEDIA_BYTES it replaced no longer exists).
+        WA-JS 4.6 marks maxMediaSize as deprecated and its implementation is
+        a no-op that rejects values above 70 MB. Media limits now come from
+        WhatsApp's MediaGatingUtils, so only maxFileSize remains meaningful.
         """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
@@ -1246,20 +1234,15 @@ class WebSocketClient:
             "Authorization": f"Bearer {mw.token}",
             "Content-Type": "application/json",
         }
-        limits = [
-            ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
-            ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
-        ]
-        for limit_type, value in limits:
-            try:
-                api_post(
-                    url,
-                    json={"type": limit_type, "value": value},
-                    headers=headers,
-                    timeout=10,
-                )
-            except Exception:
-                pass
+        try:
+            api_post(
+                url,
+                json={"type": "maxFileSize", "value": 1 * 1024 * 1024 * 1024},
+                headers=headers,
+                timeout=10,
+            )
+        except Exception:
+            pass
 
     def on_wpp_status_find(self, data):
         try:

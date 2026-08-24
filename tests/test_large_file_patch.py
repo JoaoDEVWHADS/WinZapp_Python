@@ -74,12 +74,16 @@ def test_media_and_document_ceilings_match():
     assert "70  * 1024 * 1024" not in conversations
 
 
-def test_wpp_media_size_limit_matches_the_document_ceiling():
+def test_wpp_only_sets_the_effective_file_size_limit():
     websocket_client = (ROOT / "client" / "core" / "websocket_client.py").read_text(
         encoding="utf-8"
     )
+    method = websocket_client.split("    def _set_wpp_limits(self):", 1)[1].split(
+        "    def ", 1
+    )[0]
 
-    assert '("maxMediaSize", 1 * 1024 * 1024 * 1024)' in websocket_client
+    assert '"type": "maxFileSize"' in method
+    assert '"type": "maxMediaSize"' not in method
 
 
 def test_sender_patch_widens_bounded_transfer_to_every_attachment_type():
