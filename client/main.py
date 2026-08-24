@@ -6222,7 +6222,21 @@ class MainWindow(wx.Frame):
             else:
                 node_exe = shutil.which("node") or "node"
 
-        start_js  = resource_path("api",  "start.js")
+        start_js = resource_path("api", "start.js")
+        patched_start_js = resource_path("api_patches", "start.js")
+        try:
+            if os.path.isfile(patched_start_js):
+                with open(patched_start_js, "rb") as source:
+                    patched_content = source.read()
+                current_content = b""
+                if os.path.isfile(start_js):
+                    with open(start_js, "rb") as current:
+                        current_content = current.read()
+                if current_content != patched_content:
+                    shutil.copy2(patched_start_js, start_js)
+                    logging.info("[startup] Restored current api_patches/start.js")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore api_patches/start.js: %s", exc)
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs WPPConnect separately
         try:
