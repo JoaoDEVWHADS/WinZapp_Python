@@ -2269,13 +2269,14 @@ export async function requestOlderMessages(req: Request, res: Response) {
         }
         try {
           const oldestMsg = await utils.getOldestMsgInChatFromDB(wid);
-          const oldestMsgKey =
-            oldestMsg?.id?._serialized ?? oldestMsg?.id ?? oldestMsg?.key ?? null;
+          const oldestMsgKey = oldestMsg?.id ?? oldestMsg?.key ?? oldestMsg;
           if (!oldestMsgKey) {
             out.error = 'oldest message key unavailable for on-demand request';
             return out;
           }
-          out.oldestMsgKey = String(oldestMsgKey);
+          out.oldestMsgKey = String(
+            oldestMsgKey?._serialized ?? oldestMsgKey
+          );
           // 3 === Message$PeerDataOperationRequestType.HISTORY_SYNC_ON_DEMAND.
           // Read from the protobuf enum when available so a renumbering in a
           // future build does not silently send the wrong request type.
