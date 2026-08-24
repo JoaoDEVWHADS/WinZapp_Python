@@ -4860,13 +4860,20 @@ class ConversationsPanel(wx.Panel):
                         "wait_for_older_messages returned %s",
                         len(fetched) if fetched is not None else "None",
                     )
-                if fetched is not None and fetched:
+                if fetched is None:
+                    logging.info(
+                        "[_load_older_messages_from_server thread] "
+                        "Older history is still pending for %s; keeping scroll re-queryable.",
+                        phone_jid_val,
+                    )
+                    wx.CallAfter(self._clear_loading_more, phone_jid_val)
+                elif fetched:
                     wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
                 else:
                     wx.CallAfter(self._set_reached_start, phone_jid_val)
             except Exception as e:
                 logging.exception(f"[_load_older_messages_from_server] thread error: {e}")
-                wx.CallAfter(self._set_reached_start, phone_jid_val)
+                wx.CallAfter(self._clear_loading_more, phone_jid_val)
             finally:
                 self.main_window._end_interactive_history_request(phone_jid_val)
 

@@ -65,9 +65,15 @@ def test_temporary_empty_older_page_does_not_mean_reached_start():
     loader = _method_source(CONV, "ConversationsPanel", "_load_older_messages_from_server")
     assert "confirmed_end_of_history = False" in fetch
     assert "return [] if confirmed_end_of_history else None" in fetch
-    assert "if fetched is not None:" in loader
-    assert "self._set_reached_start" in loader
-    assert "self._clear_loading_more" in loader
+    assert "if fetched is None:" in loader
+    assert "keeping scroll re-queryable" in loader
+    assert "wx.CallAfter(self._clear_loading_more, phone_jid_val)" in loader
+    assert "elif fetched:" in loader
+    assert "wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)" in loader
+    assert "else:" in loader
+    assert "wx.CallAfter(self._set_reached_start, phone_jid_val)" in loader
+    assert loader.count("wx.CallAfter(self._set_reached_start, phone_jid_val)") == 1
+    assert loader.count("wx.CallAfter(self._clear_loading_more, phone_jid_val)") >= 2
 
 
 def test_live_messages_before_first_sync_are_buffered_and_replayed():
