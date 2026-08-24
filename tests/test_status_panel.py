@@ -98,7 +98,8 @@ class _FakeTextCtrl(_FakeWidget):
 
 
 class _FakeMainWindow:
-    def __init__(self, contact_names=None, send_text_result=True, settings=None):
+    def __init__(self, contact_names=None, send_text_result=True,
+                 send_reaction_result=True, settings=None):
         self.i18n = _FakeI18n()
         self.outputs = []
         self._contact_names = contact_names or {}
@@ -107,6 +108,8 @@ class _FakeMainWindow:
         self.app_name = "WinZapp"
         self._send_text_result = send_text_result
         self.send_text_calls = []
+        self._send_reaction_result = send_reaction_result
+        self.send_reaction_calls = []
         self.settings = settings if settings is not None else {}
         self.save_settings_calls = 0
 
@@ -119,6 +122,10 @@ class _FakeMainWindow:
     def send_text_message(self, remote_jid, text, quoted=None):
         self.send_text_calls.append((remote_jid, text, quoted))
         return self._send_text_result
+
+    def send_reaction(self, remote_jid, msg_key, emoji):
+        self.send_reaction_calls.append((remote_jid, msg_key, emoji))
+        return self._send_reaction_result
 
     def save_settings(self):
         self.save_settings_calls += 1
@@ -205,7 +212,6 @@ class _Stub:
     _is_status_liked             = StatusPanel._is_status_liked
     _on_like_status              = StatusPanel._on_like_status
     _on_like_sent                = StatusPanel._on_like_sent
-    _on_unlike_status_attempted  = StatusPanel._on_unlike_status_attempted
     _parse_statuses              = StatusPanel._parse_statuses
     _latest_ts                   = staticmethod(StatusPanel._latest_ts)
     _on_next_status               = StatusPanel._on_next_status
@@ -223,9 +229,11 @@ class _Stub:
     _status_row_text              = StatusPanel._status_row_text
     _update_focused_status_row_text = StatusPanel._update_focused_status_row_text
 
-    def __init__(self, contact_names=None, send_text_result=True, settings=None):
+    def __init__(self, contact_names=None, send_text_result=True,
+                 send_reaction_result=True, settings=None):
         self.main_window = _FakeMainWindow(
-            contact_names=contact_names, send_text_result=send_text_result, settings=settings,
+            contact_names=contact_names, send_text_result=send_text_result,
+            send_reaction_result=send_reaction_result, settings=settings,
         )
         self._status_contacts      = []
         self._status_row_contact   = {}
@@ -953,18 +961,11 @@ def _run_threads_synchronously(monkeypatch):
     monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
 
-class TestLikeStatusSendsAPlainEmojiMessage:
-    """_on_like_status() no longer uses send_reaction() (WhatsApp Web's
-    Store never indexes another person's status — see the method's own
-    docstring) — it sends the like emoji as a normal message to the
-    poster instead, deliberately WITHOUT quoting the status: WPPConnect's
-    send-reply endpoint can't resolve a status as a quote target any more
-    than the reaction endpoint could resolve it as a reaction target, so
-    quoting it always failed server-side and silently fell back to a
-    plain send anyway (reported live as "Não foi possível citar a
-    mensagem original")."""
+class TestLikeStatusUsesTheNativeStatusReaction:
+    """The Status Like button is a reaction to status@broadcast, never a
+    literal heart sent into the poster's private conversation."""
 
-    def test_sends_heart_emoji_without_quoting(self, monkeypatch):
+    def test_sends_heart_through_reaction_endpoint_not_private_message(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
         entry = _entry("poster@s.whatsapp.net", [status])
@@ -976,14 +977,22 @@ class TestLikeStatusSendsAPlainEmojiMessage:
 
         stub._on_like_status(None)
 
-        assert stub.main_window.send_text_calls == [
-            ("poster@s.whatsapp.net", "❤️", None)
-        ]
+        assert stub.main_window.send_text_calls == []
+        assert stub.main_window.send_reaction_calls == [(
+            "status@broadcast",
+            {
+                "fromMe": False,
+                "id": "s1",
+                "remoteJid": "status@broadcast",
+                "participant": "poster@s.whatsapp.net",
+            },
+            "❤️",
+        )]
 
     def test_marks_liked_persists_to_settings_and_updates_button_label_on_success(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
-        stub = _Stub(send_text_result=True)
+        stub = _Stub(send_reaction_result=True)
         stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
         stub._selected_contact_idx = 0
         stub._current_status_idx = 0
@@ -1002,7 +1011,7 @@ class TestLikeStatusSendsAPlainEmojiMessage:
         calls = []
         monkeypatch.setattr(wx, "MessageBox", lambda *a, **kw: calls.append(a))
         status = _text_status("oi")
-        stub = _Stub(send_text_result=False)
+        stub = _Stub(send_reaction_result=False)
         stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
         stub._selected_contact_idx = 0
         stub._current_status_idx = 0
@@ -1014,10 +1023,8 @@ class TestLikeStatusSendsAPlainEmojiMessage:
         assert len(calls) == 1
         assert stub.main_window.save_settings_calls == 0
 
-    def test_clicking_like_again_shows_unlike_unsupported_message_instead_of_resending(self, monkeypatch):
+    def test_clicking_again_removes_the_native_reaction(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
-        calls = []
-        monkeypatch.setattr(wx, "MessageBox", lambda *a, **kw: calls.append(a))
         status = _text_status("oi")
         status_id = status["key"]["id"]
         stub = _Stub()
@@ -1030,7 +1037,24 @@ class TestLikeStatusSendsAPlainEmojiMessage:
         stub._on_like_status(None)
 
         assert stub.main_window.send_text_calls == []
-        assert len(calls) == 1
+        assert stub.main_window.send_reaction_calls[0][2] == ""
+        assert stub._liked_statuses[status_id] is False
+        assert stub._like_btn.label == "Curtir"
+
+    def test_unlike_removes_the_persisted_status_id(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        status = _text_status("oi")
+        status_id = status["key"]["id"]
+        stub = _Stub(settings={"status_panel": {"liked_status_ids": [status_id]}})
+        stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._current_status = status
+
+        stub._on_like_status(None)
+
+        assert status_id not in stub.main_window.settings["status_panel"]["liked_status_ids"]
+        assert stub.main_window.save_settings_calls == 1
 
 
 class TestIsStatusLikedRemembersAcrossSessions:

@@ -1164,11 +1164,32 @@ export async function reactMessage(req: Request, res: Response) {
           const parts = msgId.split('_');
           const rawId = parts.length > 2 ? parts[2] : msgId;
           const posterJid = parts.length > 3 ? parts[3] : null;
+          const WPP = (window as any).WPP;
           let model: any = null;
 
-          if (posterJid && (window as any).WPP && (window as any).WPP.status) {
-            const statusChat = (window as any).WPP.status.get(posterJid);
-            if (statusChat) {
+          // Use the same lookup strategy as the real status-reply route:
+          // prefer the serialized poster, but scan StatusV3Store as well.
+          // Status collections may be keyed by @c.us while Python knows the
+          // same contact as @lid (or vice versa), so WPP.status.get(posterJid)
+          // alone can miss a status that is visibly open in WinZapp.
+          const statusModels: any[] = [];
+          const expected = posterJid ? WPP?.status?.get?.(posterJid) : null;
+          if (expected) statusModels.push(expected);
+          const statusStore = WPP?.whatsapp?.StatusV3Store;
+          const storedModels =
+            (typeof statusStore?.getModels === 'function' &&
+              statusStore.getModels()) ||
+            (Array.isArray(statusStore?._models) && statusStore._models) ||
+            (Array.isArray(statusStore?.models) && statusStore.models) ||
+            [];
+          for (const statusChat of storedModels) {
+            if (statusChat && !statusModels.includes(statusChat)) {
+              statusModels.push(statusChat);
+            }
+          }
+
+          for (const statusChat of statusModels) {
+            if (!model) {
               const msgs =
                 (typeof statusChat.getAllMsgs === 'function' &&
                   statusChat.getAllMsgs()) ||
@@ -1209,8 +1230,8 @@ export async function reactMessage(req: Request, res: Response) {
             });
           }
           if (!model) return false;
-          await (window as any).WPP.chat.sendReactionToMessage(model, reaction);
-          return true;
+          const result = await WPP.chat.sendReactionToMessage(model, reaction);
+          return result !== false;
         },
         { msgId, reaction }
       );
