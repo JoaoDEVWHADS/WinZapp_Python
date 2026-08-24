@@ -15946,6 +15946,26 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel") and not skip_panel_refresh:
             self.conversations_panel.refresh_message_status(msg_id, status)
 
+        # The chat list's preview line carries this message's delivery status
+        # too — _last_msg_preview() appends _map_status(last) to it — but the
+        # only repaint fired above is the open conversation's own row. Nothing
+        # here ever told the conversations list to repaint, so a chat kept
+        # showing "Pendente" until some unrelated event (another message
+        # landing anywhere, a sync) happened to trigger set_chats(). Reported
+        # live as a preview still reading "Pendente" seconds after the message
+        # had visibly been sent.
+        #
+        # Scheduled rather than applied directly: acks arrive in bursts (one
+        # message walks pending -> sent -> delivered -> read, and reading a
+        # backlog acks dozens at once), and _schedule_set_chats() coalesces a
+        # burst into a single recompute. Skipped entirely when the status
+        # isn't part of the preview, so turning that setting off also turns
+        # off the work.
+        if found_msg and self.settings.get("user_interface", {}).get(
+            "show_delivery_status_in_chat_list", True
+        ):
+            self._schedule_set_chats()
+
 
     def _resolve_jid_name(self, jid_norm: str, chat_jid_norm: str = "") -> str:
         """Return the best display name for a participant JID (contact lookup + fallback).
