@@ -9940,6 +9940,7 @@ class MainWindow(wx.Frame):
         # also the state a restart lands in, so the walk had no way to resume
         # either: the SQLite anchor survives, but nothing ever came back for it.
         deep_pending = len(self._chats_needing_deep_history())
+        first_short_pass_done = None
         if pending or still_landing or unnamed or deep_pending:
             logging.info(
                 "[backfill] Scheduling backfill: %d chat(s) short of a full page, "
@@ -9948,9 +9949,21 @@ class MainWindow(wx.Frame):
                 pending, unnamed, deep_pending, still_landing)
             existing = getattr(self, "_backfill_thread", None)
             if existing is None or not existing.is_alive():
+                if pending:
+                    first_short_pass_done = threading.Event()
+                    self._backfill_first_short_pass_done = first_short_pass_done
                 self._backfill_thread = threading.Thread(
                     target=self._backfill_empty_chats, daemon=True, name="chat-backfill")
                 self._backfill_thread.start()
+
+        # The first short-page confirmation owns the API before media starts.
+        # This wait is on the sync worker, never the wx UI thread.
+        if first_short_pass_done is not None:
+            logging.info(
+                "[backfill] Waiting for the first short-page batch before media sync.")
+            if not first_short_pass_done.wait(timeout=180):
+                logging.warning(
+                    "[backfill] First short-page batch exceeded 180s; releasing media sync.")
 
         # ── Phase 2: download media ──────────────────────────────────────────
         # Opt-out via Settings > Armazenamento > "Baixar mídias automaticamente
@@ -13270,6 +13283,12 @@ class MainWindow(wx.Frame):
         """Start short-page confirmation now; defer background-only work."""
         return 0 if short_chats_pending else cls._BACKFILL_FIRST_DELAY
 
+    @staticmethod
+    def _background_backfill_work_allowed(short_chats_pending: bool,
+                                          continuing_short_sweep: bool) -> bool:
+        """Names and deep history must not block short-page recovery."""
+        return not short_chats_pending and not continuing_short_sweep
+
     @classmethod
     def _backfill_short_queue_delays(cls, retry_delay: int, sweep_finished: bool,
                                      sweep_made_progress: bool) -> tuple[int, int]:
@@ -13687,6 +13706,8 @@ class MainWindow(wx.Frame):
         re-reads the queue and re-kicks it if needed.
         """
         my_run = getattr(self, "_sync_run_id", 0)
+        first_short_pass_done = getattr(
+            self, "_backfill_first_short_pass_done", None)
         deadline = time.monotonic() + self._BACKFILL_BUDGET
         # A fresh pairing can take longer to deliver and decode its history than
         # the ordinary budget allows, and stopping halfway leaves conversations
@@ -13777,7 +13798,9 @@ class MainWindow(wx.Frame):
                 # Name and deep-history work run once per complete short-chat
                 # sweep. Repeating them between every fast queue chunk would
                 # merely move the old 30-second bottleneck to another endpoint.
-                named = 0 if continuing_short_sweep else self._backfill_names()
+                background_work_allowed = self._background_backfill_work_allowed(
+                    bool(pending), continuing_short_sweep)
+                named = self._backfill_names() if background_work_allowed else 0
                 if named:
                     wx.CallAfter(self._schedule_set_chats)
 
@@ -13789,7 +13812,7 @@ class MainWindow(wx.Frame):
                 # back on the next sweep, anchored on what is now oldest on
                 # disk, so the walk resumes rather than restarting.
                 deep_stored = 0
-                if deep_pending and not continuing_short_sweep:
+                if deep_pending and background_work_allowed:
                     window = deep_pending[:self._DEEP_CHATS_PER_PASS]
                     logging.info(
                         "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
@@ -13904,6 +13927,9 @@ class MainWindow(wx.Frame):
                 logging.info(
                     "[backfill] Pass %d: %d chat(s) gained messages, %d no longer pending "
                     "(of %d).", attempt, grew, completed, before)
+                if first_short_pass_done is not None:
+                    first_short_pass_done.set()
+                    first_short_pass_done = None
                 made_progress = (grew > 0 or completed > 0 or named > 0
                                  or deep_stored > 0)
                 sweep_made_progress = sweep_made_progress or made_progress
@@ -13928,6 +13954,9 @@ class MainWindow(wx.Frame):
                     still, unnamed)
         except Exception:
             logging.exception("[backfill] Unhandled error in the backfill loop")
+        finally:
+            if first_short_pass_done is not None:
+                first_short_pass_done.set()
 
     # ── History-sync health ─────────────────────────────────────────────────
     # WhatsApp's multi-device design keeps older history on the phone and only

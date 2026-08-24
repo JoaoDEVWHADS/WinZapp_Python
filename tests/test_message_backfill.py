@@ -394,6 +394,15 @@ class TestBackfillPacing:
         assert MainWindow._initial_backfill_delay(
             short_chats_pending=False) == MainWindow._BACKFILL_FIRST_DELAY
 
+    def test_short_pages_block_names_and_deep_history(self):
+        assert MainWindow._background_backfill_work_allowed(True, False) is False
+
+    def test_partial_short_sweep_still_blocks_background_work(self):
+        assert MainWindow._background_backfill_work_allowed(False, True) is False
+
+    def test_background_work_starts_after_short_pages_finish(self):
+        assert MainWindow._background_backfill_work_allowed(False, False) is True
+
     @staticmethod
     def _next_delay(delay, recovered):
         """The pacing rule the loop applies after each pass."""
