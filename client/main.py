@@ -2497,8 +2497,19 @@ class MainWindow(wx.Frame):
 
     def _set_status(self, status: str):
         """Update window title and tray tooltip to reflect current status."""
+        previous = getattr(self, "_tray_status", "")
         self._tray_status = status
+        if status != previous:
+            logging.info("[sync-status] %r -> %r", previous, status)
         self._update_title()
+
+    def _set_preparing_status_if_idle(self):
+        """Do not let a delayed connection callback regress an active sync."""
+        if getattr(self, "_initial_sync_running", False):
+            logging.info(
+                "[sync-status] Ignoring delayed preparing status; sync is running.")
+            return
+        self._set_status(self.i18n.t("preparing_to_sync"))
 
     def _update_title(self):
         """
@@ -3293,7 +3304,7 @@ class MainWindow(wx.Frame):
                 # title claim progress the app hadn't made yet.
                 # wait_messages_set() no longer sets this status itself —
                 # this is the one place that does, in lockstep with the sound.
-                wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+                wx.CallAfter(self._set_preparing_status_if_idle)
             elif self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
                 # Reconnect (not the first-ever connect, handled above) —
                 # clear only the transient "connecting"/"disconnected" text; a
