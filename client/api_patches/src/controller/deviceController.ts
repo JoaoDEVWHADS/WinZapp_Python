@@ -2533,6 +2533,11 @@ export async function requestOlderMessages(req: Request, res: Response) {
           out.recentCompleted = true;
         }
 
+        if (out.recentCompleted !== true) {
+          out.error = "recent history sync is not complete";
+          return out;
+        }
+
         // One-to-one chats are keyed by @lid in current multi-device builds,
         // while WinZapp's public API deliberately continues to use the phone
         // number (@c.us). Resolve to the actual ChatStore key before looking up
