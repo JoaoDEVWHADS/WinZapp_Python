@@ -8747,6 +8747,45 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
+        # The target may be older than the rendered page but still be present
+        # in the local database.  The old code incorrectly reported an error.
+        jid = (self.conversation or {}).get("remoteJid", "")
+        try:
+            quoted = self.main_window.db.get_message(jid, quoted_id)
+        except Exception:
+            logging.exception("[goto quoted] Database lookup failed")
+            quoted = None
+        if quoted:
+            records = (
+                (self.conversation.get("messages") or {}).get("messages") or {}
+            ).get("records") or []
+            records = self._deduplicate_messages(list(records) + [quoted])
+            records.sort(key=self._extract_timestamp)
+            self.conversation.setdefault("messages", {}).setdefault(
+                "messages", {}
+            )["records"] = records
+            self.populate_messages(preserve_focus=True)
+            for i, candidate in enumerate(self._sorted_messages):
+                if (
+                    not self._is_separator(candidate)
+                    and candidate.get("key", {}).get("id") == quoted_id
+                ):
+                    self.messages_list.Focus(i)
+                    self.messages_list.Select(i, True)
+                    self.messages_list.EnsureVisible(i)
+                    self.messages_list.SetFocus()
+                    return
+            # Pagination keeps the newest configured page.  An older quoted
+            # target can therefore still fall just outside it; expose that one
+            # row at the top without starting a server-side history request.
+            self._all_sorted_messages.insert(0, quoted)
+            self._sorted_messages.insert(0, quoted)
+            self.messages_list.InsertItem(0, self._render_message_line(quoted))
+            self.messages_list.Focus(0)
+            self.messages_list.Select(0, True)
+            self.messages_list.EnsureVisible(0)
+            self.messages_list.SetFocus()
+            return
         if self._goto_quoted_status(quoted_id, ctx):
             return
         self._show_quoted_not_found_error()
