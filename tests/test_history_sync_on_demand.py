@@ -56,12 +56,17 @@ class _Stub:
     request_older_messages = MainWindow.request_older_messages
     unblock_history_sync = MainWindow.unblock_history_sync
     refresh_history_still_landing = MainWindow.refresh_history_still_landing
+    wait_for_restarted_history_sync = MainWindow.wait_for_restarted_history_sync
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
 
     def __init__(self, connected=True):
         self._wa_connected = connected
+        self.offline_mode = False
         self._phone_to_lid = {}
         self._lid_to_phone = {}
+
+    def _should_abort_sync_for_offline(self):
+        return False
 
 
 class TestFetchHistorySyncStatus:
@@ -284,6 +289,7 @@ class TestRefreshHistoryStillLanding:
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
+
     def test_an_incomplete_recent_sync_keeps_history_landing(self, monkeypatch):
         stub = self._stub(
             {"unprocessedChunks": 0, "initialSyncComplete": True, "recentCompleted": False},
@@ -301,6 +307,42 @@ class TestRefreshHistoryStillLanding:
         stub._history_still_landing = False
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
+
+
+class TestWaitForRestartedHistorySync:
+    def _clock(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("main.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            "main.time.sleep",
+            lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def test_stable_count_is_not_completion_while_recent_is_false(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: {
+                "unprocessedChunks": 0,
+                "recentCompleted": False,
+                "storeCounts": {"message": 10199},
+            })
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is False
+
+    def test_recent_true_and_empty_queue_completes_wait(self, monkeypatch):
+        self._clock(monkeypatch)
+        statuses = iter((
+            {"unprocessedChunks": 0, "recentCompleted": False,
+             "storeCounts": {"message": 10199}},
+            {"unprocessedChunks": 0, "recentCompleted": True,
+             "storeCounts": {"message": 39288}},
+        ))
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status",
+            lambda self, timeout=10: next(statuses))
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is True
 
     def test_a_disconnected_status_stops_history_landing(self, monkeypatch):
         stub = self._stub(None, monkeypatch)

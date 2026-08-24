@@ -9772,7 +9772,13 @@ class MainWindow(wx.Frame):
         # the rest of its history is still landing.
         unblock_result = self.unblock_history_sync()
         if isinstance(unblock_result, dict) and unblock_result.get("restarted"):
-            self.wait_for_restarted_history_sync()
+            if not self.wait_for_restarted_history_sync():
+                logging.warning(
+                    "[start_sync] RECENT history is still incomplete; deferring "
+                    "the message phase so it does not compete with the phone transfer."
+                )
+                self._sync_completed = False
+                return
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13423,11 +13429,9 @@ class MainWindow(wx.Frame):
         )
         return landing
 
-    def wait_for_restarted_history_sync(self, timeout: int = 120) -> bool:
-        """Wait until a manually restarted RECENT chunk stops mutating storage."""
+    def wait_for_restarted_history_sync(self, timeout: int = 600) -> bool:
+        """Wait until a manually restarted RECENT pass is actually complete."""
         deadline = time.monotonic() + timeout
-        last_message_count = None
-        stable_samples = 0
         while time.monotonic() < deadline:
             if self._should_abort_sync_for_offline():
                 return False
@@ -13437,21 +13441,16 @@ class MainWindow(wx.Frame):
             counts = status.get("storeCounts") or {}
             message_count = counts.get("message")
             queue_empty = status.get("unprocessedChunks") == 0
-            if queue_empty and isinstance(message_count, int):
-                stable_samples = stable_samples + 1 if message_count == last_message_count else 0
-                if stable_samples >= 3:
-                    logging.info(
-                        "[history-sync] Restarted RECENT history settled at %d messages.",
-                        message_count,
-                    )
-                    return True
-            else:
-                stable_samples = 0
-            last_message_count = message_count
+            if queue_empty and status.get("recentCompleted") is True:
+                logging.info(
+                    "[history-sync] Restarted RECENT history completed at %s messages.",
+                    message_count,
+                )
+                return True
             time.sleep(2)
         logging.warning(
-            "[history-sync] Restarted RECENT history did not settle within %ds; "
-            "continuing with bounded REST sync.", timeout,
+            "[history-sync] Restarted RECENT history did not complete within %ds; "
+            "deferring the REST message sync.", timeout,
         )
         return False
 
