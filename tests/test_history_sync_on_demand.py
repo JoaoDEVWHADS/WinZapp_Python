@@ -88,6 +88,15 @@ class TestFetchHistorySyncStatus:
         stub = _Stub()
         monkeypatch.setattr("main.requests.get", lambda *a, **k: _Response(404, text="nope"))
         assert stub.fetch_history_sync_status() is None
+        assert stub._history_status_disconnected is False
+
+    def test_disconnected_response_is_remembered(self, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.get",
+            lambda *a, **k: _Response(404, text='{"status":"Disconnected"}'))
+        assert stub.fetch_history_sync_status() is None
+        assert stub._history_status_disconnected is True
 
     def test_transport_error_is_swallowed(self, monkeypatch):
         stub = _Stub()
@@ -290,6 +299,13 @@ class TestRefreshHistoryStillLanding:
     def test_an_unreadable_status_preserves_the_last_known_state(self, monkeypatch):
         stub = self._stub(None, monkeypatch)
         stub._history_still_landing = False
+        assert stub.refresh_history_still_landing() is False
+        assert stub._history_still_landing is False
+
+    def test_a_disconnected_status_stops_history_landing(self, monkeypatch):
+        stub = self._stub(None, monkeypatch)
+        stub._history_status_disconnected = True
+        stub._history_still_landing = True
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 

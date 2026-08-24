@@ -13385,6 +13385,17 @@ class MainWindow(wx.Frame):
         """
         status = self.fetch_history_sync_status()
         if status is None:
+            disconnected = (
+                getattr(self, "_history_status_disconnected", False)
+                or not getattr(self, "_wa_connected", False)
+                or getattr(self, "offline_mode", False)
+            )
+            if disconnected:
+                self._history_still_landing = False
+                logging.warning(
+                    "[history-sync] %s: session disconnected; stopping history wait.",
+                    context or "check")
+                return False
             landing = bool(getattr(self, "_history_still_landing", True))
             self._history_still_landing = landing
             logging.warning(
@@ -14046,6 +14057,7 @@ class MainWindow(wx.Frame):
     def fetch_history_sync_status(self, timeout: int = 30):
         """Raw /history-sync-status payload, or None when it can't be read."""
         if not getattr(self, "_wa_connected", False):
+            self._history_status_disconnected = True
             return None
         url = (f"{self.wpp_server}:{self.wpp_port}"
                f"/api/{self.token}/history-sync-status")
@@ -14057,10 +14069,16 @@ class MainWindow(wx.Frame):
                 timeout=timeout,
             )
             if response.status_code not in (200, 201):
+                response_text = response.text[:500]
+                self._history_status_disconnected = (
+                    "disconnected" in response_text.lower()
+                    or "sessão do whatsapp não está ativa" in response_text.lower()
+                )
                 logging.warning("[history-sync] status endpoint returned %s: %s",
-                                response.status_code, response.text[:200])
+                                response.status_code, response_text[:200])
                 return None
             body = response.json()
+            self._history_status_disconnected = False
             return body.get("response") if isinstance(body, dict) else None
         except Exception as exc:
             # An older client/api/ build simply has no such route. Not worth a
