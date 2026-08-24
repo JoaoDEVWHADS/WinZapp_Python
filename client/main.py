@@ -13199,17 +13199,6 @@ class MainWindow(wx.Frame):
                     lst.Select(0)
                     lst.EnsureVisible(0)
 
-    # Deep-sync for the most-recent chats.  The boot sync normally fetches only
-    # messages_page_size (200) newest messages per chat, so scrolling up in a
-    # conversation quickly exhausts local history and stalls on
-    # fetch_older_messages() network round-trips.  Give the N most-recent chats
-    # (the ones the user is most likely to open first) a deeper window instead;
-    # the rest still sync the regular page target.  The server bounds a plain
-    # (un-anchored) get-messages to maxPages=10 pages of `count` each, so a
-    # count beyond ~10x a page cannot loop.
-    _DEEP_SYNC_TOP_N = 10
-    _DEEP_SYNC_COUNT = 1000
-
     def sync_remote_chats(self):
         chats = list(self.chats.values())
         if not chats:
@@ -13234,32 +13223,13 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-        # Tag the N most-recent chats for a deeper history window so the
-        # conversations the user is most likely to open first keep reading from
-        # the local DB while scrolling up, instead of stalling on
-        # fetch_older_messages() network round-trips.
-        deep_ids = {c.get("remoteJid", "") for c in valid_chats[:self._DEEP_SYNC_TOP_N]}
-        deep_ids.discard("")
-        if deep_ids:
-            logging.info(
-                "[sync_remote_chats] Deep-syncing %d most-recent chat(s) at "
-                "count=%d (page target=%d).",
-                len(deep_ids), self._DEEP_SYNC_COUNT, self.history_page_target(),
-            )
-
         # RECENT decoding and message queries share one Puppeteer page. Keep
         # the initial sweep gentle until the phone finishes feeding history.
         worker_cap = 2 if getattr(self, "_history_still_landing", False) else 6
         max_workers = min(worker_cap, len(valid_chats))
         failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            def _job(c):
-                copy = c.copy()
-                if c.get("remoteJid", "") in deep_ids:
-                    copy["_sync_limit"] = self._DEEP_SYNC_COUNT
-                return copy
-
-            futs = {pool.submit(self.sync_chat_messages, _job(c)): c for c in valid_chats}
+            futs = {pool.submit(self.sync_chat_messages, c): c for c in valid_chats}
             for fut in as_completed(futs):
                 try:
                     fut.result()
@@ -14477,8 +14447,6 @@ class MainWindow(wx.Frame):
             phone = remote_jid
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        if chat.get("_sync_limit"):
-            limit = int(chat["_sync_limit"])
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
