@@ -12873,8 +12873,10 @@ class MainWindow(wx.Frame):
                         pending = self._lid_resolution_queue
                         if not pending:
                             return
-                        jid = pending.pop()
-                    self.resolve_lid_jids_via_api([jid])
+                        batch = []
+                        while pending and len(batch) < 20:
+                            batch.append(pending.pop())
+                    self.resolve_lid_jids_via_api(batch)
             finally:
                 with lock:
                     self._lid_resolution_queue_running = False
