@@ -9756,7 +9756,9 @@ class MainWindow(wx.Frame):
         # decoded, and _note_backfill_state() uses the pending-chunk flag to
         # decide whether a chat that came back short is worth re-querying while
         # the rest of its history is still landing.
-        self.unblock_history_sync()
+        unblock_result = self.unblock_history_sync()
+        if isinstance(unblock_result, dict) and unblock_result.get("restarted"):
+            self.wait_for_restarted_history_sync()
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13357,6 +13359,38 @@ class MainWindow(wx.Frame):
             else "will get one confirming retry only",
         )
         return landing
+
+    def wait_for_restarted_history_sync(self, timeout: int = 120) -> bool:
+        """Wait until a manually restarted RECENT chunk stops mutating storage."""
+        deadline = time.monotonic() + timeout
+        last_message_count = None
+        stable_samples = 0
+        while time.monotonic() < deadline:
+            if self._should_abort_sync_for_offline():
+                return False
+            status = self.fetch_history_sync_status(timeout=10)
+            if not isinstance(status, dict):
+                return False
+            counts = status.get("storeCounts") or {}
+            message_count = counts.get("message")
+            queue_empty = status.get("unprocessedChunks") == 0
+            if queue_empty and isinstance(message_count, int):
+                stable_samples = stable_samples + 1 if message_count == last_message_count else 0
+                if stable_samples >= 3:
+                    logging.info(
+                        "[history-sync] Restarted RECENT history settled at %d messages.",
+                        message_count,
+                    )
+                    return True
+            else:
+                stable_samples = 0
+            last_message_count = message_count
+            time.sleep(2)
+        logging.warning(
+            "[history-sync] Restarted RECENT history did not settle within %ds; "
+            "continuing with bounded REST sync.", timeout,
+        )
+        return False
 
     def _note_backfill_state(self, remote_jid: str, chat: dict, api_ok: bool) -> None:
         """Track chats that still owe us history.
