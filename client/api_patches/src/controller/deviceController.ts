@@ -1159,13 +1159,40 @@ export async function reactMessage(req: Request, res: Response) {
       // exactly that poster JID. Store.Msg.models is kept as a fallback in
       // case a status is ever ALSO mirrored there on some WhatsApp Web
       // version.
-      const ok = await req.client.page.evaluate(
+      const outcome = await req.client.page.evaluate(
         async ({ msgId, reaction }) => {
           const parts = msgId.split('_');
           const rawId = parts.length > 2 ? parts[2] : msgId;
           const posterJid = parts.length > 3 ? parts[3] : null;
           const WPP = (window as any).WPP;
           let model: any = null;
+
+          const asModels = (value: any): any[] => {
+            if (!value) return [];
+            if (Array.isArray(value)) return value;
+            if (typeof value.getModelsArray === 'function') {
+              return value.getModelsArray() || [];
+            }
+            if (typeof value.values === 'function') {
+              try {
+                return Array.from(value.values());
+              } catch (_) {
+                return [];
+              }
+            }
+            return [];
+          };
+
+          const matchesStatusId = (item: any): boolean => {
+            if (!item?.id) return false;
+            const serialized = String(item.id._serialized ?? item.id.$1 ?? '');
+            const itemId = String(item.id.id ?? item.id.$1 ?? '');
+            return (
+              itemId === rawId ||
+              serialized === msgId ||
+              Boolean(rawId && serialized.includes(rawId))
+            );
+          };
 
           // Use the same lookup strategy as the real status-reply route:
           // prefer the serialized poster, but scan StatusV3Store as well.
@@ -1176,12 +1203,21 @@ export async function reactMessage(req: Request, res: Response) {
           const expected = posterJid ? WPP?.status?.get?.(posterJid) : null;
           if (expected) statusModels.push(expected);
           const statusStore = WPP?.whatsapp?.StatusV3Store;
-          const storedModels =
+          if (typeof statusStore?.sync === 'function') {
+            try {
+              await statusStore.sync();
+            } catch (_) {
+              // The already-loaded collection is still useful when sync fails.
+            }
+          }
+          const storedModels = asModels(
             (typeof statusStore?.getModels === 'function' &&
               statusStore.getModels()) ||
-            (Array.isArray(statusStore?._models) && statusStore._models) ||
-            (Array.isArray(statusStore?.models) && statusStore.models) ||
-            [];
+              statusStore?._models ||
+              statusStore?.models ||
+              (typeof statusStore?.getUnexpired === 'function' &&
+                statusStore.getUnexpired())
+          );
           for (const statusChat of storedModels) {
             if (statusChat && !statusModels.includes(statusChat)) {
               statusModels.push(statusChat);
@@ -1190,24 +1226,14 @@ export async function reactMessage(req: Request, res: Response) {
 
           for (const statusChat of statusModels) {
             if (!model) {
-              const msgs =
+              const msgs = asModels(
                 (typeof statusChat.getAllMsgs === 'function' &&
                   statusChat.getAllMsgs()) ||
-                (statusChat.msgs &&
-                typeof statusChat.msgs.getModelsArray === 'function'
-                  ? statusChat.msgs.getModelsArray()
-                  : null) ||
-                [];
-              model = msgs.find((item: any) => {
-                if (!item || !item.id) return false;
-                const ser = item.id._serialized || '';
-                const itemId = item.id.id || '';
-                return (
-                  itemId === rawId ||
-                  ser === msgId ||
-                  (rawId && ser.includes(rawId))
-                );
-              });
+                  statusChat.msgs?._models ||
+                  statusChat.msgs?.models ||
+                  statusChat.msgs
+              );
+              model = msgs.find(matchesStatusId);
             }
           }
 
@@ -1218,26 +1244,29 @@ export async function reactMessage(req: Request, res: Response) {
             (window as any).Store.Msg.models
           ) {
             const models = (window as any).Store.Msg.models;
-            model = models.find((item: any) => {
-              if (!item || !item.id) return false;
-              const ser = item.id._serialized || '';
-              const itemId = item.id.id || '';
-              return (
-                itemId === rawId ||
-                ser === msgId ||
-                (rawId && ser.includes(rawId))
-              );
-            });
+            model = asModels(models).find(matchesStatusId);
           }
-          if (!model) return false;
+          if (!model) {
+            return {
+              ok: false,
+              detail: `message-not-found; models=${statusModels.length}`,
+            };
+          }
           const result = await WPP.chat.sendReactionToMessage(model, reaction);
-          return result !== false;
+          const sendMsgResult = String(result?.sendMsgResult ?? '');
+          const rejected = /error|fail/i.test(sendMsgResult);
+          return {
+            ok: result !== false && !rejected,
+            detail: sendMsgResult || 'reaction-call-returned',
+          };
         },
         { msgId, reaction }
       );
-      if (!ok) {
+      if (!outcome?.ok) {
         throw new Error(
-          `Status message not found in Store for reaction: ${msgId}`
+          `Status reaction failed for ${msgId}: ${
+            outcome?.detail || 'unknown browser result'
+          }`
         );
       }
     } else {

@@ -809,10 +809,17 @@ class StatusPanel(wx.Panel):
         self.on_show()
 
     def _on_escape(self, event):
-        """Esc closes the open status viewer and returns focus to the list.
+        """Esc closes the composer/viewer and returns focus to the list.
         Also called directly (event=None) from _on_next_status() when the
         last status of a contact is exhausted — see its own comment."""
-        if self._viewer_panel.IsShown():
+        if self._is_status_composer_open():
+            if self._voice_post_panel.IsShown():
+                self._on_close_voice_panel(event)
+            elif self._media_post_panel.IsShown():
+                self._on_close_media_panel(event)
+            else:
+                self._on_close_post_panel(event)
+        elif self._viewer_panel.IsShown():
             self._selected_contact_idx = -1
             self._viewer_panel.Hide()
             self._video_player.stop()
@@ -1815,11 +1822,9 @@ class StatusPanel(wx.Panel):
         menu.Destroy()
 
     def _on_choose_text_status(self, event):
-        self._hide_post_panels()
-        self._post_panel.Show()
+        self._enter_status_composer(self._post_panel)
         self._post_text_field.SetValue("")
         self._caption_field.SetValue("")
-        self.Layout()
         self._post_text_field.SetFocus()
 
     def _on_open_post_emoji_picker(self, event):
@@ -1847,39 +1852,75 @@ class StatusPanel(wx.Panel):
         if dlg.ShowModal() == wx.ID_OK:
             self._selected_media_paths = dlg.GetPaths()
             dlg.Destroy()
-            self._hide_post_panels()
-            self._media_post_panel.Show()
+            self._enter_status_composer(self._media_post_panel)
             self._media_caption_field.SetValue("")
             self._rebuild_media_attachment_list()
-            self.Layout()
             self._media_caption_field.SetFocus()
         else:
             dlg.Destroy()
 
     def _on_close_post_panel(self, event):
-        self._post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
     def _on_close_media_panel(self, event):
         self._selected_media_paths = []
-        self._media_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
     def _hide_post_panels(self):
         self._post_panel.Hide()
         self._media_post_panel.Hide()
         self._voice_post_panel.Hide()
 
+    def _is_status_composer_open(self) -> bool:
+        return any(
+            panel.IsShown()
+            for panel in (
+                self._post_panel,
+                self._media_post_panel,
+                self._voice_post_panel,
+            )
+        )
+
+    def _enter_status_composer(self, panel):
+        """Show only the selected Add Status flow.
+
+        The status browser and every other composer are deliberately hidden:
+        recording controls and their shortcuts belong to Audio, attachment
+        controls belong to Media, and text controls belong to Text. Keeping
+        them beside the status list made the main screen needlessly crowded.
+        """
+        self._hide_post_panels()
+        self._viewer_panel.Hide()
+        self._video_player.stop()
+        for widget in (
+            self._add_status_btn,
+            self._refresh_status_btn,
+            self._list_label,
+            self._status_list,
+        ):
+            widget.Hide()
+        panel.Show()
+        self.Layout()
+
+    def _leave_status_composer(self):
+        """Return from any Add Status flow to the clean status browser."""
+        self._hide_post_panels()
+        for widget in (
+            self._add_status_btn,
+            self._refresh_status_btn,
+            self._list_label,
+            self._status_list,
+        ):
+            widget.Show()
+        self.Layout()
+        self._status_list.SetFocus()
+
     # ── Record & post voice status ───────────────────────────────────────────
 
     def _on_choose_voice_status(self, event):
         """Open the voice status post panel in prepared state (NOT recording yet).
         User can click Record or press Ctrl+R to start recording."""
-        self._hide_post_panels()
-        self._viewer_panel.Hide()
-        self._video_player.stop()
+        self._enter_status_composer(self._voice_post_panel)
 
         self._is_recording = False
         self._recording_paused = False
@@ -1896,8 +1937,6 @@ class StatusPanel(wx.Panel):
         self._voice_send_btn.Hide()
         self._voice_close_btn.Hide()
 
-        self._voice_post_panel.Show()
-        self.Layout()
         self._voice_start_btn.SetFocus()
 
     def _on_ctrl_r_shortcut(self, event):
@@ -2188,9 +2227,7 @@ class StatusPanel(wx.Panel):
         self._recording_frames = []
         self._is_recording = False
         self._recording_paused = False
-        self._voice_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
     def _on_send_voice_status(self, event):
         if not self._is_recording:
@@ -2204,9 +2241,7 @@ class StatusPanel(wx.Panel):
         self._stop_recording_stream()
         self._is_recording = False
         self._recording_paused = False
-        self._voice_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
         if not self._recording_frames:
             return
@@ -2389,10 +2424,7 @@ class StatusPanel(wx.Panel):
             )
 
     def _on_status_sent(self):
-        self._post_panel.Hide()
-        self._media_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
         self.main_window.output(self.main_window.i18n.t("status_posted"))
         threading.Thread(target=self._load_statuses, daemon=True).start()
 

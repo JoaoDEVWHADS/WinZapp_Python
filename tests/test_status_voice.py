@@ -125,6 +125,9 @@ class _FakeMainWindow:
 class _Stub:
     _on_choose_voice_status   = StatusPanel._on_choose_voice_status
     _hide_post_panels         = StatusPanel._hide_post_panels
+    _is_status_composer_open  = StatusPanel._is_status_composer_open
+    _enter_status_composer    = StatusPanel._enter_status_composer
+    _leave_status_composer    = StatusPanel._leave_status_composer
     _start_voice_recording    = StatusPanel._start_voice_recording
     _send_media_status_bg     = StatusPanel._send_media_status_bg
     _send_all_media_statuses_bg = StatusPanel._send_all_media_statuses_bg
@@ -137,6 +140,17 @@ class _Stub:
         self._post_panel = _FakeWidget()
         self._media_post_panel = _FakeWidget()
         self._voice_post_panel = _FakeWidget()
+        self._add_status_btn = _FakeWidget()
+        self._refresh_status_btn = _FakeWidget()
+        self._list_label = _FakeWidget()
+        self._status_list = _FakeButton()
+        for widget in (
+            self._add_status_btn,
+            self._refresh_status_btn,
+            self._list_label,
+            self._status_list,
+        ):
+            widget.Show()
         # Opening a post panel now also hides the status viewer and stops the
         # in-app video player alongside the other panels; without these the
         # method under test dies on an AttributeError before reaching anything

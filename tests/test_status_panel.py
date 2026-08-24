@@ -154,6 +154,7 @@ class _FakeVideoPlayer:
 class _FakeStatusList:
     def __init__(self, focused=-1):
         self._focused = focused
+        self.shown = True
         self.select_calls = []
         self.items = []
         self.focus_calls = []
@@ -166,6 +167,15 @@ class _FakeStatusList:
 
     def SetFocus(self):
         pass
+
+    def Show(self, show=True):
+        self.shown = bool(show)
+
+    def Hide(self):
+        self.shown = False
+
+    def IsShown(self):
+        return self.shown
 
     def Append(self, row):
         self.items.append(row[0])
@@ -217,6 +227,12 @@ class _Stub:
     _on_next_status               = StatusPanel._on_next_status
     _on_prev_status                = StatusPanel._on_prev_status
     _on_escape                    = StatusPanel._on_escape
+    _hide_post_panels             = StatusPanel._hide_post_panels
+    _is_status_composer_open      = StatusPanel._is_status_composer_open
+    _enter_status_composer        = StatusPanel._enter_status_composer
+    _leave_status_composer        = StatusPanel._leave_status_composer
+    _on_close_post_panel          = StatusPanel._on_close_post_panel
+    _on_close_media_panel         = StatusPanel._on_close_media_panel
     _MAX_REMEMBERED_LIKES         = StatusPanel._MAX_REMEMBERED_LIKES
     _on_send_status_reply         = StatusPanel._on_send_status_reply
     _send_status_reply_bg         = StatusPanel._send_status_reply_bg
@@ -248,6 +264,12 @@ class _Stub:
         self._video_download_status_id  = None
         self._video_player = _FakeVideoPlayer()
         self._status_list = _FakeStatusList()
+        self._add_status_btn = _FakeWidget()
+        self._refresh_status_btn = _FakeWidget()
+        self._list_label = _FakeWidget()
+        self._add_status_btn.Show()
+        self._refresh_status_btn.Show()
+        self._list_label.Show()
         self.my_status_dialog_calls = 0
 
         self._status_content_label = _FakeWidget()
@@ -260,6 +282,10 @@ class _Stub:
         self._reply_field          = _FakeTextCtrl()
         self._reply_send_btn       = _FakeWidget()
         self._viewer_panel         = _FakeWidget()
+        self._post_panel           = _FakeWidget()
+        self._media_post_panel     = _FakeWidget()
+        self._voice_post_panel     = _FakeWidget()
+        self._selected_media_paths = []
 
     def _open_my_status_dialog(self):
         self.my_status_dialog_calls += 1
@@ -1372,6 +1398,56 @@ class TestEscapeClosesTheViewer:
         stub._on_escape(None)  # must not raise even with event=None
 
         assert stub._video_player.stop_calls == 0
+
+
+class TestStatusComposerKeepsTheMainScreenClean:
+    @pytest.mark.parametrize(
+        "panel_name",
+        ["_post_panel", "_media_post_panel", "_voice_post_panel"],
+    )
+    def test_only_the_selected_add_status_panel_is_visible(self, panel_name):
+        stub = _Stub()
+        stub._viewer_panel.Show()
+        selected_panel = getattr(stub, panel_name)
+
+        stub._enter_status_composer(selected_panel)
+
+        assert selected_panel.shown is True
+        assert sum(
+            panel.shown
+            for panel in (
+                stub._post_panel,
+                stub._media_post_panel,
+                stub._voice_post_panel,
+            )
+        ) == 1
+        assert stub._viewer_panel.shown is False
+        assert stub._add_status_btn.shown is False
+        assert stub._refresh_status_btn.shown is False
+        assert stub._list_label.shown is False
+        assert stub._status_list.shown is False
+        assert stub._video_player.stop_calls == 1
+
+    def test_closing_a_composer_restores_the_status_browser(self):
+        stub = _Stub()
+        stub._enter_status_composer(stub._post_panel)
+
+        stub._leave_status_composer()
+
+        assert stub._is_status_composer_open() is False
+        assert stub._add_status_btn.shown is True
+        assert stub._refresh_status_btn.shown is True
+        assert stub._list_label.shown is True
+        assert stub._status_list.shown is True
+
+    def test_escape_closes_the_active_composer_before_the_viewer(self):
+        stub = _Stub()
+        stub._enter_status_composer(stub._post_panel)
+
+        stub._on_escape(None)
+
+        assert stub._is_status_composer_open() is False
+        assert stub._status_list.shown is True
 
 
 class TestStatusReplyKeepsTheStatusQuote:
