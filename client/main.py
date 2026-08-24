@@ -15955,16 +15955,21 @@ class MainWindow(wx.Frame):
         # live as a preview still reading "Pendente" seconds after the message
         # had visibly been sent.
         #
-        # Scheduled rather than applied directly: acks arrive in bursts (one
-        # message walks pending -> sent -> delivered -> read, and reading a
-        # backlog acks dozens at once), and _schedule_set_chats() coalesces a
-        # burst into a single recompute. Skipped entirely when the status
-        # isn't part of the preview, so turning that setting off also turns
-        # off the work.
+        # An ack changes one row's text and nothing else — it doesn't move the
+        # chat, because the message's timestamp is untouched. So repaint that
+        # row directly instead of going through set_chats(), which re-resolves
+        # every chat's name and rebuilds every chat's row text; on an account
+        # with several hundred chats that is seconds of work per ack, and it
+        # was the actual reason the preview took so long to leave "Pendente".
+        # _schedule_set_chats() stays as the fallback for when the row can't be
+        # updated in place (filtered out of the current view, list mid-rebuild,
+        # chat not rendered). Skipped entirely when the status isn't part of
+        # the preview, so turning that setting off also turns off the work.
         if found_msg and self.settings.get("user_interface", {}).get(
             "show_delivery_status_in_chat_list", True
         ):
-            self._schedule_set_chats()
+            if not self.refresh_chat_row_text(found_chat_jid):
+                self._schedule_set_chats()
 
 
     def _resolve_jid_name(self, jid_norm: str, chat_jid_norm: str = "") -> str:
@@ -20439,6 +20444,93 @@ class MainWindow(wx.Frame):
                 arch_lst.Select(target_idx)
                 arch_lst.EnsureVisible(target_idx)
 
+    def _build_chat_item_text(self, chat: dict, name: str) -> str:
+        """Render one conversations-list row: name, unread badge, preview,
+        presence, and the pinned/muted/blocked/selected suffixes.
+
+        Extracted from add_chats_to_ui() so a single row can be rebuilt on its
+        own — see refresh_chat_row_text().
+        """
+        chat_jid = chat.get("remoteJid", "")
+        unread = effective_unread_count(chat)
+        unread_str = (
+            f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+            if unread > 0 else ""
+        )
+        preview = self._last_msg_preview(chat)
+        text = name + unread_str
+        if preview:
+            text += f" {preview}"
+        chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
+        if chat_jid_norm:
+            presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
+            if presence_label:
+                text += f" {presence_label}"
+        if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
+            text += f" ({self.i18n.t('pinned_suffix')})"
+        if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
+            text += f" ({self.i18n.t('muted')})"
+        if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
+            text += f" ({self.i18n.t('blocked')})"
+        is_selected = bool(chat_jid) and chat_jid in getattr(self.conversations_panel, "selected_chats", ())
+        position = self.settings.get("user_interface", {}).get(
+            "selected_announcement_position", "end"
+        )
+        return append_selected_marker(text, self.i18n.t("selected_suffix"), position, is_selected)
+
+    def refresh_chat_row_text(self, chat_jid: str) -> bool:
+        """Repaint ONE conversation's row in place. Returns whether it worked.
+
+        For a change that alters a chat's row text but not its position in the
+        list — a delivery ack walking "Pendente" to "Enviada" is the archetype,
+        since it leaves the message's timestamp alone — going through
+        set_chats() is enormously disproportionate: _compute_chat_lists()
+        re-resolves the display name of EVERY chat (contact lookups, group name
+        resolution, JID formatting) and add_chats_to_ui() then rebuilds the row
+        text of every chat (each one walking that chat's records for a preview,
+        plus presence/pinned/muted/blocked lookups) — all to change one row.
+        On an account with several hundred chats that is seconds of work, which
+        is exactly the delay reported between a message being sent and its
+        preview leaving "Pendente".
+
+        This touches only the row that changed. Callers must fall back to
+        _schedule_set_chats() when it returns False — the row may be filtered
+        out of the current view, the list may be mid-rebuild, or the chat may
+        not be rendered at all.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        if panel is None:
+            return False
+        displayed = getattr(panel, "_displayed_jids", None)
+        chats_list = getattr(panel, "chats_list", None)
+        names = getattr(panel, "chat_names", None)
+        if not displayed or chats_list is None or names is None:
+            return False
+        # The backing arrays must line up with what's on screen; if they don't,
+        # a targeted SetItem would write the right text into the wrong row.
+        lst = panel.conversations_list
+        if not (len(displayed) == len(chats_list) == len(names) == lst.GetItemCount()):
+            return False
+
+        # Rows are identified by chat["remoteJid"], which is not always the key
+        # the chat is stored under in self.chats (see _compute_chat_lists).
+        wanted = {chat_jid}
+        stored = self.chats.get(chat_jid)
+        if isinstance(stored, dict) and stored.get("remoteJid"):
+            wanted.add(stored["remoteJid"])
+        idx = next((i for i, j in enumerate(displayed) if j in wanted), None)
+        if idx is None:
+            return False
+
+        try:
+            new_text = self._build_chat_item_text(chats_list[idx], names[idx])
+            if lst.GetItemText(idx, 0) != new_text:
+                lst.SetItem(idx, 0, new_text)
+        except Exception:
+            logging.exception("[refresh_chat_row_text] failed for %s; falling back", chat_jid)
+            return False
+        return True
+
     def _apply_chat_rows_incrementally(self, lst, old_jids: list, new_jids: list,
                                        new_item_texts: list, focused_jid) -> bool:
         """Move/insert/delete individual rows of *lst* instead of rebuilding it.
@@ -20554,33 +20646,7 @@ class MainWindow(wx.Frame):
 
         # Pre-compute the new display list (filtering + item text) so we can
         # choose between a lightweight SetItem path and a full rebuild.
-        def _build_item_text(chat, name):
-            chat_jid = chat.get("remoteJid", "")
-            unread = effective_unread_count(chat)
-            unread_str = (
-                f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
-                if unread > 0 else ""
-            )
-            preview = self._last_msg_preview(chat)
-            text = name + unread_str
-            if preview:
-                text += f" {preview}"
-            chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
-            if chat_jid_norm:
-                presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
-                if presence_label:
-                    text += f" {presence_label}"
-            if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
-                text += f" ({self.i18n.t('pinned_suffix')})"
-            if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
-                text += f" ({self.i18n.t('muted')})"
-            if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
-                text += f" ({self.i18n.t('blocked')})"
-            is_selected = bool(chat_jid) and chat_jid in getattr(self.conversations_panel, "selected_chats", ())
-            position = self.settings.get("user_interface", {}).get(
-                "selected_announcement_position", "end"
-            )
-            return append_selected_marker(text, self.i18n.t("selected_suffix"), position, is_selected)
+        _build_item_text = self._build_chat_item_text
 
         displayed_chats: list = []
         displayed_names: list = []
