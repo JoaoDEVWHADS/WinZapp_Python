@@ -4916,8 +4916,17 @@ class MainWindow(wx.Frame):
         # ── Persist in background — debounced so rapid bursts produce one write ─
         self._schedule_save(dirty_jid=remote_jid)
 
-        # ── Update conversation list UI (debounced to avoid rapid rebuilds) ───
-        self._schedule_set_chats()
+        # ── Update conversation list UI ───────────────────────────────────────
+        # A new message moves this chat to the top of its group and changes its
+        # preview — and nothing else in the list changes. move_chat_row_to_top()
+        # does exactly that, comparing this chat's sort key against the current
+        # top of its group so the claim is checked rather than assumed. The
+        # debounced full recompute stays as the fallback: it re-resolves the
+        # display name and rebuilds the row text of EVERY chat, which on an
+        # account with several hundred of them is what made a new message take
+        # seconds to show up in the list.
+        if not self.move_chat_row_to_top(remote_jid):
+            self._schedule_set_chats()
 
         # ── Add message to the open conversation panel (if visible) ──────────
         if hasattr(self, "conversations_panel"):
@@ -12223,50 +12232,11 @@ class MainWindow(wx.Frame):
         # lastMessage are already never set from a non-countable message
         # (see on_new_message()/on_historical_message()), but this also
         # scans every raw record directly, so it needs the same filter.
-        def _chat_last_ts(c):
-            # Fallback to chat's own last activity timestamp (t)
-            chat_ts = int(c.get("t", 0) or 0)
-            if chat_ts > 1_000_000_000_000:
-                chat_ts //= 1000
-            ts = chat_ts
-
-            lm = c.get("lastMessage")
-            if isinstance(lm, dict) and is_countable_message(lm):
-                lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
-                if lm_ts > 1_000_000_000_000:
-                    lm_ts //= 1000
-                if lm_ts > ts:
-                    ts = lm_ts
-
-            records_wrapper = c.get("messages") or {}
-            if isinstance(records_wrapper, dict):
-                inner_wrapper = records_wrapper.get("messages") or {}
-                if isinstance(inner_wrapper, dict):
-                    records_copy = list(inner_wrapper.get("records") or [])
-                    if records_copy:
-                        for m in records_copy:
-                            # Only records the preview would show may move a chat
-                            # — see _counts_as_last_message(), which is stricter
-                            # than is_countable_message() and rejects non-dicts
-                            # itself. Counting silent bookkeeping here (a
-                            # groupNotification for someone joining) floated
-                            # week-old groups above live ones while they still
-                            # displayed their old preview.
-                            if not self._counts_as_last_message(m):
-                                continue
-                            t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
-                            if t > 1_000_000_000_000:
-                                t //= 1000
-                            if t > ts:
-                                ts = t
-
-            return ts if ts else 1
+        _chat_last_ts = self._chat_last_ts
 
         def _sort_key(pair):
             c, n = pair
-            j   = c.get("remoteJid", "")
-            pin = 0 if j in pinned else 1
-            return (pin, -_chat_last_ts(c), n.lower())
+            return self._chat_sort_key(c, n, pinned)
 
         pairs = sorted(zip(main_chats, main_names), key=_sort_key)
         main_chats = [c for c, _ in pairs]
@@ -20443,6 +20413,166 @@ class MainWindow(wx.Frame):
                     arch_lst.Focus(target_idx)
                 arch_lst.Select(target_idx)
                 arch_lst.EnsureVisible(target_idx)
+
+    def _chat_last_ts(self, c: dict) -> int:
+        """The timestamp the conversations list sorts a chat by.
+
+        Only counts records the preview would show — a system event (group
+        join/leave, settings change, revoke, ...) stored in this chat's records
+        must never push it back to the top just because its timestamp is the
+        newest one on file. chat["t"]/lastMessage are already never set from a
+        non-countable message (see on_new_message()/on_historical_message()),
+        but this also scans raw records directly, so it needs the same filter.
+
+        Extracted from _compute_chat_lists() so a single chat's position can be
+        worked out without sorting the whole list — see _chat_sort_key() and
+        move_chat_row_to_top().
+        """
+        chat_ts = int(c.get("t", 0) or 0)
+        if chat_ts > 1_000_000_000_000:
+            chat_ts //= 1000
+        ts = chat_ts
+
+        lm = c.get("lastMessage")
+        if isinstance(lm, dict) and is_countable_message(lm):
+            lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
+            if lm_ts > 1_000_000_000_000:
+                lm_ts //= 1000
+            if lm_ts > ts:
+                ts = lm_ts
+
+        records_wrapper = c.get("messages") or {}
+        if isinstance(records_wrapper, dict):
+            inner_wrapper = records_wrapper.get("messages") or {}
+            if isinstance(inner_wrapper, dict):
+                for m in list(inner_wrapper.get("records") or []):
+                    if not self._counts_as_last_message(m):
+                        continue
+                    t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                    if t > 1_000_000_000_000:
+                        t //= 1000
+                    if t > ts:
+                        ts = t
+
+        return ts if ts else 1
+
+    def _chat_sort_key(self, chat: dict, name: str, pinned=None):
+        """The conversations list's ordering: pinned chats first, then
+        most-recent message descending, then alphabetically.
+
+        Single source of truth — _compute_chat_lists() sorts by this, and
+        move_chat_row_to_top() compares against it to place one row without
+        sorting anything.
+        """
+        if pinned is None:
+            pinned = self._pinned_chats
+        j = chat.get("remoteJid", "")
+        pin = 0 if j in pinned else 1
+        return (pin, -self._chat_last_ts(chat), (name or "").lower())
+
+    def move_chat_row_to_top(self, chat_jid: str) -> bool:
+        """Move one chat to the top of its group after a new message, updating
+        only that row. Returns whether it worked; callers fall back to
+        _schedule_set_chats() when it returns False.
+
+        A new message (sent or received) is the other half of the problem
+        refresh_chat_row_text() solved for acks: it changes the row's text AND
+        its position, so the row can't simply be repainted in place. But it
+        does not require re-sorting the list either — a chat that just received
+        the newest message belongs at the top of its own group (pinned or
+        unpinned), and that claim is checked here rather than assumed: the
+        chat's sort key is compared against the key of whatever currently sits
+        at the top of that group, and anything that doesn't come out on top
+        falls back to the full recompute.
+
+        Only two sort keys are computed (this chat's and the incumbent's),
+        instead of _compute_chat_lists() re-resolving names and timestamps for
+        every chat in the account.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        if panel is None:
+            return False
+        displayed = getattr(panel, "_displayed_jids", None)
+        chats_list = getattr(panel, "chats_list", None)
+        names = getattr(panel, "chat_names", None)
+        if not displayed or chats_list is None or names is None:
+            return False
+        lst = panel.conversations_list
+        if not (len(displayed) == len(chats_list) == len(names) == lst.GetItemCount()):
+            return False
+
+        # A search or filter means the displayed list isn't simply the sorted
+        # chat list, so "top of its group" isn't a position this can reason
+        # about. Let the full path handle it.
+        try:
+            if panel.search_field.GetValue().strip():
+                return False
+        except Exception:
+            return False
+        if getattr(panel, "_conv_filter", "all") != "all":
+            return False
+
+        wanted = {chat_jid}
+        stored = self.chats.get(chat_jid)
+        if isinstance(stored, dict) and stored.get("remoteJid"):
+            wanted.add(stored["remoteJid"])
+        idx = next((i for i, j in enumerate(displayed) if j in wanted), None)
+        if idx is None:
+            return False        # not rendered yet — a brand-new chat needs the full path
+
+        chat = chats_list[idx]
+        name = names[idx]
+        pinned = self._pinned_chats
+        key = self._chat_sort_key(chat, name, pinned)
+
+        # Where this chat's group starts: pinned chats occupy the head of the
+        # list, so an unpinned chat can only rise to just below them.
+        is_pinned = (chat.get("remoteJid", "") in pinned)
+        if is_pinned:
+            group_start = 0
+        else:
+            group_start = 0
+            while group_start < len(chats_list) and (
+                chats_list[group_start].get("remoteJid", "") in pinned
+            ):
+                group_start += 1
+
+        if idx == group_start:
+            # Already at the top of its group — only the text can have changed.
+            return self.refresh_chat_row_text(chat_jid)
+
+        incumbent_key = self._chat_sort_key(chats_list[group_start], names[group_start], pinned)
+        if key >= incumbent_key:
+            # Doesn't actually belong at the top (an older message arriving
+            # late, a clock skew, an alphabetical tie) — don't guess.
+            return False
+
+        new_texts = list(lst.GetItemText(i, 0) for i in range(lst.GetItemCount()))
+        new_texts.insert(group_start, new_texts.pop(idx))
+        new_texts[group_start] = self._build_chat_item_text(chat, name)
+
+        new_jids = list(displayed)
+        new_jids.insert(group_start, new_jids.pop(idx))
+        focused_jid = None
+        focused_idx = lst.GetFocusedItem()
+        if 0 <= focused_idx < len(displayed):
+            focused_jid = displayed[focused_idx]
+
+        if not self._apply_chat_rows_incrementally(
+            lst, displayed, new_jids, new_texts, focused_jid
+        ):
+            return False
+
+        chats_list.insert(group_start, chats_list.pop(idx))
+        names.insert(group_start, names.pop(idx))
+        panel._displayed_jids = new_jids
+        # _all_chats_list/_all_chat_names back the unfiltered view add_chats_to_ui()
+        # rebuilds from; keep them in step so the next full pass doesn't undo this.
+        for attr in ("_all_chats_list", "_all_chat_names"):
+            seq = getattr(panel, attr, None)
+            if isinstance(seq, list) and len(seq) == len(chats_list):
+                seq[:] = chats_list if attr == "_all_chats_list" else names
+        return True
 
     def _build_chat_item_text(self, chat: dict, name: str) -> str:
         """Render one conversations-list row: name, unread badge, preview,
