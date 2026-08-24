@@ -387,6 +387,13 @@ class TestBackfillPacing:
         assert MainWindow._BACKFILL_BUDGET >= 15 * 60, "must outlast a slow warm-up"
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
 
+    def test_short_page_confirmation_starts_without_initial_delay(self):
+        assert MainWindow._initial_backfill_delay(short_chats_pending=True) == 0
+
+    def test_background_only_work_keeps_the_initial_delay(self):
+        assert MainWindow._initial_backfill_delay(
+            short_chats_pending=False) == MainWindow._BACKFILL_FIRST_DELAY
+
     @staticmethod
     def _next_delay(delay, recovered):
         """The pacing rule the loop applies after each pass."""

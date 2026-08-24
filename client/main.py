@@ -13255,6 +13255,11 @@ class MainWindow(wx.Frame):
     _BACKFILL_CHUNK       = 60     # chats re-queried per pass
 
     @classmethod
+    def _initial_backfill_delay(cls, short_chats_pending: bool) -> int:
+        """Start short-page confirmation now; defer background-only work."""
+        return 0 if short_chats_pending else cls._BACKFILL_FIRST_DELAY
+
+    @classmethod
     def _backfill_short_queue_delays(cls, retry_delay: int, sweep_finished: bool,
                                      sweep_made_progress: bool) -> tuple[int, int]:
         """Return (next sleep, retained retry backoff) for the short-chat queue."""
@@ -13678,7 +13683,8 @@ class MainWindow(wx.Frame):
         # demonstrably still arriving — never past this ceiling, so a session
         # that never settles still ends.
         hard_deadline = time.monotonic() + self._BACKFILL_LANDING_BUDGET
-        delay = self._BACKFILL_FIRST_DELAY
+        delay = self._initial_backfill_delay(
+            bool(self._collapse_and_list_backfill_pending()))
         retry_delay = self._BACKFILL_FIRST_DELAY
         attempt = 0
         attempted: set[str] = set()
