@@ -643,6 +643,7 @@
     "ui_selected_announce_position_start": "Na początku wiadomości / czatu",
     "ui_selected_announce_position_end": "Na końcu wiadomości / czatu",
     "ui_show_yesterday_label": "Pokazuj wczorajsze wiadomości z pominiętą datą (wczoraj)",
+    "ui_show_link_previews_label": "Pokazuj podglądy linków na liście wiadomości",
     "yesterday_at": "Wczoraj o {time}",
     "restart_required_message": "Niektóre zmiany zaczną obowiązywać dopiero po ponownym uruchomieniu WinZapp.",
     "tab_accessibility": "Dostępność",

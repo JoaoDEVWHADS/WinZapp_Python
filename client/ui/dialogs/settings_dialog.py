@@ -487,6 +487,13 @@ class SettingsDialog(wx.Dialog):
             self._show_yesterday_label_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._show_link_previews_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_link_previews_label")
+        )
+        ui_sizer.Add(
+            self._show_link_previews_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -963,6 +970,11 @@ class SettingsDialog(wx.Dialog):
             "show_yesterday_label", True
         )
         self._show_yesterday_label_cb.SetValue(bool(show_yesterday_label))
+
+        show_link_previews = self.main_window.settings.get("user_interface", {}).get(
+            "show_link_previews", True
+        )
+        self._show_link_previews_cb.SetValue(bool(show_link_previews))
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1694,6 +1706,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "show_yesterday_label"
         ] = self._show_yesterday_label_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_link_previews"
+        ] = self._show_link_previews_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -2008,6 +2023,7 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_other_rb.SetLabel(i18n.t("ui_self_reference_other"))
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
         self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
+        self._show_link_previews_cb.SetLabel(i18n.t("ui_show_link_previews_label"))
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
         self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))

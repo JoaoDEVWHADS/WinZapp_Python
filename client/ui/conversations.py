@@ -6718,7 +6718,24 @@ class ConversationsPanel(wx.Panel):
                 or ctx_ext.get("mentionedJid") or ctx_ext.get("mentionedJidList")
                 or []
             )
-            return self._resolve_mentions_in_text(text, mentioned)
+            text = self._resolve_mentions_in_text(text, mentioned)
+
+            # Link preview (title/description WhatsApp itself generated for
+            # the URL — see websocket_client.py's _has_link_preview): shown
+            # ahead of the message text itself, the same "preview, then the
+            # link" order WhatsApp's own card conveys visually here as plain
+            # text, since this list has no room for a thumbnail image.
+            show_previews = self.main_window.settings.get("user_interface", {}).get(
+                "show_link_previews", True
+            )
+            if show_previews:
+                preview_title = (ext.get("title") or "").strip()
+                preview_desc = (ext.get("description") or "").strip()
+                preview_bits = [b for b in (preview_title, preview_desc) if b]
+                if preview_bits:
+                    preview_str = ". ".join(preview_bits)
+                    text = f"{preview_str}. {text}" if text else preview_str
+            return text
 
         # ── Audio ────────────────────────────────────────────────────────────
         if msg_type == "audioMessage":

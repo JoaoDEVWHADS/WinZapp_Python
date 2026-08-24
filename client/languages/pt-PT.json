@@ -643,6 +643,7 @@
     "ui_selected_announce_position_start": "No início da mensagem / conversa",
     "ui_selected_announce_position_end": "No fim da mensagem / conversa",
     "ui_show_yesterday_label": "Mostrar mensagens do dia anterior com data omitida (ontem)",
+    "ui_show_link_previews_label": "Mostrar pré-visualizações de links na lista de mensagens",
     "yesterday_at": "Ontem às {time}",
     "restart_required_message": "Algumas alterações só terão efeito depois de reiniciar o WinZapp.",
     "tab_accessibility": "Acessibilidade",

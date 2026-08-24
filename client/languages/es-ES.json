@@ -643,6 +643,7 @@
     "ui_selected_announce_position_start": "Al principio del mensaje / chat",
     "ui_selected_announce_position_end": "Al final del mensaje / chat",
     "ui_show_yesterday_label": "Mostrar los mensajes de ayer con la fecha omitida (ayer)",
+    "ui_show_link_previews_label": "Mostrar vistas previas de enlaces en la lista de mensajes",
     "yesterday_at": "Ayer a las {time}",
     "restart_required_message": "Algunos cambios solo tendrán efecto después de reiniciar WinZapp.",
     "tab_accessibility": "Accesibilidad",

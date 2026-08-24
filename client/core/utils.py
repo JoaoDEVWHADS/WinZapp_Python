@@ -236,7 +236,8 @@ DEFAULT_SETTINGS = {
         "page_up_down_step": 10,
         "self_reference_mode": "eu",
         "self_reference_custom_word": "",
-        "show_yesterday_label": True
+        "show_yesterday_label": True,
+        "show_link_previews": True
     },
     "audio_playback": {
         "audio_default_speed": 1.0

@@ -1617,6 +1617,28 @@ class WebSocketClient:
         msg_type = wpp_msg.get("type", "chat")
         conversation = wpp_msg.get("body", "") or wpp_msg.get("text", "")
 
+        # WPPConnect's own message model flattens WhatsApp's OG link-preview
+        # metadata (title/description/canonicalUrl — same proto fields
+        # sender.layer.js's own sendLinkPreview() writes on the way out)
+        # straight onto the raw message object rather than nesting it, and
+        # most link-preview text still arrives with type "chat" like any
+        # other plain text message — not "extendedText". Promoting those to
+        # extendedTextMessage (like a real quote/mention already does further
+        # down) is what makes _get_message_content() render the preview at
+        # all; a "chat" message never carries anything but conversation text.
+        _link_preview_title = wpp_msg.get("title") or ""
+        _link_preview_description = wpp_msg.get("description") or ""
+        _link_preview_url = wpp_msg.get("canonicalUrl") or wpp_msg.get("matchedText") or ""
+        _has_link_preview = bool(_link_preview_title or _link_preview_description)
+
+        def _with_link_preview(ext):
+            if _has_link_preview:
+                ext["title"] = _link_preview_title
+                ext["description"] = _link_preview_description
+                if _link_preview_url:
+                    ext["canonicalUrl"] = _link_preview_url
+            return ext
+
         def _safe_media_key(val):
             if not val:
                 return ""
@@ -1630,13 +1652,18 @@ class WebSocketClient:
             return ""
 
         message_content = {}
+        _promoted_to_extended_text = False
         if msg_type == "chat":
-            message_content = {"conversation": conversation}
+            if _has_link_preview:
+                message_content = {
+                    "extendedTextMessage": _with_link_preview({"text": conversation})
+                }
+                _promoted_to_extended_text = True
+            else:
+                message_content = {"conversation": conversation}
         elif msg_type == "extendedText":
             message_content = {
-                "extendedTextMessage": {
-                    "text": conversation
-                }
+                "extendedTextMessage": _with_link_preview({"text": conversation})
             }
         elif msg_type in ("audio", "ptt"):
             seconds_val = _media_seconds(wpp_msg)
@@ -1843,6 +1870,8 @@ class WebSocketClient:
             "liveLocation": "liveLocationMessage",
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
+        if _promoted_to_extended_text:
+            mapped_type = "extendedTextMessage"
 
         ack = wpp_msg.get("ack")
         message_updates = []
