@@ -14568,6 +14568,14 @@ class MainWindow(wx.Frame):
                         # permanently-broken chats can each burn a worker slot
                         # for over a minute, making the whole sync feel stuck.
                         logging.warning(f"[sync_chat_messages] Retryable error {response.status_code} for {remote_jid} (attempt {attempt+1}/{max_retries}): {response.text[:120]}")
+                        hard_chat_miss = "chat not found" in response.text.lower()
+                        if hard_chat_miss:
+                            logging.warning(
+                                "[sync_chat_messages] Giving up immediately for %s — "
+                                "the store definitively reported chat_not_found.",
+                                remote_jid,
+                            )
+                            break
                         if both_jid_forms_failed and attempt >= 1:
                             logging.warning(f"[sync_chat_messages] Giving up early for {remote_jid} — both JID forms failed on attempt {attempt+1}.")
                             break
