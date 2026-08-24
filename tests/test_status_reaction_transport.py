@@ -1,8 +1,8 @@
 """Contract for native status likes in the WPPConnect patch.
 
-A status like is not a private text reply and cannot use the ordinary chat
-reaction helper: WhatsApp requires a reaction message through
-status@broadcast, targeted to the status author.
+A status like is not a private text reply or a status post. WhatsApp Web has a
+dedicated action that handles LID conversion and direct device fanout to the
+status author.
 """
 
 from pathlib import Path
@@ -23,11 +23,14 @@ def test_status_like_uses_targeted_status_reaction_transport():
     source = CONTROLLER.read_text(encoding="utf-8")
     status_branch = source[source.index("export async function reactMessage") :]
 
-    assert "WPP.chat.sendRawMessage(" in status_branch
-    assert "status@broadcast" in status_branch
-    assert "reactionParentKey: model.id" in status_branch
-    assert "broadcastParticipants: [authorWid]" in status_branch
-    assert "crypto.getRandomValues(new Uint8Array(10))" in status_branch
+    assert "WAWebSendStatusReactionAction" in status_branch
+    assert (
+        "statusReactionAction.sendStatusReaction(model, reaction || '')"
+        in status_branch
+    )
+    assert "WPP.chat.sendRawMessage(" not in status_branch
+    assert "broadcastParticipants: [authorWid]" not in status_branch
+    assert "crypto.getRandomValues(new Uint8Array(10))" not in status_branch
     assert "WPP.whatsapp.randomHex" not in status_branch
     assert "[status-reaction] begin" in status_branch
     assert "[status-reaction] accepted" in status_branch

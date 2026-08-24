@@ -1257,12 +1257,12 @@ export async function reactMessage(req: Request, res: Response) {
               detail: `message-not-found; models=${statusModels.length}`,
             };
           }
-          // A status like is a reaction message sent *through the status
-          // broadcast*, addressed only to the status author. Calling the
-          // ordinary chat reaction helper with the StatusV3 model reaches
-          // WA Web but is rejected with "Reaction send error" because that
-          // helper does not provide the status audience. Sending a text/heart
-          // to the author's chat is not equivalent either: it becomes a DM.
+          // Status likes have their own WhatsApp Web action. It converts the
+          // author's LID/phone-number identity, builds the addon payload and
+          // fans it out directly to both the author's devices and our linked
+          // devices. The generic status-post path uses the account's status
+          // privacy audience instead, which can acknowledge the local copy
+          // while never delivering the like to this status author.
           const modelAuthor =
             model.author || model.id?.participant || posterJid || null;
           const authorText = String(
@@ -1272,54 +1272,30 @@ export async function reactMessage(req: Request, res: Response) {
             return { ok: false, detail: 'status-author-not-found' };
           }
 
-          const authorWid = WPP.util.createWid(authorText);
-          const me = WPP.conn.getMyUserWid();
-          const statusWid = WPP.util.createWid('status@broadcast');
-          // randomHex exists inside WA-JS's private module graph but is not
-          // exported on window.WPP.whatsapp in the installed 4.5.0 build.
-          // Using it here failed before the reaction reached WhatsApp. A
-          // cryptographically random 20-hex-character stanza id has the same
-          // shape as WhatsApp Web's generated message ids and needs no
-          // version-sensitive private export.
-          const reactionMessageId = Array.from(
-            crypto.getRandomValues(new Uint8Array(10)),
-            (byte: number) => byte.toString(16).padStart(2, '0')
-          )
-            .join('')
-            .toUpperCase();
-          const reactionId = new WPP.whatsapp.MsgKey({
-            fromMe: true,
-            remote: statusWid,
-            participant: me,
-            id: reactionMessageId,
-          });
-          const result = await WPP.chat.sendRawMessage(
-            statusWid,
-            {
-              type: 'reaction',
-              author: me,
-              reactionParentKey: model.id,
-              reactionText: reaction || '',
-              // encryptAndSendStatusMsg uses this audience for the status
-              // sender-key fanout. Without it WhatsApp rejects the reaction.
-              broadcastParticipants: [authorWid],
-            },
-            {
-              messageId: reactionId,
-              markIsRead: false,
-              waitForAck: true,
-            }
-          );
-          const sendMsgResult = String(result?.sendMsgResult ?? '');
-          const rejected = /error|fail/i.test(sendMsgResult);
-          const accepted =
-            Boolean(result) &&
-            (Number(result?.ack ?? 0) > 0 || result?.sendMsgResult != null);
+          const pageWindow = window as any;
+          let statusReactionAction: any = null;
+          try {
+            statusReactionAction = pageWindow.require?.(
+              'WAWebSendStatusReactionAction'
+            );
+          } catch (error) {
+            return {
+              ok: false,
+              detail: `native-status-reaction-module-error: ${String(
+                (error as any)?.message || error
+              )}`,
+            };
+          }
+          if (typeof statusReactionAction?.sendStatusReaction !== 'function') {
+            return {
+              ok: false,
+              detail: 'native-status-reaction-action-not-found',
+            };
+          }
+          await statusReactionAction.sendStatusReaction(model, reaction || '');
           return {
-            ok: accepted && !rejected,
-            detail:
-              sendMsgResult ||
-              `reaction-call-returned; ack=${String(result?.ack ?? '')}`,
+            ok: true,
+            detail: `native-status-reaction-completed; author=${authorText}`,
           };
         },
         { msgId, reaction }
