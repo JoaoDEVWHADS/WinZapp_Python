@@ -1053,6 +1053,9 @@ class MainWindow(wx.Frame):
         self._presence_pushname_map = {}
         self._contact_resolution_lock = threading.Lock()
         self._contact_resolution_inflight = set()
+        self._lid_resolution_queue_lock = threading.Lock()
+        self._lid_resolution_queue = set()
+        self._lid_resolution_queue_running = False
         # Incoming call IDs currently ringing. The sound is one shared looping
         # stream, so it stops only after the final simultaneous call ends.
         self._active_incoming_calls = {}
@@ -4668,31 +4671,7 @@ class MainWindow(wx.Frame):
                 self._merge_lid_into_phone(remote_jid, phone_jid)
                 remote_jid = phone_jid
             else:
-                # We don't have the mapping for this new @lid JID!
-                # Start a background thread to resolve it, merge it, and update the UI
-                def _bg_resolve_new_lid(lid_jid, message_obj):
-                    try:
-                        pn_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
-                        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-                        pn_resp = api_get(pn_url, headers=headers, timeout=5)
-                        if pn_resp.ok:
-                            pn_data = pn_resp.json()
-                            phone_obj = pn_data.get("phoneNumber") or {}
-                            phone_val = phone_obj.get("_serialized") or phone_obj.get("id") or ""
-                            if phone_val:
-                                if not phone_val.endswith("@s.whatsapp.net") and not phone_val.endswith("@c.us"):
-                                    phone_val = f"{phone_val}@s.whatsapp.net"
-                                phone_val = self._normalize_jid(phone_val)
-                                
-                                # Register mapping and merge on the main thread
-                                def _main_thread_merge():
-                                    self.register_jid_mapping(lid_jid, phone_val)
-                                    self._merge_lid_into_phone(lid_jid, phone_val)
-                                    self._schedule_set_chats()
-                                wx.CallAfter(_main_thread_merge)
-                    except Exception as e:
-                        logging.warning("[on_new_message] Failed to resolve new LID %s in background: %s", lid_jid, e)
-                self._msg_bg_executor.submit(_bg_resolve_new_lid, remote_jid, msg)
+                self._queue_lid_resolutions([remote_jid])
         elif alt_jid.endswith("@lid"):
             # NEW format — merge the @lid side into the phone chat
             self._merge_lid_into_phone(alt_jid, remote_jid)
@@ -12803,10 +12782,7 @@ class MainWindow(wx.Frame):
         # Outside the `mentioned` branch on purpose: the sender collected above
         # must still be resolved for a message that mentions nobody.
         if lids_to_resolve:
-            logging.info(f"[LID Mapping] Found unresolved LIDs in message: {lids_to_resolve}")
-            def resolve_in_bg():
-                self.resolve_lid_jids_via_api(lids_to_resolve)
-            threading.Thread(target=resolve_in_bg, daemon=True).start()
+            self._queue_lid_resolutions(lids_to_resolve)
 
         if phone_jids_to_resolve:
             unique_phone_jids = list(dict.fromkeys(phone_jids_to_resolve))
@@ -12855,6 +12831,64 @@ class MainWindow(wx.Frame):
                     wx.CallAfter(self._schedule_set_chats)
                     wx.CallAfter(self._schedule_refresh_active_messages)
             threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
+
+    def _queue_lid_resolutions(self, jids) -> None:
+        """Deduplicate LID lookups and drain them through one background worker.
+
+        Historical-message normalization calls this once per message. Creating
+        a thread for every call produced hundreds of simultaneous Puppeteer
+        evaluations, starving get-messages and even the connection heartbeat.
+        One serialized worker is enough: names are optional metadata, while
+        chat/message synchronization is user-visible and keeps API priority.
+        """
+        unique = {
+            jid for jid in jids
+            if isinstance(jid, str) and jid.endswith("@lid")
+            and jid not in getattr(self, "_lid_to_phone", {})
+        }
+        if not unique:
+            return
+        lock = getattr(self, "_lid_resolution_queue_lock", None)
+        if lock is None:
+            lock = self._lid_resolution_queue_lock = threading.Lock()
+        with lock:
+            pending = getattr(self, "_lid_resolution_queue", None)
+            if pending is None:
+                pending = self._lid_resolution_queue = set()
+            pending.update(unique)
+            if getattr(self, "_lid_resolution_queue_running", False):
+                return
+            self._lid_resolution_queue_running = True
+
+        def _drain():
+            try:
+                while not getattr(self, "_shutting_down", False):
+                    # Never let optional names race the initial chat/message
+                    # sync. The queue remains in memory and resumes afterward.
+                    if (getattr(self, "_initial_sync_running", False)
+                            or not getattr(self, "_sync_completed", True)):
+                        time.sleep(1)
+                        continue
+                    with lock:
+                        pending = self._lid_resolution_queue
+                        if not pending:
+                            return
+                        jid = pending.pop()
+                    self.resolve_lid_jids_via_api([jid])
+            finally:
+                with lock:
+                    self._lid_resolution_queue_running = False
+                    # A producer can append after the empty check but before
+                    # the flag is cleared. Restart once to close that race.
+                    restart = bool(self._lid_resolution_queue)
+                if restart and not getattr(self, "_shutting_down", False):
+                    self._queue_lid_resolutions(list(self._lid_resolution_queue))
+
+        threading.Thread(
+            target=_drain, daemon=True, name="lid-resolution-queue").start()
+        logging.info(
+            "[LID Resolution] Queued %d unique LID(s); one serialized worker active.",
+            len(unique))
 
     def scan_all_cached_messages_for_mentions(self):
         """Scan all cached messages in self.chats, find all unresolved LIDs/phones, and resolve them."""
