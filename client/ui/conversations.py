@@ -652,6 +652,17 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
+        # Criado (e adicionado ao sizer) antes do botão de emojis de propósito:
+        # quando há uma citação ativa, remover a citação é a ação mais imediata,
+        # então ela deve ser lida primeiro pelo leitor de tela. A ordem de
+        # tabulação segue a ordem de criação dos controles, não só a do sizer.
+        self._remove_quote_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("remove_quote")
+        )
+        self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
+        conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._remove_quote_btn.Hide()
+
         self._emoji_btn = wx.Button(
             self.conversation_panel, label=i18n.t("emoji_button")
         )
@@ -665,13 +676,6 @@ class ConversationsPanel(wx.Panel):
         self._cancel_edit_btn.Bind(wx.EVT_BUTTON, self._on_cancel_edit)
         conv_sizer.Add(self._cancel_edit_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._cancel_edit_btn.Hide()
-
-        self._remove_quote_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("remove_quote")
-        )
-        self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
-        conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-        self._remove_quote_btn.Hide()
 
         # ── Pending mention pills (one label + remove button per @mention) ──
         self._pending_mentions_panel = wx.Panel(self.conversation_panel)
