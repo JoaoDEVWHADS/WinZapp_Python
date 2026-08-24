@@ -46,12 +46,22 @@ class _FakeI18n:
 class _FakeWidget:
     def __init__(self):
         self.shown = False
+        self.enabled = True
 
     def Show(self, show=True):
         self.shown = bool(show)
 
     def Hide(self):
         self.shown = False
+
+    def IsShown(self):
+        return self.shown
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+    def Disable(self):
+        self.enabled = False
 
 
 class _FakeVideoPlayer:
@@ -88,6 +98,18 @@ class _FakeButton(_FakeLabel):
         pass
 
 
+class _FakeTimer:
+    def __init__(self):
+        self.started = []
+        self.stop_calls = 0
+
+    def Start(self, milliseconds):
+        self.started.append(milliseconds)
+
+    def Stop(self):
+        self.stop_calls += 1
+
+
 class _FakeMainWindow:
     def __init__(self, convert_result="converted.ogg"):
         self.i18n = _FakeI18n()
@@ -109,17 +131,34 @@ class _FakeMainWindow:
 
 class _Stub:
     _on_choose_voice_status   = StatusPanel._on_choose_voice_status
+    _on_ctrl_r_shortcut       = StatusPanel._on_ctrl_r_shortcut
     _hide_post_panels         = StatusPanel._hide_post_panels
+    _is_status_composer_open  = StatusPanel._is_status_composer_open
+    _enter_status_composer    = StatusPanel._enter_status_composer
+    _leave_status_composer    = StatusPanel._leave_status_composer
     _start_voice_recording    = StatusPanel._start_voice_recording
     _send_media_status_bg     = StatusPanel._send_media_status_bg
     _send_all_media_statuses_bg = StatusPanel._send_all_media_statuses_bg
     _send_status_voice_bg     = StatusPanel._send_status_voice_bg
+    _stop_recorded_audio_preview = StatusPanel._stop_recorded_audio_preview
+    _cleanup_recorded_audio_temp_file = StatusPanel._cleanup_recorded_audio_temp_file
 
     def __init__(self, convert_result="converted.ogg"):
         self.main_window = _FakeMainWindow(convert_result=convert_result)
         self._post_panel = _FakeWidget()
         self._media_post_panel = _FakeWidget()
         self._voice_post_panel = _FakeWidget()
+        self._add_status_btn = _FakeWidget()
+        self._refresh_status_btn = _FakeWidget()
+        self._list_label = _FakeWidget()
+        self._status_list = _FakeButton()
+        for widget in (
+            self._add_status_btn,
+            self._refresh_status_btn,
+            self._list_label,
+            self._status_list,
+        ):
+            widget.Show()
         # Opening a post panel now also hides the status viewer and stops the
         # in-app video player alongside the other panels; without these the
         # method under test dies on an AttributeError before reaching anything
@@ -134,11 +173,17 @@ class _Stub:
         self._voice_status_lbl = _FakeLabel()
         self._voice_start_btn = _FakeButton()
         self._voice_pause_btn = _FakeButton()
+        self._voice_play_btn = _FakeButton()
         self._voice_send_btn = _FakeButton()
         self._voice_close_btn = _FakeButton()
         self._recording_pa = None
         self._recording_stream = None
         self._recording_frames = []
+        self._recording_rate = 48000
+        self._recording_channels = 1
+        self._recorded_audio_sound = None
+        self._recorded_audio_temp_path = None
+        self._recorded_audio_timer = _FakeTimer()
         self.status_sent_calls = 0
         self.voice_calls = []
         self.media_calls = []
@@ -395,6 +440,119 @@ class TestChooseVoiceStatusDegradesGracefullyWithoutPyaudio:
 
         assert stub.main_window.output_calls == []
         assert stub._recording_stream is None
+
+    def test_audio_composer_has_close_and_record_without_other_ui(self):
+        stub = _Stub()
+
+        stub._on_choose_voice_status(None)
+
+        assert stub._voice_post_panel.shown is True
+        assert stub._voice_post_panel.enabled is True
+        assert stub._voice_close_btn.shown is True
+        assert stub._voice_close_btn.label == "close"
+        assert stub._voice_start_btn.shown is True
+        assert stub._post_panel.enabled is False
+        assert stub._media_post_panel.enabled is False
+
+    def test_ctrl_r_does_not_open_audio_outside_the_audio_option(self):
+        stub = _Stub()
+        reached = []
+        stub._start_voice_recording = lambda: reached.append(True)
+
+        stub._on_ctrl_r_shortcut(None)
+
+        assert reached == []
+        assert stub._voice_post_panel.shown is False
+
+
+class _FakePreviewSound:
+    def __init__(self, path):
+        self.path = path
+        self.is_playing = False
+        self.stop_calls = 0
+
+    def play(self):
+        self.is_playing = True
+
+    def stop(self):
+        self.stop_calls += 1
+        self.is_playing = False
+
+
+class _PreviewStub(_Stub):
+    _toggle_pause_voice_recording = StatusPanel._toggle_pause_voice_recording
+    _toggle_play_recorded_audio = StatusPanel._toggle_play_recorded_audio
+    _on_recorded_audio_timer = StatusPanel._on_recorded_audio_timer
+    _on_ctrl_p_shortcut = StatusPanel._on_ctrl_p_shortcut
+
+    def __init__(self):
+        super().__init__()
+        self._voice_post_panel.Show()
+        self._is_recording = True
+        self._recording_frames = [b"\x00\x00" * 400]
+
+
+class TestVoiceStatusPausedRecordingPreview:
+    def test_pause_reveals_the_same_preview_control_as_conversations(self):
+        stub = _PreviewStub()
+
+        stub._toggle_pause_voice_recording(None)
+
+        assert stub._recording_paused is True
+        assert stub._voice_pause_btn.label == "resume_recording"
+        assert stub._voice_play_btn.shown is True
+
+    def test_play_and_stop_use_a_temporary_wav_and_clean_it_up(self, monkeypatch):
+        opened = []
+
+        def _file_stream(file):
+            sound = _FakePreviewSound(file)
+            opened.append(sound)
+            return sound
+
+        monkeypatch.setattr(status_panel_module.sl_stream, "FileStream", _file_stream)
+        stub = _PreviewStub()
+        stub._recording_paused = True
+
+        stub._toggle_play_recorded_audio(None)
+
+        temp_path = stub._recorded_audio_temp_path
+        assert os.path.isfile(temp_path)
+        assert opened[0].is_playing is True
+        assert stub._voice_play_btn.label == "stop_recorded_audio_playback"
+        assert stub._recorded_audio_timer.started == [300]
+
+        stub._toggle_play_recorded_audio(None)
+
+        assert opened[0].stop_calls == 1
+        assert stub._recorded_audio_sound is None
+        assert stub._recorded_audio_temp_path is None
+        assert not os.path.exists(temp_path)
+        assert stub._voice_play_btn.label == "play_recorded_audio"
+
+    def test_resuming_stops_preview_and_hides_its_button(self, monkeypatch):
+        sound = _FakePreviewSound("snapshot.wav")
+        sound.play()
+        stub = _PreviewStub()
+        stub._recording_paused = True
+        stub._recorded_audio_sound = sound
+
+        stub._toggle_pause_voice_recording(None)
+
+        assert sound.stop_calls == 1
+        assert stub._recording_paused is False
+        assert stub._voice_play_btn.shown is False
+
+    def test_ctrl_p_uses_the_preview_only_while_paused(self):
+        calls = []
+        stub = _PreviewStub()
+        stub._toggle_play_recorded_audio = lambda event: calls.append(event)
+
+        stub._on_ctrl_p_shortcut("not-paused")
+        stub._recording_paused = True
+        stub._on_ctrl_p_shortcut("paused")
+
+        assert calls == ["paused"]
 
 
 class _FakeStream:
