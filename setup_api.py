@@ -48,8 +48,16 @@ if _CLIENT_DIR not in sys.path:
 # reported live as every patch silently regressing to whatever old snapshot
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
-CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+CUSTOM_ROOT_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+]
 CUSTOM_SRC_FILES = [
+    "decrypt.js",
     "src/config.ts",
     "src/index.ts",
     "src/util/createSessionUtil.ts",
@@ -57,12 +65,20 @@ CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/errors/domain.ts",
+    "src/middleware/errorHandler.ts",
+    "src/services/messageResolver.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
+    "src/tests/middleware/errorHandler.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
     "src/controller/statusController.ts",
     "src/routes/index.ts",
-    "decrypt.js",
 ]
 
 def _load_env() -> dict:

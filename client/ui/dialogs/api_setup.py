@@ -127,7 +127,17 @@ _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 # flow) stripped WinZapp's own controller/util/middleware fixes with no
 # restoration step. _run_setup() now stashes their content before the clean
 # step and restores it after extraction, mirroring setup_api.py's approach.
+_CUSTOM_ROOT_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+]
+
 _CUSTOM_SRC_FILES = [
+    "decrypt.js",
     "src/config.ts",
     "src/index.ts",
     "src/util/createSessionUtil.ts",
@@ -135,13 +145,22 @@ _CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/errors/domain.ts",
+    "src/middleware/errorHandler.ts",
+    "src/services/messageResolver.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
+    "src/tests/middleware/errorHandler.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/controller/statusController.ts",
     "src/routes/index.ts",
     "dist/middleware/auth.js",
     "dist/controller/sessionController.js",
-    "decrypt.js",
 ]
 
 
@@ -854,7 +873,7 @@ class ApiSetupDialog(wx.Dialog):
                     # for a newer WinZapp release's improved patches to ever
                     # reach an existing install.
                     custom_contents = {}
-                    for rel_path in _CUSTOM_SRC_FILES:
+                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
                         full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(full_path):
                             try:
@@ -906,7 +925,7 @@ class ApiSetupDialog(wx.Dialog):
                     # api_dir (which may itself be an outdated/broken copy left
                     # by an older install) — see the comment above custom_contents.
                     patches_dir = resource_path("api_patches")
-                    for rel_path in _CUSTOM_SRC_FILES:
+                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
                         pristine_path = os.path.join(patches_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(pristine_path):
                             try:
