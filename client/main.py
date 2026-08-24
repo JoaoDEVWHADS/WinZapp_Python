@@ -12872,7 +12872,15 @@ class MainWindow(wx.Frame):
     def scan_all_cached_messages_for_mentions(self):
         """Scan all cached messages in self.chats, find all unresolved LIDs/phones, and resolve them."""
         def _scan():
-            time.sleep(3)  # Wait for startup to stabilize
+            # prepare_sync() starts this worker before start_sync() is launched.
+            # Do not let optional contact-name lookups compete with list-chats,
+            # get-messages and the history worker on the single Puppeteer page.
+            while (getattr(self, "_initial_sync_running", False)
+                   or not getattr(self, "_sync_completed", True)):
+                if getattr(self, "_shutting_down", False):
+                    return
+                time.sleep(1)
+            time.sleep(3)
             logging.info("[Mentions Scan] Starting scan of all cached messages...")
             
             lids_to_resolve = set()
@@ -12880,15 +12888,6 @@ class MainWindow(wx.Frame):
             # Mappings learned by this scan, so the single end-of-scan refresh
             # below fires even when no contact record happened to change.
             mapped = 0
-            # Senders are collected separately and capped: a busy account can
-            # hold thousands of distinct group participants, and every one of
-            # them would otherwise become an API round-trip through the single
-            # Puppeteer session at startup, starving sends and media downloads.
-            # Most participants never need this anyway — _learn_sender_name()
-            # resolves them for free from the pushName on their messages.
-            sender_lids = set()
-            _MAX_SENDER_LOOKUPS = 150
-
             # 1. Collect JID mappings and mentions
             chats_snapshot = list(self.chats.values())
             for chat in chats_snapshot:
@@ -12918,14 +12917,6 @@ class MainWindow(wx.Frame):
                             self.register_jid_mapping(alt, remote, defer_ui=True)
                             mapped += 1
 
-                    # Sender of a group message. Only mentioned JIDs used to be
-                    # collected here, so a participant whose @lid we cannot
-                    # bridge — the common case in groups, since group messages
-                    # carry no remoteJidAlt — was never sent to the resolver and
-                    # stayed "Participante sem nome" for the life of the chat.
-                    if self._needs_sender_resolution(participant):
-                        sender_lids.add(participant)
-
                     # Now collect mentions
                     msg_obj = msg.get("message") or {}
                     ext = msg_obj.get("extendedTextMessage") or {}
@@ -12951,17 +12942,6 @@ class MainWindow(wx.Frame):
                                 if not name or name == "Contato sem nome" or is_phone_like(name):
                                     phones_to_resolve.add(jid)
                                     
-            # Add the group senders that the pushName pass above could not
-            # name, up to the cap, so mentions never lose their slot to them.
-            sender_lids = {j for j in sender_lids if self._needs_sender_resolution(j)}
-            if sender_lids:
-                capped = sorted(sender_lids)[:_MAX_SENDER_LOOKUPS]
-                logging.info(
-                    "[Mentions Scan] %d group senders still unnamed; queueing %d for resolution.",
-                    len(sender_lids), len(capped),
-                )
-                lids_to_resolve.update(capped)
-
             # 2. Resolve in controlled batches
             if lids_to_resolve:
                 logging.info(f"[Mentions Scan] Found {len(lids_to_resolve)} unresolved LIDs.")
