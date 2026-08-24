@@ -17386,8 +17386,20 @@ class MainWindow(wx.Frame):
 
         # Check if history is already marked as exhausted in-memory
         if remote_jid in getattr(self, "_exhausted_chats", set()):
-            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
-            return []
+            if store_only:
+                logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping background API query.")
+                return []
+            # An explicit user scroll is stronger evidence than a cached
+            # conclusion from an earlier session. History may have arrived or
+            # been restored on the phone since then, so challenge it once more.
+            self._exhausted_chats.discard(remote_jid)
+            self._older_requested_chats.pop(remote_jid, None)
+            self._persist_exhausted_chats()
+            self._persist_older_requested()
+            logging.info(
+                "[fetch_older_messages] User scroll reopened exhausted history "
+                "for %s.", remote_jid,
+            )
 
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
@@ -17409,6 +17421,16 @@ class MainWindow(wx.Frame):
             serialized_id = serialized_key
         else:
             serialized_id = self._serialize_msg_id(remote_jid, _key if _key else oldest_msg)
+
+        # The serialized anchor identifies the Store chat that owns the
+        # message. Current multi-device sessions commonly keep private chats
+        # only under @lid; querying @c.us with an @lid anchor always returns
+        # Chat not found before the fallback can do useful work.
+        serialized_parts = serialized_id.split("_", 2)
+        if len(serialized_parts) == 3:
+            anchor_jid = serialized_parts[1]
+            if anchor_jid.endswith(("@lid", "@c.us", "@g.us")):
+                phone = anchor_jid
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"

@@ -165,12 +165,18 @@ class TestOnceTheReplyWindowHasPassed:
         stub.fetch_older_messages(JID, ANCHOR)
         assert stub.db.metadata["exhausted_chats"] == [JID]
 
-    def test_an_exhausted_chat_is_never_queried_again(self):
-        """Unchanged, and the reason the write-off has to be right: this early
-        return is shared with the user scrolling up, not just the backfill."""
+    def test_user_scroll_reopens_an_exhausted_chat(self):
+        """A durable conclusion must not permanently disable explicit scroll."""
         stub = _make()
         stub._exhausted_chats.add(JID)
-        assert stub.fetch_older_messages(JID, ANCHOR) == []
+        assert stub.fetch_older_messages(JID, ANCHOR) is None
+        assert stub.asks == [JID]
+        assert JID not in stub._exhausted_chats
+
+    def test_background_walk_still_respects_exhaustion(self):
+        stub = _make()
+        stub._exhausted_chats.add(JID)
+        assert stub.fetch_older_messages(JID, ANCHOR, store_only=True) == []
         assert stub.asks == []
 
 
