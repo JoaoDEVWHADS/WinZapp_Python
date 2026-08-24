@@ -13551,13 +13551,12 @@ class MainWindow(wx.Frame):
             grew = previous is not None and count > previous
             still_landing = getattr(self, "_history_still_landing", False)
             _done()
-            # `gap and previous is None` queues a gap chat once; from the next
-            # pass it is kept only while growing, like any other short chat.
-            # A transiently empty chunk queue does not prove that the store is
-            # finished. Give every first short page one confirming read; if it
-            # is genuinely short, the unchanged second read retires it.
-            first_short_page = previous is None
-            if still_landing or grew or first_short_page:
+            # A gap chat gets one confirming read after the chunk queue drains;
+            # from the next pass it is kept only while its store is growing.
+            # Ordinary chats below the configured page target are genuinely
+            # short unless chunks are still landing, so they must not keep the
+            # initial sync alive just because they contain fewer than 200 rows.
+            if still_landing or grew or (gap and previous is None):
                 counts[canonical] = count
                 pending.add(canonical)
 
