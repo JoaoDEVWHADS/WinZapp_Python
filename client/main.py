@@ -5409,6 +5409,49 @@ class MainWindow(wx.Frame):
             "timestamp": ts_val,
         }
 
+    def _reconstruct_last_reactions_from_records(self):
+        """Rebuild chat["_last_reaction"] (in-memory only — see
+        _track_last_reaction()) from persisted reactionMessage records right
+        after self.chats is loaded from the DB at startup.
+
+        _track_last_reaction() is already called by on_new_message() (live
+        send/receive), _on_own_reaction_sent() (own reaction) and
+        on_historical_message() (history-sync redelivery of the same
+        reaction) — but none of those run at cold start before an actual
+        resync happens, so a chat whose newest activity was a reaction kept
+        showing its previous real message as the chat-list preview after
+        every restart, until the next resync (or a brand-new live reaction)
+        happened to repopulate it. The reactionMessage record itself is
+        already persisted (see on_historical_message() — kept there so
+        ConversationsPanel can rebuild the in-conversation reaction display
+        on reopen), so replaying it here needs no extra DB round-trip.
+        """
+        for jid, chat in self.chats.items():
+            if not isinstance(chat, dict):
+                continue
+            records = (
+                chat.get("messages", {}).get("messages", {}).get("records", [])
+            )
+            if not isinstance(records, list) or not records:
+                continue
+            reaction_records = [
+                r for r in records
+                if isinstance(r, dict) and r.get("messageType") == "reactionMessage"
+            ]
+            if not reaction_records:
+                continue
+
+            def _ts(m):
+                val = int(m.get("messageTimestamp") or m.get("timestamp") or 0)
+                return val // 1000 if val > 1_000_000_000_000 else val
+
+            # Replay oldest → newest so the final state matches whatever a
+            # live sequence of the same reactions/removals would have left
+            # behind — _track_last_reaction() always overwrites
+            # unconditionally, it never compares timestamps itself.
+            for r in sorted(reaction_records, key=_ts):
+                self._track_last_reaction(jid, r)
+
     def _maybe_notify_reaction(self, remote_jid: str, msg: dict):
         """
         Notify when someone reacts to one of *your* messages.
@@ -8111,6 +8154,7 @@ class MainWindow(wx.Frame):
         logging.info("[prepare_sync] metadata loaded — loading local chats (bulk DB call, up to 120s)")
         #Get Local Chats
         self.chats = self.get_chats()
+        self._reconstruct_last_reactions_from_records()
         logging.info("[prepare_sync] local chats loaded (%d) — loading LID cache", len(self.chats))
         self._load_local_lid_cache()
 
