@@ -26,6 +26,7 @@ tests/test_get_message_content_caption.py.
 import pytest
 
 import ui.conversations as conversations
+from core.utils import MEASURED_SECONDS_KEY
 from ui.conversations import ConversationsPanel, video_seconds
 
 
@@ -144,7 +145,10 @@ class TestLearningTheDurationFromTheFile:
 
         stub._learn_video_duration(msg, "algum.mp4")
 
-        assert msg["message"]["videoMessage"]["seconds"] == 137
+        assert msg["message"]["videoMessage"][MEASURED_SECONDS_KEY] == 137
+        assert msg["message"]["videoMessage"]["seconds"] == 0, (
+            "the message's own field is the server's; the measurement gets its own key"
+        )
         assert stub.persisted == [("grupo@g.us", "VID1")]
         assert stub.main_window.saves == ["grupo@g.us"]
         assert stub.repainted == [["VID1"]]
@@ -159,19 +163,33 @@ class TestLearningTheDurationFromTheFile:
         stub._learn_video_duration(msg, "algum.mp4")
 
         assert msg["message"]["videoMessage"]["seconds"] == 29
+        assert MEASURED_SECONDS_KEY not in msg["message"]["videoMessage"]
         assert stub.persisted == []
         assert stub.repainted == []
 
-    @pytest.mark.parametrize("probed", [None, 0, -1])
+    @pytest.mark.parametrize("probed", [None, -1])
     def test_a_probe_that_answers_nothing_changes_nothing(self, probed):
         stub = _Stub(probed=probed)
         msg = _video(seconds=0)
 
         stub._learn_video_duration(msg, "algum.mp4")
 
-        assert msg["message"]["videoMessage"]["seconds"] == 0
+        assert MEASURED_SECONDS_KEY not in msg["message"]["videoMessage"]
         assert stub.persisted == []
         assert stub.repainted == []
+
+    def test_a_file_measured_at_zero_is_recorded_as_a_real_zero(self):
+        """The distinction the message alone cannot make: a stated 0 means the
+        sender omitted the field, a MEASURED 0 means the clip really is under
+        a second — and only the second one is worth announcing."""
+        stub = _Stub(probed=0)
+        msg = _video(seconds=0)
+
+        stub._learn_video_duration(msg, "algum.mp4")
+
+        assert msg["message"]["videoMessage"][MEASURED_SECONDS_KEY] == 0
+        assert stub.persisted == [("grupo@g.us", "VID1")]
+        assert stub._get_message_content(msg) == "Vídeo, duração: 0 segundos"
 
     def test_a_non_video_message_is_ignored(self):
         stub = _Stub(probed=42)
@@ -191,7 +209,7 @@ class TestLearningTheDurationFromTheFile:
 
         stub._learn_video_duration(msg, "algum.mp4")
 
-        assert msg["message"]["videoMessage"]["seconds"] == 50
+        assert msg["message"]["videoMessage"][MEASURED_SECONDS_KEY] == 50
         assert stub.persisted == []
         assert stub.repainted == [["VID1"]]
 
@@ -206,3 +224,72 @@ class TestAudioKeepsTheOppositeRule:
                "key": {"id": "AUD1"}}
 
         assert "0 segundos" in stub._get_message_content(msg)
+
+
+class TestStatedZeroVersusMeasuredZero:
+    """The guard the audio path always had, now available to video.
+
+    Audio never needed it: a voice note under a second reports its own 0 and
+    that is the truth. A video's 0 is ambiguous — WhatsApp Web writes it both
+    for "the clip is that short" and for "the sender's client omitted the
+    field" — so the two are separated by WHERE the number came from. The
+    message's own field is only believed above zero; the value WinZapp read
+    off the file is believed at any value, including 0.
+    """
+
+    def test_a_stated_zero_is_still_no_answer(self):
+        assert video_seconds({"seconds": 0}) is None
+
+    def test_a_measured_zero_is_an_answer(self):
+        assert video_seconds({"seconds": 0, MEASURED_SECONDS_KEY: 0}) == 0
+
+    def test_the_measurement_outranks_a_stated_length(self):
+        """Both are about the same immutable file, and the measurement read
+        it directly — a mismatch means the sender's metadata was wrong."""
+        assert video_seconds({"seconds": 30, MEASURED_SECONDS_KEY: 422}) == 422
+
+    @pytest.mark.parametrize("raw,expected", [(0, 0), ("0", 0), (7, 7), ("7", 7), (7.9, 7)])
+    def test_a_measurement_is_read_in_any_shape_it_is_stored(self, raw, expected):
+        assert video_seconds({"seconds": 0, MEASURED_SECONDS_KEY: raw}) == expected
+
+    @pytest.mark.parametrize("junk", [None, "", "abc", -1])
+    def test_junk_in_the_measurement_falls_back_to_the_stated_value(self, junk):
+        assert video_seconds({"seconds": 30, MEASURED_SECONDS_KEY: junk}) == 30
+        assert video_seconds({"seconds": 0, MEASURED_SECONDS_KEY: junk}) is None
+
+    def test_a_measured_zero_renders_as_zero_seconds(self):
+        stub = _Stub()
+        msg = _video(seconds=0)
+        msg["message"]["videoMessage"][MEASURED_SECONDS_KEY] = 0
+
+        assert stub._get_message_content(msg) == "Vídeo, duração: 0 segundos"
+
+
+class TestProbeTellsShortFromUnreadable:
+    """probe_media_duration() is what makes the distinction possible, so it
+    has to answer 0 for a real sub-second file and None when it cannot read
+    one — proven against files written here, not mocks."""
+
+    def _wav(self, tmp_path, seconds, rate=8000):
+        import wave
+        path = tmp_path / f"clip_{seconds}.wav"
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(b"\x00\x00" * int(rate * seconds))
+        return str(path)
+
+    def test_a_sub_second_clip_measures_zero(self, tmp_path):
+        assert conversations.probe_media_duration(self._wav(tmp_path, 0.4)) == 0
+
+    def test_a_normal_clip_measures_its_length(self, tmp_path):
+        assert conversations.probe_media_duration(self._wav(tmp_path, 2)) == 2
+
+    def test_an_empty_file_cannot_be_measured(self, tmp_path):
+        path = tmp_path / "vazio.wav"
+        path.write_bytes(b"")
+        assert conversations.probe_media_duration(str(path)) is None
+
+    def test_a_missing_file_cannot_be_measured(self, tmp_path):
+        assert conversations.probe_media_duration(str(tmp_path / "nao_existe.wav")) is None

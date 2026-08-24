@@ -49,7 +49,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, carry_over_video_durations, video_seconds
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -15138,7 +15138,9 @@ class MainWindow(wx.Frame):
                         os.remove(tmp_path)
                     except OSError:
                         pass
-            if secs and secs > 0:
+            # secs == 0 is a real answer (a clip under a second), only None
+            # means the file could not be read — see video_seconds().
+            if secs is not None and secs >= 0:
                 wx.CallAfter(self._apply_probed_video_duration, msg, secs)
 
         threading.Thread(target=_bg, daemon=True).start()
@@ -15150,7 +15152,7 @@ class MainWindow(wx.Frame):
             # Playback got there first (_learn_video_duration) — its answer
             # came from the same file, so there is nothing to correct.
             return
-        video["seconds"] = seconds
+        video[MEASURED_SECONDS_KEY] = seconds
         msg_id = msg.get("key", {}).get("id", "")
         jid = self._normalize_jid(msg.get("key", {}).get("remoteJid", ""))
         logging.info("[_apply_probed_video_duration] %s: file says %ds", msg_id, seconds)

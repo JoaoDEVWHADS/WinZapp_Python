@@ -23,6 +23,7 @@ import pathlib
 import pytest
 
 import main
+from core.utils import MEASURED_SECONDS_KEY
 from main import MainWindow
 
 
@@ -126,7 +127,7 @@ class TestTheSettingGatesIt:
         stub._maybe_probe_video_duration(msg, b"fake mp4 bytes")
 
         assert len(probed) == 1
-        assert msg["message"]["videoMessage"]["seconds"] == 137
+        assert msg["message"]["videoMessage"][MEASURED_SECONDS_KEY] == 137
 
 
 class TestWhatIsWorthProbing:
@@ -158,7 +159,7 @@ class TestWhatIsWorthProbing:
 
         stub._maybe_probe_video_duration(msg, b"bytes")
 
-        assert msg["message"]["videoMessage"]["seconds"] == 0
+        assert MEASURED_SECONDS_KEY not in msg["message"]["videoMessage"]
         assert stub.db.inserted == []
 
     def test_the_temporary_file_is_cleaned_up(self, probed):
@@ -203,6 +204,7 @@ class TestApplyingTheResult:
 
         stub._apply_probed_video_duration(msg, 137)
 
+        assert MEASURED_SECONDS_KEY not in msg["message"]["videoMessage"]
         assert msg["message"]["videoMessage"]["seconds"] == 42
         assert stub.db.inserted == []
 

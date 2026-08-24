@@ -27,15 +27,23 @@ the sender's own answer finally arriving.
 
 import pytest
 
-from core.utils import carry_over_video_durations, video_seconds
+from core.utils import (
+    MEASURED_SECONDS_KEY, carry_over_video_durations, video_seconds,
+)
 
 
-def _video_msg(mid="VID1", seconds=0, jid="grupo@g.us"):
+def _video_msg(mid="VID1", seconds=0, measured=None, jid="grupo@g.us"):
+    """*seconds* is what the message arrived with (the server's own field);
+    *measured* is what WinZapp read off the file, which is the value that has
+    to survive a resync."""
+    body = {"seconds": seconds, "mimetype": "video/mp4"}
+    if measured is not None:
+        body[MEASURED_SECONDS_KEY] = measured
     return {
         "key": {"id": mid, "remoteJid": jid, "fromMe": False},
         "messageType": "videoMessage",
         "messageTimestamp": 1000,
-        "message": {"videoMessage": {"seconds": seconds, "mimetype": "video/mp4"}},
+        "message": {"videoMessage": body},
     }
 
 
@@ -51,23 +59,21 @@ def _seconds_of(msg):
 class TestCarryOverVideoDurations:
     def test_a_measured_length_survives_the_api_copy_replacing_the_record(self):
         api = [_video_msg(seconds=0)]
-        local = [_video_msg(seconds=422)]
+        local = [_video_msg(seconds=0, measured=422)]
 
         assert carry_over_video_durations(api, local) == 1
         assert _seconds_of(api[0]) == 422
 
-    def test_a_length_the_sender_finally_states_wins(self):
-        """Not a conflict to protect against — that is the real answer
-        arriving, and it outranks anything measured locally."""
-        api = [_video_msg(seconds=30)]
-        local = [_video_msg(seconds=422)]
+    def test_a_copy_that_already_carries_a_measurement_is_left_alone(self):
+        api = [_video_msg(seconds=0, measured=30)]
+        local = [_video_msg(seconds=0, measured=422)]
 
         assert carry_over_video_durations(api, local) == 0
         assert _seconds_of(api[0]) == 30
 
     def test_only_the_matching_message_is_touched(self):
         api = [_video_msg("A", seconds=0), _video_msg("B", seconds=0)]
-        local = [_video_msg("B", seconds=17)]
+        local = [_video_msg("B", seconds=0, measured=17)]
 
         carry_over_video_durations(api, local)
 
@@ -75,9 +81,20 @@ class TestCarryOverVideoDurations:
         assert _seconds_of(api[1]) == 17
 
     def test_a_local_record_with_no_measurement_carries_nothing(self):
+        """A local record holding only the server's own 0 has nothing to
+        contribute — carrying that across would be carrying the bug."""
         api = [_video_msg(seconds=0)]
         assert carry_over_video_durations(api, [_video_msg(seconds=0)]) == 0
         assert _seconds_of(api[0]) is None
+
+    def test_a_measured_zero_travels_too(self):
+        """A clip really under a second: the measurement says 0, and that has
+        to survive a resync exactly like any other measured length."""
+        api = [_video_msg(seconds=0)]
+        local = [_video_msg(seconds=0, measured=0)]
+
+        assert carry_over_video_durations(api, local) == 1
+        assert _seconds_of(api[0]) == 0
 
     def test_non_video_records_are_ignored_on_both_sides(self):
         audio = {"key": {"id": "AUD1"}, "messageType": "audioMessage",
@@ -100,7 +117,7 @@ class TestStoredDurationIsNotOverwritten:
     async def test_a_resync_copy_cannot_erase_a_measured_duration(self, in_memory_db):
         """The restart case, end to end: the length is stored, the server's
         copy comes back stating none, and reading the chat back still has it."""
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=422))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=422))
 
         await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))
 
@@ -110,20 +127,30 @@ class TestStoredDurationIsNotOverwritten:
     async def test_batch_insert_keeps_it_too(self, in_memory_db):
         """Every sync path inserts in batches — that is the write that
         actually ran on restart."""
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=422))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=422))
 
         await in_memory_db.insert_messages_batch("grupo@g.us", [_video_msg(seconds=0)])
 
         [stored] = await in_memory_db.get_messages("grupo@g.us")
         assert _seconds_of(stored) == 422
 
-    async def test_a_stated_duration_replaces_the_measured_one(self, in_memory_db):
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=422))
+    async def test_a_newer_measurement_replaces_the_stored_one(self, in_memory_db):
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=422))
 
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=30))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=30))
 
         [stored] = await in_memory_db.get_messages("grupo@g.us")
         assert _seconds_of(stored) == 30
+
+    async def test_a_measured_zero_is_kept_like_any_other_measurement(self, in_memory_db):
+        """The point of the separate key: a measured 0 is an answer, and a
+        resync must not be able to turn it back into "unknown"."""
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=0))
+
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))
+
+        [stored] = await in_memory_db.get_messages("grupo@g.us")
+        assert _seconds_of(stored) == 0
 
     async def test_a_first_insert_with_no_duration_stores_none(self, in_memory_db):
         await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))
@@ -136,7 +163,7 @@ class TestStoredDurationIsNotOverwritten:
         measures it, and that write is what has to land."""
         await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))
 
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=137))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=137))
 
         [stored] = await in_memory_db.get_messages("grupo@g.us")
         assert _seconds_of(stored) == 137
@@ -144,7 +171,7 @@ class TestStoredDurationIsNotOverwritten:
     async def test_another_chats_copy_of_the_same_id_is_not_consulted(self, in_memory_db):
         """Rows are keyed (message_id, remote_jid); the lookup must stay
         inside the chat being written."""
-        await in_memory_db.insert_message("outro@g.us", _video_msg(seconds=422))
+        await in_memory_db.insert_message("outro@g.us", _video_msg(seconds=0, measured=422))
 
         await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))
 
@@ -166,7 +193,7 @@ class TestStoredDurationIsNotOverwritten:
         else — deleting the message (for me, for everyone, mirrored from the
         phone, or a cleared chat) must leave nothing behind for a later copy
         of the same id to inherit."""
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=422))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=422))
         await in_memory_db.delete_message("grupo@g.us", "VID1")
 
         await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))
@@ -180,7 +207,7 @@ class TestStoredDurationIsNotOverwritten:
         still reads as "Mensagem apagada" in the timeline. The video (and its
         measured length) must go with the content — this rule only ever fills
         in a video that is still a video."""
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=422))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=422))
 
         revoked = {
             "key": {"id": "VID1", "remoteJid": "grupo@g.us", "fromMe": False},
@@ -195,7 +222,7 @@ class TestStoredDurationIsNotOverwritten:
         assert "videoMessage" not in stored["message"]
 
     async def test_clearing_a_chat_leaves_nothing_to_inherit(self, in_memory_db):
-        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=422))
+        await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0, measured=422))
         await in_memory_db.delete_chat_messages("grupo@g.us")
 
         await in_memory_db.insert_message("grupo@g.us", _video_msg(seconds=0))

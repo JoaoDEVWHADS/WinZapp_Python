@@ -47,7 +47,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -115,6 +115,11 @@ def probe_media_duration(path: str):
         return None
 
     # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
+    #    A file that reads as shorter than a second returns 0, not None: the
+    #    caller has to tell "measured, and it really is that short" apart from
+    #    "could not measure" — see core.utils.video_seconds(). A length of
+    #    exactly 0.0 is the second case (nothing decodable), so it falls
+    #    through to the parsers below.
     try:
         from sound_lib import stream
         s = stream.FileStream(file=path)
@@ -133,9 +138,9 @@ def probe_media_duration(path: str):
             with wave.open(path, "rb") as wf:
                 frames = wf.getnframes()
                 rate   = wf.getframerate()
-                if rate > 0:
+                if frames > 0 and rate > 0:
                     sec = int(frames / rate)
-                    if 0 < sec < 86400:
+                    if sec < 86400:
                         return sec
         except Exception:
             pass
@@ -5500,9 +5505,12 @@ class ConversationsPanel(wx.Panel):
         if not isinstance(video, dict) or video_seconds(video) is not None:
             return
         secs = self._probe_audio_duration(path)
-        if not secs or secs <= 0:
+        # 0 is a real answer here, unlike the 0 the message itself states: the
+        # file was read and it really is under a second. Only None means the
+        # probe could not tell (see video_seconds()).
+        if secs is None or secs < 0:
             return
-        video["seconds"] = secs
+        video[MEASURED_SECONDS_KEY] = secs
         logging.info(
             "[_learn_video_duration] %s: message stated no duration, file says %ds",
             msg.get("key", {}).get("id", ""), secs,

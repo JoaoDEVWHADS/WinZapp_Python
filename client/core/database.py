@@ -30,7 +30,7 @@ from typing import Any
 import aiosqlite
 from cryptography.fernet import Fernet
 
-from core.utils import video_seconds
+from core.utils import MEASURED_SECONDS_KEY
 
 log = logging.getLogger(__name__)
 
@@ -700,8 +700,8 @@ class DatabaseManager:
                 _delivery_status(msg))
 
     async def _with_known_video_duration(self, conn, remote_jid: str, msg: dict) -> dict:
-        """*msg*, with a video duration already on record restored when the
-        incoming copy states none.
+        """*msg*, with a video duration WinZapp measured earlier restored when
+        the incoming copy carries none.
 
         Some videos are handed over by WhatsApp Web with duration 0 forever —
         the sending client left the field out of the message, and no field on
@@ -722,7 +722,7 @@ class DatabaseManager:
         duration returns untouched without hitting the database at all.
         """
         video = (msg.get("message") or {}).get("videoMessage")
-        if not isinstance(video, dict) or video_seconds(video) is not None:
+        if not isinstance(video, dict) or MEASURED_SECONDS_KEY in video:
             return msg
         message_id = (msg.get("key") or {}).get("id") or ""
         if not message_id:
@@ -735,16 +735,17 @@ class DatabaseManager:
         if not row:
             return msg
         stored = self._decrypt_json(row["message_json"]) or {}
-        known = video_seconds((stored.get("message") or {}).get("videoMessage"))
-        if known is None:
+        stored_video = (stored.get("message") or {}).get("videoMessage")
+        if not isinstance(stored_video, dict) or MEASURED_SECONDS_KEY not in stored_video:
             return msg
+        known = stored_video[MEASURED_SECONDS_KEY]
         log.info(
-            "[messages] %s: keeping the measured %ds duration; the incoming copy states none",
+            "[messages] %s: keeping the measured %ss duration; the incoming copy carries none",
             message_id, known,
         )
         merged = dict(msg)
         merged["message"] = dict(msg.get("message") or {})
-        merged["message"]["videoMessage"] = {**video, "seconds": known}
+        merged["message"]["videoMessage"] = {**video, MEASURED_SECONDS_KEY: known}
         return merged
 
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
