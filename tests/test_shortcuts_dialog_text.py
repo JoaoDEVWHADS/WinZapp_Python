@@ -81,3 +81,28 @@ class TestNewAppLevelShortcutsAreDocumented:
         text = ShortcutsDialog._build_text(_FakeI18n())
         assert "shortcut_ctrl_alt_shift_d_label" in text
         assert "shortcut_ctrl_alt_shift_q_label" in text
+
+
+class TestBulkActionShortcutsAreDocumented:
+    """Each entry of the "Ações em massa" submenu has its own shortcut (see
+    ConversationsPanel._on_accel_bulk_*), reachable whatever the "Substituir
+    atalhos por ações em massa..." setting the note below them describes is
+    set to — F1 is where a user finds out they exist at all."""
+
+    def test_every_mass_action_shortcut_is_listed(self):
+        text = ShortcutsDialog._build_text(_FakeI18n())
+        for key in (
+            "shortcut_bulk_copy_label",
+            "shortcut_bulk_forward_label",
+            "shortcut_bulk_star_label",
+            "shortcut_bulk_pin_label",
+            "shortcut_bulk_save_label",
+            "shortcut_bulk_delete_label",
+            "shortcut_bulk_clear_chats_label",
+            "shortcut_bulk_delete_chats_label",
+            "shortcut_bulk_archive_chats_label",
+            "shortcut_bulk_read_chats_label",
+            "shortcut_bulk_unread_chats_label",
+        ):
+            assert key in text
+        assert "shortcut_bulk_override_note" in text
