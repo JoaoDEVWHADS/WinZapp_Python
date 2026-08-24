@@ -49,6 +49,7 @@ from ui.accessible import (
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
 from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
+from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
 from ui.media_viewer import MediaViewerDialog
 from app_paths import data_path
@@ -12126,9 +12127,9 @@ class ConversationsPanel(wx.Panel):
         """Copy every selected plain-text message to the clipboard as one
         WhatsApp-export-style block of text, one line per message formatted
         "<date> <time> - <sender>: <text>" — the date/time pattern follows
-        the user's Windows regional format (core.locale_format) with a
-        fallback to the active language's own datetime_fmt, same as every
-        other timestamp _format_date() renders elsewhere in this panel.
+        the active app language's datetime_fmt through
+        core.message_copy_format, independently of the Windows regional
+        format used by timestamps displayed elsewhere in the interface.
         Other message types (media, location, contact cards, ...) are
         silently skipped, same as how _on_menu_copy_message only ever
         handles "conversation"/"extendedTextMessage". Order follows
@@ -12153,13 +12154,8 @@ class ConversationsPanel(wx.Panel):
                 continue
             sender = self._sender_label(m)
             ts = self._extract_timestamp(m)
-            if ts:
-                timestamp = datetime.fromtimestamp(ts).strftime(
-                    get_datetime_format(i18n.t("datetime_fmt"))
-                )
-                lines.append(f"{timestamp} - {sender}: {text}")
-            else:
-                lines.append(f"{sender}: {text}")
+            lines.append(format_copied_message(
+                ts, sender, text, i18n.t("datetime_fmt")))
 
         if not lines:
             self.main_window.output(i18n.t("copy_selected_nothing_to_copy"), interrupt=True)

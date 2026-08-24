@@ -35,6 +35,7 @@ class _FakeI18n:
         "clear_confirm_msg_bulk": "Clear {count} selected chats?",
         "delete_confirm_msg_bulk": "Delete {count} selected chats?",
         "delete_msg_confirm_bulk": "Delete {count} selected messages?",
+        "datetime_fmt": "%d/%m/%Y %H:%M",
     }
 
     def t(self, key):
