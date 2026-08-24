@@ -15172,6 +15172,15 @@ class MainWindow(wx.Frame):
             }
         else:
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
+            # A status quote that failed to serialize (e.g. incomplete status
+            # metadata missing key.id) must never silently fall through to a
+            # plain DM below — that's the exact "reply degrades to a normal
+            # message" bug this is meant to fix, just triggered by malformed
+            # data instead of a WPPConnect failure.
+            quoted_is_status = (
+                bool(quoted) and isinstance(quoted, dict)
+                and (quoted.get("key") or {}).get("remoteJid") == "status@broadcast"
+            )
             if quoted_id:
                 is_status_reply = "status@broadcast" in quoted_id
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
@@ -15189,6 +15198,9 @@ class MainWindow(wx.Frame):
                     }
                 }
                 logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
+            elif quoted_is_status:
+                logging.error("[send_text_message] status reply has no serializable quote id (key.id missing?) — refusing to send as a plain message")
+                return {"ok": False, "error": "status reply missing a serializable message id", "retry": False}
             else:
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
