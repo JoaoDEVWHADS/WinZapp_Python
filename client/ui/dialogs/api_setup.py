@@ -1001,8 +1001,9 @@ class ApiSetupDialog(wx.Dialog):
             # handed WPPConnect full Chrome forever (see tests/test_headless_shell.py).
             # The shell is also the smaller download and the faster start.
             self._set_stage(self._i18n.t("api_setup_downloading_chrome"), *stages["chrome"])
+            browser_product = "chrome" if sys.platform == "win32" else "chrome-headless-shell"
             ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", browser_product],
                 cwd=api_dir,
                 env=npm_env,
             )

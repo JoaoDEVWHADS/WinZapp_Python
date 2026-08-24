@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 // Garante que o Puppeteer saiba onde encontrar o cache do Chrome
 const puppeteerCacheDir = path.join(__dirname, '.cache');
@@ -63,8 +64,30 @@ function findHeadlessShell() {
   return findExecutable(puppeteerCacheDir, HEADLESS_SHELL_NAMES, 0);
 }
 
+function findFullChrome() {
+  const roots = [
+    puppeteerCacheDir,
+    path.join(os.homedir(), '.cache', 'puppeteer')
+  ];
+  for (const root of roots) {
+    const found = findExecutable(root, FULL_CHROME_NAMES, 0);
+    if (found) return found;
+  }
+  return null;
+}
+
 function findAnyChrome() {
-  return findHeadlessShell() || findExecutable(puppeteerCacheDir, FULL_CHROME_NAMES, 0);
+  // chrome-headless-shell is a console-subsystem executable on Windows. Its
+  // renderer/GPU children can each allocate a visible console (seven windows
+  // were observed when opening the QR screen). Full Chrome uses the GUI
+  // subsystem and remains windowless under Puppeteer's headless mode.
+  return process.platform === 'win32'
+    ? findFullChrome() || findHeadlessShell()
+    : findHeadlessShell() || findFullChrome();
+}
+
+function findPreferredChrome() {
+  return process.platform === 'win32' ? findFullChrome() : findHeadlessShell();
 }
 
 // Locate a downloaded-but-maybe-unextracted chrome-headless-shell ZIP, so a
@@ -106,15 +129,16 @@ function extractZip(zipPath, destDir) {
     execSync(
       'powershell -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force"`,
-      { stdio: 'inherit' }
+      { stdio: 'inherit', windowsHide: true }
     );
   } else {
     execSync(`unzip -o "${zipPath}" -d "${destDir}"`, { stdio: 'inherit' });
   }
 }
 
-if (!findHeadlessShell()) {
-  console.log('[chrome-install] chrome-headless-shell não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
+if (!findPreferredChrome()) {
+  const browserProduct = process.platform === 'win32' ? 'chrome' : 'chrome-headless-shell';
+  console.log(`[chrome-install] ${browserProduct} não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...`);
   try {
     const { execSync } = require('child_process');
     const nodeDir = path.dirname(process.execPath);
@@ -134,12 +158,13 @@ if (!findHeadlessShell()) {
     // is no npx.cmd shim inside the portable extraction on every layout.
     const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
     const npxCmd = fs.existsSync(npxCli)
-      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome-headless-shell`
-      : 'npx puppeteer browsers install chrome-headless-shell';
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install ${browserProduct}`
+      : `npx puppeteer browsers install ${browserProduct}`;
     execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',
-      env: env
+      env: env,
+      windowsHide: true
     });
     console.log('[chrome-install] chrome-headless-shell instalado com sucesso!');
   } catch (err) {

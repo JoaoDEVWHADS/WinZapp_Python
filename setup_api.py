@@ -115,7 +115,16 @@ def _run(cmd: list, cwd: str = None, check: bool = True, env: dict = None):
         resolved = shutil.which(executable)
         if resolved:
             cmd = [resolved] + cmd[1:]
-    result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"), env=env)
+    creation_flags = 0
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        creation_flags = subprocess.CREATE_NO_WINDOW
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        shell=False,
+        env=env,
+        creationflags=creation_flags,
+    )
     if check and result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
