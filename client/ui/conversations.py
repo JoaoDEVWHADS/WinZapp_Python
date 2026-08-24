@@ -4699,6 +4699,8 @@ class ConversationsPanel(wx.Panel):
 
     def _load_older_messages(self):
         """Load older messages from the local database, or fall back to the server if none remain locally."""
+        if getattr(self, "_is_loading_more", False):
+            return
         if not self.conversation or not self._all_sorted_messages:
             logging.info(f"[_load_older_messages] Aborting: conversation={self.conversation is not None}, all_sorted={len(self._all_sorted_messages) if self._all_sorted_messages else 0}")
             return
