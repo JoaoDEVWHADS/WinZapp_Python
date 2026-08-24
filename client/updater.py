@@ -341,6 +341,133 @@ def _wrap_changelog_text(text: str, width: int = 100) -> str:
 
 # ── Install helpers ───────────────────────────────────────────────────────────
 
+def _oem_encoding() -> str:
+    """The code page cmd.exe decodes a .bat file with.
+
+    Not the one Python writes text in by default, and not UTF-8: a console
+    reads a batch script in the OEM code page (CP852 on a Polish Windows,
+    CP850 on a Portuguese one, ...). GetOEMCP() is what actually answers
+    that; cp850 is a last-resort guess if the call is unavailable.
+    """
+    try:
+        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    except Exception:
+        return "cp850"
+
+
+def _console_safe_path(path: str) -> str:
+    """*path* in a form a batch script can carry safely — its 8.3 short form
+    when the long one has characters outside ASCII.
+
+    A path like ``C:\\Users\\Paweł\\AppData\\Local\\WinZapp`` written into a
+    .bat as UTF-8 reaches cmd.exe as mojibake, because cmd decodes the file in
+    the OEM code page (see _oem_encoding()). Every command that path appears
+    in then addresses a directory that does not exist — which is exactly how
+    an update could copy nothing, write no failure marker (the marker path
+    contains the same character), and never relaunch the app (so does the
+    exe path), leaving no trace of why. Reported from a Windows account whose
+    name contains "ł" (issue #83).
+
+    GetShortPathNameW returns the 8.3 alias, which is pure ASCII, so the
+    script becomes code-page-independent. It needs the path to exist and 8.3
+    generation to be enabled on the volume; when either isn't true it returns
+    the long path unchanged and the caller falls back to writing the script
+    in the OEM code page instead.
+    """
+    if not path or path.isascii() or sys.platform != "win32":
+        return path
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf))
+        if length and buf.value and buf.value.isascii():
+            return buf.value
+        logging.info(
+            "Auto-updater: no ASCII 8.3 name for %r (8.3 generation disabled?) "
+            "— falling back to the OEM code page for the script.", path,
+        )
+    except Exception:
+        logging.exception("Auto-updater: GetShortPathNameW failed for %r", path)
+    return path
+
+
+def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
+                            log_path: str, marker_path: str, pid: int,
+                            api_port: int) -> str:
+    """The batch script text. Pure — every path is already console-safe.
+
+    Kept apart from _run_batch_installer() so what the script says can be
+    asserted without launching anything.
+    """
+    return (
+        "@echo off\n"
+        f'> "{log_path}" echo [WinZapp] update started %DATE% %TIME%\n'
+        # The active code page goes into the log first: when a path does come
+        # out wrong, this is the single fact that explains it, and the old
+        # script left no record of anything at all.
+        f'>> "{log_path}" chcp\n'
+        f'>> "{log_path}" echo source: {source_dir}\n'
+        f'>> "{log_path}" echo target: {install_dir}\n'
+        ":WAIT\n"
+        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
+        "if not errorlevel 1 (\n"
+        "    timeout /t 1 /nobreak >NUL\n"
+        "    goto WAIT\n"
+        ")\n"
+        # Give child processes a moment to exit, then kill stragglers holding file locks.
+        "timeout /t 2 /nobreak >NUL\n"
+        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "timeout /t 1 /nobreak >NUL\n"
+        # xcopy's exit code was previously never checked, so a failed copy
+        # (locked file, disk full, permissions) silently relaunched whatever
+        # was already in install_dir — the user saw the app come back and
+        # assumed the update worked. errorlevel 4+ means xcopy itself failed
+        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
+        # leave a marker file WinZapp checks on next startup so the user is
+        # told instead of silently running a stale/partial install.
+        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\" >> "{log_path}" 2>&1\n'
+        "if errorlevel 4 (\n"
+        f'    >> "{log_path}" echo xcopy FAILED\n'
+        f'    echo update failed > "{marker_path}"\n'
+        f'    if exist "{exe_path}" start "" "{exe_path}"\n'
+        # Deliberately not deleted on failure: the script and its log are the
+        # only evidence of what went wrong, and erasing them is what made the
+        # original report impossible to diagnose from the user's machine.
+        "    exit /b 1\n"
+        ")\n"
+        f'>> "{log_path}" echo xcopy OK\n'
+        f'if exist "{exe_path}" start "" "{exe_path}"\n'
+        'del "%~f0"\n'
+    )
+
+
+def _write_installer_script(bat_path: str, script: str) -> bool:
+    """Write *script* so cmd.exe reads it back correctly. Returns success.
+
+    ASCII (the normal case, and what _console_safe_path() aims for) is written
+    as-is. Anything left over is written in the code page cmd will decode it
+    with — never UTF-8, which is what made a non-ASCII install path unusable.
+    A script that cannot be represented at all is refused rather than written
+    corrupt: the caller then reports a failed update instead of closing the
+    app for an installer that would quietly do nothing.
+    """
+    encoding = "ascii" if script.isascii() else _oem_encoding()
+    try:
+        with open(bat_path, "w", encoding=encoding, errors="strict", newline="\r\n") as f:
+            f.write(script)
+    except (UnicodeEncodeError, LookupError) as exc:
+        logging.error(
+            "Auto-updater: installer script cannot be written in %s (%s) — "
+            "the install path has characters cmd.exe cannot read back. "
+            "Aborting instead of running a script with broken paths.",
+            encoding, exc,
+        )
+        return False
+    logging.info("Auto-updater: Wrote batch installer script to %s (encoding=%s)",
+                 bat_path, encoding)
+    return True
+
+
 def _needs_admin() -> bool:
     """Return True if the install directory is not writable by the current user."""
     install_dir = _outer_exe_dir()
@@ -377,39 +504,29 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     bat_fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="winzapp_upd_")
     os.close(bat_fd)
 
-    exe_path = os.path.join(install_dir, exe_name)
+    # Every path the script carries is made console-safe: a non-ASCII install
+    # path (a Windows account named "Paweł", issue #83) reached cmd.exe as
+    # mojibake and every command in the script then addressed a directory that
+    # does not exist. Only the DIRECTORIES are converted — GetShortPathNameW
+    # answers for paths that exist, and the exe/marker/log are files the
+    # script is about to create — so the ASCII file names are joined onto the
+    # already-safe directory afterwards. The log lives next to the install so
+    # it survives the update either way; the previous script left no record at
+    # all, which is why this failed silently.
+    safe_source  = _console_safe_path(source_dir)
+    safe_install = _console_safe_path(install_dir)
 
-    bat = (
-        "@echo off\n"
-        ":WAIT\n"
-        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
-        "if not errorlevel 1 (\n"
-        "    timeout /t 1 /nobreak >NUL\n"
-        "    goto WAIT\n"
-        ")\n"
-        # Give child processes a moment to exit, then kill stragglers holding file locks.
-        "timeout /t 2 /nobreak >NUL\n"
-        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
-        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
-        "timeout /t 1 /nobreak >NUL\n"
-        # xcopy's exit code was previously never checked, so a failed copy
-        # (locked file, disk full, permissions) silently relaunched whatever
-        # was already in install_dir — the user saw the app come back and
-        # assumed the update worked. errorlevel 4+ means xcopy itself failed
-        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
-        # leave a marker file WinZapp checks on next startup so the user is
-        # told instead of silently running a stale/partial install.
-        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
-        "if errorlevel 4 (\n"
-        f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
-        ")\n"
-        f'if exist "{exe_path}" start "" "{exe_path}"\n'
-        'del "%~f0"\n'
+    script = _build_installer_script(
+        safe_source,
+        safe_install,
+        os.path.join(safe_install, exe_name),
+        os.path.join(safe_install, "update_install.log"),
+        os.path.join(safe_install, "update_failed.marker"),
+        pid,
+        api_port,
     )
-
-    with open(bat_path, "w", encoding="utf-8") as f:
-        f.write(bat)
-    logging.info("Auto-updater: Wrote batch installer script to %s", bat_path)
+    if not _write_installer_script(bat_path, script):
+        return False
 
     if sys.platform == "win32":
         needs_admin = _needs_admin()
