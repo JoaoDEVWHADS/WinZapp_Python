@@ -1,8 +1,9 @@
 """Test for GitHub issue #12: editing the most recent message in a chat
 didn't update its preview in the conversations list.
 
-Root cause: ConversationsPanel.on_send_message()'s edit-mode branch
-(conversations.py) mutates the message dict in place and persists it via
+Root cause: ConversationsPanel's edit-mode branch (_apply_message_edit(),
+split out of on_send_message()) mutates the message dict in place and
+persists it via
 main_window._schedule_save(), but never told the conversations LIST widget
 to redraw — _last_msg_preview() (main.py) reads straight from the mutated
 record so the data was correct, nothing just repainted the row. Only
@@ -12,10 +13,11 @@ picked up the change. The companion path for a REMOTE edit
 main_window._schedule_set_chats() and never had this bug — this fixes the
 local-edit path to match.
 
-on_send_message() is a large method deep in wx widget interactions
-(message_field, mention pills, etc.) that isn't practical to drive end to
-end without a running wx.App, so this pins the fix structurally via source
-inspection — same approach as tests/test_archived_context_menu.py.
+The edit path sits deep in wx widget interactions (message_field, mention
+pills, etc.) that aren't practical to drive end to end without a running
+wx.App, so this pins the fix structurally via source inspection — same
+approach as tests/test_archived_context_menu.py. The behaviour it can be
+driven for lives in tests/test_edit_message_off_ui_thread.py.
 """
 
 import inspect
@@ -25,12 +27,7 @@ from ui.conversations import ConversationsPanel
 
 
 def test_edit_mode_branch_refreshes_the_conversations_list():
-    src = inspect.getsource(ConversationsPanel.on_send_message)
-
-    # Isolate the edit-mode branch (from "Edit mode:" down to "Normal send").
-    start = src.index("Edit mode: update existing message")
-    end = src.index("Normal send")
-    edit_branch = src[start:end]
+    edit_branch = inspect.getsource(ConversationsPanel._apply_message_edit)
 
     assert "self.main_window._schedule_save(dirty_jid=remote_jid)" in edit_branch
     assert "self.main_window._schedule_set_chats()" in edit_branch, (

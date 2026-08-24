@@ -1680,90 +1680,116 @@ class ConversationsPanel(wx.Panel):
 
         # ── Edit mode: update existing message ──────────────────────────────
         if self._editing_message_id is not None:
-            msg_id = self._editing_message_id
-
-            # An edit goes through exactly the same @mention pipeline as a new
-            # send. It used to skip it entirely: the raw "@DisplayName" text was
-            # posted verbatim (so WhatsApp highlighted nothing — the mention was
-            # only cosmetic) and the local record was rewritten as a plain
-            # `conversation`, discarding any contextInfo it had. That is why
-            # adding a mention with Alt+E never produced the hyperlinks that
-            # lead to the mentioned person's chat, and why editing a message
-            # that already had mentions silently dropped them.
-            api_text, edit_mentions = self._build_mention_payload(text)
-
-            # Call WPPConnect API to update the message
-            self.main_window.edit_message(
-                remote_jid, msg_id, api_text, mentioned_jids=edit_mentions
-            )
-
-            # Re-locate the message by ID rather than trusting the row index
-            # captured when edit mode was entered: a background sync can call
-            # populate_messages() at any point while the user is typing,
-            # which fully rebuilds _sorted_messages — the old index could by
-            # then point at an unrelated row, silently overwriting a
-            # different message's local content/cache with the edited text
-            # (the server-side edit_message() call above is unaffected, since
-            # it addresses the message by ID, not by index — only the local
-            # display was at risk).
-            idx = next(
-                (i for i, m in enumerate(self._sorted_messages)
-                 if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id),
-                -1,
-            )
-
-            # Update local state
-            if 0 <= idx < len(self._sorted_messages):
-                edited = self._sorted_messages[idx]
-                if edit_mentions:
-                    # Same shape the send path builds for a mentioning message,
-                    # so _get_message_content() rewrites @phone → @DisplayName
-                    # and _extract_mentions() finds the JIDs for the hyperlinks.
-                    edited["message"] = {"extendedTextMessage": {"text": api_text}}
-                    edited["messageType"] = "extendedTextMessage"
-                    ctx = edited.setdefault("contextInfo", {})
-                    ctx["mentionedJid"] = edit_mentions
-                else:
-                    edited["message"] = {"conversation": text}
-                    edited["messageType"] = "conversation"
-                    # An edit that removed every mention must clear the old list
-                    # too, or the stale hyperlinks stay on screen forever.
-                    ctx = edited.get("contextInfo")
-                    if isinstance(ctx, dict):
-                        ctx.pop("mentionedJid", None)
-                        ctx.pop("mentionedJidList", None)
-                edited["_edited"] = True
-                self.messages_list.SetItemText(
-                    idx, self._render_message_line(edited)
-                )
-                # _sorted_messages[idx] is the same dict object held in
-                # main_window.chats[remote_jid]'s records (populate_messages()
-                # builds it from there without copying) — persist it so the
-                # "Editada" marker and new text survive a restart.
-                self.main_window._schedule_save(dirty_jid=remote_jid)
-                # Refresh the conversations list too — _last_msg_preview()
-                # reads straight from these records, but nothing tells the
-                # list widget to redraw the row on its own. Without this the
-                # preview kept showing the pre-edit text until the
-                # conversation was closed (which rebuilds the list from
-                # scratch for an unrelated reason) — see the remote-edit
-                # path (_apply_possible_edit(), main.py), which already
-                # does this and never had the bug.
-                self.main_window._schedule_set_chats()
-                # Rebuild the links/mentions panels if the edited row is the one
-                # currently focused — they are only refreshed on a focus change,
-                # so without this the panels below the list keep describing the
-                # message as it was before the edit.
-                if self.messages_list.GetFocusedItem() == idx:
-                    self._update_links_panel(
-                        self._extract_links(self._render_message_line(edited))
-                    )
-                    self._update_mentions_panel(self._extract_mentions(edited))
-
-            self._on_cancel_edit()
+            self._apply_message_edit(text, remote_jid)
             return
 
         # ── Normal send ──────────────────────────────────────────────────────
+        self._send_new_text_message(text, remote_jid)
+
+    def _apply_message_edit(self, text: str, remote_jid: str):
+        """Apply an edit to a message already sent: update it locally now and
+        tell WhatsApp about it on a worker thread.
+
+        Split out of on_send_message() so it can be tested without a live wx
+        panel, and so the server call is visibly off the UI thread.
+        """
+        msg_id = self._editing_message_id
+
+        # An edit goes through exactly the same @mention pipeline as a new
+        # send. It used to skip it entirely: the raw "@DisplayName" text was
+        # posted verbatim (so WhatsApp highlighted nothing — the mention was
+        # only cosmetic) and the local record was rewritten as a plain
+        # `conversation`, discarding any contextInfo it had. That is why
+        # adding a mention with Alt+E never produced the hyperlinks that
+        # lead to the mentioned person's chat, and why editing a message
+        # that already had mentions silently dropped them.
+        api_text, edit_mentions = self._build_mention_payload(text)
+
+        # Call WPPConnect to update the message — on a worker thread.
+        # edit-message drives Puppeteer/WhatsApp Web and routinely takes a
+        # second or two to come back (its own timeout is 15s); running it
+        # inline here froze the whole window for that long on every edit,
+        # the one server-backed message action still doing that. Everything
+        # below is the local, optimistic update — the same shape
+        # _on_menu_pin_message() uses.
+        threading.Thread(
+            target=self.main_window.edit_message,
+            args=(remote_jid, msg_id, api_text),
+            kwargs={"mentioned_jids": edit_mentions},
+            daemon=True,
+        ).start()
+
+        # Re-locate the message by ID rather than trusting the row index
+        # captured when edit mode was entered: a background sync can call
+        # populate_messages() at any point while the user is typing,
+        # which fully rebuilds _sorted_messages — the old index could by
+        # then point at an unrelated row, silently overwriting a
+        # different message's local content/cache with the edited text
+        # (the server-side edit_message() call above is unaffected, since
+        # it addresses the message by ID, not by index — only the local
+        # display was at risk).
+        idx = next(
+            (i for i, m in enumerate(self._sorted_messages)
+             if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id),
+            -1,
+        )
+
+        # Update local state
+        if 0 <= idx < len(self._sorted_messages):
+            edited = self._sorted_messages[idx]
+            if edit_mentions:
+                # Same shape the send path builds for a mentioning message,
+                # so _get_message_content() rewrites @phone → @DisplayName
+                # and _extract_mentions() finds the JIDs for the hyperlinks.
+                edited["message"] = {"extendedTextMessage": {"text": api_text}}
+                edited["messageType"] = "extendedTextMessage"
+                ctx = edited.setdefault("contextInfo", {})
+                ctx["mentionedJid"] = edit_mentions
+            else:
+                edited["message"] = {"conversation": text}
+                edited["messageType"] = "conversation"
+                # An edit that removed every mention must clear the old list
+                # too, or the stale hyperlinks stay on screen forever.
+                ctx = edited.get("contextInfo")
+                if isinstance(ctx, dict):
+                    ctx.pop("mentionedJid", None)
+                    ctx.pop("mentionedJidList", None)
+            edited["_edited"] = True
+            self.messages_list.SetItemText(
+                idx, self._render_message_line(edited)
+            )
+            # _sorted_messages[idx] is the same dict object held in
+            # main_window.chats[remote_jid]'s records (populate_messages()
+            # builds it from there without copying) — persist it so the
+            # "Editada" marker and new text survive a restart.
+            self.main_window._schedule_save(dirty_jid=remote_jid)
+            # Refresh the conversations list too — _last_msg_preview()
+            # reads straight from these records, but nothing tells the
+            # list widget to redraw the row on its own. Without this the
+            # preview kept showing the pre-edit text until the
+            # conversation was closed (which rebuilds the list from
+            # scratch for an unrelated reason) — see the remote-edit
+            # path (_apply_possible_edit(), main.py), which already
+            # does this and never had the bug.
+            self.main_window._schedule_set_chats()
+            # Rebuild the links/mentions panels if the edited row is the one
+            # currently focused — they are only refreshed on a focus change,
+            # so without this the panels below the list keep describing the
+            # message as it was before the edit.
+            if self.messages_list.GetFocusedItem() == idx:
+                self._update_links_panel(
+                    self._extract_links(self._render_message_line(edited))
+                )
+                self._update_mentions_panel(self._extract_mentions(edited))
+
+        self._on_cancel_edit()
+
+    def _send_new_text_message(self, text: str, remote_jid: str):
+        """Queue a brand-new text message and show it as pending right away.
+
+        The other half of on_send_message(), split out alongside
+        _apply_message_edit() so neither branch hides inside the other.
+        """
         # Build a virtual message dict that renders identically to real messages.
         local_id = str(uuid.uuid4())
         api_text, _mentioned = self._build_mention_payload(text)

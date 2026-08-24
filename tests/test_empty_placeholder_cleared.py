@@ -124,7 +124,9 @@ class TestSeparatorIndexFollows:
 class TestAppendPathsCallIt:
     @pytest.mark.parametrize("method_name", [
         "on_incoming_message",
-        "on_send_message",
+        # on_send_message()'s own append path, split out of it alongside
+        # _apply_message_edit().
+        "_send_new_text_message",
         "_send_voice_message",
         "_on_send_attachment",
         "_on_attach_contact",
