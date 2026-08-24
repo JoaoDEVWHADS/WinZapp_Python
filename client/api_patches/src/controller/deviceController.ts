@@ -1252,12 +1252,57 @@ export async function reactMessage(req: Request, res: Response) {
               detail: `message-not-found; models=${statusModels.length}`,
             };
           }
-          const result = await WPP.chat.sendReactionToMessage(model, reaction);
+          // A status like is a reaction message sent *through the status
+          // broadcast*, addressed only to the status author. Calling the
+          // ordinary chat reaction helper with the StatusV3 model reaches
+          // WA Web but is rejected with "Reaction send error" because that
+          // helper does not provide the status audience. Sending a text/heart
+          // to the author's chat is not equivalent either: it becomes a DM.
+          const modelAuthor =
+            model.author || model.id?.participant || posterJid || null;
+          const authorText = String(
+            modelAuthor?._serialized ?? modelAuthor?.$1 ?? modelAuthor ?? ''
+          );
+          if (!authorText) {
+            return { ok: false, detail: 'status-author-not-found' };
+          }
+
+          const authorWid = WPP.util.createWid(authorText);
+          const me = WPP.conn.getMyUserWid();
+          const statusWid = WPP.util.createWid('status@broadcast');
+          const reactionId = new WPP.whatsapp.MsgKey({
+            fromMe: true,
+            remote: statusWid,
+            participant: me,
+            id: WPP.whatsapp.randomHex(16),
+          });
+          const result = await WPP.chat.sendRawMessage(
+            statusWid,
+            {
+              type: 'reaction',
+              author: me,
+              reactionParentKey: model.id,
+              reactionText: reaction || '',
+              // encryptAndSendStatusMsg uses this audience for the status
+              // sender-key fanout. Without it WhatsApp rejects the reaction.
+              broadcastParticipants: [authorWid],
+            },
+            {
+              messageId: reactionId,
+              markIsRead: false,
+              waitForAck: true,
+            }
+          );
           const sendMsgResult = String(result?.sendMsgResult ?? '');
           const rejected = /error|fail/i.test(sendMsgResult);
+          const accepted =
+            Boolean(result) &&
+            (Number(result?.ack ?? 0) > 0 || result?.sendMsgResult != null);
           return {
-            ok: result !== false && !rejected,
-            detail: sendMsgResult || 'reaction-call-returned',
+            ok: accepted && !rejected,
+            detail:
+              sendMsgResult ||
+              `reaction-call-returned; ack=${String(result?.ack ?? '')}`,
           };
         },
         { msgId, reaction }

@@ -46,6 +46,7 @@ class _FakeI18n:
 class _FakeWidget:
     def __init__(self):
         self.shown = False
+        self.enabled = True
 
     def Show(self, show=True):
         self.shown = bool(show)
@@ -55,6 +56,12 @@ class _FakeWidget:
 
     def IsShown(self):
         return self.shown
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+    def Disable(self):
+        self.enabled = False
 
 
 class _FakeVideoPlayer:
@@ -124,6 +131,7 @@ class _FakeMainWindow:
 
 class _Stub:
     _on_choose_voice_status   = StatusPanel._on_choose_voice_status
+    _on_ctrl_r_shortcut       = StatusPanel._on_ctrl_r_shortcut
     _hide_post_panels         = StatusPanel._hide_post_panels
     _is_status_composer_open  = StatusPanel._is_status_composer_open
     _enter_status_composer    = StatusPanel._enter_status_composer
@@ -432,6 +440,29 @@ class TestChooseVoiceStatusDegradesGracefullyWithoutPyaudio:
 
         assert stub.main_window.output_calls == []
         assert stub._recording_stream is None
+
+    def test_audio_composer_has_close_and_record_without_other_ui(self):
+        stub = _Stub()
+
+        stub._on_choose_voice_status(None)
+
+        assert stub._voice_post_panel.shown is True
+        assert stub._voice_post_panel.enabled is True
+        assert stub._voice_close_btn.shown is True
+        assert stub._voice_close_btn.label == "close"
+        assert stub._voice_start_btn.shown is True
+        assert stub._post_panel.enabled is False
+        assert stub._media_post_panel.enabled is False
+
+    def test_ctrl_r_does_not_open_audio_outside_the_audio_option(self):
+        stub = _Stub()
+        reached = []
+        stub._start_voice_recording = lambda: reached.append(True)
+
+        stub._on_ctrl_r_shortcut(None)
+
+        assert reached == []
+        assert stub._voice_post_panel.shown is False
 
 
 class _FakePreviewSound:

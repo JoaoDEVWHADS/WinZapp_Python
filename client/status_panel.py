@@ -649,6 +649,7 @@ class StatusPanel(wx.Panel):
 
         self._post_panel.SetSizer(post_sizer)
         self._post_panel.Hide()
+        self._post_panel.Disable()
         sizer.Add(self._post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
         # ── Post media status panel (hidden) ──────────────────────────────
@@ -682,6 +683,7 @@ class StatusPanel(wx.Panel):
 
         self._media_post_panel.SetSizer(media_sizer)
         self._media_post_panel.Hide()
+        self._media_post_panel.Disable()
         sizer.Add(self._media_post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
         self._selected_media_paths: list = []
@@ -693,24 +695,28 @@ class StatusPanel(wx.Panel):
         self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("voice_recording"))
         voice_sizer.Add(self._voice_status_lbl, 0, wx.ALL, 5)
 
-        voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # Match ConversationsPanel's recorder: one vertical action stack,
+        # with every recording shortcut exposed only inside the Audio flow.
+        # The old horizontal strip was both unlike the working conversation
+        # recorder and easy to spill across/narrow the Status UI.
+        voice_btn_sizer = wx.BoxSizer(wx.VERTICAL)
 
         self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message"))
         self._voice_close_btn.SetAccessible(AccessibleDiscardVoiceMessage())
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
         self._voice_close_btn.Hide()
-        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message"))
         self._voice_start_btn.SetAccessible(AccessibleRecordVoiceMessage("Ctrl+R"))
         self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
-        voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_start_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording"))
         self._voice_pause_btn.SetAccessible(AccessiblePauseResumeRecording())
         self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
         self._voice_pause_btn.Hide()
-        voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._voice_play_btn = wx.Button(
             self._voice_post_panel, label=i18n.t("play_recorded_audio")
@@ -718,7 +724,7 @@ class StatusPanel(wx.Panel):
         self._voice_play_btn.SetAccessible(AccessiblePlayRecordedAudio())
         self._voice_play_btn.Bind(wx.EVT_BUTTON, self._toggle_play_recorded_audio)
         self._voice_play_btn.Hide()
-        voice_btn_sizer.Add(self._voice_play_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_play_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._recorded_audio_timer = wx.Timer(self._voice_play_btn)
         self._voice_play_btn.Bind(
             wx.EVT_TIMER, self._on_recorded_audio_timer, self._recorded_audio_timer
@@ -728,12 +734,13 @@ class StatusPanel(wx.Panel):
         self._voice_send_btn.SetAccessible(AccessibleSendVoiceMessage())
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
         self._voice_send_btn.Hide()
-        voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         voice_sizer.Add(voice_btn_sizer, 0, wx.ALL, 5)
 
         self._voice_post_panel.SetSizer(voice_sizer)
         self._voice_post_panel.Hide()
+        self._voice_post_panel.Disable()
         sizer.Add(self._voice_post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
         # Recording state — same shape as ConversationsPanel's own voice-
@@ -1867,9 +1874,16 @@ class StatusPanel(wx.Panel):
         self._leave_status_composer()
 
     def _hide_post_panels(self):
-        self._post_panel.Hide()
-        self._media_post_panel.Hide()
-        self._voice_post_panel.Hide()
+        # Disable as well as hide, so controls from the two inactive choices
+        # cannot remain keyboard-focusable or exposed as enabled actions in
+        # the Windows/MSAA accessibility tree while another composer is open.
+        for panel in (
+            self._post_panel,
+            self._media_post_panel,
+            self._voice_post_panel,
+        ):
+            panel.Disable()
+            panel.Hide()
 
     def _is_status_composer_open(self) -> bool:
         return any(
@@ -1899,6 +1913,7 @@ class StatusPanel(wx.Panel):
             self._status_list,
         ):
             widget.Hide()
+        panel.Enable()
         panel.Show()
         self.Layout()
 
@@ -1935,21 +1950,25 @@ class StatusPanel(wx.Panel):
         self._voice_pause_btn.Hide()
         self._voice_play_btn.Hide()
         self._voice_send_btn.Hide()
-        self._voice_close_btn.Hide()
+        # Audio is a self-contained flow. Before capture starts this is the
+        # Close action; once recording starts _on_stream_opened relabels the
+        # same control to Discard, exactly like the conversation recorder.
+        self._voice_close_btn.SetLabel(i18n.t("close"))
+        self._voice_close_btn.Show()
 
         self._voice_start_btn.SetFocus()
 
     def _on_ctrl_r_shortcut(self, event):
         """Ctrl+R shortcut handler for status panel.
-        If voice post panel is shown: start recording if idle, or send if recording."""
+        It belongs only to the Audio composer selected from Add Status: start
+        if idle, or send if recording. It must not open Audio from the clean
+        Status browser, otherwise audio controls leak outside their option."""
         if self._voice_post_panel.IsShown():
             if not self._is_recording:
                 if not self._recording_starting:
                     self._start_voice_recording()
             else:
                 self._on_send_voice_status(None)
-        else:
-            self._on_choose_voice_status(None)
 
     def _on_ctrl_shift_p_shortcut(self, event):
         """Ctrl+Shift+P shortcut handler to pause/resume voice recording."""

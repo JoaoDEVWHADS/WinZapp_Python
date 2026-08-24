@@ -60,6 +60,7 @@ class _FakeI18n:
 class _FakeWidget:
     def __init__(self):
         self.shown = False
+        self.enabled = True
         self.label = ""
 
     def Show(self, show=True):
@@ -70,6 +71,12 @@ class _FakeWidget:
 
     def IsShown(self):
         return self.shown
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+    def Disable(self):
+        self.enabled = False
 
     def SetLabel(self, text):
         self.label = text
@@ -1427,6 +1434,15 @@ class TestStatusComposerKeepsTheMainScreenClean:
         assert stub._list_label.shown is False
         assert stub._status_list.shown is False
         assert stub._video_player.stop_calls == 1
+        assert selected_panel.enabled is True
+        assert all(
+            panel.enabled is (panel is selected_panel)
+            for panel in (
+                stub._post_panel,
+                stub._media_post_panel,
+                stub._voice_post_panel,
+            )
+        )
 
     def test_closing_a_composer_restores_the_status_browser(self):
         stub = _Stub()
