@@ -71,6 +71,44 @@ _SAVEABLE_MESSAGE_TYPES = frozenset({
 })
 
 
+class _FocusedTransferGaugeAccessible(wx.Accessible):
+    """Expose value changes to screen readers only while the gauge has focus."""
+
+    def __init__(self, gauge):
+        super().__init__()
+        self._gauge = gauge
+
+    def GetState(self, childId):
+        state = wx.ACC_STATE_SYSTEM_FOCUSABLE
+        if self._gauge.HasFocus():
+            state |= wx.ACC_STATE_SYSTEM_FOCUSED
+        else:
+            # NVDA's native ProgressBar handler deliberately ignores value
+            # changes carrying INVISIBLE/OFFSCREEN. The gauge remains visible
+            # on screen; only unsolicited accessibility updates are suppressed.
+            state |= wx.ACC_STATE_SYSTEM_INVISIBLE
+        return (wx.ACC_OK, state)
+
+
+class _FocusedTransferGauge(wx.Gauge):
+    """Native gauge reachable by Tab, with focus-scoped NVDA progress output."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.SetAccessible(_FocusedTransferGaugeAccessible(self))
+        self.Bind(wx.EVT_LEFT_DOWN, self._focus_from_mouse)
+
+    def AcceptsFocus(self):
+        return True
+
+    def AcceptsFocusFromKeyboard(self):
+        return True
+
+    def _focus_from_mouse(self, event):
+        self.SetFocus()
+        event.Skip()
+
+
 def message_caption(msg) -> str:
     """The caption carried by an image/video/document message, '' otherwise.
 
@@ -287,6 +325,9 @@ class ConversationsPanel(wx.Panel):
         # ── Reply / quoted message state ────────────────────────────────────
         # When not None, the next sent message will be a quoted reply
         self._quoted_message: dict | None = None
+        self._outgoing_virtual_messages: dict = {}
+        self._media_upload_progress: dict = {}
+        self._media_transfer_started: set = set()
 
         # ── Search in conversation state ─────────────────────────────────────
         # Indices in _sorted_messages that match the current search query
@@ -539,43 +580,53 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._media_bitmap, 0, wx.ALIGN_LEFT | wx.LEFT | wx.BOTTOM, 5)
         self._media_bitmap.Hide()
 
-        self._media_transfer_gauge = wx.Gauge(
-            self.conversation_panel,
+        # Stable row shared by transfer progress and the selected media's
+        # actions. This gives the native Windows gauge an already-laid-out
+        # parent and puts it exactly where Open / Save As normally appear.
+        self._media_action_slot = wx.Panel(self.conversation_panel)
+        self._media_action_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._media_action_slot.SetSizer(self._media_action_sizer)
+        conv_sizer.Add(
+            self._media_action_slot, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
+        )
+
+        self._media_transfer_gauge = _FocusedTransferGauge(
+            self._media_action_slot,
             range=100,
             style=wx.GA_HORIZONTAL | wx.GA_SMOOTH,
         )
         self._media_transfer_gauge.SetMinSize((-1, 24))
-        conv_sizer.Add(
-            self._media_transfer_gauge, 0,
-            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
-        )
+        self._media_action_sizer.Add(self._media_transfer_gauge, 0, wx.EXPAND)
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge:
             gauge.Hide()
 
         # ── Action buttons (document / image / video) ───────────────────────
         self._action_open_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("open")
+            self._media_action_slot, label=i18n.t("open")
         )
         self._action_open_btn.Bind(wx.EVT_BUTTON, self._on_action_open)
-        conv_sizer.Add(self._action_open_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_open_btn, 0, wx.TOP, 2)
         self._action_open_btn.Hide()
 
         self._action_save_as_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("save_as")
+            self._media_action_slot, label=i18n.t("save_as")
         )
         self._action_save_as_btn.SetAccessible(AccessibleSaveAs())
         self._action_save_as_btn.Bind(wx.EVT_BUTTON, self._on_action_save_as)
-        conv_sizer.Add(self._action_save_as_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_save_as_btn, 0, wx.TOP, 2)
         self._action_save_as_btn.Hide()
 
         # ── Download button (shown when media is not yet cached locally) ───
         self._action_download_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("download")
+            self._media_action_slot, label=i18n.t("download")
         )
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
-        conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_download_btn, 0, wx.TOP, 2)
         self._action_download_btn.Hide()
+        self._hide_media_transfer_gauge()
+        self._media_action_slot.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
@@ -1271,6 +1322,15 @@ class ConversationsPanel(wx.Panel):
         except Exception as e:
             logging.error(f"[navigate_to_conversation] Failed to load messages from DB: {e}")
 
+        pending_rows = [
+            row for row in self._outgoing_virtual_messages.values()
+            if row.get("key", {}).get("remoteJid") == conversation.get("remoteJid", "")
+            and row.get("_local_pending")
+        ]
+        records = conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", [])
+        known_local_ids = {row.get("_local_id") for row in records}
+        records.extend(row for row in pending_rows if row.get("_local_id") not in known_local_ids)
+
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
         self.conversation_name = (
@@ -1361,6 +1421,7 @@ class ConversationsPanel(wx.Panel):
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
+        self._sync_pending_document_gauge()
 
         # Re-show audio controls only if the playing audio message is focused.
         if (self._current_audio_id is not None
@@ -1897,6 +1958,8 @@ class ConversationsPanel(wx.Panel):
                 .setdefault("records", [])
         )
         local_id = virtual_msg.get("_local_id", "")
+        if local_id:
+            self._outgoing_virtual_messages[local_id] = virtual_msg
         if local_id and any(r.get("_local_id") == local_id for r in records):
             return  # already registered
         records.append(virtual_msg)
@@ -1925,6 +1988,13 @@ class ConversationsPanel(wx.Panel):
         reply — the quote never actually reached the recipient.
         """
         self._hide_media_transfer_gauge()
+        tracked = self._outgoing_virtual_messages.get(local_id)
+        if tracked is not None:
+            tracked["_local_pending"] = False
+            if real_id and isinstance(real_id, str):
+                tracked.setdefault("key", {})["id"] = real_id
+        self._media_upload_progress.pop(local_id, None)
+        self._media_transfer_started.discard(local_id)
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)
@@ -3096,6 +3166,8 @@ class ConversationsPanel(wx.Panel):
         # ── Mention detection ─────────────────────────────────────────────
         self._update_mentions_panel(self._extract_mentions(msg))
 
+        self._sync_media_action_slot_visibility()
+
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
         idx = self.messages_list.GetFocusedItem()
@@ -3480,6 +3552,7 @@ class ConversationsPanel(wx.Panel):
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
         self._action_download_btn.Hide()
+        self._hide_media_transfer_gauge()
         # The transfer gauge is not a selection-specific media control.  Hiding
         # it here made an in-flight upload/download disappear whenever focus or
         # message selection changed.  Transfer completion / conversation exit
@@ -5807,6 +5880,7 @@ class ConversationsPanel(wx.Panel):
 
         mw.output(i18n.t("downloading"))
         self._action_download_btn.Hide()
+        self._hide_media_transfer_gauge()
         self._show_media_transfer_gauge()
         self.conversation_panel.Layout()
 
@@ -5838,6 +5912,7 @@ class ConversationsPanel(wx.Panel):
                     self._action_save_as_btn.Show()
                 else:
                     self._action_download_btn.Show()
+                self._sync_media_action_slot_visibility()
                 self.conversation_panel.Layout()
 
             wx.CallAfter(_done)
@@ -7861,6 +7936,15 @@ class ConversationsPanel(wx.Panel):
             if index is not None and total is not None and total > 0:
                 pieces.append(f", {index + 1} {i18n.t('of')} {total}")
 
+        local_id = str(msg.get("_local_id") or "")
+        if local_id and (msg.get("_local_pending") or msg.get("_awaiting_sent_ack")):
+            pct = max(0, min(100, round(
+                self._media_upload_progress.get(local_id, 0.0) * 100
+            )))
+            pieces.append(
+                f", {i18n.t('uploading_progress').format(pct=pct)}"
+            )
+
         line = " ".join(pieces)
         is_selected = bool(msg_id) and msg_id in getattr(self, "selected_messages", ())
         position = self.main_window.settings.get("user_interface", {}).get(
@@ -7883,17 +7967,71 @@ class ConversationsPanel(wx.Panel):
                 break
 
     def update_media_upload_progress(self, upload_id: str, progress: float):
-        if any(msg.get("_local_id") == upload_id for msg in self._sorted_messages):
+        try:
+            progress = max(0.0, min(1.0, float(progress)))
+        except (TypeError, ValueError):
+            return
+        previous = self._media_upload_progress.get(upload_id, 0.0)
+        progress = max(previous, progress)
+        self._media_upload_progress[upload_id] = progress
+        self._media_transfer_started.add(upload_id)
+        for index, msg in enumerate(self._sorted_messages):
+            if msg.get("_local_id") != upload_id:
+                continue
             self._update_media_transfer_gauge(progress)
+            self.messages_list.SetItemText(index, self._render_message_line(msg))
+            self.messages_list.RefreshItem(index)
+            return
+        self._hide_media_transfer_gauge()
+
+    def _sync_pending_document_gauge(self, preferred_local_id: str = ""):
+        """Restore progress only for the selected active transfer."""
+        waiting = [
+            msg for msg in self._sorted_messages
+            if msg.get("_local_id") in self._media_transfer_started
+            and msg.get("_local_pending")
+        ]
+        if not waiting:
+            self._hide_media_transfer_gauge()
+            return
+        selected = self.messages_list.GetFirstSelected()
+        selected_id = ""
+        if 0 <= selected < len(self._sorted_messages):
+            selected_id = self._sorted_messages[selected].get("_local_id", "")
+        target_id = preferred_local_id or selected_id
+        target = next(
+            (msg for msg in waiting if msg.get("_local_id") == target_id),
+            None,
+        )
+        if target is None:
+            self._hide_media_transfer_gauge()
+            return
+        self._update_media_transfer_gauge(
+            self._media_upload_progress.get(target_id, 0.0)
+        )
+
+    def _sync_media_action_slot_visibility(self):
+        slot = getattr(self, "_media_action_slot", None)
+        if slot is None:
+            return
+        controls = (
+            getattr(self, "_media_transfer_gauge", None),
+            getattr(self, "_action_open_btn", None),
+            getattr(self, "_action_save_as_btn", None),
+            getattr(self, "_action_download_btn", None),
+        )
+        visible = any(control is not None and control.IsShown() for control in controls)
+        slot.Show(visible)
+        self.conversation_panel.Layout()
 
     def _show_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge is None:
             return
-        gauge.SetValue(0)
+        gauge.SetValue(1)
         gauge.Show()
+        self._media_action_slot.Show()
         self.conversation_panel.Layout()
-        gauge.Pulse()
 
     def _update_media_transfer_gauge(self, progress: float):
         gauge = getattr(self, "_media_transfer_gauge", None)
@@ -7902,6 +8040,7 @@ class ConversationsPanel(wx.Panel):
         gauge.SetValue(max(0, min(100, round(progress * 100))))
         if not gauge.IsShown():
             gauge.Show()
+            self._media_action_slot.Show()
             self.conversation_panel.Layout()
 
     def _hide_media_transfer_gauge(self):
@@ -7909,6 +8048,7 @@ class ConversationsPanel(wx.Panel):
         if gauge is None:
             return
         gauge.Hide()
+        self._sync_media_action_slot_visibility()
         self.conversation_panel.Layout()
 
     # ── Ctrl+Shift+D / Ctrl+Shift+P dispatch ────────────────────────────────
@@ -9279,7 +9419,17 @@ class ConversationsPanel(wx.Panel):
             self.conversation.get("remoteJid", "") if self.conversation else ""
         )
 
-        if for_everyone:
+        pending_local_id = str(msg.get("_local_id") or "")
+        cancelled_pending = bool(msg.get("_local_pending") and pending_local_id)
+        if cancelled_pending:
+            # There is no WhatsApp message ID to revoke yet. Whichever scope the
+            # dialog had selected, cancel the queued/in-flight upload and apply
+            # a local deletion; asking the API for "everyone" here can only fail.
+            self.main_window.message_queue.cancel(pending_local_id)
+            self._media_upload_progress.pop(pending_local_id, None)
+            self._media_transfer_started.discard(pending_local_id)
+            self._hide_media_transfer_gauge()
+        elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
             # correct serialized id and actually revoke it.
@@ -11175,6 +11325,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
+                self.messages_list.Select(last, True)
                 self.messages_list.EnsureVisible(last)
             def _update_upload_progress(progress, local_id=local_id):
                 wx.CallAfter(self.update_media_upload_progress, local_id, progress)
@@ -11203,6 +11354,9 @@ class ConversationsPanel(wx.Panel):
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
+        # Attachment-panel teardown performs its own layout pass. Reassert the
+        # transfer UI afterwards so that pass cannot swallow the new gauge.
+        self._sync_pending_document_gauge()
         self.main_window._schedule_set_chats()
         self.message_field.SetFocus()
 

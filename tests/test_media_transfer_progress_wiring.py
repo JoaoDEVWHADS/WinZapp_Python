@@ -18,14 +18,13 @@ def _method_source(path: Path, class_name: str, method_name: str) -> str:
     raise AssertionError(f"{class_name}.{method_name} not found in {path}")
 
 
-def test_selection_cleanup_does_not_hide_active_transfer_gauge():
+def test_selection_cleanup_hides_previous_messages_transfer_gauge():
     src = _method_source(
         ROOT / "client" / "ui" / "conversations.py",
         "ConversationsPanel",
         "_hide_all_media_controls",
     )
-    assert "_media_transfer_gauge" not in src
-    assert "_hide_media_transfer_gauge" not in src
+    assert "self._hide_media_transfer_gauge()" in src
 
 
 def test_leaving_conversation_explicitly_hides_transfer_gauge():

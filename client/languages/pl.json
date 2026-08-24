@@ -148,6 +148,7 @@
     "all_files": "Wszystkie pliki",
     "audio_convert_failed": "Nie udało się przekonwertować audio. Brak FFmpeg lub jest on niedostępny w tym systemie.",
     "downloading_progress": "pobieranie, ukończono {pct}%",
+    "uploading_progress": "wysyłanie, ukończono {pct}%",
     "discard_voice_message": "Odrzuć wiadomość głosową",
     "pause_recording": "Wstrzymaj nagrywanie",
     "resume_recording": "Wznów nagrywanie",
