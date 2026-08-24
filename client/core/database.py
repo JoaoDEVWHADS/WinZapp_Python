@@ -598,47 +598,47 @@ class DatabaseManager:
 
     @staticmethod
     def _jid_variants(remote_jid: str) -> list[str]:
-        """*remote_jid* plus its @c.us/@s.whatsapp.net counterpart.
-
-        Everything is SUPPOSED to be normalized to @s.whatsapp.net before it
-        ever reaches the database (see main.py's extensive JID-normalization
-        docs — "the single most common bug source in this codebase"), so
-        under correct operation this is a one-element list and a no-op. It
-        exists as a defensive second line: if a message ever got inserted
-        under the legacy @c.us form by some path that skipped
-        normalization, a plain single-JID lookup would silently never find
-        it again (not an error — just messages that quietly never load).
-        Querying both forms costs nothing extra when only one is ever
-        actually populated (SQLite's `IN` short-circuits false-y branches
-        the same as `=`), and closes that failure mode either way.
-        """
+        """*remote_jid* plus its @c.us/@s.whatsapp.net counterpart."""
         if remote_jid.endswith("@s.whatsapp.net"):
             return [remote_jid, remote_jid.replace("@s.whatsapp.net", "@c.us")]
         if remote_jid.endswith("@c.us"):
             return [remote_jid, remote_jid.replace("@c.us", "@s.whatsapp.net")]
         return [remote_jid]
 
+    async def _resolve_all_jid_aliases(self, remote_jid: str) -> list[str]:
+        """Return remote_jid and all known aliases (@c.us, @s.whatsapp.net, and LID mapping)."""
+        variants = list(self._jid_variants(remote_jid))
+        try:
+            conn = await self._ensure_conn()
+            if remote_jid.endswith("@lid"):
+                cur = await conn.execute(
+                    "SELECT phone_jid FROM lid_mappings WHERE lid_jid = ?", (remote_jid,)
+                )
+                row = await cur.fetchone()
+                if row and row["phone_jid"]:
+                    for v in self._jid_variants(row["phone_jid"]):
+                        if v not in variants:
+                            variants.append(v)
+            else:
+                norm = remote_jid.replace("@c.us", "@s.whatsapp.net")
+                cur = await conn.execute(
+                    "SELECT lid_jid FROM lid_mappings WHERE phone_jid = ? OR phone_jid = ?",
+                    (norm, remote_jid),
+                )
+                rows = await cur.fetchall()
+                for r in rows:
+                    if r["lid_jid"] and r["lid_jid"] not in variants:
+                        variants.append(r["lid_jid"])
+        except Exception:
+            pass
+        return variants
+
     async def get_messages(
         self, remote_jid: str, limit: int = 200, offset: int = 0
     ) -> list[dict]:
-        """Return message dicts for a chat, newest-first.
-
-        Parameters
-        ----------
-        remote_jid : str
-            Chat JID.
-        limit : int
-            Maximum records to return (default 200).
-        offset : int
-            Skip this many records (for pagination).
-
-        Returns
-        -------
-        list[dict]
-            Normalized message dicts (same shape as current messages.dat).
-        """
+        """Return message dicts for a chat, newest-first."""
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
             f"""SELECT m.message_json FROM messages AS m
@@ -665,7 +665,7 @@ class DatabaseManager:
     ) -> list[dict]:
         """Return message dicts oldest-first (for initial chat load)."""
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
             f"""SELECT m.message_json FROM messages AS m
@@ -690,7 +690,7 @@ class DatabaseManager:
     async def get_message_count(self, remote_jid: str) -> int:
         """Return total message count for a chat."""
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
             f"""SELECT COUNT(*) AS cnt FROM messages AS m
@@ -718,7 +718,7 @@ class DatabaseManager:
         if not remote_jid or not message_id:
             return None
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
             f"""SELECT m.message_json FROM messages AS m
@@ -762,7 +762,7 @@ class DatabaseManager:
         if not remote_jid or not ids:
             return set()
         conn = await self._ensure_conn()
-        jids = self._jid_variants(remote_jid)
+        jids = await self._resolve_all_jid_aliases(remote_jid)
         deleted = set()
         for start in range(0, len(ids), 400):
             chunk = ids[start:start + 400]
