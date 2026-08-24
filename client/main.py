@@ -13297,6 +13297,7 @@ class MainWindow(wx.Frame):
     # burst of automation traffic on top of the media phase.
     _BACKFILL_WORKERS     = 3
     _BACKFILL_CHUNK       = 60     # chats re-queried per pass
+    _OLDER_REQUESTS_PER_PASS = 10  # bounded phone-history requests per pass
 
     @classmethod
     def _initial_backfill_delay(cls, short_chats_pending: bool) -> int:
@@ -13966,7 +13967,7 @@ class MainWindow(wx.Frame):
                 # dozens of chats stuck at exactly one message). Ask the phone
                 # for older history, a few chats per pass, and keep every such
                 # chat queued while its asynchronous reply is pending.
-                phone_requests_left = 2
+                phone_requests_left = self._OLDER_REQUESTS_PER_PASS
                 for jid, was in counts_before.items():
                     now = self._local_record_count(jid)
                     if now >= self.history_page_target() or now > was:
