@@ -12894,6 +12894,11 @@ class MainWindow(wx.Frame):
 
     def scan_all_cached_messages_for_mentions(self):
         """Scan all cached messages in self.chats, find all unresolved LIDs/phones, and resolve them."""
+        with self._contact_resolution_lock:
+            if getattr(self, "_mentions_scan_running", False):
+                return
+            self._mentions_scan_running = True
+
         def _scan():
             # prepare_sync() starts this worker before start_sync() is launched.
             # Do not let optional contact-name lookups compete with list-chats,
@@ -13018,7 +13023,14 @@ class MainWindow(wx.Frame):
             
             logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
 
-        threading.Thread(target=_scan, daemon=True).start()
+        def _run_once():
+            try:
+                _scan()
+            finally:
+                with self._contact_resolution_lock:
+                    self._mentions_scan_running = False
+
+        threading.Thread(target=_run_once, daemon=True, name="mentions-scan").start()
 
     def _find_alt_jid_from_messages(self, chat):
         """
