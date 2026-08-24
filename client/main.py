@@ -48,7 +48,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -20419,6 +20419,70 @@ class MainWindow(wx.Frame):
                 arch_lst.Select(target_idx)
                 arch_lst.EnsureVisible(target_idx)
 
+    def _apply_chat_rows_incrementally(self, lst, old_jids: list, new_jids: list,
+                                       new_item_texts: list, focused_jid) -> bool:
+        """Move/insert/delete individual rows of *lst* instead of rebuilding it.
+
+        Returns True when the control now matches *new_jids* exactly; False
+        when the change was too large to be worth it (or a native call
+        refused), in which case the caller falls back to the full rebuild.
+
+        Keyboard focus follows the chat it was on, not the row index — the
+        whole point of the incremental path is that a chat jumping to the top
+        must not drag the user's cursor with it, and must not reset focus to
+        row 0 the way DeleteAllItems() does.
+        """
+        ops = plan_row_updates(old_jids, new_jids)
+        if not ops:
+            # None  -> too churny, rebuild.  []  -> nothing to do, but the
+            # caller only reaches here when the JID lists actually differ, so
+            # an empty plan means the two disagreed about identity; rebuild.
+            return False
+
+        had_focus = (wx.Window.FindFocus() is lst)
+        lst.Freeze()
+        try:
+            for kind, idx in ops:
+                if kind == "delete":
+                    lst.DeleteItem(idx)
+                else:
+                    lst.InsertItem(idx, new_item_texts[idx])
+            # Rows that merely shifted keep their old text (a preview, unread
+            # badge or presence label may have changed on any of them), so
+            # resync every row the same way the SetItem path does.
+            for idx, new_text in enumerate(new_item_texts):
+                if lst.GetItemText(idx, 0) != new_text:
+                    lst.SetItem(idx, 0, new_text)
+        except Exception:
+            # Same defence as the SetItem path: a native call rejected an
+            # index we believed valid. The control is now in an unknown state,
+            # so let the caller rebuild it from scratch rather than leaving it
+            # half-updated.
+            logging.exception("[add_chats_to_ui] incremental row update failed; rebuilding")
+            return False
+        finally:
+            lst.Thaw()
+
+        if lst.GetItemCount() != len(new_jids):
+            logging.warning(
+                "[add_chats_to_ui] incremental update left %s rows for %s chats; rebuilding",
+                lst.GetItemCount(), len(new_jids),
+            )
+            return False
+
+        if focused_jid and focused_jid in new_jids:
+            target_idx = new_jids.index(focused_jid)
+            try:
+                if lst.GetFocusedItem() != target_idx:
+                    lst.Focus(target_idx)
+                if not lst.IsSelected(target_idx):
+                    lst.Select(target_idx)
+                if had_focus:
+                    lst.EnsureVisible(target_idx)
+            except Exception:
+                logging.exception("[add_chats_to_ui] restoring focus after incremental update failed")
+        return True
+
     def add_chats_to_ui(self):
         """Rebuild the conversations list from the current chats data.
 
@@ -20567,6 +20631,30 @@ class MainWindow(wx.Frame):
             self.conversations_panel.chat_names = displayed_names
             # _displayed_jids stays the same (JIDs didn't change)
             # Refresh archived panel via the same SetItem logic
+            if hasattr(self, "archived_conversations_panel"):
+                self._refresh_archived_chats_in_ui(arch_focused_jid)
+            return
+
+        # ── Incremental path: the same list with a few rows moved/added/gone ──
+        # A new message (or a reaction, or a read receipt) reorders the list —
+        # almost always by moving one chat up — which misses the SetItem path
+        # above and used to fall straight through to the full rebuild below.
+        # That rebuild is a DeleteAllItems() plus one Append() per row, so the
+        # cost of showing a new preview scaled with how many chats the account
+        # has, and screen readers were handed an entirely new list each time.
+        # plan_row_updates() turns "one chat moved" into two native calls
+        # regardless of list length; anything it considers too churny returns
+        # None and rebuilds as before.
+        if (
+            _displayed_jids is not None
+            and lst.GetItemCount() == len(_displayed_jids)
+            and self._apply_chat_rows_incrementally(
+                lst, _displayed_jids, new_jids, new_item_texts, focused_jid
+            )
+        ):
+            self.conversations_panel.chats_list = displayed_chats
+            self.conversations_panel.chat_names = displayed_names
+            self.conversations_panel._displayed_jids = new_jids
             if hasattr(self, "archived_conversations_panel"):
                 self._refresh_archived_chats_in_ui(arch_focused_jid)
             return
