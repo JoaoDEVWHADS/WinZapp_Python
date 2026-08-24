@@ -194,7 +194,23 @@ class TestAgainstRealCmd:
         bat = tmp_path / f"t_{encoding}.bat"
         with open(bat, "w", encoding=encoding, newline="\r\n") as f:
             f.write(f'@echo off\r\necho hello > "{proof}"\r\n')
-        subprocess.run(["cmd.exe", "/c", str(bat)], capture_output=True)
+        # _oem_encoding() answers for the SYSTEM default OEM code page
+        # (GetOEMCP()). A plain subprocess.run() with no creation flags
+        # inherits the calling process's (pytest's) own console/code page —
+        # which matches GetOEMCP() on an ordinary machine, since nothing
+        # changed it, but can differ on a CI runner whose parent console was
+        # already switched to something else (observed on GitHub Actions'
+        # Windows runner). CREATE_NO_WINDOW forces a fresh hidden console
+        # using the system default instead, matching what production
+        # actually gets (see the win32 install-launch branch of
+        # updater.py — deliberately CREATE_NO_WINDOW only, no
+        # DETACHED_PROCESS, which would remove the console entirely and
+        # flip decoding to the ANSI code page instead; confirmed empirically
+        # while diagnosing this same test).
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["cmd.exe", "/c", str(bat)], capture_output=True, creationflags=flags
+        )
         return proof.is_file()
 
     def test_utf8_sends_the_command_to_a_path_that_does_not_exist(self, tmp_path):
