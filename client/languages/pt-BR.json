@@ -353,6 +353,8 @@
     "select_group_title": "Selecionar grupo",
     "add_member_success": "Membros adicionados com sucesso.",
     "add_member_error": "Erro ao adicionar membros: {error}",
+    "add_member_privacy_invite_sent": "{names} não pôde(puderam) ser adicionado(s) diretamente por causa da configuração de privacidade — o WhatsApp enviou um convite em vez disso.",
+    "add_member_could_not_add": "Não foi possível adicionar {names} ao grupo.",
     "add_member_custom_number_label": "Ou digite um número de telefone:",
     "add_member_custom_number_button": "Adicionar número",
     "no_groups_available": "Nenhum grupo disponível.",

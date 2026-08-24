@@ -17,6 +17,20 @@ import pytest
 from main import MainWindow
 
 
+class _I18n:
+    """Just enough to render add_group_members()'s per-participant messages
+    — real key lookup would need a full main_window/settings chain this
+    module has no other use for."""
+    _TEMPLATES = {
+        "add_member_privacy_invite_sent":
+            "{names} could not be added directly; an invite was sent instead.",
+        "add_member_could_not_add": "Could not add {names}.",
+    }
+
+    def t(self, key):
+        return self._TEMPLATES.get(key, key)
+
+
 class _Stub:
     _group_participant_action = MainWindow._group_participant_action
     add_group_members     = MainWindow.add_group_members
@@ -30,6 +44,7 @@ class _Stub:
         self.wpp_server = "http://127.0.0.1"
         self.wpp_port = 6300
         self.token = "test-token"
+        self.i18n = _I18n()
 
 
 def _fake_post_ok(url, json=None, headers=None, timeout=None, **kw):
@@ -144,6 +159,114 @@ class TestAddGroupMembers:
 
         assert ok is False
         assert "403" in err
+
+
+def _fake_post_json(result_groups):
+    """A 201 'success' response carrying wa-js's per-participant result —
+    the shape add-participant-group actually returns (see
+    add_group_members()'s own docstring)."""
+    class _Resp:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"status": "success", "response": {"result": result_groups}}
+
+    def _post(url, json=None, headers=None, timeout=None, **kw):
+        return _Resp()
+    return _post
+
+
+class TestAddGroupMembersPerParticipantResult:
+    """WPPConnect's addParticipant controller answers HTTP 201 'success'
+    unconditionally, even when WhatsApp itself never added the participant —
+    reported live: a target whose privacy settings required an invite came
+    back as an ordinary success, and was never actually in the group. The
+    real per-participant outcome is wa-js's `code` field buried in
+    response.result, which add_group_members() must now inspect instead of
+    trusting the HTTP status alone."""
+
+    def test_code_200_is_a_real_success(self, monkeypatch):
+        post = _fake_post_json([{"5511999999999@c.us": {
+            "code": 200, "message": "", "wid": "5511999999999@c.us",
+            "invite_code": None, "invite_code_exp": None,
+        }}])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is True
+        assert err == ""
+
+    def test_code_409_already_a_participant_counts_as_success(self, monkeypatch):
+        post = _fake_post_json([{"5511999999999@c.us": {
+            "code": 409, "message": "already in group", "wid": "5511999999999@c.us",
+            "invite_code": None, "invite_code_exp": None,
+        }}])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is True
+
+    def test_code_403_with_invite_code_is_not_reported_as_a_plain_success(self, monkeypatch):
+        """The exact bug: a privacy-restricted target used to report success
+        even though WhatsApp sent an invite instead of adding them."""
+        post = _fake_post_json([{"5511999999999@c.us": {
+            "code": 403, "message": "", "wid": "5511999999999@c.us",
+            "invite_code": "abc123", "invite_code_exp": 1700000000,
+        }}])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is False
+        assert "5511999999999" in err
+
+    def test_failure_code_with_no_invite_code_is_still_reported(self, monkeypatch):
+        post = _fake_post_json([{"5511999999999@c.us": {
+            "code": 408, "message": "blocked", "wid": "5511999999999@c.us",
+            "invite_code": None, "invite_code_exp": None,
+        }}])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is False
+        assert "5511999999999" in err
+
+    def test_mixed_results_report_only_the_one_that_actually_failed(self, monkeypatch):
+        post = _fake_post_json([{
+            "5511999999999@c.us": {"code": 200, "message": "", "wid": "5511999999999@c.us",
+                                    "invite_code": None, "invite_code_exp": None},
+            "5511888888888@c.us": {"code": 403, "message": "", "wid": "5511888888888@c.us",
+                                    "invite_code": "xyz", "invite_code_exp": 1},
+        }])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members(
+            "123-456@g.us", ["5511999999999", "5511888888888"])
+
+        assert ok is False
+        assert "5511888888888" in err
+        assert "5511999999999" not in err
+
+    def test_no_result_field_falls_back_to_plain_http_success(self, monkeypatch):
+        """A response that doesn't carry this field (older/other WPPConnect
+        builds) must not regress into reporting every add as a failure."""
+        post = _fake_post_json([])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is True
+        assert err == ""
 
 
 class TestGroupSubjectAndDescription:

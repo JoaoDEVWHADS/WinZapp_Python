@@ -4738,6 +4738,7 @@ class MainWindow(wx.Frame):
         # arrives without the new name (on_historical_message deliberately
         # does not — see _apply_group_subject_change).
         self._apply_group_subject_change(remote_jid, chat, msg, live=True)
+        self._refresh_mention_cache_on_membership_change(remote_jid, msg)
 
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
@@ -11313,6 +11314,42 @@ class MainWindow(wx.Frame):
         if chat.get("name") == new_name:
             return
         self._store_group_subject(remote_jid, chat, new_name)
+
+    # Notification subtypes that change who is actually in the group — as
+    # opposed to e.g. "promote"/"demote" (admin status only) or "subject"
+    # (name only), neither of which add or remove anyone from the mention list.
+    _GROUP_MEMBERSHIP_NOTIF_SUBTYPES = frozenset({"add", "remove", "invite", "leave"})
+
+    def _refresh_mention_cache_on_membership_change(self, remote_jid: str, msg: dict) -> None:
+        """Re-fetch @mention participants when a live add/remove notification
+        arrives for the group currently open.
+
+        _fetch_group_participants() (conversations.py) only ever runs when a
+        group conversation is *opened* — nothing re-ran it while one stayed
+        open, so a member who joined mid-conversation was invisible to @
+        suggestions until the user closed and reopened the chat (or WinZapp
+        happened to re-sync). The groupNotification that announces the join
+        arrives over the same live socket messages already flow through, so
+        reacting to it here catches the cache up within one HTTP round trip
+        instead of leaving it stale for the rest of the session.
+        """
+        if not remote_jid.endswith("@g.us"):
+            return
+        if msg.get("messageType") != "groupNotification":
+            return
+        notif = (msg.get("message") or {}).get("groupNotification") or {}
+        if notif.get("subtype") not in self._GROUP_MEMBERSHIP_NOTIF_SUBTYPES:
+            return
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        if self._normalize_jid(cp.conversation.get("remoteJid", "")) != self._normalize_jid(remote_jid):
+            return
+        threading.Thread(
+            target=cp._fetch_group_participants,
+            args=(remote_jid,),
+            daemon=True,
+        ).start()
 
     def _resolve_subject_change_async(self, jid: str, chat: dict, notif: dict) -> None:
         """Fetch the group's current subject after a rename notification that
@@ -18954,6 +18991,16 @@ class MainWindow(wx.Frame):
         """
         Add one or more participants to a group.
         Returns (True, "") on success, (False, error_message) on failure.
+
+        HTTP 201 alone is not proof anyone was actually added: WPPConnect's
+        addParticipant controller answers "success" unconditionally, and the
+        one signal that reflects what WhatsApp itself did is buried in
+        response.result — a dict per participant carrying a wa-js `code`
+        (200/409 = really in the group now, 403 = the target's privacy
+        settings blocked a direct add and WhatsApp sent an invite instead,
+        anything else = not added and no invite either). Reported live: a
+        403 case surfaced as an ordinary success dialog, and the "member" was
+        never in the group's participant list at all.
         """
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/add-participant-group"
         headers = {
@@ -18972,9 +19019,40 @@ class MainWindow(wx.Frame):
         }
         try:
             r = api_post(url, json=payload, headers=headers, timeout=15)
-            if r.status_code in (200, 201):
+            if r.status_code not in (200, 201):
+                return False, f"HTTP {r.status_code}: {r.text[:200]}"
+            try:
+                result_groups = r.json().get("response", {}).get("result", [])
+            except Exception:
+                result_groups = []
+            invited, failed = [], []
+            for group_result in result_groups:
+                if not isinstance(group_result, dict):
+                    continue
+                for jid, info in group_result.items():
+                    if not isinstance(info, dict):
+                        continue
+                    try:
+                        code = int(info.get("code"))
+                    except (TypeError, ValueError):
+                        code = None
+                    if code in (200, 409):
+                        continue  # genuinely in the group now (or already was)
+                    display = jid.split("@")[0]
+                    if code == 403 and info.get("invite_code"):
+                        invited.append(display)
+                    else:
+                        failed.append(display)
+            if not invited and not failed:
                 return True, ""
-            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+            parts = []
+            if invited:
+                parts.append(self.i18n.t("add_member_privacy_invite_sent").format(
+                    names=", ".join(invited)))
+            if failed:
+                parts.append(self.i18n.t("add_member_could_not_add").format(
+                    names=", ".join(failed)))
+            return False, " ".join(parts)
         except Exception as exc:
             return False, str(exc)
 
