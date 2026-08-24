@@ -1164,6 +1164,52 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("group_admins_only")
         return f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {name}"
 
+    def _apply_composer_permissions(self, jid: str, conversation: dict):
+        """Enable/disable the composer controls according to what *jid* allows.
+
+        Three cases: a channel (nothing can be posted at all), a group with
+        "only admins can send messages" on where the user isn't an admin, and
+        everything else.  Kept out of navigate_to_conversation() so it can be
+        tested without a live wx panel — the emoji button used to be the one
+        control this switch forgot, staying clickable in a group the user
+        cannot post in and inserting text into a read-only field.
+        """
+        is_channel = jid.endswith("@newsletter")
+        admins_only_group = (
+            jid.endswith("@g.us")
+            and self.main_window._is_group_send_restricted(conversation)
+        )
+        if is_channel:
+            self.message_field.Enable()
+            self.message_field.SetEditable(True)
+            self.message_field.Disable()
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self._emoji_btn.Disable()
+        elif admins_only_group:
+            # Keep the field enabled/focusable (unlike the channel case
+            # above) so it stays reachable via Tab/the Alt+D accelerator and
+            # NVDA can announce its read-only state — only actual editing is
+            # blocked. Sending/attaching/recording would just be rejected by
+            # WhatsApp Web anyway, so those stay disabled like the channel case.
+            # Disable() here instead of SetEditable(False) drops the field out
+            # of the tab order entirely, which leaves a screen-reader user in
+            # a group they cannot post in with nothing announcing why.
+            self.message_field.Enable()
+            self.message_field.SetEditable(False)
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self._emoji_btn.Disable()
+        else:
+            self.message_field.Enable()
+            self.message_field.SetEditable(True)
+            self.send_message_btn.Enable()
+            self.record_voice_message_btn.Enable()
+            self._add_attachment_btn.Enable()
+            self._emoji_btn.Enable()
+
     def update_conversation_name(self, jid: str, new_name: str):
         """Apply a group rename to the conversation currently on screen.
 
@@ -1282,35 +1328,7 @@ class ConversationsPanel(wx.Panel):
             self._conversation_note_text(self.conversation_name, is_group)
         )
 
-        is_channel        = jid.endswith("@newsletter")
-        admins_only_group = is_group and self.main_window._is_group_send_restricted(conversation)
-        if is_channel:
-            self.message_field.Enable()
-            self.message_field.SetEditable(True)
-            self.message_field.Disable()
-            self.send_message_btn.Disable()
-            self.record_voice_message_btn.Disable()
-            self._add_attachment_btn.Disable()
-        elif admins_only_group:
-            # Keep the field enabled/focusable (unlike the channel case
-            # above) so it stays reachable via Tab/the Alt+D accelerator and
-            # NVDA can announce its read-only state — only actual editing is
-            # blocked. Sending/attaching/recording would just be rejected by
-            # WhatsApp Web anyway, so those stay disabled like the channel case.
-            # Disable() here instead of SetEditable(False) drops the field out
-            # of the tab order entirely, which leaves a screen-reader user in
-            # a group they cannot post in with nothing announcing why.
-            self.message_field.Enable()
-            self.message_field.SetEditable(False)
-            self.send_message_btn.Disable()
-            self.record_voice_message_btn.Disable()
-            self._add_attachment_btn.Disable()
-        else:
-            self.message_field.Enable()
-            self.message_field.SetEditable(True)
-            self.send_message_btn.Enable()
-            self.record_voice_message_btn.Enable()
-            self._add_attachment_btn.Enable()
+        self._apply_composer_permissions(jid, conversation)
         self.message_label.SetLabel(
             self._message_label_text(jid, conversation, self.conversation_name)
         )
