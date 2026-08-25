@@ -2421,13 +2421,21 @@ export async function requestOlderMessages(req: Request, res: Response) {
               /* handled below */
             }
           }
-          if (!chatModel?.id) {
-            out.error = 'chat model unavailable for on-demand history request';
-            return out;
-          }
-          out.requestPayloadMode = 'chatId';
+          // Prefer the resolved chat model's own canonical id when available:
+          // it may carry a different JID form (@lid vs @c.us) than the wid
+          // just built above, and sendPeerDataOperationRequest needs whatever
+          // form WhatsApp Web itself already tracks this chat under. But a
+          // chat WAWebCollections.Chat hasn't hydrated yet must still get its
+          // request sent with the raw wid rather than being refused outright
+          // — @lid-only chats routinely bridge into this collection late (see
+          // this file's own comments elsewhere on @lid/@c.us mismatches), and
+          // silently never requesting their older history is worse than
+          // sending with the same wid this endpoint always used before the
+          // chat-model lookup existed.
+          const requestChatId = chatModel?.id ?? wid;
+          out.requestPayloadMode = chatModel?.id ? 'chatModelId' : 'wid';
           await sender.sendPeerDataOperationRequest(kind, {
-            chatId: chatModel.id,
+            chatId: requestChatId,
           });
           out.requested = true;
         } catch (e: any) {

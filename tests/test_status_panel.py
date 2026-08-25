@@ -221,6 +221,7 @@ class _Stub:
     _on_status_contact_activated = StatusPanel._on_status_contact_activated
     _on_status_list_key_down     = StatusPanel._on_status_list_key_down
     _use_status_media_viewer_dialog = StatusPanel._use_status_media_viewer_dialog
+    _status_to_media_viewer_item = StatusPanel._status_to_media_viewer_item
     _is_current_status_playable  = StatusPanel._is_current_status_playable
     _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
     _resolve_name                = StatusPanel._resolve_name
@@ -1073,6 +1074,56 @@ class TestStatusMediaSaveInfoCoversEveryMediaType:
     def test_unsupported_type_returns_none(self):
         assert _status_media_save_info("documentMessage", {}, self.i18n) is None
         assert _status_media_save_info("conversation", {}, self.i18n) is None
+
+    def test_jpeg_is_canonicalized_to_jpg_not_a_bare_mimetype_split(self):
+        """Regression: a naive mimetype.split("/")[-1] gives ".jpeg" for
+        image/jpeg — the far more common case than "image/jpg" ever
+        actually appearing on the wire. _status_to_media_viewer_item()'s
+        own canonicalizing table already got this right; this function
+        used to disagree with it for the exact same status."""
+        msg_obj = {"imageMessage": {"mimetype": "image/jpeg"}}
+        ext, _wildcard = _status_media_save_info("imageMessage", msg_obj, self.i18n)
+        assert ext == ".jpg"
+
+
+class TestStatusMediaSaveInfoAgreesWithTheMediaViewer:
+    """Regression: the classic "Salvar mídia" button/shortcut
+    (_status_media_save_info(), reachable again once Settings > Interface
+    do usuário > "Mostrar os status em player separado" can be unchecked)
+    and the unified MediaViewerDialog's own Save As
+    (_status_to_media_viewer_item()) used to compute the file extension
+    with two independent implementations — the same image/jpeg status photo
+    saved as status.jpeg from one button and status.jpg from the other.
+    Both now share _status_media_extension()."""
+
+    i18n = _FakeI18n()
+
+    def _stub(self):
+        return _Stub(contact_names={})
+
+    @pytest.mark.parametrize(
+        "msg_type, mimetype",
+        [
+            ("imageMessage", "image/jpeg"),
+            ("imageMessage", "image/png"),
+            ("videoMessage", "video/webm"),
+            ("audioMessage", "audio/mp4"),
+            ("audioMessage", "audio/ogg; codecs=opus"),
+        ],
+    )
+    def test_both_entry_points_pick_the_same_extension(self, msg_type, mimetype):
+        msg_obj = {msg_type: {"mimetype": mimetype}}
+        ext_classic, _wildcard = _status_media_save_info(msg_type, msg_obj, self.i18n)
+
+        stub = self._stub()
+        status = {
+            "messageType": msg_type,
+            "message": msg_obj,
+            "key": {"id": "s1", "fromMe": False},
+        }
+        item = stub._status_to_media_viewer_item({"name": "Ana", "jid": "a@s.whatsapp.net"}, status)
+
+        assert item["extension"] == ext_classic
 
 
 class TestResolveNamePrefersSavedContactNameOverPushName:

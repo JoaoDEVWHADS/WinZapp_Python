@@ -154,6 +154,63 @@ class TestAScanWithNothingToLearn:
         assert stub.refreshes == 0
 
 
+class TestGroupSenderLidsWithoutMentions:
+    """Regression: a message from a group participant whose @lid can't be
+    bridged (no remoteJidAlt on the message — the common case for group
+    messages, which carry no such field) used to never reach the resolver
+    unless that same participant was ALSO @mentioned by someone, leaving
+    them "Participante sem nome" for the life of the chat.
+    scan_all_cached_messages_for_mentions() also collects the SENDER of
+    every message (key.participant), capped at 150, and feeds unresolved
+    ones into the same resolve_lid_jids_via_api() batch as mentions."""
+
+    def _stub_needing_resolution(self, chats, unresolved_lids):
+        stub = _make(chats)
+        stub._needs_sender_resolution = lambda jid, _u=unresolved_lids: jid in _u
+        return stub
+
+    def test_an_unresolved_sender_with_no_mention_still_gets_queued(self):
+        sender_lid = "999888777666555@lid"
+        chat = {
+            "remoteJid": "group@g.us",
+            "messages": {"messages": {"records": [
+                {"key": {"id": "m1", "remoteJid": "group@g.us", "participant": sender_lid}},
+            ]}},
+        }
+        stub = self._stub_needing_resolution({"group@g.us": chat}, {sender_lid})
+
+        stub.scan_all_cached_messages_for_mentions()
+
+        assert stub.resolved_lid_batches == [[sender_lid]]
+
+    def test_the_lookup_is_capped_at_150_senders(self):
+        senders = [f"{i:015d}@lid" for i in range(200)]
+        records = [
+            {"key": {"id": f"m{i}", "remoteJid": "group@g.us", "participant": s}}
+            for i, s in enumerate(senders)
+        ]
+        chat = {"remoteJid": "group@g.us", "messages": {"messages": {"records": records}}}
+        stub = self._stub_needing_resolution({"group@g.us": chat}, set(senders))
+
+        stub.scan_all_cached_messages_for_mentions()
+
+        assert len(stub.resolved_lid_batches[0]) == 150
+
+    def test_a_sender_that_resolves_via_pushname_pass_is_never_queued(self):
+        sender_lid = "999888777666555@lid"
+        chat = {
+            "remoteJid": "group@g.us",
+            "messages": {"messages": {"records": [
+                {"key": {"id": "m1", "remoteJid": "group@g.us", "participant": sender_lid}},
+            ]}},
+        }
+        stub = self._stub_needing_resolution({"group@g.us": chat}, unresolved_lids=set())
+
+        stub.scan_all_cached_messages_for_mentions()
+
+        assert stub.resolved_lid_batches == []
+
+
 class TestTheEmptyAccount:
     def test_no_chats_at_all_is_not_an_error(self):
         stub = _make({})

@@ -114,6 +114,35 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
     return i18n.t("notif_unsupported")
 
 
+# Shared by both status media-save entry points — the classic "Salvar
+# mídia" button/shortcut (_status_media_save_info(), used by
+# StatusPanel._on_save_status_media() when Settings > Interface do
+# usuário > "Mostrar os status em player separado" is unchecked) and the
+# unified MediaViewerDialog's own Save As (_status_to_media_viewer_item()).
+# Both used to compute the extension independently — a bare
+# mimetype.split("/")[-1] here vs. a canonicalizing table there — so the
+# very same image/jpeg status photo saved as status.jpeg from one button
+# and status.jpg from the other. One table now backs both.
+_STATUS_MIME_SUBTYPE_TO_EXT = {
+    "jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp",
+    "gif": ".gif", "mp4": ".mp4", "webm": ".webm",
+    "ogg": ".ogg", "opus": ".opus", "mpeg": ".mp3", "mp3": ".mp3",
+    "mp4a-latm": ".m4a", "x-m4a": ".m4a", "aac": ".aac",
+    "wav": ".wav", "x-wav": ".wav", "flac": ".flac",
+}
+
+
+def _status_media_extension(mimetype: str, default_ext: str) -> str:
+    """Canonical file extension for a status media mimetype, falling back
+    to *default_ext* (with the leading dot) when the mimetype is missing
+    or its subtype isn't in the table above."""
+    mime = str(mimetype or "").split(";")[0].strip().lower()
+    if "/" not in mime:
+        return default_ext
+    subtype = mime.split("/", 1)[1]
+    return _STATUS_MIME_SUBTYPE_TO_EXT.get(subtype, "." + subtype.split("+")[0])
+
+
 def _status_media_save_info(msg_type: str, msg_obj: dict, i18n):
     """Returns (ext, wildcard) for the "Save media as..." dialog, or None
     if *msg_type* isn't a savable media status. Shared by
@@ -121,15 +150,15 @@ def _status_media_save_info(msg_type: str, msg_obj: dict, i18n):
     for each media type lives in one place."""
     if msg_type == "imageMessage":
         mimetype = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
-        ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "jpg")
+        ext = _status_media_extension(mimetype, ".jpg")
         return ext, f"{i18n.t('photo')} (*{ext})|*{ext}|*.*|*.*"
     if msg_type == "videoMessage":
         mimetype = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
-        ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "mp4")
+        ext = _status_media_extension(mimetype, ".mp4")
         return ext, f"{i18n.t('video')} (*{ext})|*{ext}|*.*|*.*"
     if msg_type == "audioMessage":
         mimetype = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
-        ext = "." + (mimetype.split("/")[-1].split(";")[0] if "/" in mimetype else "ogg")
+        ext = _status_media_extension(mimetype, ".ogg")
         return ext, f"{i18n.t('message_type_audio')} (*{ext})|*{ext}|*.*|*.*"
     return None
 
@@ -1498,18 +1527,7 @@ class StatusPanel(wx.Panel):
         if msg_type in type_map:
             kind, default_ext, label_key = type_map[msg_type]
             inner = msg_obj.get(msg_type) or {}
-            mime = str(inner.get("mimetype") or "").split(";")[0].strip().lower()
-            ext = default_ext
-            if "/" in mime:
-                subtype = mime.split("/", 1)[1]
-                canonical = {
-                    "jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp",
-                    "gif": ".gif", "mp4": ".mp4", "webm": ".webm",
-                    "ogg": ".ogg", "opus": ".opus", "mpeg": ".mp3", "mp3": ".mp3",
-                    "mp4a-latm": ".m4a", "x-m4a": ".m4a", "aac": ".aac",
-                    "wav": ".wav", "x-wav": ".wav", "flac": ".flac",
-                }
-                ext = canonical.get(subtype, "." + subtype.split("+")[0])
+            ext = _status_media_extension(inner.get("mimetype"), default_ext)
             caption = str(inner.get("caption") or "")
 
             def _loader(st=status):
