@@ -220,6 +220,7 @@ class _Stub:
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
     _on_status_contact_activated = StatusPanel._on_status_contact_activated
     _on_status_list_key_down     = StatusPanel._on_status_list_key_down
+    _use_status_media_viewer_dialog = StatusPanel._use_status_media_viewer_dialog
     _is_current_status_playable  = StatusPanel._is_current_status_playable
     _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
     _resolve_name                = StatusPanel._resolve_name
@@ -754,6 +755,132 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
         stub._on_status_list_key_down(evt)
 
         assert evt.skip_calls == 1
+
+
+def _classic_stub(**kwargs):
+    kwargs.setdefault(
+        "settings", {"user_interface": {"status_media_viewer_dialog": False}}
+    )
+    return _Stub(**kwargs)
+
+
+class TestClassicInlineModeWhenSeparatePlayerDisabled:
+    """Settings > Interface do usuário > "Mostrar os status em player
+    separado" — unchecked keeps the classic in-panel viewer (pre-PR #103
+    behaviour) instead of opening MediaViewerDialog, for every entry point:
+    Enter/double-click activation, Space, and plain arrow-key selection."""
+
+    def test_default_setting_uses_the_dialog(self):
+        stub = _Stub()  # no settings override — must default to True
+        assert stub._use_status_media_viewer_dialog() is True
+
+    def test_disabled_setting_uses_the_classic_viewer(self):
+        stub = _classic_stub()
+        assert stub._use_status_media_viewer_dialog() is False
+
+    def test_activation_shows_current_status_instead_of_the_dialog(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub.open_viewer_calls == []
+        assert stub._selected_contact_idx == 0
+
+    def test_activation_on_an_already_playing_video_toggles_pause(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._status_row_contact = {1: 0}
+        stub._selected_contact_idx = 0
+        stub._current_status = _video_status()
+        stub._video_player.is_playing = True
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub.open_viewer_calls == []
+        assert stub._video_player.toggle_pause_calls == 1  # toggled, not reopened as a dialog
+
+    def test_space_selects_and_shows_inline_instead_of_the_dialog(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._status_row_contact = {1: 0}
+        stub._selected_contact_idx = -1
+        stub._current_status = None
+        stub._status_list = _FakeStatusList(focused=1)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub.open_viewer_calls == []
+        assert stub._selected_contact_idx == 0
+        assert stub._status_list.select_calls == [1]
+
+    def test_space_on_row_zero_selects_before_opening_my_status_dialog(self):
+        stub = _classic_stub()
+        stub._status_list = _FakeStatusList(focused=0)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub.my_status_dialog_calls == 1
+        assert stub._status_list.select_calls == [0]
+
+    def test_plain_arrow_selection_shows_the_status_inline(self):
+        """The defining difference from dialog mode: mere focus movement
+        (EVT_LIST_ITEM_SELECTED, arrow keys) drives the inline viewer
+        directly instead of only tracking which row has focus."""
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub._selected_contact_idx == 0
+        assert stub._current_status is not None
+        assert stub.open_viewer_calls == []
+
+    def test_selecting_my_status_row_hides_the_inline_viewer(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("a")])]
+        stub._selected_contact_idx = 0
+
+        class _Evt:
+            def GetIndex(self):
+                return 0
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub._selected_contact_idx == -1
+        assert stub._viewer_panel.shown is False
+
+    def test_arrow_selection_marks_the_status_viewed_same_as_before_the_dialog_existed(self):
+        """Regression: the dialog-mode rewrite moved "mark viewed" into
+        _on_viewer_status_opened() only, which _show_current_status() never
+        reaches from dialog mode — but classic mode still routes through
+        _show_current_status() directly, and that legacy path stopped
+        marking anything viewed at all until this was restored."""
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
+        stub._status_row_contact = {1: 0}
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
 
 
 class TestCopyStatusText:

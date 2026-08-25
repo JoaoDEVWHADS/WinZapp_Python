@@ -1272,6 +1272,15 @@ class StatusPanel(wx.Panel):
             and self._current_status.get("messageType") in ("videoMessage", "audioMessage")
         )
 
+    def _use_status_media_viewer_dialog(self) -> bool:
+        """True (default) opens a status in the dedicated, full
+        MediaViewerDialog; False keeps the classic in-panel inline viewer
+        instead. Settings > Interface do usuário > "Mostrar os status em
+        player separado"."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "status_media_viewer_dialog", True
+        )
+
     def _on_status_list_key_down(self, event):
         """Space opens the focused status exactly like Enter.
 
@@ -1285,11 +1294,28 @@ class StatusPanel(wx.Panel):
         if idx < 0:
             return
         if idx == 0:
+            if not self._use_status_media_viewer_dialog():
+                self._status_list.Select(idx)
             self._open_my_status_dialog()
             return
         contact_idx = self._status_row_contact.get(idx, -1)
         if contact_idx < 0 or contact_idx >= len(self._status_contacts):
             return
+
+        if not self._use_status_media_viewer_dialog():
+            # Play/pause toggle deliberately checked BEFORE Select(idx) runs
+            # below: Select() re-fires EVT_LIST_ITEM_SELECTED even for an
+            # already-selected row, which would otherwise stop() the player
+            # out from under this toggle a moment later — see
+            # _is_current_status_playable()'s docstring.
+            if self._is_current_status_playable(contact_idx):
+                self._on_play_pause_video(None)
+                return
+            self._status_list.Select(idx)
+            self._selected_contact_idx = contact_idx
+            self._show_current_status()
+            return
+
         if contact_idx != self._selected_contact_idx:
             self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
@@ -1301,11 +1327,46 @@ class StatusPanel(wx.Panel):
     # ── Status list selection / activation ───────────────────────────────────
 
     def _on_status_contact_selected(self, event, announce: bool = False):
-        """Track focus only; selecting a row is not the same as viewing it."""
+        """Track focus. In classic (non-dialog) mode this also drives the
+        inline viewer directly — see _use_status_media_viewer_dialog()."""
         idx = event.GetIndex()
-        # The old inline viewer is deliberately not used for passive list
-        # navigation anymore. Keeping it hidden is also important for screen
-        # readers: arrowing the list should announce only the list item.
+
+        if not self._use_status_media_viewer_dialog():
+            if idx == 0:
+                # My Status row selected — hide the inline viewer; dialog
+                # opens on activate.
+                self._selected_contact_idx = -1
+                self._viewer_panel.Hide()
+                self.Layout()
+                return
+            contact_idx = self._status_row_contact.get(idx, -1)
+            if contact_idx < 0 or contact_idx >= len(self._status_contacts):
+                self._viewer_panel.Hide()
+                self.Layout()
+                return
+            # Only jump back to the FIRST status when selecting a genuinely
+            # different contact. This event also fires from Select() calls
+            # elsewhere (e.g. Space re-activating the row the list already
+            # has focused, while the user has since moved forward within
+            # the viewer via Ctrl+Left/Right) — resetting unconditionally
+            # meant pressing Space while sitting on "status 3 de 5" silently
+            # snapped it back to "1 de 5" for no reason.
+            if contact_idx != self._selected_contact_idx:
+                self._current_status_idx = 0
+            self._selected_contact_idx = contact_idx
+            # Defaults to silent: NVDA/JAWS already read the newly-focused
+            # list item on their own on plain arrow-key navigation (EVT_
+            # LIST_ITEM_SELECTED) — see _show_current_status()'s own
+            # docstring. Callers driven by an explicit action rather than
+            # mere focus movement (Space, Enter/double-click activation)
+            # pass announce=True.
+            self._show_current_status(announce=announce)
+            return
+
+        # Dialog mode: the old inline viewer is deliberately not used for
+        # passive list navigation. Keeping it hidden is also important for
+        # screen readers: arrowing the list should announce only the list
+        # item — the dialog only opens on an explicit activation.
         try:
             self._video_player.stop()
         except Exception:
@@ -1331,6 +1392,14 @@ class StatusPanel(wx.Panel):
         contact_idx = self._status_row_contact.get(idx, -1)
         if contact_idx < 0 or contact_idx >= len(self._status_contacts):
             return
+
+        if not self._use_status_media_viewer_dialog():
+            if self._is_current_status_playable(contact_idx):
+                self._on_play_pause_video(None)
+                return
+            self._on_status_contact_selected(event, announce=True)
+            return
+
         if contact_idx != self._selected_contact_idx:
             self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
@@ -1597,8 +1666,18 @@ class StatusPanel(wx.Panel):
         from_me     = status_key.get("fromMe", False)
         if not from_me:
             status_id = status_key.get("id", "")
-            # A status is marked viewed only by MediaViewer after the user
-            # explicitly activates it; passive/legacy rendering must not do it.
+            # In dialog mode (the default), a status is marked viewed only
+            # by MediaViewer's on_item_opened callback, after the user
+            # explicitly activates it — see _on_viewer_status_opened().
+            # _show_current_status() itself is now reachable only in
+            # classic/inline mode (Settings > Interface do usuário >
+            # "Mostrar os status em player separado" unchecked — see
+            # _use_status_media_viewer_dialog()), where it is the ONLY
+            # place a status ever gets marked viewed, exactly like before
+            # that setting existed: arrowing to a contact there immediately
+            # shows (and views) their status, same as it always did.
+            if status_id:
+                self._mark_status_viewed(status_id)
             is_liked  = self._is_status_liked(status_id)
             i18n2     = self.main_window.i18n
             self._like_btn.SetLabel(

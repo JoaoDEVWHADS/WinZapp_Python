@@ -36,23 +36,46 @@ def test_conversation_activation_routes_images_and_videos_to_media_viewer():
     assert "_open_conversation_media_viewer" in calls
 
 
-def test_status_plain_selection_does_not_open_or_mark_viewed():
+def test_status_plain_selection_never_opens_the_dialog_or_marks_viewed_directly():
+    """Plain (arrow-key) selection must never open the dialog viewer or mark
+    a status viewed itself, in either mode — Settings > Interface do
+    usuário > "Mostrar os status em player separado" toggles between
+    _open_status_media_viewer() (dialog, default) and _show_current_status()
+    (classic inline) for *explicit* activation only; this handler only ever
+    calls _use_status_media_viewer_dialog() to decide which of the two
+    other handlers should react, plus (in classic mode) _show_current_
+    status() itself — which does its own marking internally, not something
+    this handler does directly. See test_only_viewer_open_callback_marks_
+    status_viewed() below for that."""
     calls = _method_calls("client/status_panel.py", "StatusPanel", "_on_status_contact_selected")
     assert "_open_status_media_viewer" not in calls
-    assert "_show_current_status" not in calls
     assert "_mark_status_viewed" not in calls
+    assert "_use_status_media_viewer_dialog" in calls
 
 
 def test_status_activation_opens_media_viewer():
     calls = _method_calls("client/status_panel.py", "StatusPanel", "_on_status_contact_activated")
     assert "_open_status_media_viewer" in calls
+    assert "_use_status_media_viewer_dialog" in calls
 
 
-def test_only_viewer_open_callback_marks_status_viewed():
+def test_only_viewer_open_callback_marks_status_viewed_in_dialog_mode():
+    """In dialog mode (the default), a status is marked viewed only by
+    MediaViewer's on_item_opened callback (_on_viewer_status_opened), after
+    the user explicitly activates it.
+
+    _show_current_status() (the classic/inline viewer) legitimately marks
+    a status viewed too — but it is only ever reachable when Settings >
+    Interface do usuário > "Mostrar os status em player separado" is
+    unchecked, restoring the pre-dialog behaviour where arrowing to a
+    contact immediately showed (and viewed) their status. Both are
+    correct for their respective mode; this test only pins the
+    dialog-mode invariant.
+    """
     calls = _method_calls("client/status_panel.py", "StatusPanel", "_on_viewer_status_opened")
     assert "_mark_status_viewed" in calls
     legacy = _method_calls("client/status_panel.py", "StatusPanel", "_show_current_status")
-    assert "_mark_status_viewed" not in legacy
+    assert "_mark_status_viewed" in legacy
 
 
 def test_video_player_has_real_seek_volume_and_speeded_frame_clock():
