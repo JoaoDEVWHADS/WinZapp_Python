@@ -375,6 +375,7 @@
     "reply_to": "R&esponder a {name}",
     "reply_to_group": "R&esponder a {name} em {group}",
     "remove_quote": "Remover mensagem citada",
+    "remove_link_preview": "Remover pré-visualização do link",
     "reaction_preview_them": "{name} reagiu com {emoji} a:",
     "reaction_preview_you": "Reagiu com {emoji} a:",
     "reactions_dialog_title": "Lista de reações",

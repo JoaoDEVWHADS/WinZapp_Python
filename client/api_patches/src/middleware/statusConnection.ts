@@ -16,7 +16,16 @@
 
 import { NextFunction, Request, Response } from 'express';
 
+import { SessionNotReadyError } from '../errors/domain';
 import { contactToArray } from '../util/functions';
+
+function disconnected(res: Response) {
+  return res.status(404).json({
+    response: null,
+    status: 'Disconnected',
+    message: 'A sessão do WhatsApp não está ativa.',
+  });
+}
 
 export default async function statusConnection(
   req: Request,
@@ -30,7 +39,10 @@ export default async function statusConnection(
         req.path.endsWith('/typing') ||
         req.path.endsWith('/recording') ||
         req.path.endsWith('/send-seen');
-      if (!skipsConnectionProbe) await req.client.isConnected();
+      if (!skipsConnectionProbe) {
+        const connected = await req.client.isConnected();
+        if (connected !== true) return disconnected(res);
+      }
 
       const localArr = contactToArray(
         req.body.phone || [],
@@ -88,19 +100,19 @@ export default async function statusConnection(
       }
       req.body.phone = localArr;
     } else {
-      return res.status(404).json({
-        response: null,
-        status: 'Disconnected',
-        message: 'A sessão do WhatsApp não está ativa.',
-      });
+      return disconnected(res);
     }
     next();
   } catch (error) {
-    req.logger.error(error);
-    res.status(404).json({
-      response: null,
-      status: 'Disconnected',
-      message: 'A sessão do WhatsApp não está ativa.',
-    });
+    const detail = String((error as any)?.message || error || '');
+    if (/WAPI is not defined|Execution context was destroyed/i.test(detail)) {
+      next(new SessionNotReadyError(detail));
+      return;
+    }
+    if (/Target closed|not connected|Session (closed|not active)/i.test(detail)) {
+      disconnected(res);
+      return;
+    }
+    next(error);
   }
 }

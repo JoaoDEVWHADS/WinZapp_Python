@@ -1505,6 +1505,7 @@ class TestFailedStatusReplyNeverDegradesToPlainMessage:
 
     class _MainStub:
         send_text_message = MainWindow.send_text_message
+        _build_link_preview_options = staticmethod(MainWindow._build_link_preview_options)
 
         def __init__(self):
             self.wpp_server = "http://127.0.0.1"

@@ -137,6 +137,40 @@ class WebSocketClient:
 
         # Debounce timer for on_disconnect() — see that method.
         self._disconnect_timer = None
+        self._locally_sent_reaction_ids = {}
+
+    def _consume_own_reaction_echo(self, msg):
+        """True only for an echo of a reaction just sent by WinZapp."""
+        reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+        signature = (str((reaction.get("key") or {}).get("id", "")),
+                     (reaction.get("text") or "").strip())
+        reaction_id = str((msg.get("key") or {}).get("id", ""))
+        now = time.monotonic()
+        local_ids = getattr(self, "_locally_sent_reaction_ids", None)
+        if local_ids is None:
+            local_ids = self._locally_sent_reaction_ids = {}
+        self._locally_sent_reaction_ids = {
+            event_id: created_at
+            for event_id, created_at in local_ids.items()
+            if now - created_at <= 60
+        }
+        if reaction_id and reaction_id in self._locally_sent_reaction_ids:
+            return True
+        pending = getattr(self.main_window, "_pending_own_reactions", None)
+        lock = getattr(self.main_window, "_pending_own_reactions_lock", None)
+        if pending is None or lock is None:
+            return False
+        with lock:
+            created_at = pending.get(signature)
+            if created_at is None:
+                return False
+            if now - created_at > 60:
+                pending.pop(signature, None)
+                return False
+            pending.pop(signature, None)
+            if reaction_id:
+                self._locally_sent_reaction_ids[reaction_id] = now
+            return True
 
     def _clean_jid(self, jid_val):
         if not jid_val:
@@ -790,10 +824,11 @@ class WebSocketClient:
             # We distinguish the two cases via _own_sent_ids, which is populated
             # by MessageQueue immediately after the API returns the real message ID.
             if msg.get("key", {}).get("fromMe", False):
-                # Own reactions are applied optimistically in _on_own_reaction_sent;
-                # suppress the WebSocket echo so the reaction count isn't doubled.
                 if msg.get("messageType") == "reactionMessage":
-                    return
+                    # fromMe also covers reactions made on linked devices. Only
+                    # suppress one that matches a reaction WinZapp just sent.
+                    if self._consume_own_reaction_echo(msg):
+                        return
                 msg_id = msg.get("key", {}).get("id", "")
                 _lock = getattr(self.main_window, "_own_sent_ids_lock", None)
                 if _lock is not None:
@@ -1114,7 +1149,6 @@ class WebSocketClient:
                             "pushName": push,
                             "profilePicUrl": contact.get("profilePicUrl") or "",
                             "type": "contact",
-                            "isSaved": True,
                         }
                         self.main_window.contacts[jid] = entry
                         updated = True
@@ -1231,23 +1265,11 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] Failed to fetch host device JID")
 
     def _set_wpp_limits(self):
-        """Push raised file-size limits into WhatsApp Web via the setLimit API.
+        """Raise WhatsApp Web's effective document file-size limit to 1 GB.
 
-        WPPConnect documented defaults:
-          maxMediaSize — 70 MB  (images, videos, audio)
-          maxFileSize  — 1 GB   (documents)
-
-        maxMediaSize now matches maxFileSize: the 70 MB ceiling only ever
-        existed because non-document sends had no way to move a large file
-        into Chromium without building one giant in-memory base64 string
-        and passing it as a single CDP argument. Now that sender.layer.js's
-        bounded/chunked transfer covers image/video/audio too (see
-        core/wppconnect_sender_layer_patch.py), there is no longer a reason
-        for WhatsApp Web's own client-side guard to reject a large media
-        send before WinZapp ever gets a chance to use that path — matches
-        the single client-side cap every attachment type now shares
-        (ui/conversations.py's _MAX_ATTACHMENT_BYTES; the separate, lower
-        _MAX_MEDIA_BYTES it replaced no longer exists).
+        WA-JS 4.6 marks maxMediaSize as deprecated and its implementation is
+        a no-op that rejects values above 70 MB. Media limits now come from
+        WhatsApp's MediaGatingUtils, so only maxFileSize remains meaningful.
         """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
@@ -1255,20 +1277,15 @@ class WebSocketClient:
             "Authorization": f"Bearer {mw.token}",
             "Content-Type": "application/json",
         }
-        limits = [
-            ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
-            ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
-        ]
-        for limit_type, value in limits:
-            try:
-                api_post(
-                    url,
-                    json={"type": limit_type, "value": value},
-                    headers=headers,
-                    timeout=10,
-                )
-            except Exception:
-                pass
+        try:
+            api_post(
+                url,
+                json={"type": "maxFileSize", "value": 1 * 1024 * 1024 * 1024},
+                headers=headers,
+                timeout=10,
+            )
+        except Exception:
+            pass
 
     def on_wpp_status_find(self, data):
         try:
@@ -1443,15 +1460,13 @@ class WebSocketClient:
             reactor_from_me, r_chat, reaction_id, reactor_participant = _split(
                 reaction_serialized or ""
             )
-            if reactor_from_me:
-                return  # own reaction — applied optimistically, ignore the echo
             if not chat_jid:
                 chat_jid = r_chat
 
             normalized = {
                 "key": {
                     "remoteJid": chat_jid,
-                    "fromMe": False,
+                    "fromMe": reactor_from_me,
                     "id": reaction_id,
                 },
                 "pushName": "",
@@ -1470,6 +1485,8 @@ class WebSocketClient:
             }
             if reactor_participant:
                 normalized["key"]["participant"] = reactor_participant
+            if reactor_from_me and self._consume_own_reaction_echo(normalized):
+                return
             wx.CallAfter(self.main_window.on_new_message, normalized)
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_reaction error")

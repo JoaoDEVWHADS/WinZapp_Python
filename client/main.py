@@ -728,6 +728,23 @@ def unread_after_history_sync(
     return max(baseline, max(0, int(local_unread or 0)) + inferred)
 
 
+def reconcile_snapshot_unread(
+    server_unread: int,
+    local_unread: int,
+    incoming_timestamp: int,
+    local_timestamp: int,
+    unsynced: bool = False,
+) -> int:
+    """Merge an authoritative chat snapshot without losing newer live arrivals."""
+    server_unread = max(0, int(server_unread or 0))
+    local_unread = max(0, int(local_unread or 0))
+    if server_unread >= local_unread:
+        return server_unread
+    if unsynced or int(incoming_timestamp or 0) < int(local_timestamp or 0):
+        return local_unread
+    return server_unread
+
+
 def history_gap_detected(fetched: list, local_records: list, page_size: int) -> bool:
     """True when a freshly fetched page cannot be joined onto stored history.
 
@@ -1168,6 +1185,11 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
+        # Reactions made by WinZapp are rendered optimistically. Keep their
+        # target/emoji briefly so the WebSocket client suppresses only that
+        # echo, not a fromMe reaction made on the phone or another device.
+        self._pending_own_reactions: dict = {}
+        self._pending_own_reactions_lock = threading.Lock()
         # Consecutive failed network probes (see check_whatsapp_reachable).
         self._offline_probe_strikes = 0
         # Consecutive not-yet-connected results from _set_wa_connected() this
@@ -10731,14 +10753,22 @@ class MainWindow(wx.Frame):
                                 if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
-                        # If chat exists in self.chats (passed in), preserve any higher unreadCount
+                        # A snapshot can legitimately lower the count after the
+                        # chat was read on another device. Preserve local only
+                        # when its activity is newer than this snapshot.
                         if hasattr(self, "chats") and jid in self.chats:
                             local_unread = int(self.chats[jid].get("unreadCount") or 0)
                             server_unread = int(chat.get("unreadCount") or 0)
-                            if local_unread > server_unread:
-                                chat["unreadCount"] = local_unread
+                            chat["unreadCount"] = reconcile_snapshot_unread(
+                                server_unread,
+                                local_unread,
+                                chat.get("t", 0),
+                                self.chats[jid].get("t", 0),
+                                bool(self.chats[jid].get("_unread_count_unsynced")),
+                            )
                         chats[jid] = chat
                     else:
+                        local_activity_t = int(chats[jid].get("t", 0) or 0)
                         for k, v in chat.items():
                             if k in ("messages", "remoteJid"):
                                 continue
@@ -10777,7 +10807,14 @@ class MainWindow(wx.Frame):
                                 # a few seconds stale relative to that. Same guard as
                                 # on_chat_unread_update()'s live-event path.
                                 _cp = getattr(self, "conversations_panel", None)
-                                if jid == getattr(_cp, "_last_open_jid", ""):
+                                open_now = (
+                                    _cp is not None
+                                    and _cp.conversation is not None
+                                    and self._normalize_jid(
+                                        _cp.conversation.get("remoteJid", "")
+                                    ) == jid
+                                )
+                                if open_now:
                                     v = 0
                                 elif server_val < local_val:
                                     # WPPConnect's list-chats snapshot lagging behind
@@ -10789,7 +10826,23 @@ class MainWindow(wx.Frame):
                                     # next live message's toast notification announced
                                     # "1 unread" right after the reset, even though
                                     # several messages had already piled up before it.
-                                    continue
+                                    merged = reconcile_snapshot_unread(
+                                        server_val,
+                                        local_val,
+                                        chat.get("t", 0),
+                                        local_activity_t,
+                                        bool(chats[jid].get("_unread_count_unsynced")),
+                                    )
+                                    if merged == local_val:
+                                        continue
+                                    v = merged
+                                    if merged == 0:
+                                        removed_ack = getattr(
+                                            self, "_locally_read_at", {}
+                                        ).pop(jid, None)
+                                        getattr(self, "_new_since_read", {}).pop(jid, None)
+                                        if removed_ack is not None:
+                                            self._persist_locally_read_at()
                                 else:
                                     # A snapshot taken shortly after
                                     # mark_conversation_as_read() cleared this chat
@@ -15648,7 +15701,34 @@ class MainWindow(wx.Frame):
 
 
 
-    def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
+    @staticmethod
+    def _build_link_preview_options(link_preview: dict | None) -> dict:
+        """The "options" value every send-message/-reply/-mentioned payload
+        below carries for its link preview.
+
+        ``linkPreview: False`` (no argument) keeps WPPConnect from ever
+        generating one itself on send — that used to make sending hang until
+        timeout, since WA-JS's own on-send fetch goes through undocumented
+        third-party proxy servers (see send_text_message()'s own comment,
+        commit 6cec2d0e). When the composer already resolved a preview via
+        core/link_preview.py (independent of that mechanism, run ahead of
+        time on a background thread), passing it here as an object instead
+        of `True` makes WA-JS use it as-is with no fetch of its own — see
+        `prepareLinkPreview` in wa-js: an object skips the network call
+        entirely, only literal `true` triggers it.
+        """
+        if not link_preview:
+            return {"linkPreview": False}
+        return {
+            "linkPreview": {
+                "title": link_preview.get("title", ""),
+                "description": link_preview.get("description", ""),
+                "canonicalUrl": link_preview.get("canonicalUrl", ""),
+                "matchedText": link_preview.get("canonicalUrl", ""),
+            }
+        }
+
+    def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None, link_preview=None):
         """Send a plain-text message via the WPPConnect Server API."""
         # Canonical destination: @lid when known, else the @c.us phone form —
         # see _resolve_jid_for_send's docstring for why @lid has to win here.
@@ -15664,6 +15744,7 @@ class MainWindow(wx.Frame):
         quoted_id = None
         quote_stripped = False
         is_status_reply = False
+        link_preview_options = self._build_link_preview_options(link_preview)
 
         if mentioned_jids:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
@@ -15680,9 +15761,7 @@ class MainWindow(wx.Frame):
                 "mentioned": mentioned_clean,
                 "isGroup": phone_net.endswith("@g.us"),
                 "isLid": is_lid_target,
-                "options": {
-                    "linkPreview": False
-                }
+                "options": link_preview_options
             }
         else:
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
@@ -15707,9 +15786,7 @@ class MainWindow(wx.Frame):
                     "messageId": quoted_id,
                     "isGroup": phone_net.endswith("@g.us"),
                     "isLid": is_lid_target,
-                    "options": {
-                        "linkPreview": False
-                    }
+                    "options": link_preview_options
                 }
                 logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
             elif quoted_is_status:
@@ -15725,9 +15802,7 @@ class MainWindow(wx.Frame):
                     "message": text,
                     "isGroup": phone_net.endswith("@g.us"),
                     "isLid": is_lid_target,
-                    "options": {
-                        "linkPreview": False
-                    }
+                    "options": link_preview_options
                 }
         try:
             # 25s (not 15s): WPPConnect can take longer to ack under load (e.g.
@@ -15762,7 +15837,7 @@ class MainWindow(wx.Frame):
                             "mentioned": mentioned_clean,
                             "isGroup": fb_phone.endswith("@g.us"),
                             "isLid": False,
-                            "options": {"linkPreview": False}
+                            "options": link_preview_options
                         }
                     elif quoted_id:
                         retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
@@ -15770,7 +15845,7 @@ class MainWindow(wx.Frame):
                             "phone": [fb_phone], "message": text,
                             "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
                             "isLid": False,
-                            "options": {"linkPreview": False}
+                            "options": link_preview_options
                         }
                     else:
                         retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
@@ -15778,7 +15853,7 @@ class MainWindow(wx.Frame):
                             "phone": [fb_phone], "message": text,
                             "isGroup": fb_phone.endswith("@g.us"),
                             "isLid": False,
-                            "options": {"linkPreview": False}
+                            "options": link_preview_options
                         }
                     active_dest = fb_phone
                     response = api_post(retry_url, json=retry_payload, headers=headers, timeout=25)
@@ -15801,9 +15876,7 @@ class MainWindow(wx.Frame):
                         "message": text,
                         "isGroup": active_dest.endswith("@g.us"),
                         "isLid": active_dest.endswith("@lid"),
-                        "options": {
-                            "linkPreview": False
-                        }
+                        "options": link_preview_options
                     }
                     response = api_post(url, json=payload, headers=headers, timeout=25)
 
@@ -16172,6 +16245,13 @@ class MainWindow(wx.Frame):
             "msgId": self._serialize_msg_id(remote_jid, msg_key),
             "reaction": emoji
         }
+        reaction_signature = (str(msg_key.get("id", "")), emoji)
+        with self._pending_own_reactions_lock:
+            now = time.monotonic()
+            for key, created_at in list(self._pending_own_reactions.items()):
+                if now - created_at > 60:
+                    self._pending_own_reactions.pop(key, None)
+            self._pending_own_reactions[reaction_signature] = now
         try:
             response = api_post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
@@ -16182,10 +16262,14 @@ class MainWindow(wx.Frame):
                 # longer than the old truncation allowed.
                 logging.error("[send_reaction] HTTP %s: %s",
                               response.status_code, response.text[:1500])
+                with self._pending_own_reactions_lock:
+                    self._pending_own_reactions.pop(reaction_signature, None)
                 return False
             return True
         except Exception as exc:
             logging.error("[send_reaction] exception: %s", exc)
+            with self._pending_own_reactions_lock:
+                self._pending_own_reactions.pop(reaction_signature, None)
             return False
 
     def pin_message(self, remote_jid: str, msg_key: dict, pin: bool = True) -> bool:
@@ -16460,7 +16544,13 @@ class MainWindow(wx.Frame):
                 self._schedule_set_chats()
 
 
-    def _resolve_jid_name(self, jid_norm: str, chat_jid_norm: str = "") -> str:
+    def _resolve_jid_name(
+        self,
+        jid_norm: str,
+        chat_jid_norm: str = "",
+        *,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback).
 
         chat_jid_norm: the group this participant belongs to, when known —
@@ -16551,11 +16641,12 @@ class MainWindow(wx.Frame):
             # group is opened) shows the real name instead of the
             # placeholder forever. resolve_lid_jids_via_api dedupes
             # concurrent/repeat requests for the same jid internally.
-            threading.Thread(
-                target=self.resolve_lid_jids_via_api,
-                args=([jid_norm],),
-                daemon=True,
-            ).start()
+            if resolve_missing:
+                threading.Thread(
+                    target=self.resolve_lid_jids_via_api,
+                    args=([jid_norm],),
+                    daemon=True,
+                ).start()
             # `local` here is just the raw @lid digits, meaningless to a user
             # ("Fulano está digitando" showing a bare numeric ID instead of a
             # name/phone). A generic placeholder is far more useful than
@@ -16569,7 +16660,13 @@ class MainWindow(wx.Frame):
             return self.i18n.t("unnamed_participant")
         return format_number(jid_norm)
 
-    def _presence_label_for_chat(self, chat_jid_norm: str, is_group: bool) -> str:
+    def _presence_label_for_chat(
+        self,
+        chat_jid_norm: str,
+        is_group: bool,
+        *,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return the typing/recording label to append to a chat-list row, or ''."""
         active = getattr(self, "_composing_chats", {}).get(chat_jid_norm, {})
         if not active:
@@ -16582,7 +16679,14 @@ class MainWindow(wx.Frame):
         else:
             return ""
         if is_group:
-            name = self._resolve_jid_name(participant_jid, chat_jid_norm)
+            if resolve_missing:
+                name = self._resolve_jid_name(participant_jid, chat_jid_norm)
+            else:
+                name = self._resolve_jid_name(
+                    participant_jid,
+                    chat_jid_norm,
+                    resolve_missing=False,
+                )
             if name:
                 return self.i18n.t("group_presence_indicator").format(
                     name=name, action=action_label
@@ -18163,32 +18267,83 @@ class MainWindow(wx.Frame):
             return api_post(url, json=payload, headers=headers, timeout=10)
 
         def _do_api():
+            success = False
             try:
-                resp = _send_seen(target_phone, is_lid_target)
-                if not resp.ok:
-                    logging.warning("[mark_as_read] API response %s for %s: %s",
-                                     resp.status_code, target_phone, resp.text[:200])
-                    # If it failed, try the alternate format (LID <-> phone) as fallback
-                    fallback_phone = remote_jid
-                    if fallback_phone.endswith("@lid"):
-                        phone_jid = getattr(self, "_lid_to_phone", {}).get(fallback_phone, "")
-                        if phone_jid: fallback_phone = phone_jid
-                    else:
-                        alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(fallback_phone), "")
-                        if alt_lid: fallback_phone = alt_lid
+                fallback_phone = remote_jid
+                if fallback_phone.endswith("@lid"):
+                    fallback_phone = getattr(self, "_lid_to_phone", {}).get(
+                        fallback_phone, fallback_phone
+                    )
+                else:
+                    fallback_phone = getattr(self, "_phone_to_lid", {}).get(
+                        self._normalize_jid(fallback_phone), fallback_phone
+                    )
+                if fallback_phone.endswith("@s.whatsapp.net"):
+                    fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
 
-                    if fallback_phone.endswith("@s.whatsapp.net"):
-                        fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
+                targets = [(target_phone, is_lid_target)]
+                if fallback_phone != target_phone:
+                    targets.append((fallback_phone, fallback_phone.endswith("@lid")))
 
-                    if fallback_phone != target_phone:
-                        logging.info("[mark_as_read] Retrying /send-seen using fallback JID: %s", fallback_phone)
-                        resp2 = _send_seen(fallback_phone, fallback_phone.endswith("@lid"))
-                        if not resp2.ok:
-                            logging.warning("[mark_as_read] Fallback /send-seen also failed %s for %s: %s",
-                                             resp2.status_code, fallback_phone, resp2.text[:200])
-            except Exception as exc:
-                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
+                for attempt in range(3):
+                    for phone, is_lid in targets:
+                        try:
+                            resp = _send_seen(phone, is_lid)
+                        except Exception as exc:
+                            logging.warning(
+                                "[mark_as_read] Request failed for %s (attempt %s): %s",
+                                phone, attempt + 1, exc,
+                            )
+                            continue
+                        if resp.ok:
+                            success = True
+                            return
+                        logging.warning(
+                            "[mark_as_read] API response %s for %s (attempt %s): %s",
+                            resp.status_code, phone, attempt + 1, resp.text[:200],
+                        )
+                    if attempt < 2:
+                        time.sleep(attempt + 1)
+            except Exception:
+                logging.exception("[mark_as_read] Unexpected send-seen failure")
+            finally:
+                if not success:
+                    wx.CallAfter(
+                        self._restore_unread_after_send_seen_failure,
+                        remote_jid,
+                        unread,
+                        int(chat.get("t", 0) or 0),
+                    )
         threading.Thread(target=_do_api, daemon=True).start()
+
+    def _restore_unread_after_send_seen_failure(
+        self, remote_jid: str, previous_unread: int, read_timestamp: int
+    ):
+        """Undo an optimistic local read when WhatsApp rejected every attempt."""
+        normalized = self._normalize_jid(remote_jid)
+        chat = self.chats.get(normalized) or self.chats.get(remote_jid)
+        if chat is None:
+            return
+        marker = getattr(self, "_locally_read_at", {}).get(normalized)
+        if marker is None:
+            marker = getattr(self, "_locally_read_at", {}).get(remote_jid)
+        if (
+            marker != read_timestamp
+            or int(chat.get("t", 0) or 0) != read_timestamp
+            or int(chat.get("unreadCount") or 0) != 0
+            or max(
+                getattr(self, "_new_since_read", {}).get(normalized, 0),
+                getattr(self, "_new_since_read", {}).get(remote_jid, 0),
+            ) > 0
+        ):
+            return
+        chat["unreadCount"] = max(0, int(previous_unread or 0))
+        self._locally_read_at.pop(normalized, None)
+        self._locally_read_at.pop(remote_jid, None)
+        self._persist_locally_read_at()
+        self._schedule_save(dirty_jid=normalized)
+        self._refresh_chat_row_in_list(normalized)
+        self._schedule_set_chats()
 
     def mark_conversation_as_unread(self, remote_jid: str):
         chat = self.chats.get(remote_jid)
@@ -20757,7 +20912,9 @@ class MainWindow(wx.Frame):
                         name = "eu"
                     else:
                         if hasattr(self, "conversations_panel"):
-                            name = self.conversations_panel._get_participant_name(jid)
+                            name = self.conversations_panel._get_participant_name(
+                                jid, resolve_missing=False
+                            )
                         else:
                             name = ""
                     
@@ -21215,7 +21372,11 @@ class MainWindow(wx.Frame):
             text += f" {preview}"
         chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
         if chat_jid_norm:
-            presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
+            presence_label = self._presence_label_for_chat(
+                chat_jid_norm,
+                chat_jid_norm.endswith("@g.us"),
+                resolve_missing=False,
+            )
             if presence_label:
                 text += f" {presence_label}"
         if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):

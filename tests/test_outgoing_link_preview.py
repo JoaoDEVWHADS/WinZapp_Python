@@ -1,0 +1,482 @@
+"""Tests for outgoing link previews.
+
+Reported live: WinZapp never sent a link preview on its own outgoing
+messages (only ever showed one on messages it *received*) — `send_text_
+message()` unconditionally set `options.linkPreview: False` (commit
+6cec2d0e, "avoid timeouts": WPPConnect's own on-send preview fetch goes
+through undocumented third-party proxy servers and used to hang the whole
+send). This covers the fix in three layers:
+
+1. core/link_preview.py — find_first_url()/fetch_link_preview(), the
+   from-scratch OG-tag fetch that replaces WPPConnect's own mechanism,
+   run ahead of time on a background thread instead of during send.
+2. MainWindow._build_link_preview_options() — still `{"linkPreview": False}`
+   with nothing resolved (preserves the timeout fix for every other send),
+   but a resolved preview is passed through as an explicit object, which
+   WA-JS uses as-is with no fetch of its own.
+3. ConversationsPanel's composer wiring — detecting a URL as the user
+   types, fetching in the background, and surfacing a "remove preview"
+   button (_remove_link_preview_btn) — bound onto a plain stub, same
+   approach as tests/test_recording_open_failure.py, since
+   ConversationsPanel is a wx.Panel and can't be instantiated without a
+   running wx.App.
+"""
+
+import threading
+import types
+
+import ui.conversations as conversations_module
+from core.link_preview import fetch_link_preview, find_first_url
+from main import MainWindow
+from ui.conversations import ConversationsPanel
+
+
+# ── core/link_preview.py ────────────────────────────────────────────────────
+
+class TestFindFirstUrl:
+    def test_finds_a_url_in_plain_text(self):
+        assert find_first_url("check this out https://example.com/page") == (
+            "https://example.com/page"
+        )
+
+    def test_no_url_returns_empty_string(self):
+        assert find_first_url("just some text") == ""
+
+    def test_empty_text_returns_empty_string(self):
+        assert find_first_url("") == ""
+
+    def test_returns_the_first_of_several_urls(self):
+        text = "see https://a.example.com and also https://b.example.com"
+        assert find_first_url(text) == "https://a.example.com"
+
+    def test_stops_at_trailing_punctuation_whitespace(self):
+        # A trailing quote/paren isn't part of the URL — the regex only
+        # excludes whitespace and quote characters, so this documents what
+        # it actually captures rather than claiming smarter trimming.
+        assert find_first_url("link: https://example.com/page\nnext line") == (
+            "https://example.com/page"
+        )
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes, content_type="text/html; charset=utf-8", status=200):
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+        self.status_code = status
+        self.encoding = "utf-8"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise Exception(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size=16384):
+        yield self._body
+
+    def close(self):
+        pass
+
+
+class TestFetchLinkPreview:
+    def test_returns_title_and_description_from_og_tags(self, monkeypatch):
+        html = b"""<html><head>
+            <meta property="og:title" content="Example Domain">
+            <meta property="og:description" content="Example site used for illustration">
+            <meta property="og:url" content="https://example.com/canonical">
+        </head></html>"""
+        monkeypatch.setattr(
+            "core.link_preview.requests.get",
+            lambda *a, **kw: _FakeResponse(html),
+        )
+        preview = fetch_link_preview("https://example.com")
+        assert preview == {
+            "title": "Example Domain",
+            "description": "Example site used for illustration",
+            "canonicalUrl": "https://example.com/canonical",
+        }
+
+    def test_falls_back_to_plain_title_tag_when_no_og_title(self, monkeypatch):
+        html = b"<html><head><title>Plain Title</title></head></html>"
+        monkeypatch.setattr(
+            "core.link_preview.requests.get",
+            lambda *a, **kw: _FakeResponse(html),
+        )
+        preview = fetch_link_preview("https://example.com")
+        assert preview["title"] == "Plain Title"
+        assert preview["canonicalUrl"] == "https://example.com"  # no og:url — falls back to the input URL
+
+    def test_returns_none_when_neither_title_nor_description_present(self, monkeypatch):
+        html = b"<html><head></head><body>hi</body></html>"
+        monkeypatch.setattr(
+            "core.link_preview.requests.get",
+            lambda *a, **kw: _FakeResponse(html),
+        )
+        assert fetch_link_preview("https://example.com") is None
+
+    def test_returns_none_on_network_error(self, monkeypatch):
+        def _boom(*a, **kw):
+            raise Exception("connection refused")
+        monkeypatch.setattr("core.link_preview.requests.get", _boom)
+        assert fetch_link_preview("https://example.com") is None
+
+    def test_returns_none_for_non_html_response(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.link_preview.requests.get",
+            lambda *a, **kw: _FakeResponse(b"\x89PNG...", content_type="image/png"),
+        )
+        assert fetch_link_preview("https://example.com/pic.png") is None
+
+    def test_returns_none_on_http_error_status(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.link_preview.requests.get",
+            lambda *a, **kw: _FakeResponse(b"", status=404),
+        )
+        assert fetch_link_preview("https://example.com/missing") is None
+
+
+# ── MainWindow._build_link_preview_options() ───────────────────────────────
+
+class TestBuildLinkPreviewOptions:
+    def test_none_disables_link_preview(self):
+        assert MainWindow._build_link_preview_options(None) == {"linkPreview": False}
+
+    def test_empty_dict_disables_link_preview(self):
+        assert MainWindow._build_link_preview_options({}) == {"linkPreview": False}
+
+    def test_resolved_preview_is_passed_through_as_an_object(self):
+        preview = {
+            "title": "Example Domain",
+            "description": "Example site used for illustration",
+            "canonicalUrl": "https://example.com",
+        }
+        options = MainWindow._build_link_preview_options(preview)
+        assert options == {
+            "linkPreview": {
+                "title": "Example Domain",
+                "description": "Example site used for illustration",
+                "canonicalUrl": "https://example.com",
+                "matchedText": "https://example.com",
+            }
+        }
+
+
+# ── ConversationsPanel composer wiring ──────────────────────────────────────
+
+class _FakeWidget:
+    def __init__(self):
+        self.shown = False
+
+    def Show(self, show=True):
+        self.shown = show
+
+    def Hide(self):
+        self.shown = False
+
+    def IsShown(self):
+        return self.shown
+
+    def Layout(self):
+        pass
+
+
+class _FakeMessageField:
+    def __init__(self, value=""):
+        self._value = value
+
+    def GetValue(self):
+        return self._value
+
+    def SetValue(self, value):
+        self._value = value
+
+    def SetFocus(self):
+        pass
+
+
+class _Stub:
+    _schedule_link_preview_check = ConversationsPanel._schedule_link_preview_check
+    _check_link_preview_for_current_text = (
+        ConversationsPanel._check_link_preview_for_current_text
+    )
+    _on_link_preview_fetched = ConversationsPanel._on_link_preview_fetched
+    _on_remove_link_preview = ConversationsPanel._on_remove_link_preview
+    _clear_link_preview = ConversationsPanel._clear_link_preview
+    _LINK_PREVIEW_DEBOUNCE_MS = ConversationsPanel._LINK_PREVIEW_DEBOUNCE_MS
+
+    def __init__(self, text=""):
+        self.message_field = _FakeMessageField(text)
+        self.conversation_panel = _FakeWidget()
+        self._remove_link_preview_btn = _FakeWidget()
+        self._pending_link_preview = None
+        self._link_preview_source_url = ""
+        self._link_preview_dismissed_url = ""
+        self._link_preview_fetch_token = 0
+        self._link_preview_debounce_timer = None
+
+
+def _run_debounced_check(monkeypatch, stub):
+    """Runs _schedule_link_preview_check()'s wx.CallLater callback
+    synchronously instead of waiting out the real debounce."""
+    captured = {}
+
+    def _fake_call_later(delay, func):
+        captured["func"] = func
+        return types.SimpleNamespace(Stop=lambda: None)
+
+    monkeypatch.setattr(conversations_module.wx, "CallLater", _fake_call_later)
+    stub._schedule_link_preview_check()
+    captured["func"]()
+
+
+def _run_fetch_synchronously(monkeypatch):
+    """Runs the background-thread fetch inline instead of on a real thread,
+    and wx.CallAfter's callback immediately — both so the test doesn't need
+    a running wx.App or to wait on anything."""
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        conversations_module.wx, "CallAfter",
+        lambda func, *args, **kw: func(*args, **kw),
+    )
+
+
+class TestLinkPreviewComposerFlow:
+    def test_url_with_a_preview_shows_the_remove_button(self, monkeypatch):
+        stub = _Stub(text="check this out https://example.com")
+        _run_fetch_synchronously(monkeypatch)
+        monkeypatch.setattr(
+            conversations_module, "fetch_link_preview",
+            lambda url, **kw: {"title": "Example Domain", "description": "desc",
+                                "canonicalUrl": url},
+        )
+        _run_debounced_check(monkeypatch, stub)
+
+        assert stub._pending_link_preview == {
+            "title": "Example Domain", "description": "desc",
+            "canonicalUrl": "https://example.com",
+        }
+        assert stub._remove_link_preview_btn.IsShown() is True
+
+    def test_url_with_no_preview_available_does_not_show_the_button(self, monkeypatch):
+        stub = _Stub(text="https://example.com")
+        _run_fetch_synchronously(monkeypatch)
+        monkeypatch.setattr(
+            conversations_module, "fetch_link_preview", lambda url, **kw: None,
+        )
+        _run_debounced_check(monkeypatch, stub)
+
+        assert stub._pending_link_preview is None
+        assert stub._remove_link_preview_btn.IsShown() is False
+
+    def test_no_url_never_triggers_a_fetch(self, monkeypatch):
+        stub = _Stub(text="just some text, no link")
+        calls = []
+        _run_fetch_synchronously(monkeypatch)
+        monkeypatch.setattr(
+            conversations_module, "fetch_link_preview",
+            lambda url, **kw: calls.append(url) or None,
+        )
+        _run_debounced_check(monkeypatch, stub)
+        assert calls == []
+
+    def test_removing_the_preview_clears_state_and_hides_the_button(self, monkeypatch):
+        stub = _Stub(text="https://example.com")
+        stub._pending_link_preview = {"title": "t", "description": "d", "canonicalUrl": "https://example.com"}
+        stub._link_preview_source_url = "https://example.com"
+        stub._remove_link_preview_btn.Show()
+        monkeypatch.setattr(
+            conversations_module.wx, "CallAfter",
+            lambda func, *args, **kw: func(*args, **kw),
+        )
+
+        stub._on_remove_link_preview()
+
+        assert stub._pending_link_preview is None
+        assert stub._remove_link_preview_btn.IsShown() is False
+        assert stub._link_preview_dismissed_url == "https://example.com"
+
+    def test_dismissed_url_is_not_refetched_while_still_in_the_field(self, monkeypatch):
+        stub = _Stub(text="https://example.com")
+        stub._link_preview_dismissed_url = "https://example.com"
+        calls = []
+        _run_fetch_synchronously(monkeypatch)
+        monkeypatch.setattr(
+            conversations_module, "fetch_link_preview",
+            lambda url, **kw: calls.append(url) or {"title": "t", "description": "", "canonicalUrl": url},
+        )
+        _run_debounced_check(monkeypatch, stub)
+        assert calls == []
+        assert stub._remove_link_preview_btn.IsShown() is False
+
+    def test_changing_the_url_after_dismissal_fetches_the_new_one(self, monkeypatch):
+        stub = _Stub(text="https://other.example.com")
+        stub._link_preview_dismissed_url = "https://example.com"
+        _run_fetch_synchronously(monkeypatch)
+        monkeypatch.setattr(
+            conversations_module, "fetch_link_preview",
+            lambda url, **kw: {"title": "t", "description": "", "canonicalUrl": url},
+        )
+        _run_debounced_check(monkeypatch, stub)
+        assert stub._pending_link_preview is not None
+        assert stub._remove_link_preview_btn.IsShown() is True
+
+    def test_editing_away_the_url_clears_an_already_resolved_preview(self, monkeypatch):
+        stub = _Stub(text="no link here anymore")
+        stub._pending_link_preview = {"title": "t", "description": "d", "canonicalUrl": "https://example.com"}
+        stub._link_preview_source_url = "https://example.com"
+        stub._remove_link_preview_btn.Show()
+        _run_fetch_synchronously(monkeypatch)
+        monkeypatch.setattr(conversations_module, "fetch_link_preview", lambda url, **kw: None)
+
+        _run_debounced_check(monkeypatch, stub)
+
+        assert stub._pending_link_preview is None
+        assert stub._remove_link_preview_btn.IsShown() is False
+
+    def test_stale_fetch_result_is_ignored_after_the_field_changed(self, monkeypatch):
+        """A slow fetch for an old URL must not clobber state once the user
+        already moved on to different text — guarded by the fetch token."""
+        stub = _Stub(text="https://example.com")
+        stub._link_preview_fetch_token = 5
+        stub.message_field._value = "the url is gone now"
+
+        stub._on_link_preview_fetched(
+            token=1,  # stale — current token is 5
+            url="https://example.com",
+            preview={"title": "t", "description": "d", "canonicalUrl": "https://example.com"},
+        )
+        assert stub._pending_link_preview is None
+
+
+# ── ConversationsPanel._send_new_text_message() ─────────────────────────────
+
+class _FakeMessagesList:
+    def __init__(self):
+        self.appended = []
+
+    def Append(self, row):
+        self.appended.append(row)
+
+    def GetItemCount(self):
+        return len(self.appended)
+
+    def EnsureVisible(self, index):
+        pass
+
+
+class _FakeMessageQueue:
+    def __init__(self):
+        self.enqueued = []
+
+    def enqueue(self, pm):
+        self.enqueued.append(pm)
+
+
+class _FakeMainWindowForSend:
+    def __init__(self):
+        self.message_queue = _FakeMessageQueue()
+        self.mark_conversation_as_read_calls = []
+
+    def mark_conversation_as_read(self, jid):
+        self.mark_conversation_as_read_calls.append(jid)
+
+    def _schedule_set_chats(self):
+        pass
+
+
+class _SendStub:
+    _send_new_text_message = ConversationsPanel._send_new_text_message
+    _build_mention_payload = ConversationsPanel._build_mention_payload
+    _clear_link_preview = ConversationsPanel._clear_link_preview
+
+    def __init__(self, pending_link_preview=None):
+        self.main_window = _FakeMainWindowForSend()
+        self.message_field = _FakeMessageField()
+        self.messages_list = _FakeMessagesList()
+        self.conversation_panel = _FakeWidget()
+        self._remove_link_preview_btn = _FakeWidget()
+        self._sorted_messages = []
+        self._quoted_message = None
+        self._pending_mentions = []
+        self._pending_mention_display_names = {}
+        self._pending_link_preview = pending_link_preview
+        self._link_preview_source_url = (
+            pending_link_preview.get("canonicalUrl", "") if pending_link_preview else ""
+        )
+        self._link_preview_dismissed_url = ""
+        self._link_preview_fetch_token = 0
+
+    def _render_message_line(self, msg):
+        return ""
+
+    def _clear_empty_placeholder(self):
+        pass
+
+    def _hide_mention_suggestions(self):
+        pass
+
+    def _rebuild_mention_pills(self):
+        pass
+
+    def _register_virtual_msg(self, virtual_msg):
+        pass
+
+    def _on_cancel_reply(self, event=None):
+        pass
+
+
+class TestSendNewTextMessageWithLinkPreview:
+    def test_virtual_message_carries_the_preview_fields(self):
+        preview = {
+            "title": "Example Domain", "description": "desc",
+            "canonicalUrl": "https://example.com",
+        }
+        stub = _SendStub(pending_link_preview=preview)
+
+        stub._send_new_text_message(
+            "check this out https://example.com", "5511999999999@s.whatsapp.net"
+        )
+
+        virtual_msg = stub._sorted_messages[0]
+        assert virtual_msg["messageType"] == "extendedTextMessage"
+        ext = virtual_msg["message"]["extendedTextMessage"]
+        assert ext["title"] == "Example Domain"
+        assert ext["description"] == "desc"
+        assert ext["canonicalUrl"] == "https://example.com"
+        assert ext["text"] == "check this out https://example.com"
+
+    def test_the_pending_message_carries_the_preview(self):
+        preview = {"title": "t", "description": "d", "canonicalUrl": "https://example.com"}
+        stub = _SendStub(pending_link_preview=preview)
+
+        stub._send_new_text_message("https://example.com", "5511999999999@s.whatsapp.net")
+
+        pm = stub.main_window.message_queue.enqueued[0]
+        assert pm.link_preview == preview
+
+    def test_composer_state_is_reset_after_sending(self):
+        preview = {"title": "t", "description": "d", "canonicalUrl": "https://example.com"}
+        stub = _SendStub(pending_link_preview=preview)
+        stub._remove_link_preview_btn.Show()
+
+        stub._send_new_text_message("https://example.com", "5511999999999@s.whatsapp.net")
+
+        assert stub._pending_link_preview is None
+        assert stub._link_preview_dismissed_url == ""
+        assert stub._remove_link_preview_btn.IsShown() is False
+
+    def test_plain_message_without_a_preview_stays_a_conversation(self):
+        stub = _SendStub(pending_link_preview=None)
+
+        stub._send_new_text_message("just some text", "5511999999999@s.whatsapp.net")
+
+        virtual_msg = stub._sorted_messages[0]
+        assert virtual_msg["messageType"] == "conversation"
+        assert virtual_msg["message"] == {"conversation": "just some text"}
+        pm = stub.main_window.message_queue.enqueued[0]
+        assert pm.link_preview is None
