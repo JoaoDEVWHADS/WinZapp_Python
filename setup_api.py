@@ -287,6 +287,7 @@ from core.wppconnect_host_layer_patch import (
 )
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
 from core.wppconnect_sender_layer_patch import ALL_PATCHES as _SENDER_LAYER_PATCHES
+from core.wppconnect_sender_layer_patch import patch_sender_layer_source as _patch_sender_layer_source
 from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
 
 
@@ -438,6 +439,18 @@ def _patch_wppconnect_sender_layer(client_api_dir: str = None) -> bool:
             applied += 1
         else:
             missing += 1
+
+    # patch_sender_layer_source() additionally migrates a couple of
+    # transitional intermediate states from this patch's own iterative
+    # development (a chunked-upload variant missing the MediaGatingUtils
+    # 1 GB override, and an even earlier chunking-threshold marker) that
+    # the literal ALL_PATCHES pairs above don't cover on their own — see
+    # that function's own docstring. Idempotent no-op on content the loop
+    # above already brought fully up to date.
+    migrated = _patch_sender_layer_source(content)
+    if migrated != content:
+        content = migrated
+        applied += 1
 
     if applied:
         with open(sender_layer_path, "w", encoding="utf-8") as f:

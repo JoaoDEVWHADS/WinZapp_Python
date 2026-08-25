@@ -905,7 +905,24 @@ class StatusPanel(wx.Panel):
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 
     def _reconcile_my_status_cache(self, remote_my_statuses: list) -> None:
-        """Delete cached own stories absent from authoritative WhatsApp."""
+        """Delete cached own stories absent from authoritative WhatsApp.
+
+        Only runs when *remote_my_statuses* is non-empty. _fetch_statuses_
+        from_api() marks the fetch "ok" as soon as it gets back HTTP 200
+        with a JSON dict body — it has no way to tell "you genuinely have
+        no live stories right now" apart from "WPPConnect's StatusV3Store
+        hasn't finished rehydrating yet" (routine right after a reconnect),
+        both of which look identical here: an empty myStatus list. Treating
+        an empty-but-"ok" response as authoritative used to permanently
+        delete every locally cached own status — from memory AND SQLite,
+        via remove_failed_status_update() — on the next reconnect after
+        posting one, even though it was still live on WhatsApp. A genuinely
+        expired own status (the one real case this deliberately no longer
+        catches) is the far cheaper failure to leave uncorrected than
+        wiping a user's own live content out from under them.
+        """
+        if not remote_my_statuses:
+            return
         mw = self.main_window
         remote_ids = {
             (status.get("key") or {}).get("id")

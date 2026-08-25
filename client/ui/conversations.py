@@ -9776,6 +9776,11 @@ class ConversationsPanel(wx.Panel):
             self._media_upload_progress.pop(pending_local_id, None)
             self._media_transfer_started.discard(pending_local_id)
             self._hide_media_transfer_gauge()
+            # cancel() only stops the queue from ever sending it — the pending
+            # bubble itself (key.id == pending_local_id for a virtual message)
+            # stays in the list until removed here, same as the other two
+            # branches below do for their own message.
+            self.remove_messages_by_id({pending_local_id}, focus_previous=True)
         elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the

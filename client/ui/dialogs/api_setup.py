@@ -605,7 +605,7 @@ class ApiSetupDialog(wx.Dialog):
         Idempotent and best-effort, same pattern as
         _patch_wppconnect_status_layer just above.
         """
-        from core.wppconnect_sender_layer_patch import ALL_PATCHES
+        from core.wppconnect_sender_layer_patch import ALL_PATCHES, patch_sender_layer_source
         sender_layer_path = os.path.join(wppconnect_api_dir, "layers", "sender.layer.js")
         if not os.path.isfile(sender_layer_path):
             logging.warning("[api_setup] sender.layer.js not found — skipping sendFile error-detail patch.")
@@ -625,6 +625,15 @@ class ApiSetupDialog(wx.Dialog):
                 applied += 1
             else:
                 missing += 1
+
+        # Also migrates a couple of transitional intermediate states from
+        # this patch's own iterative development not covered by the literal
+        # ALL_PATCHES pairs above — see patch_sender_layer_source()'s own
+        # docstring (setup_api.py's copy of this function does the same).
+        migrated = patch_sender_layer_source(content)
+        if migrated != content:
+            content = migrated
+            applied += 1
 
         if applied:
             with open(sender_layer_path, "w", encoding="utf-8") as f:

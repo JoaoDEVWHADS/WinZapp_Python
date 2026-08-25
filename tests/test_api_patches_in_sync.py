@@ -97,10 +97,27 @@ def test_the_two_copies_of_each_patch_are_identical(rel_path):
         # client/api/ is only populated after setup_api.py has run; a bare
         # checkout legitimately has just the tracked subset.
         pytest.skip(f"client/api/{rel_path} not present (API not set up here)")
+    # Normalized for line endings only (a Windows checkout of client/api_patches/
+    # vs. whatever setup_api.py wrote can legitimately differ in CRLF/LF alone)
+    # — an actual content difference below this point is real drift and must
+    # still fail loudly. This is the enforcement mechanism for CLAUDE.md's
+    # "only ever edit the tracked copy under client/api_patches/... or the
+    # next setup_api.py run will silently revert this file" rule; softening
+    # it to a skip on any difference (as a previous version of this test did)
+    # defeats that on the one environment where it can actually catch
+    # anything — CI's fast test job never has client/api/ at all (skipped
+    # above), and CI's build job always regenerates client/api/ fresh from
+    # client/api_patches/ so the two can never differ there either. A local
+    # dev machine with a stale client/api/ left over from before an
+    # api_patches/ edit is the only place this assertion is ever reachable.
     patch_bytes = patch.read_bytes().replace(b"\r\n", b"\n")
     live_bytes = live.read_bytes().replace(b"\r\n", b"\n")
-    if patch_bytes != live_bytes:
-        pytest.skip(f"client/api/{rel_path} has local dev drift from client/api_patches/{rel_path}")
+    assert patch_bytes == live_bytes, (
+        f"client/api/{rel_path} and client/api_patches/{rel_path} have drifted. "
+        f"api_patches/ is the source of truth setup_api.py restores from — edit "
+        f"that copy (and mirror it into client/api/), or the next setup_api.py "
+        f"run will silently revert this file."
+    )
 
 
 def test_setup_api_patch_list_matches_this_one():

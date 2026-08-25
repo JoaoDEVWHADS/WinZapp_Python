@@ -448,17 +448,31 @@ class VideoPlayer:
             wx.CallAfter(self._timer.Start, self._timer_interval())
 
     def _restart_video_pipe(self, seconds: float):
-        """Replace only the ffmpeg picture pipe after an audio seek."""
+        """Replace only the ffmpeg picture pipe after an audio seek.
+
+        set_position() calls this straight from wx seek-slider/shortcut
+        handlers on the UI thread. The generation bump has to happen right
+        here, synchronously, so _read_frames()'s already-running loop
+        notices the mismatch and stops feeding stale frames on its very
+        next iteration — but _kill_ffmpeg_locked() below it blocks on
+        proc.wait(timeout=2), which used to run on that same UI thread and
+        could freeze the whole window (NVDA/JAWS included) for up to two
+        seconds on a single seek if the killed process was slow to reap.
+        Everything past the generation bump is safe to defer to a
+        background thread instead — _pipe_lock still serializes it against
+        any other in-flight restart.
+        """
         with self._pipe_lock:
             self._generation += 1
             self._eof_reached = False
-            self._kill_ffmpeg_locked()
-            self._drain_frames()
-        threading.Thread(
-            target=self._start_video_pipe,
-            args=(max(0.0, seconds),),
-            daemon=True,
-        ).start()
+
+        def _finish_restart():
+            with self._pipe_lock:
+                self._kill_ffmpeg_locked()
+                self._drain_frames()
+            self._start_video_pipe(max(0.0, seconds))
+
+        threading.Thread(target=_finish_restart, daemon=True).start()
 
     def _read_frames(self, generation: int, proc):
         if proc is None or proc.stdout is None:

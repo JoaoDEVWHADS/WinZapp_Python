@@ -55,7 +55,7 @@ from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path, accounts_root
-from core.message_queue import MessageQueue, PendingMessage
+from core.message_queue import MessageQueue, PendingMessage, MessageCancelled
 import wx
 import wx.adv
 if sys.platform == "win32":
@@ -20064,6 +20064,12 @@ class MainWindow(wx.Frame):
                 }
             retryable = r.status_code >= 500
             return {"ok": False, "error": err, "retry": retryable}
+        except MessageCancelled:
+            # Must propagate, not be classified as a send failure: this is
+            # what MessageQueue's own `except MessageCancelled:` handler
+            # (message_queue.py) is waiting for to drop the message
+            # without retrying or reporting a failure to the user.
+            raise
         except Exception as exc:
             return self._classify_send_exception(exc, "send_media")
         finally:
