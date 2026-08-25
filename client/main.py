@@ -17915,7 +17915,7 @@ class MainWindow(wx.Frame):
                             self._older_requested_chats.pop(remote_jid, None)
                             self._persist_older_requested()
                             history_pending = True
-                    waited = max(0.0, time.time() - (asked_at or time.time()))
+                    waited = max(0.0, time.time() - (time.time() if asked_at is None else asked_at))
                     if requested:
                         history_pending = True
                         logging.info(
