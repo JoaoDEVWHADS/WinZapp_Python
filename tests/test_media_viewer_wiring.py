@@ -98,6 +98,44 @@ def test_viewer_is_maximized_and_text_mode_is_read_only():
     assert "self._position_slider" in src
 
 
+def test_prev_next_save_have_real_shortcuts_and_are_announced():
+    """Reported live: prev/next/save were reachable by mouse or Tab only —
+    no keyboard shortcut worked, and NVDA announced no shortcut for any of
+    the three buttons, unlike the classic StatusPanel viewer they mirror
+    (AccessibleStatusPrev/Next/SaveAs, Ctrl+Left/Right, Ctrl+Shift+S)."""
+    src = _source("client/ui/media_viewer.py")
+    assert "from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs" in src
+
+    calls = _method_calls("client/ui/media_viewer.py", "MediaViewerDialog", "_build_ui")
+    assert "SetAccessible" in calls
+
+    accel_calls = _method_calls("client/ui/media_viewer.py", "MediaViewerDialog", "_create_accelerators")
+    assert "SetAcceleratorTable" in accel_calls
+    assert "Bind" in accel_calls
+
+    accel_src_start = src.index("def _create_accelerators")
+    accel_src = src[accel_src_start:src.index("\n    def ", accel_src_start + 1)]
+    assert "wx.WXK_LEFT" in accel_src and "self._on_prev" in accel_src
+    assert "wx.WXK_RIGHT" in accel_src and "self._on_next" in accel_src
+    assert 'ord("S")' in accel_src and "self._on_save" in accel_src
+    assert "wx.ACCEL_CTRL | wx.ACCEL_SHIFT" in accel_src
+
+
+def test_reply_field_has_a_visible_label_not_just_setname():
+    """Reported live: the status reply field announced nothing on focus.
+    SetName() alone is not reliably read by NVDA/JAWS for an editable
+    (non-read-only) wx.TextCtrl on Windows — the same reason StatusPanel's
+    own classic reply field pairs a StaticText with the TextCtrl instead of
+    relying on SetName() alone."""
+    src = _source("client/ui/media_viewer.py")
+    assert 'self._reply_label = wx.StaticText(' in src
+    assert 'self._reply_field.SetName(self.i18n.t("status_reply_label"))' in src
+    # The label must actually be shown/hidden alongside the field, not left
+    # permanently visible while the field it names is hidden (or vice versa).
+    calls = _method_calls("client/ui/media_viewer.py", "MediaViewerDialog", "_configure_status_actions")
+    assert "Show" in calls
+
+
 def test_i18n_audit_covers_save_filters():
     conversations = _source("client/ui/conversations.py")
     for key in (

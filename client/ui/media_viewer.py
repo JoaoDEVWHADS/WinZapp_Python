@@ -12,6 +12,7 @@ import wx
 
 from core.utils import get_downloads_folder
 from core.video_player import VideoPlayer
+from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs
 
 
 class CenteredBitmapPanel(wx.Panel):
@@ -151,6 +152,7 @@ class MediaViewerDialog(wx.Dialog):
         self._current_path = ""
 
         self._build_ui()
+        self._create_accelerators()
         self._player = VideoPlayer(self.main_window, self._bitmap_panel)
         self._progress_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_progress_timer, self._progress_timer)
@@ -252,6 +254,18 @@ class MediaViewerDialog(wx.Dialog):
         self._like_btn = wx.Button(self._status_actions, label=self.i18n.t("status_like"))
         self._like_btn.Bind(wx.EVT_BUTTON, self._on_like)
         status_sizer.Add(self._like_btn, 0, wx.RIGHT, 8)
+        # A wx.TextCtrl's SetName() alone is not reliably announced by NVDA/
+        # JAWS for an editable (non-read-only) control on Windows — unlike
+        # the read-only _text_ctrl/_caption_ctrl above, a plain EDIT control's
+        # accessible Name is normally supplied by an adjacent static label,
+        # which is how StatusPanel's own classic reply field
+        # (_reply_label + _reply_field) already gets read correctly. Kept
+        # here too, alongside SetName(), so the field is announced whichever
+        # of the two the screen reader actually uses.
+        self._reply_label = wx.StaticText(
+            self._status_actions, label=self.i18n.t("status_reply_label")
+        )
+        status_sizer.Add(self._reply_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self._reply_field = wx.TextCtrl(self._status_actions, style=wx.TE_PROCESS_ENTER)
         self._reply_field.SetName(self.i18n.t("status_reply_label"))
         status_sizer.Add(self._reply_field, 1, wx.RIGHT, 8)
@@ -266,13 +280,16 @@ class MediaViewerDialog(wx.Dialog):
 
         bottom = wx.BoxSizer(wx.HORIZONTAL)
         self._prev_btn = wx.Button(self, label=self.i18n.t("status_prev"))
+        self._prev_btn.SetAccessible(AccessibleStatusPrev(self.i18n.t("accessible_ctrl_left")))
         self._prev_btn.Bind(wx.EVT_BUTTON, self._on_prev)
         bottom.Add(self._prev_btn, 0, wx.RIGHT, 8)
         self._next_btn = wx.Button(self, label=self.i18n.t("status_next"))
+        self._next_btn.SetAccessible(AccessibleStatusNext(self.i18n.t("accessible_ctrl_right")))
         self._next_btn.Bind(wx.EVT_BUTTON, self._on_next)
         bottom.Add(self._next_btn, 0, wx.RIGHT, 8)
         bottom.AddStretchSpacer(1)
         self._save_btn = wx.Button(self, label=self.i18n.t("save_as"))
+        self._save_btn.SetAccessible(AccessibleSaveAs())
         self._save_btn.Bind(wx.EVT_BUTTON, self._on_save)
         bottom.Add(self._save_btn, 0, wx.RIGHT, 8)
         self._close_btn = wx.Button(self, wx.ID_CANCEL, self.i18n.t("close"))
@@ -282,6 +299,28 @@ class MediaViewerDialog(wx.Dialog):
 
         self.SetSizer(root)
         self._update_speed_label()
+
+    def _create_accelerators(self):
+        """Keyboard shortcuts matching StatusPanel's own classic viewer
+        (client/status_panel.py's _create_accelerators()) — this dialog
+        used to only bind Escape and Space (via _on_char_hook), leaving
+        prev/next/save reachable by mouse or Tab only, unlike every other
+        equivalent action elsewhere in the app."""
+        self.ID_CTRL_LEFT = wx.NewIdRef()
+        self.ID_CTRL_RIGHT = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_S = wx.NewIdRef()
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, wx.WXK_LEFT, self.ID_CTRL_LEFT),
+            (wx.ACCEL_CTRL, wx.WXK_RIGHT, self.ID_CTRL_RIGHT),
+            # Same combo StatusPanel/ConversationsPanel already use for
+            # "save as" — consistent muscle memory across every place media
+            # can be saved from.
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("S"), self.ID_CTRL_SHIFT_S),
+        ])
+        self.SetAcceleratorTable(accel_tbl)
+        self.Bind(wx.EVT_MENU, self._on_prev, id=self.ID_CTRL_LEFT)
+        self.Bind(wx.EVT_MENU, self._on_next, id=self.ID_CTRL_RIGHT)
+        self.Bind(wx.EVT_MENU, self._on_save, id=self.ID_CTRL_SHIFT_S)
 
     # ── Item lifecycle ───────────────────────────────────────────────────
 
@@ -437,6 +476,7 @@ class MediaViewerDialog(wx.Dialog):
             and (self._on_like_cb is not None or self._on_reply_cb is not None)
         )
         self._like_btn.Show(can_interact and self._on_like_cb is not None)
+        self._reply_label.Show(can_interact and self._on_reply_cb is not None)
         self._reply_field.Show(can_interact and self._on_reply_cb is not None)
         self._reply_btn.Show(can_interact and self._on_reply_cb is not None)
         self._reply_field.SetValue("")
