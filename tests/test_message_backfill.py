@@ -513,6 +513,8 @@ class TestBackfillPacing:
         """Nothing left to decode means a re-query returns the identical list."""
         s = _Stub(page_size=200, chunks_pending=False)
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == {"a@lid"}
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
     def test_a_chat_that_grew_keeps_its_slot_after_the_queue_drains(self):
