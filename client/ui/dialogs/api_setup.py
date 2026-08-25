@@ -128,6 +128,7 @@ _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 # restoration step. _run_setup() now stashes their content before the clean
 # step and restores it after extraction, mirroring setup_api.py's approach.
 _CUSTOM_ROOT_FILES = [
+    ".babelrc",
     "start.js",
     "config.json",
     ".eslintrc.json",
