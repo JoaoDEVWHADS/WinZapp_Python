@@ -30,9 +30,14 @@ class _FakePanel:
 
 class _MainWindowStub:
     _refresh_open_conversation_after_sync = MainWindow._refresh_open_conversation_after_sync
+    _chat_jids_equivalent = MainWindow._chat_jids_equivalent
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _jid_address_forms = MainWindow._jid_address_forms
 
     def __init__(self, conversations_panel=None):
         self.conversations_panel = conversations_panel
+        self._lid_to_phone = {}
+        self._phone_to_lid = {}
 
 
 def test_swaps_the_open_conversation_to_the_new_object_and_repaints(monkeypatch):
