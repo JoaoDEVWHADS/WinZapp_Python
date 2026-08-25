@@ -14335,7 +14335,7 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning(
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
-            return False
+            return None
 
     def _start_deferred_media_sync(self) -> None:
         """Start media downloads after RECENT stops using the browser page."""
@@ -17915,7 +17915,7 @@ class MainWindow(wx.Frame):
                             self._older_requested_chats.pop(remote_jid, None)
                             self._persist_older_requested()
                             history_pending = True
-                    waited = max(0.0, time.time() - (time.time() if asked_at is None else asked_at))
+                    waited = max(0.0, time.time() - (asked_at or time.time()))
                     if requested:
                         history_pending = True
                         logging.info(
