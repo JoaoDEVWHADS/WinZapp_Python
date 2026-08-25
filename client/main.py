@@ -14335,7 +14335,7 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning(
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
-            return None
+            return False
 
     def _start_deferred_media_sync(self) -> None:
         """Start media downloads after RECENT stops using the browser page."""

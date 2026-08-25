@@ -362,6 +362,12 @@ class TestWaitForRestartedHistorySync:
 
         assert MainWindow._recent_history_needs_wait(payload) is False
 
+    def _stub(self, status, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=30: status)
+        return stub
+
     def test_a_disconnected_status_stops_history_landing(self, monkeypatch):
         stub = self._stub(None, monkeypatch)
         stub._history_status_disconnected = True
@@ -621,7 +627,7 @@ class TestRoutesArePatched:
         request = main.index("self.request_older_messages(jid)", retry)
         keep = main.index("self._keep_backfill_pending(jid, now)", retry)
         completed = main.index("self._completed_backfill_targets(window)", retry)
-        assert retry < request < keep < completed
+        assert retry < keep < request < completed
 
 
 class TestDocumentOnlyInterception:
