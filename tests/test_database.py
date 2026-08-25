@@ -437,6 +437,26 @@ class TestMergeOrRenameChat:
         old_msgs = await in_memory_db.get_messages("old@lid")
         assert old_msgs == []
 
+    async def test_a_message_left_under_an_lid_is_invisible_from_the_phone_jid(
+        self, in_memory_db
+    ):
+        """Why the merge is mandatory rather than cosmetic: _jid_variants()
+        bridges @c.us <-> @s.whatsapp.net and nothing else, so a message still
+        filed under the contact's @lid cannot be read back through the phone
+        JID — which is the only one navigate_to_conversation() ever asks for
+        once the chats have been merged in memory."""
+        await in_memory_db.insert_message("old@lid", {
+            "key": {"remoteJid": "old@lid", "id": "m1"},
+            "messageTimestamp": 1,
+        })
+
+        assert await in_memory_db.get_messages("new@s.whatsapp.net") == []
+
+        await in_memory_db.merge_or_rename_chat("old@lid", "new@s.whatsapp.net")
+
+        msgs = await in_memory_db.get_messages("new@s.whatsapp.net")
+        assert [m["key"]["id"] for m in msgs] == ["m1"]
+
     async def test_merge_deletes_old_chat_row_when_new_exists(self, in_memory_db):
         await in_memory_db.upsert_chat("old@lid", {"remoteJid": "old@lid"})
         await in_memory_db.upsert_chat("new@w", {"remoteJid": "new@w", "pushName": "Kept"})

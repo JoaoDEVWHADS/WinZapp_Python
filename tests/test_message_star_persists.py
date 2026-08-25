@@ -73,9 +73,15 @@ class _Stub:
         self.main_window = _FakeMainWindow()
         self.conversation = {"remoteJid": conversation_jid}
         self.populate_calls = []
+        self.repainted = []
 
     def populate_messages(self, preserve_focus=False):
         self.populate_calls.append(preserve_focus)
+
+    def _repaint_or_repopulate(self, msg_ids):
+        # The real one repaints the affected rows and only rebuilds the list
+        # when it can't — see ConversationsPanel._repaint_message_rows().
+        self.repainted.append(sorted(i for i in msg_ids if i))
 
 
 def _msg(msg_id="MSG1", starred=False, message_type="conversation"):
@@ -112,13 +118,14 @@ class TestStarPersistsToDatabase:
         [(jid, saved)] = panel.main_window.db.inserted
         assert saved["starred"] is False
 
-    def test_toggle_refreshes_the_message_list(self):
+    def test_toggle_refreshes_only_the_message_row(self):
         panel = _Stub()
         msg = _msg(starred=False)
 
         panel._on_menu_star(msg)
 
-        assert panel.populate_calls == [True]
+        assert panel.repainted == [["MSG1"]]
+        assert panel.populate_calls == [], "starring one message must not rebuild the whole list"
         assert panel.main_window.save_calls == 1
 
     def test_system_event_is_not_starred_or_persisted(self):
@@ -130,3 +137,4 @@ class TestStarPersistsToDatabase:
         assert msg["starred"] is False
         assert panel.main_window.db.inserted == []
         assert panel.populate_calls == []
+        assert panel.repainted == []

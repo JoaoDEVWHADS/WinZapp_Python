@@ -5,12 +5,14 @@ import os
 import tempfile
 import threading
 import time
+import wave
 import wx
 import requests
+import sound_lib.stream as sl_stream
 from ui.accessible import (
     AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText, AccessibleSaveAs,
     AccessibleRecordVoiceMessage, AccessibleDiscardVoiceMessage, AccessiblePauseResumeRecording,
-    AccessibleSendVoiceMessage,
+    AccessibleSendVoiceMessage, AccessiblePlayRecordedAudio,
 )
 from core.api_client import api_get, api_post, redact_api_url
 from core.utils import format_number, get_downloads_folder, normalize_line_separators
@@ -663,6 +665,7 @@ class StatusPanel(wx.Panel):
 
         self._post_panel.SetSizer(post_sizer)
         self._post_panel.Hide()
+        self._post_panel.Disable()
         sizer.Add(self._post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
         # ── Post media status panel (hidden) ──────────────────────────────
@@ -696,6 +699,7 @@ class StatusPanel(wx.Panel):
 
         self._media_post_panel.SetSizer(media_sizer)
         self._media_post_panel.Hide()
+        self._media_post_panel.Disable()
         sizer.Add(self._media_post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
         self._selected_media_paths: list = []
@@ -707,35 +711,52 @@ class StatusPanel(wx.Panel):
         self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("recording_in_progress"))
         voice_sizer.Add(self._voice_status_lbl, 0, wx.ALL, 5)
 
-        voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # Match ConversationsPanel's recorder: one vertical action stack,
+        # with every recording shortcut exposed only inside the Audio flow.
+        # The old horizontal strip was both unlike the working conversation
+        # recorder and easy to spill across/narrow the Status UI.
+        voice_btn_sizer = wx.BoxSizer(wx.VERTICAL)
 
         self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message"))
         self._voice_close_btn.SetAccessible(AccessibleDiscardVoiceMessage())
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
         self._voice_close_btn.Hide()
-        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message"))
         self._voice_start_btn.SetAccessible(AccessibleRecordVoiceMessage("Ctrl+R"))
         self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
-        voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_start_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording"))
         self._voice_pause_btn.SetAccessible(AccessiblePauseResumeRecording())
         self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
         self._voice_pause_btn.Hide()
-        voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        self._voice_play_btn = wx.Button(
+            self._voice_post_panel, label=i18n.t("play_recorded_audio")
+        )
+        self._voice_play_btn.SetAccessible(AccessiblePlayRecordedAudio())
+        self._voice_play_btn.Bind(wx.EVT_BUTTON, self._toggle_play_recorded_audio)
+        self._voice_play_btn.Hide()
+        voice_btn_sizer.Add(self._voice_play_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._recorded_audio_timer = wx.Timer(self._voice_play_btn)
+        self._voice_play_btn.Bind(
+            wx.EVT_TIMER, self._on_recorded_audio_timer, self._recorded_audio_timer
+        )
 
         self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("send_voice_message"))
         self._voice_send_btn.SetAccessible(AccessibleSendVoiceMessage())
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
         self._voice_send_btn.Hide()
-        voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
+        voice_btn_sizer.Add(self._voice_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         voice_sizer.Add(voice_btn_sizer, 0, wx.ALL, 5)
 
         self._voice_post_panel.SetSizer(voice_sizer)
         self._voice_post_panel.Hide()
+        self._voice_post_panel.Disable()
         sizer.Add(self._voice_post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
         # Recording state — same shape as ConversationsPanel's own voice-
@@ -749,6 +770,8 @@ class StatusPanel(wx.Panel):
         self._recording_channels = 1
         self._recording_paused  = False
         self._is_recording      = False
+        self._recorded_audio_sound = None
+        self._recorded_audio_temp_path = None
         # True while a background thread is opening the PyAudio input stream.
         # pa.open() (and find_input_device_index()'s device enumeration) can
         # block for seconds negotiating with the driver, and this used to run
@@ -770,6 +793,7 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_C        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
         self.ID_CTRL_R        = wx.NewIdRef()
+        self.ID_CTRL_P        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_P  = wx.NewIdRef()
         self.ID_CTRL_SHIFT_D  = wx.NewIdRef()
         self.ID_F5            = wx.NewIdRef()
@@ -781,6 +805,7 @@ class StatusPanel(wx.Panel):
             (wx.ACCEL_NORMAL,                  wx.WXK_F5,     self.ID_F5),
             (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
             (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
+            (wx.ACCEL_CTRL,                    ord("P"),      self.ID_CTRL_P),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("P"),      self.ID_CTRL_SHIFT_P),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("D"),      self.ID_CTRL_SHIFT_D),
             (wx.ACCEL_CTRL,                    ord("."),      self.ID_CTRL_PERIOD),
@@ -796,6 +821,7 @@ class StatusPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_copy_status_text,     id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_save_status_media,    id=self.ID_CTRL_SHIFT_S)
         self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,      id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_p_shortcut,      id=self.ID_CTRL_P)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p_shortcut,id=self.ID_CTRL_SHIFT_P)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d_shortcut,id=self.ID_CTRL_SHIFT_D)
         self.Bind(wx.EVT_MENU, self._on_refresh_status_btn,   id=self.ID_F5)
@@ -806,10 +832,17 @@ class StatusPanel(wx.Panel):
         self.on_show()
 
     def _on_escape(self, event):
-        """Esc closes the open status viewer and returns focus to the list.
+        """Esc closes the composer/viewer and returns focus to the list.
         Also called directly (event=None) from _on_next_status() when the
         last status of a contact is exhausted — see its own comment."""
-        if self._viewer_panel.IsShown():
+        if self._is_status_composer_open():
+            if self._voice_post_panel.IsShown():
+                self._on_close_voice_panel(event)
+            elif self._media_post_panel.IsShown():
+                self._on_close_media_panel(event)
+            else:
+                self._on_close_post_panel(event)
+        elif self._viewer_panel.IsShown():
             self._selected_contact_idx = -1
             self._viewer_panel.Hide()
             self._video_player.stop()
@@ -1640,12 +1673,9 @@ class StatusPanel(wx.Panel):
 
     # ── Like / unlike status ─────────────────────────────────────────────────
 
-    # Cap on how many liked-status ids settings.json keeps — a like is
-    # never removed from this list (there's no reliable "unlike" signal to
-    # remove it on either — see _on_unlike_status_attempted()), so without
-    # a cap it would grow forever. Keeping the most RECENT ones is what
-    # matters: an old status has long since expired, so nobody will ever
-    # ask "was this one liked?" again anyway.
+    # Cap on how many liked-status ids settings.json keeps. Keeping the most
+    # recent ones is what matters: an old status has long since expired, so
+    # nobody will ever ask "was this one liked?" again anyway.
     _MAX_REMEMBERED_LIKES = 500
 
     def _is_status_liked(self, status_id: str) -> bool:
@@ -1656,11 +1686,9 @@ class StatusPanel(wx.Panel):
         liked before restarting used to always show "Curtir" again with
         no way to tell it had already been done. Persisted in
         settings.json (settings["status_panel"]["liked_status_ids"]) so it
-        survives a restart — a like has no message-side trace to detect
-        it from instead (see _on_like_status()'s own docstring on why it's
-        sent as a plain, unquoted message: WPPConnect can't resolve a
-        status as a quote target any more than it can resolve one as a
-        reaction target).
+        survives a restart. Native status reactions are not stored as normal
+        private-chat messages, so there is no message-history row to infer this
+        state from after relaunching WinZapp.
         """
         if status_id in self._liked_statuses:
             return self._liked_statuses[status_id]
@@ -1668,39 +1696,13 @@ class StatusPanel(wx.Panel):
         return bool(status_id) and status_id in remembered
 
     def _on_like_status(self, event):
-        """"Like" the currently displayed status.
+        """Toggle the native heart reaction on the displayed status.
 
-        WhatsApp Web's own Store never indexes another person's status
-        message (confirmed live: neither the general Store.Msg collection
-        nor StatusV3Store — the latter is only populated once the Status
-        tab is actually rendered in the page, which never happens in
-        WPPConnect's headless session), and wa-js has no purpose-built
-        "react to a status" API. WPP.chat.sendReactionToMessage() always
-        needs an existing MsgModel instance to skip its own
-        getMessageById() lookup — passing a plain id/key just gets
-        stringified back into exactly that same failing lookup.
-
-        This is also how a "like" on a status genuinely behaves on the
-        wire in the real WhatsApp protocol: it lands in your DM history
-        with the poster, not as a public reaction — so sending it as a
-        normal message (the emoji as the body) to the poster's own chat
-        is a faithful equivalent, not just a workaround, and reuses
-        send_text_message()'s already-proven send path instead of the
-        status@broadcast reaction endpoint.
-
-        Deliberately sent WITHOUT quoting the status: WPPConnect's
-        send-reply endpoint needs to resolve the quoted message id the
-        same way the (broken) native reaction lookup does — a status is
-        never indexed anywhere WPPConnect can find it from inside the
-        poster's own chat either, so quoting it always failed server-side
-        and silently fell back to a plain send anyway (confirmed live:
-        "Não foi possível citar a mensagem original"), just after an
-        extra round trip and a confusing notice for something that was
-        never going to work.
-
-        There is no reliable way to *unsend* it afterwards (deleting it
-        would need to reach into the recipient's own chat), so once liked
-        the button only reports that state — see _on_unlike_status_attempted().
+        This must go through ``react-message`` with a status@broadcast key.
+        Sending a literal heart with ``send_text_message`` creates an ordinary
+        private message, which is observably different from WhatsApp's Status
+        Like button. The patched Node route resolves the status in the
+        poster's StatusV3Model, just as the status-reply route does.
         """
         if self._selected_contact_idx < 0:
             return
@@ -1714,10 +1716,7 @@ class StatusPanel(wx.Panel):
         if not status_id:
             return
 
-        is_liked = self._liked_statuses.get(status_id, False)
-        if is_liked:
-            self._on_unlike_status_attempted()
-            return
+        is_liked = self._is_status_liked(status_id)
 
         sender_jid = (
             status_key.get("participant", "")
@@ -1726,15 +1725,25 @@ class StatusPanel(wx.Panel):
         if not sender_jid:
             return
 
+        # API-normalized statuses normally already carry both fields. The
+        # fallbacks keep WebSocket-cache records and older stored records just
+        # as reactable without mutating the status displayed by the panel.
+        reaction_key = dict(status_key)
+        reaction_key["remoteJid"] = "status@broadcast"
+        if not reaction_key.get("participant"):
+            reaction_key["participant"] = sender_jid
+
         mw = self.main_window
 
         def _do_like():
             try:
-                ok = bool(mw.send_text_message(sender_jid, "❤️"))
+                ok = bool(mw.send_reaction(
+                    "status@broadcast", reaction_key, "" if is_liked else "❤️"
+                ))
             except Exception:
                 ok = False
             if ok:
-                wx.CallAfter(self._on_like_sent, status_id)
+                wx.CallAfter(self._on_like_sent, status_id, not is_liked)
             else:
                 wx.CallAfter(
                     wx.MessageBox,
@@ -1745,29 +1754,30 @@ class StatusPanel(wx.Panel):
 
         threading.Thread(target=_do_like, daemon=True).start()
 
-    def _on_like_sent(self, status_id: str):
-        self._liked_statuses[status_id] = True
+    def _on_like_sent(self, status_id: str, liked: bool = True):
+        self._liked_statuses[status_id] = liked
 
         mw = self.main_window
         section = mw.settings.setdefault("status_panel", {})
         remembered = section.setdefault("liked_status_ids", [])
-        if status_id not in remembered:
+        settings_changed = False
+        if liked and status_id not in remembered:
             remembered.append(status_id)
             if len(remembered) > self._MAX_REMEMBERED_LIKES:
                 del remembered[:len(remembered) - self._MAX_REMEMBERED_LIKES]
+            settings_changed = True
+        elif not liked and status_id in remembered:
+            remembered.remove(status_id)
+            settings_changed = True
+        if settings_changed:
             mw.save_settings()
 
         # The status shown may have changed while the send was in flight
         # (Ctrl+Left/Right) — only touch the button if it's still this one.
         if (self._current_status or {}).get("key", {}).get("id") == status_id:
-            self._like_btn.SetLabel(mw.i18n.t("status_unlike"))
-
-    def _on_unlike_status_attempted(self):
-        wx.MessageBox(
-            self.main_window.i18n.t("status_unlike_unsupported"),
-            self.main_window.app_name,
-            wx.OK | wx.ICON_INFORMATION,
-        )
+            self._like_btn.SetLabel(
+                mw.i18n.t("status_unlike") if liked else mw.i18n.t("status_like")
+            )
 
     # ── Play/pause video status (in-app: audio via BASS, frames via ffmpeg) ──
     #
@@ -2024,11 +2034,9 @@ class StatusPanel(wx.Panel):
         menu.Destroy()
 
     def _on_choose_text_status(self, event):
-        self._hide_post_panels()
-        self._post_panel.Show()
+        self._enter_status_composer(self._post_panel)
         self._post_text_field.SetValue("")
         self._caption_field.SetValue("")
-        self.Layout()
         self._post_text_field.SetFocus()
 
     def _on_open_post_emoji_picker(self, event):
@@ -2056,43 +2064,88 @@ class StatusPanel(wx.Panel):
         if dlg.ShowModal() == wx.ID_OK:
             self._selected_media_paths = dlg.GetPaths()
             dlg.Destroy()
-            self._hide_post_panels()
-            self._media_post_panel.Show()
+            self._enter_status_composer(self._media_post_panel)
             self._media_caption_field.SetValue("")
             self._rebuild_media_attachment_list()
-            self.Layout()
             self._media_caption_field.SetFocus()
         else:
             dlg.Destroy()
 
     def _on_close_post_panel(self, event):
-        self._post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
     def _on_close_media_panel(self, event):
         self._selected_media_paths = []
-        self._media_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
     def _hide_post_panels(self):
-        self._post_panel.Hide()
-        self._media_post_panel.Hide()
-        self._voice_post_panel.Hide()
+        # Disable as well as hide, so controls from the two inactive choices
+        # cannot remain keyboard-focusable or exposed as enabled actions in
+        # the Windows/MSAA accessibility tree while another composer is open.
+        for panel in (
+            self._post_panel,
+            self._media_post_panel,
+            self._voice_post_panel,
+        ):
+            panel.Disable()
+            panel.Hide()
+
+    def _is_status_composer_open(self) -> bool:
+        return any(
+            panel.IsShown()
+            for panel in (
+                self._post_panel,
+                self._media_post_panel,
+                self._voice_post_panel,
+            )
+        )
+
+    def _enter_status_composer(self, panel):
+        """Show only the selected Add Status flow.
+
+        The status browser and every other composer are deliberately hidden:
+        recording controls and their shortcuts belong to Audio, attachment
+        controls belong to Media, and text controls belong to Text. Keeping
+        them beside the status list made the main screen needlessly crowded.
+        """
+        self._hide_post_panels()
+        self._viewer_panel.Hide()
+        self._video_player.stop()
+        for widget in (
+            self._add_status_btn,
+            self._refresh_status_btn,
+            self._list_label,
+            self._status_list,
+        ):
+            widget.Hide()
+        panel.Enable()
+        panel.Show()
+        self.Layout()
+
+    def _leave_status_composer(self):
+        """Return from any Add Status flow to the clean status browser."""
+        self._hide_post_panels()
+        for widget in (
+            self._add_status_btn,
+            self._refresh_status_btn,
+            self._list_label,
+            self._status_list,
+        ):
+            widget.Show()
+        self.Layout()
+        self._status_list.SetFocus()
 
     # ── Record & post voice status ───────────────────────────────────────────
 
     def _on_choose_voice_status(self, event):
         """Open the voice status post panel in prepared state (NOT recording yet).
         User can click Record or press Ctrl+R to start recording."""
-        self._hide_post_panels()
-        self._viewer_panel.Hide()
-        self._video_player.stop()
+        self._enter_status_composer(self._voice_post_panel)
 
         self._is_recording = False
         self._recording_paused = False
         self._recording_frames = []
+        self._stop_recorded_audio_preview()
         self._stop_recording_stream()
 
         i18n = self.main_window.i18n
@@ -2100,29 +2153,41 @@ class StatusPanel(wx.Panel):
         self._voice_start_btn.SetLabel(i18n.t("record_voice_message"))
         self._voice_start_btn.Show()
         self._voice_pause_btn.Hide()
+        self._voice_play_btn.Hide()
         self._voice_send_btn.Hide()
-        self._voice_close_btn.Hide()
+        # Audio is a self-contained flow. Before capture starts this is the
+        # Close action; once recording starts _on_stream_opened relabels the
+        # same control to Discard, exactly like the conversation recorder.
+        self._voice_close_btn.SetLabel(i18n.t("close"))
+        self._voice_close_btn.Show()
 
-        self._voice_post_panel.Show()
-        self.Layout()
         self._voice_start_btn.SetFocus()
 
     def _on_ctrl_r_shortcut(self, event):
         """Ctrl+R shortcut handler for status panel.
-        If voice post panel is shown: start recording if idle, or send if recording."""
+        It belongs only to the Audio composer selected from Add Status: start
+        if idle, or send if recording. It must not open Audio from the clean
+        Status browser, otherwise audio controls leak outside their option."""
         if self._voice_post_panel.IsShown():
             if not self._is_recording:
                 if not self._recording_starting:
                     self._start_voice_recording()
             else:
                 self._on_send_voice_status(None)
-        else:
-            self._on_choose_voice_status(None)
 
     def _on_ctrl_shift_p_shortcut(self, event):
         """Ctrl+Shift+P shortcut handler to pause/resume voice recording."""
         if self._voice_post_panel.IsShown() and self._is_recording:
             self._toggle_pause_voice_recording(event)
+
+    def _on_ctrl_p_shortcut(self, event):
+        """Ctrl+P plays/stops the paused recording, matching conversations."""
+        if (
+            self._voice_post_panel.IsShown()
+            and self._is_recording
+            and self._recording_paused
+        ):
+            self._toggle_play_recorded_audio(event)
 
     def _on_ctrl_shift_d_shortcut(self, event):
         """Ctrl+Shift+D shortcut handler to discard voice recording/panel."""
@@ -2292,9 +2357,74 @@ class StatusPanel(wx.Panel):
         if self._recording_paused:
             self._voice_pause_btn.SetLabel(i18n.t("resume_recording"))
             self._voice_status_lbl.SetLabel(i18n.t("recording_paused"))
+            self._voice_play_btn.Show()
         else:
+            self._stop_recorded_audio_preview()
+            self._voice_play_btn.Hide()
             self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
             self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
+        self.Layout()
+
+    def _toggle_play_recorded_audio(self, event):
+        """Play or stop the stable snapshot captured before the pause."""
+        if not self._is_recording or not self._recording_paused:
+            return
+        if self._recorded_audio_sound is not None:
+            self._stop_recorded_audio_preview()
+            return
+        if not self._recording_frames:
+            return
+
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.close()
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(self._recording_channels)
+                wf.setsampwidth(2)  # capture is always 16-bit PCM
+                wf.setframerate(self._recording_rate)
+                wf.writeframes(b"".join(self._recording_frames))
+            self._recorded_audio_temp_path = tmp.name
+            sound = sl_stream.FileStream(file=tmp.name)
+            sound.play()
+        except Exception as exc:
+            logging.warning("[status audio] Failed to preview recording: %s", exc)
+            self._cleanup_recorded_audio_temp_file()
+            return
+
+        self._recorded_audio_sound = sound
+        self._voice_play_btn.SetLabel(
+            self.main_window.i18n.t("stop_recorded_audio_playback")
+        )
+        self._recorded_audio_timer.Start(300)
+
+    def _on_recorded_audio_timer(self, event):
+        if (
+            self._recorded_audio_sound is None
+            or not self._recorded_audio_sound.is_playing
+        ):
+            self._stop_recorded_audio_preview()
+
+    def _stop_recorded_audio_preview(self):
+        self._recorded_audio_timer.Stop()
+        if self._recorded_audio_sound is not None:
+            try:
+                self._recorded_audio_sound.stop()
+            except Exception:
+                pass
+            self._recorded_audio_sound = None
+        self._cleanup_recorded_audio_temp_file()
+        if hasattr(self, "_voice_play_btn"):
+            self._voice_play_btn.SetLabel(
+                self.main_window.i18n.t("play_recorded_audio")
+            )
+
+    def _cleanup_recorded_audio_temp_file(self):
+        if self._recorded_audio_temp_path is not None:
+            try:
+                os.unlink(self._recorded_audio_temp_path)
+            except Exception:
+                pass
+            self._recorded_audio_temp_path = None
 
     def _stop_recording_stream(self):
         if self._recording_stream is not None:
@@ -2316,24 +2446,26 @@ class StatusPanel(wx.Panel):
                 self.main_window.voicemsg_discard_sound.play()
             except Exception:
                 pass
+        self._stop_recorded_audio_preview()
         self._stop_recording_stream()
         self._recording_frames = []
         self._is_recording = False
         self._recording_paused = False
-        self._voice_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
 
     def _on_send_voice_status(self, event):
+        if not self._is_recording:
+            return
         if hasattr(self.main_window, "voicemsg_send_sound"):
             try:
                 self.main_window.voicemsg_send_sound.play()
             except Exception:
                 pass
+        self._stop_recorded_audio_preview()
         self._stop_recording_stream()
-        self._voice_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._is_recording = False
+        self._recording_paused = False
+        self._leave_status_composer()
 
         if not self._recording_frames:
             return
@@ -2344,7 +2476,6 @@ class StatusPanel(wx.Panel):
         fd, temp_wav = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
-            import wave
             with wave.open(temp_wav, "wb") as wf:
                 wf.setnchannels(self._recording_channels)
                 wf.setsampwidth(self._recording_pa.get_sample_size(pyaudio.paInt16))
@@ -2517,10 +2648,7 @@ class StatusPanel(wx.Panel):
             )
 
     def _on_status_sent(self):
-        self._post_panel.Hide()
-        self._media_post_panel.Hide()
-        self.Layout()
-        self._status_list.SetFocus()
+        self._leave_status_composer()
         self.main_window.output(self.main_window.i18n.t("status_posted"))
         threading.Thread(target=self._load_statuses, daemon=True).start()
 

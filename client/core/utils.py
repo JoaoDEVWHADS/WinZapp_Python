@@ -13,6 +13,109 @@ from cryptography.fernet import Fernet
 SEARCH_NORMALIZATION_MODES = ("off", "nfd", "nfkd")
 
 
+#: Where a duration WinZapp measured from the media file itself is kept, apart
+#: from the "seconds" the message arrived with. Two reasons for its own key:
+#: a resync overwrites "seconds" with the server's copy and must not touch
+#: this, and only a measured value can legitimately be 0 (see video_seconds).
+MEASURED_SECONDS_KEY = "_measured_seconds"
+
+
+def video_seconds(video: dict):
+    """A video's length in whole seconds, or None when it isn't known.
+
+    Two sources, in order:
+
+    1. ``_measured_seconds`` — what WinZapp read off the media file itself
+       (see ui/conversations.probe_media_duration). This is the only place a
+       0 is believed: the file said so, and a clip under a second really does
+       round to 0 there. WhatsApp shows "0:00" for such a thing, so we do too.
+
+    2. ``seconds`` — what the message arrived with, and only when above zero.
+       WhatsApp Web hands over duration 0 whenever the sending client left the
+       field out of the message (confirmed against /get-messages for such a
+       video: `duration` is the string "0", and no other field on the payload
+       or its mediaData carries the real length). No video lasts no time, so
+       announcing "duração: 0 segundos" from that states a length that is
+       certainly wrong — reported as exactly that on a video that plays for
+       minutes.
+
+    So a stated 0 means "not stated", a measured 0 means "really that short",
+    and the two are no longer the same answer. Audio never needed the
+    distinction: a voice note under a second genuinely reports its own 0, and
+    that path keeps treating it as a real value.
+
+    Either value may arrive as an int or as a string depending on which layer
+    normalized it (WebSocketClient._media_seconds() casts, a record restored
+    straight from a REST sync may not) — "0" is truthy, so this cannot be a
+    plain falsiness check at the call site.
+    """
+    if not isinstance(video, dict):
+        return None
+    measured = _whole_seconds(video.get(MEASURED_SECONDS_KEY))
+    if measured is not None and measured >= 0:
+        return measured
+    stated = _whole_seconds(video.get("seconds"))
+    return stated if stated is not None and stated > 0 else None
+
+
+def _whole_seconds(raw):
+    """*raw* as a whole number of seconds, or None if it isn't a number."""
+    if raw is None or raw == "" or isinstance(raw, bool):
+        return None
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def carry_over_video_durations(new_msgs, old_msgs) -> int:
+    """Copy a measured video duration from *old_msgs* onto the matching
+    message in *new_msgs* whenever the new copy states none. Returns how many
+    were carried over.
+
+    A resync replaces the in-memory records of a chat with the server's copy,
+    and the server never learns a duration WinZapp measured from the file
+    itself (see ui/conversations.probe_media_duration) — so without this the
+    length vanished from the list the moment any sync ran, and only came back
+    after the video was played again. The database side of the same rule lives
+    in DatabaseManager._with_known_video_duration(); this one keeps what is on
+    screen right now in step with it.
+
+    A message's video is immutable — WhatsApp has no "edit the media of a sent
+    message" — so a duration measured once stays valid for that message id
+    forever.
+    Only the measured value travels: "seconds" is the server's own field and
+    the incoming copy's is authoritative for it, whatever it says.
+    """
+    known = {}
+    for m in old_msgs or ():
+        if not isinstance(m, dict):
+            continue
+        mid = (m.get("key") or {}).get("id")
+        video = (m.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict):
+            continue
+        measured = _whole_seconds(video.get(MEASURED_SECONDS_KEY))
+        if mid and measured is not None and measured >= 0:
+            known[mid] = measured
+    if not known:
+        return 0
+    carried = 0
+    for m in new_msgs or ():
+        if not isinstance(m, dict):
+            continue
+        video = (m.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict):
+            continue
+        if _whole_seconds(video.get(MEASURED_SECONDS_KEY)) is not None:
+            continue
+        measured = known.get((m.get("key") or {}).get("id"))
+        if measured is not None:
+            video[MEASURED_SECONDS_KEY] = measured
+            carried += 1
+    return carried
+
+
 def search_normalization_mode(value) -> str:
     """Canonicalize whatever settings.json holds into one of the three modes.
 

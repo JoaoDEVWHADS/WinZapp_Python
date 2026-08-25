@@ -47,7 +47,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
@@ -135,6 +135,76 @@ def message_caption(msg) -> str:
         if isinstance(media, dict):
             return (media.get("caption") or "").strip()
     return ""
+
+
+def probe_media_duration(path: str):
+    """Best-effort length in whole seconds of a media file, or None if unknown.
+
+    Supports .mp3, .ogg, .wav, .m4a, .flac, .opus, .aac etc. — and .mp4, since
+    BASS opens the container directly through the bass_aac plugin the app
+    already loads at startup (that is how core/video_player.py plays a video's
+    audio track), which is what lets a video with no stated duration be
+    measured from the file. Uses sound_lib / BASS when available, or stdlib
+    wave and header fallback parsers.
+
+    A module-level function rather than only a ConversationsPanel method
+    because MainWindow probes downloaded video from the media-download path,
+    where there is no panel in reach.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+
+    # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
+    #    A file that reads as shorter than a second returns 0, not None: the
+    #    caller has to tell "measured, and it really is that short" apart from
+    #    "could not measure" — see core.utils.video_seconds(). A length of
+    #    exactly 0.0 is the second case (nothing decodable), so it falls
+    #    through to the parsers below.
+    try:
+        from sound_lib import stream
+        s = stream.FileStream(file=path)
+        length_bytes = s.get_length()
+        length_secs = s.bytes_to_seconds(length_bytes)
+        s.free()
+        if length_secs and 0 < length_secs < 86400:
+            return int(length_secs)
+    except Exception:
+        pass
+
+    # 2. Try stdlib wave module for .wav files
+    if path.lower().endswith(".wav"):
+        try:
+            import wave
+            with wave.open(path, "rb") as wf:
+                frames = wf.getnframes()
+                rate   = wf.getframerate()
+                if frames > 0 and rate > 0:
+                    sec = int(frames / rate)
+                    if sec < 86400:
+                        return sec
+        except Exception:
+            pass
+
+    # 3. Fallback lightweight header parser for MP3 / OGG
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".mp3":
+            size = os.path.getsize(path)
+            if size > 0:
+                # Estimate based on standard 128kbps (16000 bytes/sec)
+                sec = max(1, int(size / 16000))
+                if 0 < sec < 86400:
+                    return sec
+        elif ext in (".ogg", ".opus"):
+            size = os.path.getsize(path)
+            if size > 0:
+                sec = max(1, int(size / 6000))
+                if 0 < sec < 86400:
+                    return sec
+    except Exception:
+        pass
+
+    return None
 
 
 def _fmt_last_seen(ts, i18n) -> str:
@@ -722,6 +792,17 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
+        # Criado (e adicionado ao sizer) antes do botão de emojis de propósito:
+        # quando há uma citação ativa, remover a citação é a ação mais imediata,
+        # então ela deve ser lida primeiro pelo leitor de tela. A ordem de
+        # tabulação segue a ordem de criação dos controles, não só a do sizer.
+        self._remove_quote_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("remove_quote")
+        )
+        self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
+        conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._remove_quote_btn.Hide()
+
         self._emoji_btn = wx.Button(
             self.conversation_panel, label=i18n.t("emoji_button")
         )
@@ -735,13 +816,6 @@ class ConversationsPanel(wx.Panel):
         self._cancel_edit_btn.Bind(wx.EVT_BUTTON, self._on_cancel_edit)
         conv_sizer.Add(self._cancel_edit_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._cancel_edit_btn.Hide()
-
-        self._remove_quote_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("remove_quote")
-        )
-        self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
-        conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-        self._remove_quote_btn.Hide()
 
         # ── Pending mention pills (one label + remove button per @mention) ──
         self._pending_mentions_panel = wx.Panel(self.conversation_panel)
@@ -1230,6 +1304,52 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("group_admins_only")
         return f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {name}"
 
+    def _apply_composer_permissions(self, jid: str, conversation: dict):
+        """Enable/disable the composer controls according to what *jid* allows.
+
+        Three cases: a channel (nothing can be posted at all), a group with
+        "only admins can send messages" on where the user isn't an admin, and
+        everything else.  Kept out of navigate_to_conversation() so it can be
+        tested without a live wx panel — the emoji button used to be the one
+        control this switch forgot, staying clickable in a group the user
+        cannot post in and inserting text into a read-only field.
+        """
+        is_channel = jid.endswith("@newsletter")
+        admins_only_group = (
+            jid.endswith("@g.us")
+            and self.main_window._is_group_send_restricted(conversation)
+        )
+        if is_channel:
+            self.message_field.Enable()
+            self.message_field.SetEditable(True)
+            self.message_field.Disable()
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self._emoji_btn.Disable()
+        elif admins_only_group:
+            # Keep the field enabled/focusable (unlike the channel case
+            # above) so it stays reachable via Tab/the Alt+D accelerator and
+            # NVDA can announce its read-only state — only actual editing is
+            # blocked. Sending/attaching/recording would just be rejected by
+            # WhatsApp Web anyway, so those stay disabled like the channel case.
+            # Disable() here instead of SetEditable(False) drops the field out
+            # of the tab order entirely, which leaves a screen-reader user in
+            # a group they cannot post in with nothing announcing why.
+            self.message_field.Enable()
+            self.message_field.SetEditable(False)
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self._emoji_btn.Disable()
+        else:
+            self.message_field.Enable()
+            self.message_field.SetEditable(True)
+            self.send_message_btn.Enable()
+            self.record_voice_message_btn.Enable()
+            self._add_attachment_btn.Enable()
+            self._emoji_btn.Enable()
+
     def update_conversation_name(self, jid: str, new_name: str):
         """Apply a group rename to the conversation currently on screen.
 
@@ -1358,35 +1478,7 @@ class ConversationsPanel(wx.Panel):
             self._conversation_note_text(self.conversation_name, is_group)
         )
 
-        is_channel        = jid.endswith("@newsletter")
-        admins_only_group = is_group and self.main_window._is_group_send_restricted(conversation)
-        if is_channel:
-            self.message_field.Enable()
-            self.message_field.SetEditable(True)
-            self.message_field.Disable()
-            self.send_message_btn.Disable()
-            self.record_voice_message_btn.Disable()
-            self._add_attachment_btn.Disable()
-        elif admins_only_group:
-            # Keep the field enabled/focusable (unlike the channel case
-            # above) so it stays reachable via Tab/the Alt+D accelerator and
-            # NVDA can announce its read-only state — only actual editing is
-            # blocked. Sending/attaching/recording would just be rejected by
-            # WhatsApp Web anyway, so those stay disabled like the channel case.
-            # Disable() here instead of SetEditable(False) drops the field out
-            # of the tab order entirely, which leaves a screen-reader user in
-            # a group they cannot post in with nothing announcing why.
-            self.message_field.Enable()
-            self.message_field.SetEditable(False)
-            self.send_message_btn.Disable()
-            self.record_voice_message_btn.Disable()
-            self._add_attachment_btn.Disable()
-        else:
-            self.message_field.Enable()
-            self.message_field.SetEditable(True)
-            self.send_message_btn.Enable()
-            self.record_voice_message_btn.Enable()
-            self._add_attachment_btn.Enable()
+        self._apply_composer_permissions(jid, conversation)
         self.message_label.SetLabel(
             self._message_label_text(jid, conversation, self.conversation_name)
         )
@@ -1739,90 +1831,116 @@ class ConversationsPanel(wx.Panel):
 
         # ── Edit mode: update existing message ──────────────────────────────
         if self._editing_message_id is not None:
-            msg_id = self._editing_message_id
-
-            # An edit goes through exactly the same @mention pipeline as a new
-            # send. It used to skip it entirely: the raw "@DisplayName" text was
-            # posted verbatim (so WhatsApp highlighted nothing — the mention was
-            # only cosmetic) and the local record was rewritten as a plain
-            # `conversation`, discarding any contextInfo it had. That is why
-            # adding a mention with Alt+E never produced the hyperlinks that
-            # lead to the mentioned person's chat, and why editing a message
-            # that already had mentions silently dropped them.
-            api_text, edit_mentions = self._build_mention_payload(text)
-
-            # Call WPPConnect API to update the message
-            self.main_window.edit_message(
-                remote_jid, msg_id, api_text, mentioned_jids=edit_mentions
-            )
-
-            # Re-locate the message by ID rather than trusting the row index
-            # captured when edit mode was entered: a background sync can call
-            # populate_messages() at any point while the user is typing,
-            # which fully rebuilds _sorted_messages — the old index could by
-            # then point at an unrelated row, silently overwriting a
-            # different message's local content/cache with the edited text
-            # (the server-side edit_message() call above is unaffected, since
-            # it addresses the message by ID, not by index — only the local
-            # display was at risk).
-            idx = next(
-                (i for i, m in enumerate(self._sorted_messages)
-                 if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id),
-                -1,
-            )
-
-            # Update local state
-            if 0 <= idx < len(self._sorted_messages):
-                edited = self._sorted_messages[idx]
-                if edit_mentions:
-                    # Same shape the send path builds for a mentioning message,
-                    # so _get_message_content() rewrites @phone → @DisplayName
-                    # and _extract_mentions() finds the JIDs for the hyperlinks.
-                    edited["message"] = {"extendedTextMessage": {"text": api_text}}
-                    edited["messageType"] = "extendedTextMessage"
-                    ctx = edited.setdefault("contextInfo", {})
-                    ctx["mentionedJid"] = edit_mentions
-                else:
-                    edited["message"] = {"conversation": text}
-                    edited["messageType"] = "conversation"
-                    # An edit that removed every mention must clear the old list
-                    # too, or the stale hyperlinks stay on screen forever.
-                    ctx = edited.get("contextInfo")
-                    if isinstance(ctx, dict):
-                        ctx.pop("mentionedJid", None)
-                        ctx.pop("mentionedJidList", None)
-                edited["_edited"] = True
-                self.messages_list.SetItemText(
-                    idx, self._render_message_line(edited)
-                )
-                # _sorted_messages[idx] is the same dict object held in
-                # main_window.chats[remote_jid]'s records (populate_messages()
-                # builds it from there without copying) — persist it so the
-                # "Editada" marker and new text survive a restart.
-                self.main_window._schedule_save(dirty_jid=remote_jid)
-                # Refresh the conversations list too — _last_msg_preview()
-                # reads straight from these records, but nothing tells the
-                # list widget to redraw the row on its own. Without this the
-                # preview kept showing the pre-edit text until the
-                # conversation was closed (which rebuilds the list from
-                # scratch for an unrelated reason) — see the remote-edit
-                # path (_apply_possible_edit(), main.py), which already
-                # does this and never had the bug.
-                self.main_window._schedule_set_chats()
-                # Rebuild the links/mentions panels if the edited row is the one
-                # currently focused — they are only refreshed on a focus change,
-                # so without this the panels below the list keep describing the
-                # message as it was before the edit.
-                if self.messages_list.GetFocusedItem() == idx:
-                    self._update_links_panel(
-                        self._extract_links(self._render_message_line(edited))
-                    )
-                    self._update_mentions_panel(self._extract_mentions(edited))
-
-            self._on_cancel_edit()
+            self._apply_message_edit(text, remote_jid)
             return
 
         # ── Normal send ──────────────────────────────────────────────────────
+        self._send_new_text_message(text, remote_jid)
+
+    def _apply_message_edit(self, text: str, remote_jid: str):
+        """Apply an edit to a message already sent: update it locally now and
+        tell WhatsApp about it on a worker thread.
+
+        Split out of on_send_message() so it can be tested without a live wx
+        panel, and so the server call is visibly off the UI thread.
+        """
+        msg_id = self._editing_message_id
+
+        # An edit goes through exactly the same @mention pipeline as a new
+        # send. It used to skip it entirely: the raw "@DisplayName" text was
+        # posted verbatim (so WhatsApp highlighted nothing — the mention was
+        # only cosmetic) and the local record was rewritten as a plain
+        # `conversation`, discarding any contextInfo it had. That is why
+        # adding a mention with Alt+E never produced the hyperlinks that
+        # lead to the mentioned person's chat, and why editing a message
+        # that already had mentions silently dropped them.
+        api_text, edit_mentions = self._build_mention_payload(text)
+
+        # Call WPPConnect to update the message — on a worker thread.
+        # edit-message drives Puppeteer/WhatsApp Web and routinely takes a
+        # second or two to come back (its own timeout is 15s); running it
+        # inline here froze the whole window for that long on every edit,
+        # the one server-backed message action still doing that. Everything
+        # below is the local, optimistic update — the same shape
+        # _on_menu_pin_message() uses.
+        threading.Thread(
+            target=self.main_window.edit_message,
+            args=(remote_jid, msg_id, api_text),
+            kwargs={"mentioned_jids": edit_mentions},
+            daemon=True,
+        ).start()
+
+        # Re-locate the message by ID rather than trusting the row index
+        # captured when edit mode was entered: a background sync can call
+        # populate_messages() at any point while the user is typing,
+        # which fully rebuilds _sorted_messages — the old index could by
+        # then point at an unrelated row, silently overwriting a
+        # different message's local content/cache with the edited text
+        # (the server-side edit_message() call above is unaffected, since
+        # it addresses the message by ID, not by index — only the local
+        # display was at risk).
+        idx = next(
+            (i for i, m in enumerate(self._sorted_messages)
+             if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id),
+            -1,
+        )
+
+        # Update local state
+        if 0 <= idx < len(self._sorted_messages):
+            edited = self._sorted_messages[idx]
+            if edit_mentions:
+                # Same shape the send path builds for a mentioning message,
+                # so _get_message_content() rewrites @phone → @DisplayName
+                # and _extract_mentions() finds the JIDs for the hyperlinks.
+                edited["message"] = {"extendedTextMessage": {"text": api_text}}
+                edited["messageType"] = "extendedTextMessage"
+                ctx = edited.setdefault("contextInfo", {})
+                ctx["mentionedJid"] = edit_mentions
+            else:
+                edited["message"] = {"conversation": text}
+                edited["messageType"] = "conversation"
+                # An edit that removed every mention must clear the old list
+                # too, or the stale hyperlinks stay on screen forever.
+                ctx = edited.get("contextInfo")
+                if isinstance(ctx, dict):
+                    ctx.pop("mentionedJid", None)
+                    ctx.pop("mentionedJidList", None)
+            edited["_edited"] = True
+            self.messages_list.SetItemText(
+                idx, self._render_message_line(edited)
+            )
+            # _sorted_messages[idx] is the same dict object held in
+            # main_window.chats[remote_jid]'s records (populate_messages()
+            # builds it from there without copying) — persist it so the
+            # "Editada" marker and new text survive a restart.
+            self.main_window._schedule_save(dirty_jid=remote_jid)
+            # Refresh the conversations list too — _last_msg_preview()
+            # reads straight from these records, but nothing tells the
+            # list widget to redraw the row on its own. Without this the
+            # preview kept showing the pre-edit text until the
+            # conversation was closed (which rebuilds the list from
+            # scratch for an unrelated reason) — see the remote-edit
+            # path (_apply_possible_edit(), main.py), which already
+            # does this and never had the bug.
+            self.main_window._schedule_set_chats()
+            # Rebuild the links/mentions panels if the edited row is the one
+            # currently focused — they are only refreshed on a focus change,
+            # so without this the panels below the list keep describing the
+            # message as it was before the edit.
+            if self.messages_list.GetFocusedItem() == idx:
+                self._update_links_panel(
+                    self._extract_links(self._render_message_line(edited))
+                )
+                self._update_mentions_panel(self._extract_mentions(edited))
+
+        self._on_cancel_edit()
+
+    def _send_new_text_message(self, text: str, remote_jid: str):
+        """Queue a brand-new text message and show it as pending right away.
+
+        The other half of on_send_message(), split out alongside
+        _apply_message_edit() so neither branch hides inside the other.
+        """
         # Build a virtual message dict that renders identically to real messages.
         local_id = str(uuid.uuid4())
         api_text, _mentioned = self._build_mention_payload(text)
@@ -4968,11 +5086,27 @@ class ConversationsPanel(wx.Panel):
         change — SetItemText only, no list rebuild/focus disruption."""
         if not msg_ids:
             return
-        ids = set(msg_ids)
+        self._set_message_row_texts(set(msg_ids))
+
+    def _set_message_row_texts(self, ids: set) -> set:
+        """Re-render every rendered row whose message id is in *ids*, and
+        return the ids that were actually found on screen.
+
+        The bare mechanism, shared by _refresh_message_rows_by_ids() (selection
+        markers, which never care whether a row is missing) and
+        _repaint_message_rows() (local flag changes, which fall back to a full
+        rebuild when one is).
+        """
+        found = set()
         total = len(self._sorted_messages)
         for i, m in enumerate(self._sorted_messages):
-            if not self._is_separator(m) and m.get("key", {}).get("id") in ids:
+            if self._is_separator(m):
+                continue
+            mid = m.get("key", {}).get("id", "")
+            if mid in ids:
                 self.messages_list.SetItemText(i, self._render_message_line(m, index=i, total=total))
+                found.add(mid)
+        return found
 
     def _on_messages_list_key_down(self, event):
         """Ctrl+Space toggles the focused row's membership in
@@ -5572,6 +5706,9 @@ class ConversationsPanel(wx.Panel):
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
                 tmp.write(content)
                 tmp.close()
+                # Now that the file is on disk, it can answer what the message
+                # itself never stated (see video_seconds()).
+                self._learn_video_duration(msg, tmp.name)
                 speed = self._audio_speed_steps[self._audio_speed_index]
                 self._current_video_msg_id = msg_id
                 wx.CallAfter(self._start_video_playback, tmp.name, speed, msg_id)
@@ -5586,6 +5723,44 @@ class ConversationsPanel(wx.Panel):
                 )
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _learn_video_duration(self, msg: dict, path: str):
+        """Fill in a video's length from the decoded file when the message
+        never stated one, then persist it and repaint that row.
+
+        A video whose sender left the duration out of the message renders as
+        a bare "vídeo" (see video_seconds()) — accurate, but the length is
+        knowable the moment the file is on disk, and playing it is exactly
+        when that happens. BASS opens an .mp4 directly (the same bass_aac
+        path core/video_player.py plays it through), so _probe_audio_duration()
+        already works here and no extra process is needed.
+
+        Runs on the playback worker thread: the DB write goes through
+        _persist_message_local_flag()'s own thread, and the repaint is bounced
+        to the UI thread. Repaint rather than repopulate — a full rebuild
+        would move the user's focus in the middle of starting playback, and
+        a row that fails to repaint just keeps reading "vídeo" until the
+        conversation is reopened.
+        """
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            return
+        secs = self._probe_audio_duration(path)
+        # 0 is a real answer here, unlike the 0 the message itself states: the
+        # file was read and it really is under a second. Only None means the
+        # probe could not tell (see video_seconds()).
+        if secs is None or secs < 0:
+            return
+        video[MEASURED_SECONDS_KEY] = secs
+        logging.info(
+            "[_learn_video_duration] %s: message stated no duration, file says %ds",
+            msg.get("key", {}).get("id", ""), secs,
+        )
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if jid:
+            self._persist_message_local_flag(jid, msg)
+            self.main_window._schedule_save(dirty_jid=jid)
+        wx.CallAfter(self._repaint_message_rows, [msg.get("key", {}).get("id", "")])
 
     def _start_video_playback(self, path: str, speed: float, msg_id: str):
         """Runs on the UI thread (via wx.CallAfter from _run() above). Starts
@@ -6346,7 +6521,11 @@ class ConversationsPanel(wx.Panel):
             self._stop_playback_for_removed_messages({msg_id})
         if msg_id and self._focused_msg_id() == msg_id:
             self._hide_all_media_controls()
-        self.refresh_active_conversation_messages()
+        # Only the revoked message's own row changes text (it keeps its row —
+        # a revoke protocolMessage is still displayable), so re-rendering every
+        # row of the conversation for it was disproportionate.
+        if not self._repaint_message_rows([msg_id]):
+            self.refresh_active_conversation_messages()
 
     def on_audio_timer(self, event):
         if self._current_video_msg_id is not None:
@@ -6825,60 +7004,8 @@ class ConversationsPanel(wx.Panel):
             return ""
 
     def _probe_audio_duration(self, path: str):
-        """Best-effort audio length in whole seconds for any audio format, or None if unknown.
-
-        Supports .mp3, .ogg, .wav, .m4a, .flac, .opus, .aac etc. Uses sound_lib / BASS
-        when available, or stdlib wave and header fallback parsers.
-        """
-        if not path or not os.path.isfile(path):
-            return None
-
-        # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
-        try:
-            from sound_lib import stream
-            s = stream.FileStream(file=path)
-            length_bytes = s.get_length()
-            length_secs = s.bytes_to_seconds(length_bytes)
-            s.free()
-            if length_secs and 0 < length_secs < 86400:
-                return int(length_secs)
-        except Exception:
-            pass
-
-        # 2. Try stdlib wave module for .wav files
-        if path.lower().endswith(".wav"):
-            try:
-                import wave
-                with wave.open(path, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate   = wf.getframerate()
-                    if rate > 0:
-                        sec = int(frames / rate)
-                        if 0 < sec < 86400:
-                            return sec
-            except Exception:
-                pass
-
-        # 3. Fallback lightweight header parser for MP3 / OGG
-        try:
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".mp3":
-                size = os.path.getsize(path)
-                if size > 0:
-                    # Estimate based on standard 128kbps (16000 bytes/sec)
-                    sec = max(1, int(size / 16000))
-                    if 0 < sec < 86400:
-                        return sec
-            elif ext in (".ogg", ".opus"):
-                size = os.path.getsize(path)
-                if size > 0:
-                    sec = max(1, int(size / 6000))
-                    if 0 < sec < 86400:
-                        return sec
-        except Exception:
-            pass
-
-        return None
+        """Method form of probe_media_duration() — see that function."""
+        return probe_media_duration(path)
 
     def _format_duration(self, seconds):
         """Human-readable length, or "" when it isn't known.
@@ -7092,9 +7219,10 @@ class ConversationsPanel(wx.Panel):
             if video.get("gifPlayback"):
                 # Animated GIF — treat identically to sticker
                 return i18n.t("sticker")
-            dur = self._format_duration(video.get("seconds"))
+            dur = self._format_duration(video_seconds(video))
             # Same as the audio branch: an unknown length omits the clause
             # instead of reading "duração: " with nothing after the colon.
+            # For video, "unknown" includes a stated 0 — see video_seconds().
             base = f"{i18n.t('video')}, {i18n.t('duration')}: {dur}" if dur else i18n.t("video")
             caption = (video.get("caption") or "").strip()
             return f"{base}, {caption}" if caption else base
@@ -9371,7 +9499,7 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self.main_window._schedule_save()
             self._persist_message_local_flag(jid, msg)
-            self.populate_messages(preserve_focus=True)
+            self._repaint_or_repopulate([msg.get("key", {}).get("id", "")])
 
     def _on_menu_pin_message(self, msg: dict):
         """Pin/unpin a message via WhatsApp's own message-pin feature.
@@ -9390,7 +9518,7 @@ class ConversationsPanel(wx.Panel):
         msg["pinInChat"] = pin
         self.main_window._schedule_save()
         self._persist_message_local_flag(jid, msg)
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate([msg.get("key", {}).get("id", "")])
 
         msg_key = dict(msg.get("key", {}))
 
@@ -9408,7 +9536,7 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self._persist_message_local_flag(jid, msg)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate([msg.get("key", {}).get("id", "")])
         i18n = self.main_window.i18n
         wx.MessageBox(
             i18n.t("pin_message_failed" if attempted_pin else "unpin_message_failed"),
@@ -11794,6 +11922,104 @@ class ConversationsPanel(wx.Panel):
             tuple(sig),
         )
 
+    @staticmethod
+    def _signature_changed_ids(old, new):
+        """Which message ids differ between two _messages_signature() snapshots.
+
+        Returns None when the difference isn't expressible as "these rows
+        changed": a different conversation, a moved unread separator, or an id
+        that is empty/repeated in either snapshot (which makes the per-id
+        comparison below ambiguous). Those change which row sits where, so no
+        per-row repaint can stand in for a rebuild.
+        """
+        if not (isinstance(old, tuple) and isinstance(new, tuple)):
+            return None
+        if len(old) != 4 or len(new) != 4 or old[:3] != new[:3]:
+            return None
+        old_rows = {r[0]: r for r in old[3]}
+        new_rows = {r[0]: r for r in new[3]}
+        if len(old_rows) != len(old[3]) or len(new_rows) != len(new[3]):
+            return None
+        if "" in old_rows or "" in new_rows:
+            return None
+        return {
+            mid for mid in set(old_rows) | set(new_rows)
+            if old_rows.get(mid) != new_rows.get(mid)
+        }
+
+    def _adopt_signature_after_repaint(self, msg_ids: set) -> None:
+        """Move refresh_messages_if_changed()'s fingerprint forward after rows
+        were repainted in place.
+
+        populate_messages() snapshots the fingerprint on its way out, so a
+        local change used to land in the cache as a side effect of rebuilding.
+        Repainting instead leaves the cache describing the state *before* the
+        change, and the next background refresh would find a mismatch and
+        rebuild the whole list — moving the user's focus for something already
+        correct on screen. Adopting the new fingerprint unconditionally would
+        be worse: anything else that changed in `records` since the last
+        rebuild would be swallowed and never rendered. So it's adopted only
+        when the rows that differ are the ones just repainted.
+        """
+        try:
+            new_sig = self._messages_signature()
+        except Exception:
+            logging.exception("[_adopt_signature_after_repaint] signature failed")
+            self._messages_signature_cache = None
+            return
+        changed = self._signature_changed_ids(
+            getattr(self, "_messages_signature_cache", None), new_sig
+        )
+        if changed is not None and changed <= set(msg_ids):
+            self._messages_signature_cache = new_sig
+
+    def _repaint_message_rows(self, msg_ids) -> bool:
+        """Repaint the rows of *msg_ids* in place instead of rebuilding the
+        list. Returns whether every requested row was found and repainted;
+        callers fall back to a full rebuild when it returns False.
+
+        Starring, pinning and a remote "delete for everyone" each change the
+        text of rows already on screen and nothing else: the list is sorted by
+        timestamp, which none of them touch, so no row moves, appears or
+        disappears (a revoked message keeps its row — see
+        _is_displayable_message()). populate_messages() nevertheless re-sorts
+        and de-duplicates every record in the conversation, rebuilds the
+        reaction map, recomputes the unread separator and the pagination
+        window, then DeleteAllItems() + Append()s every row — and hands the
+        screen reader a whole new list in the process (CLAUDE.md's
+        Freeze()/Thaw() note). Starring a selection of messages in a long
+        conversation is the visible case. Same idea as main.py's
+        refresh_chat_row_text() for the conversations list.
+        """
+        ids = {i for i in (msg_ids or ()) if i}
+        if not ids or not self._sorted_messages:
+            return False
+        # Backing list out of step with the control means a targeted
+        # SetItemText would write the right text into the wrong row.
+        if self.messages_list.GetItemCount() != len(self._sorted_messages):
+            logging.info("[_repaint_message_rows] list out of step with rows — full path")
+            return False
+        try:
+            found = self._set_message_row_texts(ids)
+        except Exception:
+            logging.exception("[_repaint_message_rows] failed — full path")
+            return False
+        if found != ids:
+            # Something asked for isn't rendered: paginated out of the current
+            # window, or replaced by a resync while a server call was in
+            # flight. The rebuild is the only thing that can show it.
+            logging.info("[_repaint_message_rows] %d of %d rows not rendered — full path",
+                         len(ids - found), len(ids))
+            return False
+        self._adopt_signature_after_repaint(ids)
+        return True
+
+    def _repaint_or_repopulate(self, msg_ids) -> None:
+        """Repaint just the rows of *msg_ids*, rebuilding the list only if
+        that isn't possible. The shape every local flag change uses."""
+        if not self._repaint_message_rows(msg_ids):
+            self.populate_messages(preserve_focus=True)
+
     def refresh_messages_if_changed(self):
         """Repopulate the messages list only when its content actually changed.
 
@@ -12237,7 +12463,9 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self._persist_message_local_flags(jid, to_star)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        # The whole selection, not just to_star: clearing selected_messages
+        # above dropped the " selecionado" marker from every row in it.
+        self._repaint_or_repopulate(ids)
         self.main_window.output(i18n.t("success_star_bulk"), interrupt=True)
 
     def _on_mass_pin_messages(self, event):
@@ -12272,7 +12500,7 @@ class ConversationsPanel(wx.Panel):
             m["pinInChat"] = True
         self._persist_message_local_flags(jid, to_pin)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate(ids)   # see _on_mass_star_messages on `ids`
         self.main_window.output(i18n.t("success_pin_bulk"), interrupt=True)
 
         # Keys are copied now: the message dicts can be replaced underneath us
@@ -12304,7 +12532,7 @@ class ConversationsPanel(wx.Panel):
             m["pinInChat"] = False
         self._persist_message_local_flags(jid, failed)
         self.main_window._schedule_save()
-        self.populate_messages(preserve_focus=True)
+        self._repaint_or_repopulate([m.get("key", {}).get("id", "") for m in failed])
         i18n = self.main_window.i18n
         wx.MessageBox(
             f"{i18n.t('pin_message_failed')} ({len(failed)}/{total})",

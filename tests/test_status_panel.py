@@ -60,6 +60,7 @@ class _FakeI18n:
 class _FakeWidget:
     def __init__(self):
         self.shown = False
+        self.enabled = True
         self.label = ""
 
     def Show(self, show=True):
@@ -70,6 +71,12 @@ class _FakeWidget:
 
     def IsShown(self):
         return self.shown
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+    def Disable(self):
+        self.enabled = False
 
     def SetLabel(self, text):
         self.label = text
@@ -98,7 +105,8 @@ class _FakeTextCtrl(_FakeWidget):
 
 
 class _FakeMainWindow:
-    def __init__(self, contact_names=None, send_text_result=True, settings=None):
+    def __init__(self, contact_names=None, send_text_result=True,
+                 send_reaction_result=True, settings=None):
         self.i18n = _FakeI18n()
         self.outputs = []
         self._contact_names = contact_names or {}
@@ -107,6 +115,8 @@ class _FakeMainWindow:
         self.app_name = "WinZapp"
         self._send_text_result = send_text_result
         self.send_text_calls = []
+        self._send_reaction_result = send_reaction_result
+        self.send_reaction_calls = []
         self.settings = settings if settings is not None else {}
         self.save_settings_calls = 0
 
@@ -119,6 +129,10 @@ class _FakeMainWindow:
     def send_text_message(self, remote_jid, text, quoted=None):
         self.send_text_calls.append((remote_jid, text, quoted))
         return self._send_text_result
+
+    def send_reaction(self, remote_jid, msg_key, emoji):
+        self.send_reaction_calls.append((remote_jid, msg_key, emoji))
+        return self._send_reaction_result
 
     def save_settings(self):
         self.save_settings_calls += 1
@@ -147,6 +161,7 @@ class _FakeVideoPlayer:
 class _FakeStatusList:
     def __init__(self, focused=-1):
         self._focused = focused
+        self.shown = True
         self.select_calls = []
         self.items = []
         self.focus_calls = []
@@ -159,6 +174,15 @@ class _FakeStatusList:
 
     def SetFocus(self):
         pass
+
+    def Show(self, show=True):
+        self.shown = bool(show)
+
+    def Hide(self):
+        self.shown = False
+
+    def IsShown(self):
+        return self.shown
 
     def Append(self, row):
         self.items.append(row[0])
@@ -205,12 +229,17 @@ class _Stub:
     _is_status_liked             = StatusPanel._is_status_liked
     _on_like_status              = StatusPanel._on_like_status
     _on_like_sent                = StatusPanel._on_like_sent
-    _on_unlike_status_attempted  = StatusPanel._on_unlike_status_attempted
     _parse_statuses              = StatusPanel._parse_statuses
     _latest_ts                   = staticmethod(StatusPanel._latest_ts)
     _on_next_status               = StatusPanel._on_next_status
     _on_prev_status                = StatusPanel._on_prev_status
     _on_escape                    = StatusPanel._on_escape
+    _hide_post_panels             = StatusPanel._hide_post_panels
+    _is_status_composer_open      = StatusPanel._is_status_composer_open
+    _enter_status_composer        = StatusPanel._enter_status_composer
+    _leave_status_composer        = StatusPanel._leave_status_composer
+    _on_close_post_panel          = StatusPanel._on_close_post_panel
+    _on_close_media_panel         = StatusPanel._on_close_media_panel
     _MAX_REMEMBERED_LIKES         = StatusPanel._MAX_REMEMBERED_LIKES
     _on_send_status_reply         = StatusPanel._on_send_status_reply
     _send_status_reply_bg         = StatusPanel._send_status_reply_bg
@@ -223,9 +252,11 @@ class _Stub:
     _status_row_text              = StatusPanel._status_row_text
     _update_focused_status_row_text = StatusPanel._update_focused_status_row_text
 
-    def __init__(self, contact_names=None, send_text_result=True, settings=None):
+    def __init__(self, contact_names=None, send_text_result=True,
+                 send_reaction_result=True, settings=None):
         self.main_window = _FakeMainWindow(
-            contact_names=contact_names, send_text_result=send_text_result, settings=settings,
+            contact_names=contact_names, send_text_result=send_text_result,
+            send_reaction_result=send_reaction_result, settings=settings,
         )
         self._status_contacts      = []
         self._status_row_contact   = {}
@@ -240,6 +271,12 @@ class _Stub:
         self._video_download_status_id  = None
         self._video_player = _FakeVideoPlayer()
         self._status_list = _FakeStatusList()
+        self._add_status_btn = _FakeWidget()
+        self._refresh_status_btn = _FakeWidget()
+        self._list_label = _FakeWidget()
+        self._add_status_btn.Show()
+        self._refresh_status_btn.Show()
+        self._list_label.Show()
         self.my_status_dialog_calls = 0
 
         self._status_content_label = _FakeWidget()
@@ -252,6 +289,10 @@ class _Stub:
         self._reply_field          = _FakeTextCtrl()
         self._reply_send_btn       = _FakeWidget()
         self._viewer_panel         = _FakeWidget()
+        self._post_panel           = _FakeWidget()
+        self._media_post_panel     = _FakeWidget()
+        self._voice_post_panel     = _FakeWidget()
+        self._selected_media_paths = []
 
     def _open_my_status_dialog(self):
         self.my_status_dialog_calls += 1
@@ -953,18 +994,11 @@ def _run_threads_synchronously(monkeypatch):
     monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
 
-class TestLikeStatusSendsAPlainEmojiMessage:
-    """_on_like_status() no longer uses send_reaction() (WhatsApp Web's
-    Store never indexes another person's status — see the method's own
-    docstring) — it sends the like emoji as a normal message to the
-    poster instead, deliberately WITHOUT quoting the status: WPPConnect's
-    send-reply endpoint can't resolve a status as a quote target any more
-    than the reaction endpoint could resolve it as a reaction target, so
-    quoting it always failed server-side and silently fell back to a
-    plain send anyway (reported live as "Não foi possível citar a
-    mensagem original")."""
+class TestLikeStatusUsesTheNativeStatusReaction:
+    """The Status Like button is a reaction to status@broadcast, never a
+    literal heart sent into the poster's private conversation."""
 
-    def test_sends_heart_emoji_without_quoting(self, monkeypatch):
+    def test_sends_heart_through_reaction_endpoint_not_private_message(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
         entry = _entry("poster@s.whatsapp.net", [status])
@@ -976,14 +1010,22 @@ class TestLikeStatusSendsAPlainEmojiMessage:
 
         stub._on_like_status(None)
 
-        assert stub.main_window.send_text_calls == [
-            ("poster@s.whatsapp.net", "❤️", None)
-        ]
+        assert stub.main_window.send_text_calls == []
+        assert stub.main_window.send_reaction_calls == [(
+            "status@broadcast",
+            {
+                "fromMe": False,
+                "id": "s1",
+                "remoteJid": "status@broadcast",
+                "participant": "poster@s.whatsapp.net",
+            },
+            "❤️",
+        )]
 
     def test_marks_liked_persists_to_settings_and_updates_button_label_on_success(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
-        stub = _Stub(send_text_result=True)
+        stub = _Stub(send_reaction_result=True)
         stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
         stub._selected_contact_idx = 0
         stub._current_status_idx = 0
@@ -1002,7 +1044,7 @@ class TestLikeStatusSendsAPlainEmojiMessage:
         calls = []
         monkeypatch.setattr(wx, "MessageBox", lambda *a, **kw: calls.append(a))
         status = _text_status("oi")
-        stub = _Stub(send_text_result=False)
+        stub = _Stub(send_reaction_result=False)
         stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
         stub._selected_contact_idx = 0
         stub._current_status_idx = 0
@@ -1014,10 +1056,8 @@ class TestLikeStatusSendsAPlainEmojiMessage:
         assert len(calls) == 1
         assert stub.main_window.save_settings_calls == 0
 
-    def test_clicking_like_again_shows_unlike_unsupported_message_instead_of_resending(self, monkeypatch):
+    def test_clicking_again_removes_the_native_reaction(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
-        calls = []
-        monkeypatch.setattr(wx, "MessageBox", lambda *a, **kw: calls.append(a))
         status = _text_status("oi")
         status_id = status["key"]["id"]
         stub = _Stub()
@@ -1030,7 +1070,24 @@ class TestLikeStatusSendsAPlainEmojiMessage:
         stub._on_like_status(None)
 
         assert stub.main_window.send_text_calls == []
-        assert len(calls) == 1
+        assert stub.main_window.send_reaction_calls[0][2] == ""
+        assert stub._liked_statuses[status_id] is False
+        assert stub._like_btn.label == "Curtir"
+
+    def test_unlike_removes_the_persisted_status_id(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        status = _text_status("oi")
+        status_id = status["key"]["id"]
+        stub = _Stub(settings={"status_panel": {"liked_status_ids": [status_id]}})
+        stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._current_status = status
+
+        stub._on_like_status(None)
+
+        assert status_id not in stub.main_window.settings["status_panel"]["liked_status_ids"]
+        assert stub.main_window.save_settings_calls == 1
 
 
 class TestIsStatusLikedRemembersAcrossSessions:
@@ -1348,6 +1405,65 @@ class TestEscapeClosesTheViewer:
         stub._on_escape(None)  # must not raise even with event=None
 
         assert stub._video_player.stop_calls == 0
+
+
+class TestStatusComposerKeepsTheMainScreenClean:
+    @pytest.mark.parametrize(
+        "panel_name",
+        ["_post_panel", "_media_post_panel", "_voice_post_panel"],
+    )
+    def test_only_the_selected_add_status_panel_is_visible(self, panel_name):
+        stub = _Stub()
+        stub._viewer_panel.Show()
+        selected_panel = getattr(stub, panel_name)
+
+        stub._enter_status_composer(selected_panel)
+
+        assert selected_panel.shown is True
+        assert sum(
+            panel.shown
+            for panel in (
+                stub._post_panel,
+                stub._media_post_panel,
+                stub._voice_post_panel,
+            )
+        ) == 1
+        assert stub._viewer_panel.shown is False
+        assert stub._add_status_btn.shown is False
+        assert stub._refresh_status_btn.shown is False
+        assert stub._list_label.shown is False
+        assert stub._status_list.shown is False
+        assert stub._video_player.stop_calls == 1
+        assert selected_panel.enabled is True
+        assert all(
+            panel.enabled is (panel is selected_panel)
+            for panel in (
+                stub._post_panel,
+                stub._media_post_panel,
+                stub._voice_post_panel,
+            )
+        )
+
+    def test_closing_a_composer_restores_the_status_browser(self):
+        stub = _Stub()
+        stub._enter_status_composer(stub._post_panel)
+
+        stub._leave_status_composer()
+
+        assert stub._is_status_composer_open() is False
+        assert stub._add_status_btn.shown is True
+        assert stub._refresh_status_btn.shown is True
+        assert stub._list_label.shown is True
+        assert stub._status_list.shown is True
+
+    def test_escape_closes_the_active_composer_before_the_viewer(self):
+        stub = _Stub()
+        stub._enter_status_composer(stub._post_panel)
+
+        stub._on_escape(None)
+
+        assert stub._is_status_composer_open() is False
+        assert stub._status_list.shown is True
 
 
 class TestStatusReplyKeepsTheStatusQuote:

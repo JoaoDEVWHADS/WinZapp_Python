@@ -722,6 +722,7 @@
     "auto_download_media_label": "Descarregar ficheiros multimédia automaticamente ao sincronizar",
     "media_max_days_label": "Descarregar ficheiros multimédia de até (dias): 0 = ilimitado",
     "media_max_mb_label": "Descarregar ficheiros multimédia de até no máximo (MB): 0 = ilimitado",
+    "probe_video_duration_on_download_label": "Descobrir a duração de vídeos sem duração indicada logo ao transferi-los (em vez de só ao reproduzir)",
     "invalid_media_max_days": "O limite de dias para descarregar ficheiros multimédia deve ser um número inteiro (0 ou maior).",
     "invalid_media_max_mb": "O limite de tamanho para descarregar ficheiros multimédia deve ser um número inteiro (0 ou maior).",
     "sound_events_list_label": "Eventos de som",

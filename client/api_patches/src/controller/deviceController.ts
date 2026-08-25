@@ -1142,6 +1142,11 @@ export async function reactMessage(req: Request, res: Response) {
 
   try {
     if (typeof msgId === 'string' && msgId.includes('status@broadcast')) {
+      req.logger.info(
+        `[status-reaction] begin msgId=${msgId} action=${
+          reaction === false ? 'remove' : 'set'
+        }`
+      );
       // wa-js's WPP.chat.sendReactionToMessage(msgId, reaction) resolves a
       // string id via getMessageById(), which — for any @broadcast id —
       // unconditionally looks the message up in
@@ -1159,34 +1164,81 @@ export async function reactMessage(req: Request, res: Response) {
       // exactly that poster JID. Store.Msg.models is kept as a fallback in
       // case a status is ever ALSO mirrored there on some WhatsApp Web
       // version.
-      const ok = await req.client.page.evaluate(
+      const outcome = await req.client.page.evaluate(
         async ({ msgId, reaction }) => {
           const parts = msgId.split('_');
           const rawId = parts.length > 2 ? parts[2] : msgId;
           const posterJid = parts.length > 3 ? parts[3] : null;
+          const WPP = (window as any).WPP;
           let model: any = null;
 
-          if (posterJid && (window as any).WPP && (window as any).WPP.status) {
-            const statusChat = (window as any).WPP.status.get(posterJid);
-            if (statusChat) {
-              const msgs =
+          const asModels = (value: any): any[] => {
+            if (!value) return [];
+            if (Array.isArray(value)) return value;
+            if (typeof value.getModelsArray === 'function') {
+              return value.getModelsArray() || [];
+            }
+            if (typeof value.values === 'function') {
+              try {
+                return Array.from(value.values());
+              } catch (_) {
+                return [];
+              }
+            }
+            return [];
+          };
+
+          const matchesStatusId = (item: any): boolean => {
+            if (!item?.id) return false;
+            const serialized = String(item.id._serialized ?? item.id.$1 ?? '');
+            const itemId = String(item.id.id ?? item.id.$1 ?? '');
+            return (
+              itemId === rawId ||
+              serialized === msgId ||
+              Boolean(rawId && serialized.includes(rawId))
+            );
+          };
+
+          // Use the same lookup strategy as the real status-reply route:
+          // prefer the serialized poster, but scan StatusV3Store as well.
+          // Status collections may be keyed by @c.us while Python knows the
+          // same contact as @lid (or vice versa), so WPP.status.get(posterJid)
+          // alone can miss a status that is visibly open in WinZapp.
+          const statusModels: any[] = [];
+          const expected = posterJid ? WPP?.status?.get?.(posterJid) : null;
+          if (expected) statusModels.push(expected);
+          const statusStore = WPP?.whatsapp?.StatusV3Store;
+          if (typeof statusStore?.sync === 'function') {
+            try {
+              await statusStore.sync();
+            } catch (_) {
+              // The already-loaded collection is still useful when sync fails.
+            }
+          }
+          const storedModels = asModels(
+            (typeof statusStore?.getModels === 'function' &&
+              statusStore.getModels()) ||
+              statusStore?._models ||
+              statusStore?.models ||
+              (typeof statusStore?.getUnexpired === 'function' &&
+                statusStore.getUnexpired())
+          );
+          for (const statusChat of storedModels) {
+            if (statusChat && !statusModels.includes(statusChat)) {
+              statusModels.push(statusChat);
+            }
+          }
+
+          for (const statusChat of statusModels) {
+            if (!model) {
+              const msgs = asModels(
                 (typeof statusChat.getAllMsgs === 'function' &&
                   statusChat.getAllMsgs()) ||
-                (statusChat.msgs &&
-                typeof statusChat.msgs.getModelsArray === 'function'
-                  ? statusChat.msgs.getModelsArray()
-                  : null) ||
-                [];
-              model = msgs.find((item: any) => {
-                if (!item || !item.id) return false;
-                const ser = item.id._serialized || '';
-                const itemId = item.id.id || '';
-                return (
-                  itemId === rawId ||
-                  ser === msgId ||
-                  (rawId && ser.includes(rawId))
-                );
-              });
+                  statusChat.msgs?._models ||
+                  statusChat.msgs?.models ||
+                  statusChat.msgs
+              );
+              model = msgs.find(matchesStatusId);
             }
           }
 
@@ -1197,28 +1249,69 @@ export async function reactMessage(req: Request, res: Response) {
             (window as any).Store.Msg.models
           ) {
             const models = (window as any).Store.Msg.models;
-            model = models.find((item: any) => {
-              if (!item || !item.id) return false;
-              const ser = item.id._serialized || '';
-              const itemId = item.id.id || '';
-              return (
-                itemId === rawId ||
-                ser === msgId ||
-                (rawId && ser.includes(rawId))
-              );
-            });
+            model = asModels(models).find(matchesStatusId);
           }
-          if (!model) return false;
-          await (window as any).WPP.chat.sendReactionToMessage(model, reaction);
-          return true;
+          if (!model) {
+            return {
+              ok: false,
+              detail: `message-not-found; models=${statusModels.length}`,
+            };
+          }
+          // Status likes have their own WhatsApp Web action. It converts the
+          // author's LID/phone-number identity, builds the addon payload and
+          // fans it out directly to both the author's devices and our linked
+          // devices. The generic status-post path uses the account's status
+          // privacy audience instead, which can acknowledge the local copy
+          // while never delivering the like to this status author.
+          const modelAuthor =
+            model.author || model.id?.participant || posterJid || null;
+          const authorText = String(
+            modelAuthor?._serialized ?? modelAuthor?.$1 ?? modelAuthor ?? ''
+          );
+          if (!authorText) {
+            return { ok: false, detail: 'status-author-not-found' };
+          }
+
+          const pageWindow = window as any;
+          let statusReactionAction: any = null;
+          try {
+            statusReactionAction = pageWindow.require?.(
+              'WAWebSendStatusReactionAction'
+            );
+          } catch (error) {
+            return {
+              ok: false,
+              detail: `native-status-reaction-module-error: ${String(
+                (error as any)?.message || error
+              )}`,
+            };
+          }
+          if (typeof statusReactionAction?.sendStatusReaction !== 'function') {
+            return {
+              ok: false,
+              detail: 'native-status-reaction-action-not-found',
+            };
+          }
+          await statusReactionAction.sendStatusReaction(model, reaction || '');
+          return {
+            ok: true,
+            detail: `native-status-reaction-completed; author=${authorText}`,
+          };
         },
         { msgId, reaction }
       );
-      if (!ok) {
+      if (!outcome?.ok) {
         throw new Error(
-          `Status message not found in Store for reaction: ${msgId}`
+          `Status reaction failed for ${msgId}: ${
+            outcome?.detail || 'unknown browser result'
+          }`
         );
       }
+      req.logger.info(
+        `[status-reaction] accepted msgId=${msgId} detail=${
+          outcome.detail || 'none'
+        }`
+      );
     } else {
       await req.client.sendReactionToMessage(msgId, reaction);
     }
@@ -1234,7 +1327,11 @@ export async function reactMessage(req: Request, res: Response) {
     // showed up in WinZapp's log.log for every failed status reaction
     // ({"level":"error"}, no actual cause). Pull message/stack out
     // explicitly so the next failure is actually diagnosable.
-    req.logger.error(e);
+    req.logger.error(
+      `[status-reaction] failed msgId=${String(msgId)} error=${
+        e && e.message ? e.message : String(e)
+      }`
+    );
     res.status(500).json({
       status: 'error',
       message: 'Error on send reaction to message',

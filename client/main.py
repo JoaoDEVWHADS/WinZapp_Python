@@ -26,6 +26,7 @@ import shutil
 import socket as _socket
 
 import subprocess
+import tempfile
 import threading
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,7 +49,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -62,7 +63,9 @@ if sys.platform == "win32":
 from core.notification_manager import NotificationManager
 from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
-from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
+from ui.conversations import (
+    ConversationsPanel, ArchivedConversationsPanel, probe_media_duration,
+)
 from status_panel import StatusPanel
 from version import __version__
 from window_title import format_window_title
@@ -1298,6 +1301,13 @@ class MainWindow(wx.Frame):
         self._msg_bg_executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="msg-bg"
         )
+        # jid -> Future of the most recent message insert submitted for an
+        # @lid chat, so _merge_lid_into_phone() can wait for it before moving
+        # that chat's rows to the phone JID (see its own comment). Only @lid
+        # chats are tracked: they are the only ones a merge can rename, and
+        # tracking every chat would keep a dict of completed futures around
+        # for nothing.
+        self._pending_lid_inserts: dict = {}
         # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
         # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
@@ -4319,15 +4329,51 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
-        
-        def _bg_delete_chat():
-            try:
-                self.db.delete_chat(lid_jid)
-            except Exception as e:
-                logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
-        threading.Thread(target=_bg_delete_chat, daemon=True).start()
 
-        
+        # The in-memory merge above is only half the job: navigate_to_conversation()
+        # reloads a conversation's messages straight from the database by its
+        # JID, and get_messages()'s _jid_variants() knows @c.us <-> @s.whatsapp.net
+        # but nothing about @lid. So any message already filed under lid_jid has
+        # to be MOVED to phone_jid, not dropped — this used to call
+        # db.delete_chat(lid_jid), which deletes that chat's message rows
+        # outright. A first message from a contact whose @lid wasn't cached yet
+        # (on_new_message stores it under the raw @lid until /contact/pn-lid
+        # answers) was therefore deleted from the database moments after
+        # arriving: the chat-list preview still showed it, because the merged
+        # in-memory records are what the preview reads, and opening the
+        # conversation replaced those records with an empty DB read. Reported
+        # as a message from a long-quiet contact that appeared in the list and
+        # was gone by the time the conversation opened.
+        #
+        # merge_or_rename_chat() is the same operation deduplicate_chats()
+        # already uses for the sync path: it moves every row it safely can and
+        # only deletes an old_jid row once an equivalent survives under new_jid.
+        pending_insert = self._pending_lid_inserts.pop(lid_jid, None)
+
+        def _bg_merge_chat(fut=pending_insert):
+            # A just-arrived message for this @lid may still be queued for the
+            # messages table (on_new_message hands the insert to a pool
+            # thread). Renaming the chat before that insert lands would file it
+            # under a JID nothing queries again, so wait for it first. Waiting
+            # on a dedicated thread rather than inside _msg_bg_executor: a
+            # bounded pool whose workers block on other tasks from the same
+            # pool can deadlock.
+            if fut is not None:
+                try:
+                    fut.result(timeout=30)
+                except Exception as e:
+                    logging.warning(
+                        "[merge_lid] insert still pending for %s after waiting: %s",
+                        lid_jid, e,
+                    )
+            try:
+                self.db.merge_or_rename_chat(lid_jid, phone_jid)
+                logging.info("[merge_lid] moved %s -> %s in the database", lid_jid, phone_jid)
+            except Exception as e:
+                logging.error(f"[merge_lid] Failed to merge LID chat {lid_jid} into {phone_jid}: {e}")
+        threading.Thread(target=_bg_merge_chat, daemon=True).start()
+
+
         # Redirect active conversation if it was the merged LID chat, or refresh if it is the destination phone chat
         if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
             active_jid = self.conversations_panel.conversation.get("remoteJid", "")
@@ -4857,7 +4903,16 @@ class MainWindow(wx.Frame):
                 self.db.insert_message(remote_jid, msg)
             except Exception as e:
                 logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
-        self._msg_bg_executor.submit(_bg_insert_msg)
+        _insert_fut = self._msg_bg_executor.submit(_bg_insert_msg)
+        if remote_jid.endswith("@lid"):
+            # This message is being filed under a JID that a later merge will
+            # rename (the @lid is only resolved to a phone JID once
+            # /contact/pn-lid answers). _merge_lid_into_phone() waits on this
+            # future so it never moves the chat out from under an insert that
+            # hasn't landed yet — that leaves the message under a JID nothing
+            # queries again, which is exactly how a first message from a
+            # contact could vanish on opening the conversation.
+            self._pending_lid_inserts[remote_jid] = _insert_fut
 
         # ── Update unread count (only for messages we received) ───────────────
         # System events never count as unread — see is_countable_message().
@@ -14796,6 +14851,16 @@ class MainWindow(wx.Frame):
             )
 
         if local_records:
+            # A duration WinZapp measured from the file itself is not
+            # something the server knows, so the API copy of that same video
+            # arrives stating none — carry it across before the API copy
+            # replaces the record, or the length disappears from the list on
+            # every sync. The database keeps the same rule on its own side
+            # (DatabaseManager._with_known_video_duration).
+            carried = carry_over_video_durations(all_messages, local_records)
+            if carried:
+                logging.info("[sync_chat_messages] %s: kept %d measured video duration(s)",
+                             remote_jid, carried)
             api_ids = {r.get("key", {}).get("id") for r in all_messages}
             extra   = [r for r in local_records
                        if r.get("key", {}).get("id") and
@@ -15339,7 +15404,82 @@ class MainWindow(wx.Frame):
         encrypted = encrypt(content, self.key)
         with open(media_path, "wb") as f:
             f.write(encrypted)
+        self._maybe_probe_video_duration(msg, content)
         return True
+
+    def _maybe_probe_video_duration(self, msg: dict, content: bytes):
+        """Measure a just-downloaded video that never stated its duration, if
+        Settings > Armazenamento says to.
+
+        A video whose sender omitted the duration reads as a bare "vídeo"
+        until it is played, at which point _learn_video_duration() fills the
+        gap for free (the file is decoded for playback anyway). This option
+        trades that wait for one media decode per downloaded video: worth it
+        for someone who wants the length in the list without opening
+        anything, wasted work for someone who doesn't — hence off by default.
+
+        The measurement runs on its own thread. handle_media_message() is
+        called from the UI thread too (the play path downloads on demand
+        before starting), and a BASS decode of a 25 MB video is not something
+        to do inline there. `content` is the bytes already in hand, so the
+        just-written file is never read back and decrypted a second time.
+        """
+        if not self.settings.get("storage", {}).get(
+            "probe_video_duration_on_download", False
+        ):
+            return
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            return
+
+        def _bg():
+            tmp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                secs = probe_media_duration(tmp_path)
+            except Exception:
+                logging.exception("[_maybe_probe_video_duration] probe failed")
+                return
+            finally:
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+            # secs == 0 is a real answer (a clip under a second), only None
+            # means the file could not be read — see video_seconds().
+            if secs is not None and secs >= 0:
+                wx.CallAfter(self._apply_probed_video_duration, msg, secs)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _apply_probed_video_duration(self, msg: dict, seconds: int):
+        """Store a probed video length on the record and show it (UI thread)."""
+        video = (msg.get("message") or {}).get("videoMessage")
+        if not isinstance(video, dict) or video_seconds(video) is not None:
+            # Playback got there first (_learn_video_duration) — its answer
+            # came from the same file, so there is nothing to correct.
+            return
+        video[MEASURED_SECONDS_KEY] = seconds
+        msg_id = msg.get("key", {}).get("id", "")
+        jid = self._normalize_jid(msg.get("key", {}).get("remoteJid", ""))
+        logging.info("[_apply_probed_video_duration] %s: file says %ds", msg_id, seconds)
+        if jid and getattr(self, "db", None) is not None:
+            def _bg_persist():
+                try:
+                    self.db.insert_message(jid, msg)
+                except Exception as exc:
+                    logging.warning("[_apply_probed_video_duration] persist failed for %s: %s",
+                                    msg_id, exc)
+            self._msg_bg_executor.submit(_bg_persist)
+            self._schedule_save(dirty_jid=jid)
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None and cp.conversation and cp.conversation.get("remoteJid") == jid:
+            # Repaint only — a rebuild here would move the user's focus for a
+            # row that just gained a duration clause.
+            cp._repaint_message_rows([msg_id])
 
     def _check_wa_connection_closed(self, response) -> bool:
         """Detect a response that means "WhatsApp is not connected".

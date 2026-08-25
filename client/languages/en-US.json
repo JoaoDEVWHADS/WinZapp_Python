@@ -722,6 +722,7 @@
     "auto_download_media_label": "Automatically download media when syncing",
     "media_max_days_label": "Download media from up to (days): 0 = unlimited",
     "media_max_mb_label": "Download media up to a maximum of (MB): 0 = unlimited",
+    "probe_video_duration_on_download_label": "Find the length of videos that state none as soon as they download (instead of only on playback)",
     "invalid_media_max_days": "The media download day limit must be a whole number (0 or greater).",
     "invalid_media_max_mb": "The media download size limit must be a whole number (0 or greater).",
     "sound_events_list_label": "Sound events",
