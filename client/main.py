@@ -726,6 +726,23 @@ def unread_after_history_sync(
     return max(baseline, max(0, int(local_unread or 0)) + inferred)
 
 
+def reconcile_snapshot_unread(
+    server_unread: int,
+    local_unread: int,
+    incoming_timestamp: int,
+    local_timestamp: int,
+    unsynced: bool = False,
+) -> int:
+    """Merge an authoritative chat snapshot without losing newer live arrivals."""
+    server_unread = max(0, int(server_unread or 0))
+    local_unread = max(0, int(local_unread or 0))
+    if server_unread >= local_unread:
+        return server_unread
+    if unsynced or int(incoming_timestamp or 0) < int(local_timestamp or 0):
+        return local_unread
+    return server_unread
+
+
 def history_gap_detected(fetched: list, local_records: list, page_size: int) -> bool:
     """True when a freshly fetched page cannot be joined onto stored history.
 
@@ -10679,14 +10696,22 @@ class MainWindow(wx.Frame):
                                 if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
-                        # If chat exists in self.chats (passed in), preserve any higher unreadCount
+                        # A snapshot can legitimately lower the count after the
+                        # chat was read on another device. Preserve local only
+                        # when its activity is newer than this snapshot.
                         if hasattr(self, "chats") and jid in self.chats:
                             local_unread = int(self.chats[jid].get("unreadCount") or 0)
                             server_unread = int(chat.get("unreadCount") or 0)
-                            if local_unread > server_unread:
-                                chat["unreadCount"] = local_unread
+                            chat["unreadCount"] = reconcile_snapshot_unread(
+                                server_unread,
+                                local_unread,
+                                chat.get("t", 0),
+                                self.chats[jid].get("t", 0),
+                                bool(self.chats[jid].get("_unread_count_unsynced")),
+                            )
                         chats[jid] = chat
                     else:
+                        local_activity_t = int(chats[jid].get("t", 0) or 0)
                         for k, v in chat.items():
                             if k in ("messages", "remoteJid"):
                                 continue
@@ -10725,7 +10750,14 @@ class MainWindow(wx.Frame):
                                 # a few seconds stale relative to that. Same guard as
                                 # on_chat_unread_update()'s live-event path.
                                 _cp = getattr(self, "conversations_panel", None)
-                                if jid == getattr(_cp, "_last_open_jid", ""):
+                                open_now = (
+                                    _cp is not None
+                                    and _cp.conversation is not None
+                                    and self._normalize_jid(
+                                        _cp.conversation.get("remoteJid", "")
+                                    ) == jid
+                                )
+                                if open_now:
                                     v = 0
                                 elif server_val < local_val:
                                     # WPPConnect's list-chats snapshot lagging behind
@@ -10737,7 +10769,23 @@ class MainWindow(wx.Frame):
                                     # next live message's toast notification announced
                                     # "1 unread" right after the reset, even though
                                     # several messages had already piled up before it.
-                                    continue
+                                    merged = reconcile_snapshot_unread(
+                                        server_val,
+                                        local_val,
+                                        chat.get("t", 0),
+                                        local_activity_t,
+                                        bool(chats[jid].get("_unread_count_unsynced")),
+                                    )
+                                    if merged == local_val:
+                                        continue
+                                    v = merged
+                                    if merged == 0:
+                                        removed_ack = getattr(
+                                            self, "_locally_read_at", {}
+                                        ).pop(jid, None)
+                                        getattr(self, "_new_since_read", {}).pop(jid, None)
+                                        if removed_ack is not None:
+                                            self._persist_locally_read_at()
                                 else:
                                     # A snapshot taken shortly after
                                     # mark_conversation_as_read() cleared this chat
@@ -17775,32 +17823,83 @@ class MainWindow(wx.Frame):
             return api_post(url, json=payload, headers=headers, timeout=10)
 
         def _do_api():
+            success = False
             try:
-                resp = _send_seen(target_phone, is_lid_target)
-                if not resp.ok:
-                    logging.warning("[mark_as_read] API response %s for %s: %s",
-                                     resp.status_code, target_phone, resp.text[:200])
-                    # If it failed, try the alternate format (LID <-> phone) as fallback
-                    fallback_phone = remote_jid
-                    if fallback_phone.endswith("@lid"):
-                        phone_jid = getattr(self, "_lid_to_phone", {}).get(fallback_phone, "")
-                        if phone_jid: fallback_phone = phone_jid
-                    else:
-                        alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(fallback_phone), "")
-                        if alt_lid: fallback_phone = alt_lid
+                fallback_phone = remote_jid
+                if fallback_phone.endswith("@lid"):
+                    fallback_phone = getattr(self, "_lid_to_phone", {}).get(
+                        fallback_phone, fallback_phone
+                    )
+                else:
+                    fallback_phone = getattr(self, "_phone_to_lid", {}).get(
+                        self._normalize_jid(fallback_phone), fallback_phone
+                    )
+                if fallback_phone.endswith("@s.whatsapp.net"):
+                    fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
 
-                    if fallback_phone.endswith("@s.whatsapp.net"):
-                        fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
+                targets = [(target_phone, is_lid_target)]
+                if fallback_phone != target_phone:
+                    targets.append((fallback_phone, fallback_phone.endswith("@lid")))
 
-                    if fallback_phone != target_phone:
-                        logging.info("[mark_as_read] Retrying /send-seen using fallback JID: %s", fallback_phone)
-                        resp2 = _send_seen(fallback_phone, fallback_phone.endswith("@lid"))
-                        if not resp2.ok:
-                            logging.warning("[mark_as_read] Fallback /send-seen also failed %s for %s: %s",
-                                             resp2.status_code, fallback_phone, resp2.text[:200])
-            except Exception as exc:
-                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
+                for attempt in range(3):
+                    for phone, is_lid in targets:
+                        try:
+                            resp = _send_seen(phone, is_lid)
+                        except Exception as exc:
+                            logging.warning(
+                                "[mark_as_read] Request failed for %s (attempt %s): %s",
+                                phone, attempt + 1, exc,
+                            )
+                            continue
+                        if resp.ok:
+                            success = True
+                            return
+                        logging.warning(
+                            "[mark_as_read] API response %s for %s (attempt %s): %s",
+                            resp.status_code, phone, attempt + 1, resp.text[:200],
+                        )
+                    if attempt < 2:
+                        time.sleep(attempt + 1)
+            except Exception:
+                logging.exception("[mark_as_read] Unexpected send-seen failure")
+            finally:
+                if not success:
+                    wx.CallAfter(
+                        self._restore_unread_after_send_seen_failure,
+                        remote_jid,
+                        unread,
+                        int(chat.get("t", 0) or 0),
+                    )
         threading.Thread(target=_do_api, daemon=True).start()
+
+    def _restore_unread_after_send_seen_failure(
+        self, remote_jid: str, previous_unread: int, read_timestamp: int
+    ):
+        """Undo an optimistic local read when WhatsApp rejected every attempt."""
+        normalized = self._normalize_jid(remote_jid)
+        chat = self.chats.get(normalized) or self.chats.get(remote_jid)
+        if chat is None:
+            return
+        marker = getattr(self, "_locally_read_at", {}).get(normalized)
+        if marker is None:
+            marker = getattr(self, "_locally_read_at", {}).get(remote_jid)
+        if (
+            marker != read_timestamp
+            or int(chat.get("t", 0) or 0) != read_timestamp
+            or int(chat.get("unreadCount") or 0) != 0
+            or max(
+                getattr(self, "_new_since_read", {}).get(normalized, 0),
+                getattr(self, "_new_since_read", {}).get(remote_jid, 0),
+            ) > 0
+        ):
+            return
+        chat["unreadCount"] = max(0, int(previous_unread or 0))
+        self._locally_read_at.pop(normalized, None)
+        self._locally_read_at.pop(remote_jid, None)
+        self._persist_locally_read_at()
+        self._schedule_save(dirty_jid=normalized)
+        self._refresh_chat_row_in_list(normalized)
+        self._schedule_set_chats()
 
     def mark_conversation_as_unread(self, remote_jid: str):
         chat = self.chats.get(remote_jid)

@@ -154,6 +154,50 @@ class TestTheFullSaveIsOptional:
         assert stub._muted_chats
 
 
+class TestRemoteReadReconciliation:
+    JID = "5511900000001@s.whatsapp.net"
+
+    def _cached(self, *, archived=False, timestamp=1700000000):
+        return {
+            self.JID: {
+                "remoteJid": self.JID,
+                "t": timestamp,
+                "unreadCount": 4,
+                "archived": archived,
+                "messages": {"messages": {"records": []}},
+            }
+        }
+
+    @pytest.mark.parametrize("archived", [False, True])
+    def test_current_zero_from_phone_clears_normal_and_archived_chats(
+        self, post, archived
+    ):
+        cached = self._cached(archived=archived)
+        post["payload"] = [
+            _chat("5511900000001@c.us", unreadCount=0, archive=archived)
+        ]
+        stub = _make(cached)
+
+        result = stub.get_remote_chats(
+            dict(cached), persist_full=False, notify_errors=False
+        )
+
+        assert result[self.JID]["unreadCount"] == 0
+
+    def test_older_snapshot_does_not_erase_a_newer_live_arrival(self, post):
+        cached = self._cached(timestamp=1700000001)
+        post["payload"] = [
+            _chat("5511900000001@c.us", unreadCount=0, t=1700000000)
+        ]
+        stub = _make(cached)
+
+        result = stub.get_remote_chats(
+            dict(cached), persist_full=False, notify_errors=False
+        )
+
+        assert result[self.JID]["unreadCount"] == 4
+
+
 class TestTheSweepIsIndependentOfTheSave:
     """A phantom one-to-one entry — in the cache, echoed by the server, with
     no messages and no activity — is what the sweep exists to remove."""
