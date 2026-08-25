@@ -971,6 +971,19 @@ class MainWindow(wx.Frame):
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
+        # Published as soon as i18n exists, not at the end of __init__: if
+        # anything further down this constructor raises (issue #104 — a
+        # missing constructor argument deep in a sub-panel's init_UI()), the
+        # `frame = MainWindow(...)` assignment in __main__ never completes,
+        # so __main__'s own except-block has no `frame` to read a language
+        # from — that's the reason its crash dialog was always hardcoded to
+        # Portuguese, even though the user may have picked another language.
+        # This partial (but already-i18n-ready) self is what lets that
+        # except-block translate the message anyway. See _write_crash_log()'s
+        # caller for how it's used, and the module-level docstring near
+        # _last_partial_frame's definition for why it can't just be `frame`.
+        global _last_partial_frame
+        _last_partial_frame = self
 
         # Apply the configured output/input audio devices (Settings > Audio
         # Devices). A device that fails to open here falls back to the
@@ -21898,6 +21911,44 @@ class MainWindow(wx.Frame):
             pass
 
 
+# Set by MainWindow.__init__ the moment self.i18n exists (see that call
+# site's own comment) — this module-level name, not the `frame` local in
+# __main__, is what survives a constructor crash: `frame = MainWindow(...)`
+# never completes assigning `frame` when the constructor itself raises, but
+# the partially-built instance already ran that assignment before failing
+# further down. Only ever read by _startup_critical_error_text() below, and
+# only for its title/message strings — never assumed fully initialized.
+_last_partial_frame = None
+
+
+def _startup_critical_error_text(crash_path: str, tb: str) -> tuple[str, str]:
+    """(title, message) for the native MessageBoxW shown when __main__'s
+    top-level except-block catches an error during startup — translated
+    into the user's selected language when possible.
+
+    Falls back to the original hardcoded Portuguese only when no usable
+    i18n is available at all (a crash before MainWindow even constructs
+    self.i18n, or i18n.t() itself raising) — this dialog is the one thing
+    standing between the user and a silent exit, so it must never crash
+    trying to be helpful.
+    """
+    frame = _last_partial_frame
+    if frame is not None and getattr(frame, "i18n", None) is not None:
+        try:
+            title = frame.i18n.t("startup_critical_title")
+            message = frame.i18n.t("startup_critical_message").format(
+                path=crash_path, details=tb[:800]
+            )
+            return title, message
+        except Exception:
+            pass
+    return (
+        "WinZapp — Erro de inicialização",
+        f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
+        f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
+    )
+
+
 def _write_crash_log(tb: str) -> str:
     """Write a traceback to crash.log next to the exe and return the path."""
     from app_paths import _outer_exe_dir
@@ -22134,11 +22185,11 @@ if __name__ == "__main__":
         crash_path = _write_crash_log(tb)
         # Try to show a native Windows error box (works even without wx).
         try:
+            title, message = _startup_critical_error_text(crash_path, tb)
             ctypes.windll.user32.MessageBoxW(
                 0,
-                f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
-                f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
-                "WinZapp — Erro de inicialização",
+                message,
+                title,
                 0x10,  # MB_ICONERROR
             )
         except Exception:

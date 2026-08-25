@@ -400,6 +400,16 @@ def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
     """
     return (
         "@echo off\n"
+        # Keep one previous run's log (as .old) before truncating: this file
+        # is the only record of what the installer actually did, and an
+        # update that goes wrong right as the app exits (issue: a Node/
+        # WPPConnect crash mid-update, "desconexão ao atualizar") is exactly
+        # the case where the CURRENT run's log alone can't show whether this
+        # same update flow has misbehaved before. A silent `> "{log_path}"`
+        # below would erase that history on every single update, healthy or
+        # not — so move it aside first (best-effort; a locked/missing file
+        # from the very first update ever just does nothing here).
+        f'move /Y "{log_path}" "{log_path}.old" >NUL 2>&1\n'
         f'> "{log_path}" echo [WinZapp] update started %DATE% %TIME%\n'
         # The active code page goes into the log first: when a path does come
         # out wrong, this is the single fact that explains it, and the old
