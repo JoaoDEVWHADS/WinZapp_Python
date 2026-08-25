@@ -60,17 +60,17 @@ from app_paths import resource_path
 # GitHub download URLs — no git required
 _REPO_ZIP_MAIN = (
     "https://github.com/wppconnect-team/wppconnect-server"
-    "/archive/348a672ccfdf21c7a63f0b49c89d8761003fe472.zip"
+    "/archive/refs/heads/main.zip"
 )
 _REPO_ZIP_TAG  = (
     "https://github.com/wppconnect-team/wppconnect-server"
-    "/archive/{tag}.zip"
+    "/archive/refs/tags/{tag}.zip"
 )
 WPP_GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/wppconnect-team/wppconnect-server/releases/latest"
 )
 WPP_GITHUB_API_LATEST_COMMIT = (
-    "https://api.github.com/repos/wppconnect-team/wppconnect-server/commits/348a672ccfdf21c7a63f0b49c89d8761003fe472"
+    "https://api.github.com/repos/wppconnect-team/wppconnect-server/commits/main"
 )
 
 

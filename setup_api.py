@@ -466,12 +466,11 @@ def main():
         has_git = shutil.which("git") is not None
         if has_git:
             _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
-            _run(["git", "checkout", "348a672ccfdf21c7a63f0b49c89d8761003fe472"], cwd=CLIENT_API_DIR)
         else:
             print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
             import urllib.request
             import zipfile
-            zip_url = "https://github.com/wppconnect-team/wppconnect-server/archive/348a672ccfdf21c7a63f0b49c89d8761003fe472.zip"
+            zip_url = "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
             zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
             extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
             try:
@@ -526,8 +525,8 @@ def main():
                 print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
         else:
             with open(sha_file, "w", encoding="utf-8") as f:
-                f.write("348a672")
-            print("[INFO] Saved default commit SHA (348a672) to client/api/.commit_sha")
+                f.write("997164f")
+            print("[INFO] Saved default commit SHA (997164f) to client/api/.commit_sha")
     except Exception as e:
         print(f"[WARNING] Could not save .commit_sha: {e}")
 
