@@ -8380,7 +8380,13 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
         self.message_field.SetFocus()
 
-    def _get_participant_name(self, participant_jid: str, msg: dict | None = None) -> str:
+    def _get_participant_name(
+        self,
+        participant_jid: str,
+        msg: dict | None = None,
+        *,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return a display name for a group participant."""
         mw = self.main_window
         if mw._is_self_jid(participant_jid):
@@ -8478,11 +8484,12 @@ class ConversationsPanel(wx.Panel):
         # same JID internally) so a LATER render of this same notification
         # (conversation reopened, history resynced, ...) shows the real
         # formatted phone number instead of the raw LID digits forever.
-        threading.Thread(
-            target=mw.resolve_lid_jids_via_api,
-            args=([participant_jid],),
-            daemon=True,
-        ).start()
+        if resolve_missing:
+            threading.Thread(
+                target=mw.resolve_lid_jids_via_api,
+                args=([participant_jid],),
+                daemon=True,
+            ).start()
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]

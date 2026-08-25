@@ -954,7 +954,12 @@ routes.get(
   verifyToken,
   MiscController.takeScreenshot
 );
-routes.post('/api/:session/set-limit', MiscController.setLimit);
+routes.post(
+  '/api/:session/set-limit',
+  verifyToken,
+  statusConnection,
+  MiscController.setLimit
+);
 
 //Communitys
 routes.post(
