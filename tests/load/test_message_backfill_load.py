@@ -127,6 +127,10 @@ class _SweepLoadStub:
     _jid_address_forms = MainWindow._jid_address_forms
     _resolve_backfill_target = MainWindow._resolve_backfill_target
     _local_record_count = MainWindow._local_record_count
+    _initial_backfill_delay = MainWindow._initial_backfill_delay
+    _background_backfill_work_allowed = staticmethod(MainWindow._background_backfill_work_allowed)
+    _backfill_short_queue_delays = MainWindow._backfill_short_queue_delays
+    _keep_backfill_pending = MainWindow._keep_backfill_pending
     history_page_target = MainWindow.history_page_target
 
     _BACKFILL_BUDGET = MainWindow._BACKFILL_BUDGET
@@ -137,6 +141,8 @@ class _SweepLoadStub:
     _BACKFILL_WORKERS = MainWindow._BACKFILL_WORKERS
     _BACKFILL_CHUNK = MainWindow._BACKFILL_CHUNK
     _DEEP_CHATS_PER_PASS = MainWindow._DEEP_CHATS_PER_PASS
+    _OLDER_REQUESTS_PER_PASS = MainWindow._OLDER_REQUESTS_PER_PASS
+    _OLDER_REQUEST_GRACE = getattr(MainWindow, "_OLDER_REQUEST_GRACE", 300)
 
     def __init__(self, chat_count: int):
         self._backfill_state_lock = threading.RLock()
@@ -185,7 +191,22 @@ class _SweepLoadStub:
     def _schedule_set_chats(self):
         return None
 
-    def sync_chat_messages(self, chat):
+    def _start_deferred_media_sync(self):
+        pass
+
+    def unblock_history_sync(self):
+        pass
+
+    def _sync_older_chat_history_from_phone(self, target, run_id=None):
+        return False
+
+    def request_older_messages(self, jid):
+        return False
+
+    def _persist_older_requested(self):
+        pass
+
+    def sync_chat_messages(self, chat, run_id=None):
         jid = chat["remoteJid"]
         with self._metrics_lock:
             self._active_calls += 1
@@ -195,6 +216,7 @@ class _SweepLoadStub:
             # own long pacing sleeps are replaced below.
             _REAL_SLEEP(0.0005)
             self._remove_backfill_pending(jid)
+            self.chats[jid]["messages"]["messages"]["records"] = [{"key": {"id": "1"}}] * 200
             with self._metrics_lock:
                 self.calls.append(jid)
         finally:
