@@ -127,8 +127,9 @@ def _run(cmd: list, cwd: str = None):
         resolved = shutil.which(cmd[0])
         if resolved:
             cmd = [resolved] + cmd[1:]
+    creation_flags = 0x08000000 if sys.platform == "win32" else 0
     print(f"  $ {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, cwd=cwd)
+    result = subprocess.run(cmd, cwd=cwd, shell=False, creationflags=creation_flags)
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
