@@ -1,15 +1,12 @@
 """Tests for playing back a voice recording while it's paused.
 
-While recording is paused, a "Reproduzir áudio gravado" button
-(Ctrl+Shift+G — its own accelerator, and the same one the Status composer's
-recorder uses; see _on_accel_play_recorded) plays everything captured so far.
-It toggles to "Parar reprodução" while playing (same Ctrl+Shift+G, reported
-via AccessiblePlayRecordedAudio either way), and reaching the end of the audio
-is a full stop back to "Reproduzir áudio gravado", not a pause.
-
-The shortcut used to be Ctrl+P, shared with "pin conversation" and resolved by
-whether a recording happened to be paused. One key, one action now: pinning
-keeps Ctrl+P, playback got Ctrl+Shift+G in both recorders.
+New feature: while recording is paused, a "Reproduzir áudio gravado" button
+(Ctrl+P, same accelerator "Pin conversation" already used in the
+conversations list — mutually exclusive contexts, see _on_accel_pin_list)
+plays everything captured so far. It toggles to "Parar reprodução" while
+playing (same Ctrl+P, reported via AccessiblePlayRecordedAudio either way),
+and reaching the end of the audio is a full stop back to "Reproduzir áudio
+gravado", not a pause.
 
 Playback deliberately goes through a plain sl_stream.FileStream — not the
 app's Sound/load_sound wrapper, whose .play() reroutes to the separate
@@ -112,7 +109,6 @@ class _Panel:
     _stop_recorded_audio_preview = ConversationsPanel._stop_recorded_audio_preview
     _cleanup_recorded_audio_temp_file = ConversationsPanel._cleanup_recorded_audio_temp_file
     _on_accel_pin_list = ConversationsPanel._on_accel_pin_list
-    _on_accel_play_recorded = ConversationsPanel._on_accel_play_recorded
 
     def __init__(self):
         self.main_window = _FakeMainWindow()
@@ -257,44 +253,25 @@ class TestPlayback:
         assert panel._recorded_audio_temp_path is None
 
 
-class TestShortcutDispatch:
-    """Ctrl+Shift+G plays, Ctrl+P pins — neither one has to look at the other's
-    state to decide what it means any more."""
-
-    def test_the_play_shortcut_starts_the_preview_while_paused(self, fake_file_stream):
+class TestCtrlPDispatch:
+    def test_routes_to_preview_playback_while_paused(self, fake_file_stream):
         panel = _Panel()
         panel._recording_paused = True
-        panel._on_accel_play_recorded(None)
+        panel._on_accel_pin_list(None)
         assert len(fake_file_stream) == 1
         assert panel._pin_calls == []
         panel._stop_recorded_audio_preview()
 
-    def test_the_play_shortcut_does_nothing_when_not_recording(self, fake_file_stream):
+    def test_falls_through_to_pin_when_not_recording(self, fake_file_stream):
         panel = _Panel()
         panel._is_recording = False
-        panel._on_accel_play_recorded(None)
-        assert fake_file_stream == []
-        assert panel._pin_calls == []
-
-    def test_the_play_shortcut_does_nothing_while_recording_unpaused(self, fake_file_stream):
-        """Only a paused recording has a stable set of captured frames."""
-        panel = _Panel()
-        panel._recording_paused = False
-        panel._on_accel_play_recorded(None)
-        assert fake_file_stream == []
-
-    def test_pinning_no_longer_depends_on_the_recording_state(self, fake_file_stream):
-        """The old Ctrl+P routed to playback whenever a recording was paused,
-        so pinning silently stopped working mid-recording."""
-        panel = _Panel()
-        panel._recording_paused = True
         panel._on_accel_pin_list(None)
         assert panel._pin_calls == ["5511999999999@s.whatsapp.net"]
         assert fake_file_stream == []
 
-    def test_pinning_still_works_when_not_recording(self, fake_file_stream):
+    def test_falls_through_to_pin_when_recording_but_not_paused(self, fake_file_stream):
         panel = _Panel()
-        panel._is_recording = False
+        panel._recording_paused = False
         panel._on_accel_pin_list(None)
         assert panel._pin_calls == ["5511999999999@s.whatsapp.net"]
         assert fake_file_stream == []

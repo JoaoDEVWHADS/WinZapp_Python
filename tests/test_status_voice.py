@@ -483,7 +483,7 @@ class _PreviewStub(_Stub):
     _toggle_pause_voice_recording = StatusPanel._toggle_pause_voice_recording
     _toggle_play_recorded_audio = StatusPanel._toggle_play_recorded_audio
     _on_recorded_audio_timer = StatusPanel._on_recorded_audio_timer
-    _on_ctrl_shift_g_shortcut = StatusPanel._on_ctrl_shift_g_shortcut
+    _on_ctrl_p_shortcut = StatusPanel._on_ctrl_p_shortcut
 
     def __init__(self):
         super().__init__()
@@ -543,16 +543,14 @@ class TestVoiceStatusPausedRecordingPreview:
         assert stub._recording_paused is False
         assert stub._voice_play_btn.shown is False
 
-    def test_the_shortcut_uses_the_preview_only_while_paused(self):
-        """Ctrl+Shift+G — its own key, and the same one the conversation
-        composer's recorder answers to."""
+    def test_ctrl_p_uses_the_preview_only_while_paused(self):
         calls = []
         stub = _PreviewStub()
         stub._toggle_play_recorded_audio = lambda event: calls.append(event)
 
-        stub._on_ctrl_shift_g_shortcut("not-paused")
+        stub._on_ctrl_p_shortcut("not-paused")
         stub._recording_paused = True
-        stub._on_ctrl_shift_g_shortcut("paused")
+        stub._on_ctrl_p_shortcut("paused")
 
         assert calls == ["paused"]
 
