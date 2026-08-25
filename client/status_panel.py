@@ -747,7 +747,7 @@ class StatusPanel(wx.Panel):
         voice_btn_sizer = wx.BoxSizer(wx.VERTICAL)
 
         self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message"))
-        self._voice_close_btn.SetAccessible(AccessibleDiscardVoiceMessage())
+        self._voice_close_btn.SetAccessible(AccessibleDiscardVoiceMessage(self.main_window))
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
         self._voice_close_btn.Hide()
         voice_btn_sizer.Add(self._voice_close_btn, 0, wx.LEFT | wx.BOTTOM, 5)
@@ -776,7 +776,7 @@ class StatusPanel(wx.Panel):
         )
 
         self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("send_voice_message"))
-        self._voice_send_btn.SetAccessible(AccessibleSendVoiceMessage())
+        self._voice_send_btn.SetAccessible(AccessibleSendVoiceMessage(self.main_window))
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
         self._voice_send_btn.Hide()
         voice_btn_sizer.Add(self._voice_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
