@@ -123,7 +123,34 @@ class AccessibleEmojiButton(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+.")
 
 
-class AccessibleDiscardVoiceMessage(wx.Accessible):
+class _SilenceableVoiceButtonAccessible(wx.Accessible):
+    """Base for a voice-recording-panel button whose accessible *name* is
+    blanked out while Settings > Conteúdo Falado's "silence while
+    recording" toggle is on.
+
+    The screen reader queries the newly-focused object's name synchronously
+    while handling the focus WinEvent, so returning an empty name here stops
+    the announcement's content from ever being generated — instead of
+    racing to cancel speech that has already started, which
+    ConversationsPanel._silence_send_voice_focus_if_enabled()'s silence()
+    calls do and can lose against a synthesizer like SAPI5 running under
+    NVDA (see that method's own docstring for why the race exists at all).
+    The two defenses run together: this one prevents most of the
+    announcement's content before it's ever queued, silence() mops up
+    whatever residual (e.g. a bare role announcement) slips through anyway.
+    """
+
+    def __init__(self, main_window):
+        super().__init__()
+        self._mw = main_window
+
+    def GetName(self, childId):
+        if self._mw.settings.get("speech_content", {}).get("silence_while_recording", False):
+            return (wx.ACC_OK, "")
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
+class AccessibleDiscardVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
 
     def GetKeyboardShortcut(self, childId):
@@ -137,7 +164,7 @@ class AccessiblePauseResumeRecording(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+P")
 
 
-class AccessibleSendVoiceMessage(wx.Accessible):
+class AccessibleSendVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
 
     def GetKeyboardShortcut(self, childId):

@@ -931,7 +931,7 @@ class ConversationsPanel(wx.Panel):
         self._discard_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("discard_voice_message")
         )
-        self._discard_voice_btn.SetAccessible(AccessibleDiscardVoiceMessage())
+        self._discard_voice_btn.SetAccessible(AccessibleDiscardVoiceMessage(self.main_window))
         self._discard_voice_btn.Bind(wx.EVT_BUTTON, self._discard_voice_message)
         voice_sizer.Add(self._discard_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -961,7 +961,7 @@ class ConversationsPanel(wx.Panel):
         self._send_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("send_voice_message")
         )
-        self._send_voice_btn.SetAccessible(AccessibleSendVoiceMessage())
+        self._send_voice_btn.SetAccessible(AccessibleSendVoiceMessage(self.main_window))
         self._send_voice_btn.Bind(wx.EVT_BUTTON, self._send_voice_message)
         voice_sizer.Add(self._send_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -2369,7 +2369,18 @@ class ConversationsPanel(wx.Panel):
     def _silence_send_voice_focus_if_enabled(self):
         """When Settings > Conteúdo Falado's "silence while recording" toggle
         is on, cut off the screen reader's own focus announcement for the
-        Enviar button right after SetFocus() moves to it.
+        Enviar/Descartar button right after SetFocus() moves to it.
+
+        This is the second line of defense, not the first: AccessibleSendVoiceMessage
+        / AccessibleDiscardVoiceMessage (ui/accessible.py) already blank out the
+        button's accessible *name* while the toggle is on, which stops most of the
+        announcement's content from ever being generated in the first place — the
+        screen reader queries the name synchronously while handling the focus
+        WinEvent, so an empty name usually means there is nothing to speak at all.
+        This method only mops up whatever slips through anyway (e.g. a bare role
+        announcement, or a screen reader whose synthesizer — SAPI5 under NVDA is
+        the reported case — has already started speaking before the empty name is
+        read back).
 
         A silence() call issued synchronously right after SetFocus() is too
         early: on Windows the focus WinEvent is dispatched to the screen
