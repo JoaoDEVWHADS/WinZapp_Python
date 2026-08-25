@@ -953,6 +953,8 @@
     "media_viewer_loading": "Loading media...",
     "media_viewer_play": "&Play",
     "media_viewer_pause": "&Pause",
+    "media_viewer_seek_back": "Back 10 seconds",
+    "media_viewer_seek_forward": "Forward 10 seconds",
     "media_viewer_position": "Position",
     "media_viewer_volume": "Volume",
     "media_viewer_speed": "Speed: {speed}x",

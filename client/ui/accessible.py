@@ -171,6 +171,26 @@ class AccessibleSendVoiceMessage(_SilenceableVoiceButtonAccessible):
         return (wx.ACC_OK, "Ctrl+R")
 
 
+class AccessibleMediaViewerSeekBack(wx.Accessible):
+    """Reports Alt+V as the keyboard shortcut for the media viewer's
+    "voltar 10 segundos" button (ui/media_viewer.py) — shared by both the
+    conversation video player and the status player, both being the same
+    MediaViewerDialog."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Alt+V")
+
+
+class AccessibleMediaViewerSeekForward(wx.Accessible):
+    """Reports Alt+A as the keyboard shortcut for the media viewer's
+    "avançar 10 segundos" button (ui/media_viewer.py) — shared by both the
+    conversation video player and the status player, both being the same
+    MediaViewerDialog."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Alt+A")
+
+
 class AccessiblePlayRecordedAudio(wx.Accessible):
     """Reports Ctrl+P as the keyboard shortcut for the Play/Stop
     recorded-audio-preview button — same shortcut whether the button is

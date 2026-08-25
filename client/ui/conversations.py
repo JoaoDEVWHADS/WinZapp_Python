@@ -161,9 +161,16 @@ def probe_media_duration(path: str):
     #    "could not measure" — see core.utils.video_seconds(). A length of
     #    exactly 0.0 is the second case (nothing decodable), so it falls
     #    through to the parsers below.
+    #    decode=True matters, not just cosmetics: it's the exact stream mode
+    #    every actual playback path in the app already opens the file with
+    #    (VideoPlayer._start_audio, ConversationsPanel._play_audio's
+    #    _open_stream) — BASS can report a slightly different get_length()
+    #    for a plain (decode=False) stream vs. a decoded one on the same AAC/
+    #    MP4 file, which is why a probed duration used to drift a second or
+    #    two from what the player itself later showed for the same file.
     try:
         from sound_lib import stream
-        s = stream.FileStream(file=path)
+        s = stream.FileStream(file=path, decode=True)
         length_bytes = s.get_length()
         length_secs = s.bytes_to_seconds(length_bytes)
         s.free()
@@ -11692,6 +11699,18 @@ class ConversationsPanel(wx.Panel):
                 _dur = self._probe_audio_duration(path)
                 if _dur is not None:
                     _body["seconds"] = _dur
+            elif media_type == "video":
+                # Unlike audio, video_seconds() doesn't trust a plain "seconds"
+                # of 0 (WhatsApp itself sends that to mean "not stated" — see
+                # that function's own docstring), so a video we're sending
+                # needs its length under _measured_seconds instead, same key
+                # _learn_video_duration() fills in for a received video once
+                # it's played. Without this, a video sent as a WinZapp
+                # attachment showed no duration in the list until the sender
+                # opened it themselves at least once.
+                _dur = self._probe_audio_duration(path)
+                if _dur is not None and _dur >= 0:
+                    _body[MEASURED_SECONDS_KEY] = _dur
             virtual_msg = {
                 "_local_pending": True,
                 "_local_id":      local_id,
