@@ -19812,7 +19812,12 @@ class MainWindow(wx.Frame):
                         code = None
                     if code in (200, 409):
                         continue  # genuinely in the group now (or already was)
-                    display = jid.split("@")[0]
+                    contact = getattr(self, "contacts", {}).get(jid, {})
+                    display = (
+                        contact.get("name")
+                        or contact.get("pushName")
+                        or jid.split("@")[0]
+                    )
                     if code == 403 and info.get("invite_code"):
                         invited.append(display)
                     else:

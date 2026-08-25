@@ -3450,6 +3450,16 @@ class ConversationsPanel(wx.Panel):
                 audio_ext=".ogg",
             )
 
+        elif msg_type == "videoMessage" and not self._use_conversation_video_media_viewer_dialog():
+            # Classic mode (Settings > Interface do usuário > "Mostrar vídeos
+            # nas conversas em player separado" unchecked): play in-app via
+            # BASS/ffmpeg instead of the dialog, exactly like before that
+            # dialog existed — see _play_toggle_video_message().
+            video = msg_obj.get("videoMessage") or {}
+            if video.get("gifPlayback"):
+                return  # GIFs have no audio track to play
+            self._play_toggle_video_message(msg)
+
         elif msg_type in ("imageMessage", "videoMessage"):
             # Media opens in the same accessible, maximized viewer used by
             # statuses. This avoids wx.StaticBitmap clipping and gives video
@@ -5630,6 +5640,16 @@ class ConversationsPanel(wx.Panel):
                     if hasattr(os, "startfile"):
                         os.startfile(filepath)
 
+    def _use_conversation_video_media_viewer_dialog(self) -> bool:
+        """True (default) opens a conversation video in the dedicated, full
+        MediaViewerDialog; False keeps the classic in-app player instead
+        (BASS/ffmpeg, no separate dialog). Settings > Interface do usuário >
+        "Mostrar vídeos nas conversas em player separado". Images are not
+        affected by this setting — they always use the dialog."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "conversation_video_media_viewer_dialog", True
+        )
+
     def _open_conversation_media_viewer(self, index: int):
         """Open an image/video message in the shared maximized MediaViewer.
 
@@ -5725,9 +5745,13 @@ class ConversationsPanel(wx.Panel):
                 self._open_file_safely(url)
             return
 
-        if msg_type in ("imageMessage", "videoMessage"):
+        if msg_type == "imageMessage" or (
+            msg_type == "videoMessage" and self._use_conversation_video_media_viewer_dialog()
+        ):
             self._open_conversation_media_viewer(index)
             return
+        # Classic mode: fall through to the generic open-externally flow
+        # below (same as documentMessage), like before the dialog existed.
 
         if msg_type == "documentMessage":
             filename = (msg_obj.get("documentMessage") or {}).get(

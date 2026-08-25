@@ -39,19 +39,48 @@ class AddMemberDialog(wx.Dialog):
         label = wx.StaticText(self, label=i18n.t("add_member_title"))
         sizer.Add(label, 0, wx.ALL, 8)
 
-        # ── Custom phone number entry ───────────────────────────────────────
-        num_label = wx.StaticText(self, label=i18n.t("add_member_custom_number_label"))
-        sizer.Add(num_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        # ── Contacts list ─────────────────────────────────────────────────
+        # Tab order deliberately puts this before the "add by number"
+        # section below: picking from the user's own contacts is the
+        # primary/expected path, the number field is the alternative one —
+        # a blind user tabbing through the dialog used to land on the
+        # alternative first, which read backwards.
+        contacts_label = wx.StaticText(self, label=i18n.t("add_member_contacts_list_label"))
+        sizer.Add(contacts_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
 
-        num_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self._list = wx.ListCtrl(
+            self, style=wx.LC_REPORT | wx.LC_HRULES
+        )
+        self._list.InsertColumn(0, i18n.t("conversations"), width=220)
+        self._list.InsertColumn(1, i18n.t("phone_label"),   width=140)
+        sizer.Add(self._list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        # ── Custom phone number entry (alternative path) ────────────────────
+        # Wrapped in a StaticBox (not a bare StaticText immediately before
+        # the combobox) specifically because NVDA reads whatever StaticText
+        # sits right before a control as that control's own label. A
+        # section header like "Ou, adicionar via número de telefone" isn't
+        # the country combo's label — it used to be read as if it were,
+        # which made no sense once focus actually reached the combo. Each
+        # control below gets its own accurate, adjacent label instead.
+        num_box = wx.StaticBox(self, label=i18n.t("add_member_custom_number_label"))
+        num_box_sizer = wx.StaticBoxSizer(num_box, wx.VERTICAL)
+
+        country_label = wx.StaticText(self, label=i18n.t("add_member_country_label"))
+        num_box_sizer.Add(country_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
         self._countries = get_countries(self._i18n.language)
         self._country_combo = wx.ComboBox(
             self, choices=[c[0] for c in self._countries],
             style=wx.CB_READONLY,
         )
         self._country_combo.SetSelection(0)  # Brazil (default)
-        num_sizer.Add(self._country_combo, 0, wx.RIGHT, 6)
+        num_box_sizer.Add(self._country_combo, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
+        phone_label = wx.StaticText(self, label=i18n.t("add_member_phone_number_label"))
+        num_box_sizer.Add(phone_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        num_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self._phone_field = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
         self._phone_field.SetHint(i18n.t("phone_label"))
         self._phone_field.Bind(wx.EVT_CHAR, self._on_phone_char)
@@ -62,14 +91,8 @@ class AddMemberDialog(wx.Dialog):
         add_number_btn.Bind(wx.EVT_BUTTON, self._on_add_typed_number)
         num_sizer.Add(add_number_btn, 0)
 
-        sizer.Add(num_sizer, 0, wx.EXPAND | wx.ALL, 8)
-
-        self._list = wx.ListCtrl(
-            self, style=wx.LC_REPORT | wx.LC_HRULES
-        )
-        self._list.InsertColumn(0, i18n.t("conversations"), width=220)
-        self._list.InsertColumn(1, i18n.t("phone_label"),   width=140)
-        sizer.Add(self._list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        num_box_sizer.Add(num_sizer, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(num_box_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn  = wx.Button(self, wx.ID_OK,     label=i18n.t("add_member"))

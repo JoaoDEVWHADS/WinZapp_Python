@@ -350,3 +350,106 @@ class TestApplyAudioSpeedVideoBranch:
         assert stub.applied_speed == 2.0
         assert stub.audio_speed_btn.label == "2.0×"
         assert stub.main_window.save_settings_calls == 1
+
+
+# ── Settings > Interface do usuário > "Mostrar vídeos nas conversas em
+# player separado" — unchecked keeps the classic in-app player (BASS/ffmpeg,
+# no dialog) instead of MediaViewerDialog, mirroring the equivalent status
+# setting (_use_status_media_viewer_dialog in status_panel.py). Images are
+# never affected by this setting. ───────────────────────────────────────────
+
+class _FakeSettingsHolder:
+    def __init__(self, settings):
+        self.settings = settings
+
+
+class _ActivationStub:
+    _is_separator                              = ConversationsPanel._is_separator
+    _use_conversation_video_media_viewer_dialog = (
+        ConversationsPanel._use_conversation_video_media_viewer_dialog
+    )
+    _do_activate_message                        = ConversationsPanel._do_activate_message
+
+    def __init__(self, sorted_messages, settings=None):
+        self.main_window = _FakeSettingsHolder(settings or {})
+        self._sorted_messages = sorted_messages
+        self._render_message_line = lambda msg: ""
+        self._extract_links = lambda rendered: []
+        self._extract_mentions = lambda msg: []
+        self._update_links_panel = lambda links: None
+        self._update_mentions_panel = lambda mentions: None
+        self._sync_media_action_slot_visibility = lambda: None
+        self.media_viewer_calls = []
+        self.play_toggle_calls = []
+
+    def _open_conversation_media_viewer(self, index):
+        self.media_viewer_calls.append(index)
+
+    def _play_toggle_video_message(self, msg):
+        self.play_toggle_calls.append(msg)
+
+
+class TestUseConversationVideoMediaViewerDialogSetting:
+    def test_default_setting_uses_the_dialog(self):
+        stub = _ActivationStub([])  # no settings override — must default to True
+        assert stub._use_conversation_video_media_viewer_dialog() is True
+
+    def test_disabled_setting_uses_the_classic_player(self):
+        stub = _ActivationStub(
+            [], settings={"user_interface": {"conversation_video_media_viewer_dialog": False}}
+        )
+        assert stub._use_conversation_video_media_viewer_dialog() is False
+
+
+class TestVideoActivationRespectsTheSetting:
+    def test_dialog_mode_opens_the_media_viewer(self):
+        stub = _ActivationStub([_video_msg("v1")])
+
+        stub._do_activate_message(0)
+
+        assert stub.media_viewer_calls == [0]
+        assert stub.play_toggle_calls == []
+
+    def test_classic_mode_plays_in_app_instead(self):
+        stub = _ActivationStub(
+            [_video_msg("v1")],
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}},
+        )
+
+        stub._do_activate_message(0)
+
+        assert stub.play_toggle_calls == [_video_msg("v1")]
+        assert stub.media_viewer_calls == []
+
+    def test_classic_mode_ignores_gif_playback(self):
+        """GIFs (videoMessage with gifPlayback) have no audio track — Enter
+        must no-op in classic mode instead of trying to play one, matching
+        the pre-dialog behaviour this mode restores."""
+        gif_msg = {
+            "key": {"id": "g1"}, "messageType": "videoMessage",
+            "message": {"videoMessage": {"gifPlayback": True}},
+        }
+        stub = _ActivationStub(
+            [gif_msg],
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}},
+        )
+
+        stub._do_activate_message(0)
+
+        assert stub.play_toggle_calls == []
+        assert stub.media_viewer_calls == []
+
+    def test_image_messages_always_use_the_dialog_regardless_of_the_setting(self):
+        image_msg = {
+            "key": {"id": "i1"}, "messageType": "imageMessage",
+            "message": {"imageMessage": {}},
+        }
+        stub = _ActivationStub(
+            [image_msg],
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}},
+        )
+
+        stub._do_activate_message(0)
+
+        assert stub.media_viewer_calls == [0]
+        assert stub.play_toggle_calls == []

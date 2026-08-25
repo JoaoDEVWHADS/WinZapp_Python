@@ -494,6 +494,14 @@ class SettingsDialog(wx.Dialog):
             self._show_link_previews_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._conversation_video_media_viewer_dialog_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_conversation_video_media_viewer_dialog_label")
+        )
+        ui_sizer.Add(
+            self._conversation_video_media_viewer_dialog_cb, 0,
+            wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._status_media_viewer_dialog_cb = wx.CheckBox(
             self._ui_page, label=i18n.t("ui_status_media_viewer_dialog_label")
         )
@@ -991,6 +999,13 @@ class SettingsDialog(wx.Dialog):
             "show_link_previews", True
         )
         self._show_link_previews_cb.SetValue(bool(show_link_previews))
+
+        conversation_video_media_viewer_dialog = self.main_window.settings.get(
+            "user_interface", {}
+        ).get("conversation_video_media_viewer_dialog", True)
+        self._conversation_video_media_viewer_dialog_cb.SetValue(
+            bool(conversation_video_media_viewer_dialog)
+        )
 
         status_media_viewer_dialog = self.main_window.settings.get("user_interface", {}).get(
             "status_media_viewer_dialog", True
@@ -1734,6 +1749,9 @@ class SettingsDialog(wx.Dialog):
             "show_link_previews"
         ] = self._show_link_previews_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
+            "conversation_video_media_viewer_dialog"
+        ] = self._conversation_video_media_viewer_dialog_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
             "status_media_viewer_dialog"
         ] = self._status_media_viewer_dialog_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
@@ -2052,6 +2070,9 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
         self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
         self._show_link_previews_cb.SetLabel(i18n.t("ui_show_link_previews_label"))
+        self._conversation_video_media_viewer_dialog_cb.SetLabel(
+            i18n.t("ui_conversation_video_media_viewer_dialog_label")
+        )
         self._status_media_viewer_dialog_cb.SetLabel(i18n.t("ui_status_media_viewer_dialog_label"))
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
