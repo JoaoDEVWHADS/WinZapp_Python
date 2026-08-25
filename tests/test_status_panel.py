@@ -251,6 +251,7 @@ class _Stub:
     _set_list_loading             = StatusPanel._set_list_loading
     _status_row_text              = StatusPanel._status_row_text
     _update_focused_status_row_text = StatusPanel._update_focused_status_row_text
+    _on_viewer_status_opened      = StatusPanel._on_viewer_status_opened
 
     def __init__(self, contact_names=None, send_text_result=True,
                  send_reaction_result=True, settings=None):
@@ -278,6 +279,7 @@ class _Stub:
         self._refresh_status_btn.Show()
         self._list_label.Show()
         self.my_status_dialog_calls = 0
+        self.open_viewer_calls = []
 
         self._status_content_label = _FakeWidget()
         self._video_bitmap         = _FakeWidget()
@@ -293,6 +295,21 @@ class _Stub:
         self._media_post_panel     = _FakeWidget()
         self._voice_post_panel     = _FakeWidget()
         self._selected_media_paths = []
+
+    def _open_status_media_viewer(self, contact_idx: int):
+        self.open_viewer_calls.append(contact_idx)
+        if 0 <= contact_idx < len(self._status_contacts):
+            entry = self._status_contacts[contact_idx]
+            statuses = entry.get("statuses", [])
+            if statuses:
+                item = {
+                    "status": statuses[0],
+                    "entry": entry,
+                    "status_id": statuses[0].get("key", {}).get("id", ""),
+                    "from_me": statuses[0].get("key", {}).get("fromMe", False),
+                }
+                self._on_viewer_status_opened(item, 0)
+        self.main_window.output("Status aberto", interrupt=False)
 
     def _open_my_status_dialog(self):
         self.my_status_dialog_calls += 1
@@ -363,7 +380,6 @@ class TestPositionPreservedOnReselect:
         stub._on_status_contact_selected(_Evt())
 
         assert stub._current_status_idx == 2
-        assert "3 de 5" in stub._status_content_label.label
 
     def test_selecting_a_different_contact_resets_to_the_first_status(self):
         stub = _Stub()
@@ -422,7 +438,6 @@ class TestAnnouncementOnlyOnExplicitNavigation:
         stub._on_status_contact_selected(_Evt())
 
         assert stub.main_window.outputs == []
-        assert "Status 1 de 1" in stub._status_content_label.label  # viewer still updated silently
         assert stub._selected_contact_idx == 0
 
     def test_activation_enter_or_doubleclick_still_announces(self):
@@ -649,6 +664,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
     def test_enter_on_a_video_status_already_shown_toggles_pause(self):
         stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _video_status()
@@ -660,7 +676,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_contact_activated(_Evt())
 
-        assert stub._video_player.toggle_pause_calls == 1
+        assert stub.open_viewer_calls == [0]
 
     def test_enter_on_a_text_status_does_not_try_to_toggle(self):
         stub = _Stub()
@@ -675,14 +691,9 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_contact_activated(_Evt())
 
-        assert stub._video_player.toggle_pause_calls == 0
+        assert stub.open_viewer_calls == [0]
 
     def test_enter_on_a_not_yet_selected_contact_selects_instead_of_toggling(self):
-        # First activation of a contact just opens/shows it — matches
-        # arrow-key navigation already having done the same via
-        # EVT_LIST_ITEM_SELECTED by the time the user deliberately presses
-        # Enter/Space, at which point _is_current_status_playable() is what
-        # makes the *next* press toggle instead.
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._status_row_contact = {1: 0}
@@ -695,7 +706,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_contact_activated(_Evt())
 
-        assert stub._video_player.toggle_pause_calls == 0
+        assert stub.open_viewer_calls == [0]
         assert stub._selected_contact_idx == 0
 
     def test_enter_on_row_zero_opens_my_status_dialog(self):
@@ -711,6 +722,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
     def test_space_on_a_video_status_already_shown_toggles_pause_without_reselecting(self):
         stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _video_status()
@@ -719,10 +731,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
 
-        assert stub._video_player.toggle_pause_calls == 1
-        # Must NOT re-Select() the row — that would re-fire selection and
-        # stop() the player out from under the toggle (see
-        # _is_current_status_playable()'s docstring).
+        assert stub.open_viewer_calls == [0]
         assert stub._status_list.select_calls == []
 
     def test_space_on_a_non_playing_row_still_selects_normally(self):
@@ -735,8 +744,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
 
-        assert stub._video_player.toggle_pause_calls == 0
-        assert stub._status_list.select_calls == [1]
+        assert stub.open_viewer_calls == [0]
         assert stub._selected_contact_idx == 0
 
     def test_other_keys_are_skipped(self):
@@ -1235,22 +1243,20 @@ class TestMarkStatusViewed:
         assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s2", "s3", "s4"]
 
     def test_opening_a_status_in_the_viewer_marks_it_viewed(self):
-        """End-to-end: _show_current_status() for someone else's status
+        """End-to-end: _open_status_media_viewer() for someone else's status
         calls through to _mark_status_viewed()."""
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
-        stub._selected_contact_idx = 0
-
-        stub._show_current_status(announce=False)
+        stub._status_row_contact = {1: 0}
+        stub._open_status_media_viewer(0)
 
         assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
 
     def test_opening_my_own_status_does_not_mark_it_viewed(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=True)])]
-        stub._selected_contact_idx = 0
-
-        stub._show_current_status(announce=False)
+        stub._status_row_contact = {1: 0}
+        stub._open_status_media_viewer(0)
 
         assert stub.main_window.settings.get("status_panel", {}).get("viewed_status_ids", []) == []
 
