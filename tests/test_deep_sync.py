@@ -85,6 +85,7 @@ class _MessagesStub:
     """Minimal MainWindow stand-in for sync_chat_messages()."""
 
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _needs_display_page_refill = staticmethod(MainWindow._needs_display_page_refill)
 
     def __init__(self, get_urls):
         self.get_urls = get_urls
@@ -97,6 +98,14 @@ class _MessagesStub:
         self.wpp_port = 6308
         self.token = "tok"
         self.db = _FakeDb()
+        self._sync_failures_lock = threading.Lock()
+        self._sync_failed_chats = set()
+
+    def _extract_lid_mapping(self, msg):
+        pass
+
+    def _schedule_save(self, **kwargs):
+        pass
 
     def _is_cleared_message(self, remote_jid, message):
         return False
