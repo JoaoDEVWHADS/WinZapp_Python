@@ -822,7 +822,7 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_C        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
         self.ID_CTRL_R        = wx.NewIdRef()
-        self.ID_CTRL_P        = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_G  = wx.NewIdRef()
         self.ID_CTRL_SHIFT_P  = wx.NewIdRef()
         self.ID_CTRL_SHIFT_D  = wx.NewIdRef()
         self.ID_F5            = wx.NewIdRef()
@@ -834,7 +834,7 @@ class StatusPanel(wx.Panel):
             (wx.ACCEL_NORMAL,                  wx.WXK_F5,     self.ID_F5),
             (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
             (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
-            (wx.ACCEL_CTRL,                    ord("P"),      self.ID_CTRL_P),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("G"),      self.ID_CTRL_SHIFT_G),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("P"),      self.ID_CTRL_SHIFT_P),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("D"),      self.ID_CTRL_SHIFT_D),
             (wx.ACCEL_CTRL,                    ord("."),      self.ID_CTRL_PERIOD),
@@ -850,7 +850,7 @@ class StatusPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_copy_status_text,     id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_save_status_media,    id=self.ID_CTRL_SHIFT_S)
         self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,      id=self.ID_CTRL_R)
-        self.Bind(wx.EVT_MENU, self._on_ctrl_p_shortcut,      id=self.ID_CTRL_P)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_g_shortcut, id=self.ID_CTRL_SHIFT_G)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p_shortcut,id=self.ID_CTRL_SHIFT_P)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d_shortcut,id=self.ID_CTRL_SHIFT_D)
         self.Bind(wx.EVT_MENU, self._on_refresh_status_btn,   id=self.ID_F5)
@@ -2294,8 +2294,10 @@ class StatusPanel(wx.Panel):
         if self._voice_post_panel.IsShown() and self._is_recording:
             self._toggle_pause_voice_recording(event)
 
-    def _on_ctrl_p_shortcut(self, event):
-        """Ctrl+P plays/stops the paused recording, matching conversations."""
+    def _on_ctrl_shift_g_shortcut(self, event):
+        """Ctrl+Shift+G plays/stops the paused recording — the same key the
+        conversation composer's recorder uses for the same action (see
+        ConversationsPanel._on_accel_play_recorded)."""
         if (
             self._voice_post_panel.IsShown()
             and self._is_recording

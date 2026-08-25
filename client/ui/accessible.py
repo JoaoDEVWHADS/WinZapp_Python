@@ -192,13 +192,20 @@ class AccessibleMediaViewerSeekForward(wx.Accessible):
 
 
 class AccessiblePlayRecordedAudio(wx.Accessible):
-    """Reports Ctrl+P as the keyboard shortcut for the Play/Stop
+    """Reports Ctrl+Shift+G as the keyboard shortcut for the Play/Stop
     recorded-audio-preview button — same shortcut whether the button is
     currently offering to play or to stop, so it stays accurate across the
-    label swap."""
+    label swap.
+
+    One shortcut for both recorders (the conversation composer and the Status
+    composer). It used to be Ctrl+P, shared with "pin conversation" and
+    resolved by context — which meant the same key did two unrelated things
+    depending on whether a recording happened to be paused, and the two panels
+    had to keep that overload in step. Ctrl+Shift+G is its own key in both
+    places: nothing else in the app uses G."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+P")
+        return (wx.ACC_OK, "Ctrl+Shift+G")
 
 
 class AccessibleNewConversationButton(wx.Accessible):

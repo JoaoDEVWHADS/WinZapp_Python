@@ -549,9 +549,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
                 )
                 return False
         else:
-            # DETACHED_PROCESS is deliberately NOT used here, even though the
-            # attribute name below doesn't exist (getattr(...) silently
-            # falls back to 0): a real DETACHED_PROCESS gives the child no
+            # DETACHED_PROCESS is deliberately NOT used here: it gives the child no
             # console at all, and a console-less cmd.exe decodes the batch
             # script's text with the ANSI code page instead of the OEM one
             # _oem_encoding()/_write_installer_script() use — reintroducing
@@ -561,7 +559,13 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
             # hidden console using the system's default OEM code page, which
             # is exactly what matches _oem_encoding()'s GetOEMCP() call —
             # confirmed empirically (see tests/test_updater_unicode_paths.py).
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACH_PROCESS", 0)
+            #
+            # This used to read `| getattr(subprocess, "DETACH_PROCESS", 0)`,
+            # which only ever contributed 0 because the real constant is
+            # DETACHED_PROCESS — the correct behaviour depended on the typo
+            # surviving, which is the kind of thing a linter or a helpful
+            # reviewer "fixes" straight back into issue #83.
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.Popen(
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,

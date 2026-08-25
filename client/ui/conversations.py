@@ -997,6 +997,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_CLEAR_LIST          = wx.NewIdRef()
         self.ID_ARCHIVE_LIST        = wx.NewIdRef()
         self.ID_PIN_LIST            = wx.NewIdRef()
+        self.ID_PLAY_RECORDED       = wx.NewIdRef()
         self.ID_CLOSE_CONV_LIST     = wx.NewIdRef()
         # ── Mass actions (only act while conversations are selected) ─────────
         # One shortcut per entry of the chat list's "Ações em massa" submenu,
@@ -1039,6 +1040,7 @@ class ConversationsPanel(wx.Panel):
             # fat-finger while just trying to navigate the list.
             (CS,              ord("Q"),         self.ID_ARCHIVE_LIST),
             (wx.ACCEL_CTRL,   ord("P"),         self.ID_PIN_LIST),
+            (CS,              ord("G"),         self.ID_PLAY_RECORDED),
             (wx.ACCEL_CTRL,   ord("W"),         self.ID_CLOSE_CONV_LIST),
             (CAS,             ord("L"),         self.ID_BULK_CLEAR_CHATS),
             (CS,              wx.WXK_DELETE,    self.ID_BULK_DELETE_CHATS),
@@ -1058,6 +1060,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_clear_list,          id=self.ID_CLEAR_LIST)
         self.Bind(wx.EVT_MENU, self._on_accel_archive_list,        id=self.ID_ARCHIVE_LIST)
         self.Bind(wx.EVT_MENU, self._on_accel_pin_list,            id=self.ID_PIN_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_play_recorded,       id=self.ID_PLAY_RECORDED)
         self.Bind(wx.EVT_MENU, self.on_context_menu_close,         id=self.ID_CLOSE_CONV_LIST)
         self.Bind(wx.EVT_MENU, self._on_accel_bulk_clear_chats,    id=self.ID_BULK_CLEAR_CHATS)
         self.Bind(wx.EVT_MENU, self._on_accel_bulk_delete_chats,   id=self.ID_BULK_DELETE_CHATS)
@@ -10294,14 +10297,25 @@ class ConversationsPanel(wx.Panel):
         else:
             self._on_menu_archive(jid)
 
-    def _on_accel_pin_list(self, event):
-        """Play/stop the recorded-audio preview while the voice recording is
-        paused; otherwise pin/unpin the focused conversation. Both share
-        this one accelerator (Ctrl+P) — mutually exclusive contexts, same
-        pattern as _on_ctrl_shift_p uses for Ctrl+Shift+P."""
+    def _on_accel_play_recorded(self, event):
+        """Ctrl+Shift+G: play/stop the recorded-audio preview.
+
+        Its own accelerator, and the same one the Status composer's recorder
+        uses (see StatusPanel._on_ctrl_shift_g_shortcut) — one key for one
+        action, wherever the user is recording. It used to ride on Ctrl+P
+        alongside "pin conversation", resolved by whether a recording
+        happened to be paused; that worked, but made the same key mean two
+        unrelated things and left the two panels having to keep the overload
+        in step with each other.
+
+        The preview only exists while a recording is paused (that is when the
+        captured frames stop changing), so outside that this does nothing.
+        """
         if self._is_recording and self._recording_paused:
             self._toggle_play_recorded_audio(event)
-            return
+
+    def _on_accel_pin_list(self, event):
+        """Ctrl+P: pin/unpin the focused conversation."""
         chat = self._selected_chat_from_list()
         if not chat:
             return
