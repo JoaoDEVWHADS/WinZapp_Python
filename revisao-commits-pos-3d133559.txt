@@ -1,0 +1,429 @@
+REVISÃO DOS COMMITS POSTERIORES A 3d133559
+Data: 2026-08-25 (atualizado no mesmo dia — ver "STATUS" abaixo)
+Branch: main (= origin/main, ed2a4b08)
+Base: 3d133559 "Merge pull request #101 from gabrielhhaber/fix/new-conversation-api-stability"
+
+32 commits. Diff líquido: 75 arquivos, +5966 / -658.
+Produção: 28 arquivos, +3384 / -511. Quatro módulos novos.
+
+Suíte no momento da revisão: 3489 passaram, 6 falharam.
+
+────────────────────────────────────────────────────────────────
+STATUS DEPOIS DAS CORREÇÕES (branch fixs)
+────────────────────────────────────────────────────────────────
+  item 1  RESOLVIDO   setup_api.py rodado; as 6 falhas de deriva sumiram
+  item 2  CORRIGIDO   tautologia removida de test_api_patches_in_sync.py
+  item 3  ABERTO      MediaGatingUtils re-embrulhado a cada envio
+  item 4  ABERTO      três observações em link_preview.py
+  item 5  ABERTO      Content-Length congelado em multipart_stream.py
+  item 6  ABERTO      discussão de processo
+  item 7  CORRIGIDO   NOVO — descoberto ao rodar a suíte já sincronizada
+
+Suíte na fixs após as correções: 3504 passando, 0 falhando.
+
+FORMA DO LOTE
+  985160c5  feat: consolidate features, UI improvements and API stability fixes
+            (JoaoDEVWHADS — 53 arquivos, +3989/-584, mensagem sem corpo)
+  ~25 commits "fix(tests): adapt <arquivo>" + "chore: restore production code
+            to match origin, will adapt tests only"
+  1dcfae61  feat(mensagens): envia prévia de link nas mensagens de saída
+  1a5a9d2c  fix(grupos): diálogo "adicionar a um grupo" mostrava número
+  ecb72977  feat(status): player de status separado agora é opcional
+  d025b062  fix: revisão do PR — cancelamento de upload, seek travando UI, e mais
+  7a215561  fix: restaura funcionalidade perdida no merge + últimos 3 achados
+  a58023a3  fix(status): atalhos e acessibilidade faltando no MediaViewerDialog
+  ed2a4b08  Merge PR #103
+
+Os três commits de revisão (d025b062, 7a215561, a58023a3) já pegaram seis
+bugs reais e sérios — cancelamento de upload que não cancelava, seek de vídeo
+travando a UI por 2 s, patch de migração nunca chamado, status próprios sendo
+apagados do cache ao reconectar. Esta revisão parte do que sobrou depois deles.
+
+
+================================================================
+1. BLOQUEANTE — client/api/ fora de sincronia, de novo (3ª vez)
+================================================================
+Severidade: alta | Commits: 985160c5, 7a215561
+
+6 testes falhando, 5 arquivos derivados:
+
+  start.js                             55 linhas divergentes
+  src/util/createSessionUtil.ts        36
+  src/controller/deviceController.ts   91
+  src/controller/messageController.ts  43
+  src/controller/statusController.ts   14
+
+As contagens batem exatamente com o `git diff --stat` do lote, ou seja:
+client/api/ está no estado PRÉ-lote para todos os cinco. Nenhuma das
+mudanças do lado Node deste batch está ativa na máquina — inclusive a
+correção do `requestOlderMessages` em deviceController.ts que o 7a215561
+descreve no item 2 (o fallback para o wid cru em conversas @lid).
+
+Ação: `python setup_api.py`. Até lá, qualquer teste manual do histórico
+antigo, de status ou de mensagens vai exercitar o código velho.
+
+Isto é a terceira ocorrência seguida (ver
+revisao-commits-pos-d5725501.txt item 1 e a nota de memória de 21/08).
+O teste que detecta existe e funciona; o que falta é rodá-lo antes de
+abrir o PR. Vale considerar um hook de pre-push ou um passo no CI que
+monte client/api/ e rode só esse arquivo.
+
+
+================================================================
+2. GUARDA DESATIVADA POR TAUTOLOGIA  [CORRIGIDO na fixs]
+================================================================
+Severidade: alta | Commit: d89c56bd (não corrigido depois)
+
+tests/test_api_patches_in_sync.py:434
+
+    assert version.startswith("^") or version.startswith("git+") or bool(version), (
+
+A terceira cláusula torna as duas primeiras mortas: qualquer string não
+vazia passa. O pin exato "2.2.4" — literalmente o bug que este teste foi
+escrito para pegar, e que o próprio docstring logo acima ainda descreve
+("only that it's a caret range rather than the old exact pin") — passa
+sem reclamar. A única coisa que ainda falha é a dependência sumir por
+completo, que é outra asserção.
+
+O valor real hoje é "^2.2.7", ou seja, a acomodação para `git+` nem
+está sendo exercida — a cláusula extra é só dano.
+
+Contexto que agrava: o MESMO commit d89c56bd também trocou o assert de
+deriva do api_patches por um `pytest.skip`, anulando aquela guarda. O
+d025b062 pegou essa (item 6 da mensagem dele) e restaurou com um
+comentário excelente explicando por que o skip era fatal. Mas as duas
+mudanças estavam no mesmo diff e só uma foi revertida.
+
+Correção aplicada: ` or bool(version)` removido; as duas cláusulas úteis
+(`^` e `git+`) ficaram, e a mensagem de erro voltou a explicar o bug
+original. O docstring passou a mencionar o `git+` também, já que antes
+falava só em caret.
+
+Confirmado por mutação: com a tautologia de volta e o
+client/api/package.json forçado para o pin exato "2.2.4" — literalmente
+o bug que o teste existe para pegar — a suíte passava. Sem ela, falha.
+
+
+================================================================
+2b. POR QUE ITEM 1 ESCONDIA UM SÉTIMO PROBLEMA
+================================================================
+
+Rodar setup_api.py (item 1) não deixou a suíte verde: sumiram as 6
+falhas de deriva e apareceu uma sétima, em
+test_headless_shell.py::test_the_selected_binary_is_the_headless_shell.
+
+Não era regressão — era teste obsoleto que a deriva vinha mascarando. O
+client/api/start.js desatualizado ainda tinha a política ANTIGA, então o
+teste passava exercitando código velho. Ao espelhar o start.js novo, ele
+passou a rodar a lógica nova e reprovou.
+
+É exatamente o cenário que a guarda de deriva existe para evitar,
+acontecendo ao vivo — e o argumento mais forte possível a favor do item 1.
+Ver item 7 para o que estava por baixo.
+
+
+================================================================
+3. PROBLEMA REAL — MediaGatingUtils re-embrulhado a cada envio
+================================================================
+Severidade: média | Commit: 985160c5
+
+client/core/wppconnect_sender_layer_patch.py:229 e :262 (e o
+_BROWSER_DOCUMENT_LIMIT_PATCH da linha 304, que injeta o mesmo bloco)
+
+    const mediaGating = WPP.whatsapp?.MediaGatingUtils;
+    if (options.type === 'document' && mediaGating?.getUploadLimit) {
+        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);
+        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'
+            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)
+            : getUploadLimit(type, origin, isVcard);
+    }
+
+Esse bloco está DENTRO do callback do `evaluateAndReturn`, ou seja, roda
+uma vez por envio. A condição de guarda é `mediaGating?.getUploadLimit`,
+que é sempre verdadeira depois do primeiro embrulho — então cada
+documento enviado captura o wrapper anterior e instala mais um por cima.
+
+Enviar N documentos na mesma sessão da página deixa N closures aninhadas,
+e cada chamada a getUploadLimit percorre as N. Cresce sem limite enquanto
+a página do WhatsApp Web viver, que numa sessão do WinZapp é o processo
+inteiro.
+
+Falta um marcador de idempotência, no estilo do que o próprio arquivo já
+usa para outras coisas (`window.__winzappFileTransfers`):
+
+    if (options.type === 'document' && mediaGating && !mediaGating.__winzappLimitPatched) {
+        ...
+        mediaGating.__winzappLimitPatched = true;
+    }
+
+tests/test_sender_layer_migration_wired.py tem
+`test_setup_api_is_idempotent_on_already_current_content`, mas ele cobre
+idempotência do PATCH NO ARQUIVO-FONTE, não do embrulho em runtime — são
+coisas diferentes e a segunda não está coberta.
+
+
+================================================================
+4. client/core/link_preview.py — três observações
+================================================================
+Severidade: baixa | Commit: 1dcfae61
+
+O módulo em si está bem feito: teto de 256 KB de download, checagem de
+Content-Type, timeout, thread de fundo, e a decisão de não reativar o
+fetch nativo do WA-JS está bem justificada no docstring. Três pontos:
+
+(a) `response` pode estar indefinido no `finally` (linha 98-102)
+    Se o próprio `requests.get()` levantar (DNS, connection refused,
+    timeout — os casos mais comuns), `response` nunca é atribuído e o
+    `finally` faz `response.close()` sobre um nome inexistente. Não
+    quebra: o `except Exception: pass` de dentro do finally engole o
+    NameError. Mas é acidental, não intencional — a intenção era fechar
+    a conexão, e nesse caminho ela nunca é fechada porque nunca existiu.
+    Fica mais claro inicializando `response = None` antes do try e
+    testando.
+
+(b) O regex captura pontuação final
+    `_URL_RE = r"https?://[^\s<>\"']+"` — verificado:
+
+        'veja https://example.com.'      -> 'https://example.com.'
+        'olha (https://example.com/a)'   -> 'https://example.com/a)'
+        'https://ex.com, e tal'          -> 'https://ex.com,'
+
+    O fetch do terceiro caso falha, e mais relevante: `canonicalUrl` cai
+    no fallback `url`, então a prévia enviada carrega a URL malformada
+    com a vírgula. Vale aparar `.,;:!?)]}'"` do fim do match.
+
+(c) Nota de privacidade, não defeito
+    A prévia é buscada com debounce de 700 ms ENQUANTO o usuário digita,
+    do IP dele, antes de qualquer envio. Escrever uma URL no campo e
+    desistir de mandar já avisou o servidor de destino. É o mesmo que o
+    WhatsApp faz, então provavelmente é o comportamento desejado — mas
+    como a opção "Mostrar prévias de link" hoje só controla a exibição,
+    talvez valha ela controlar também a busca.
+
+
+================================================================
+5. client/core/multipart_stream.py — Content-Length congelado
+================================================================
+Severidade: baixa | Commit: 985160c5
+
+`self.file_size = os.path.getsize(...)` roda no `__init__` (linha 58) e
+alimenta `_content_length`, mas o arquivo só é lido no `__iter__` (linha
+115). A classe se descreve como "replayable" justamente para permitir
+retry, e o MessageQueue reenvia até 4 vezes.
+
+Se o arquivo mudar de tamanho entre a construção e um retry (usuário
+regravou um áudio, um app externo reescreveu o arquivo), o corpo enviado
+não bate com o Content-Length anunciado: o servidor fica esperando bytes
+que não vêm, ou corta o multipart no meio. Falha silenciosa e difícil de
+diagnosticar.
+
+Barato de fechar: reconferir `os.path.getsize()` no início de `__iter__`
+e levantar se divergir do valor anunciado — melhor um erro claro do que
+um upload truncado.
+
+O resto do módulo está correto, incluindo o detalhe fino do
+`MessageCancelled` que o d025b062 consertou (deixar essa exceção
+específica propagar e engolir todas as outras é exatamente o certo, e o
+comentário explica por quê).
+
+
+================================================================
+6. PROCESSO — um commit de 4000 linhas sem mensagem, e 25 de conserto
+================================================================
+Severidade: a discutir | Commit: 985160c5 e a série "adapt tests"
+
+985160c5 tem 53 arquivos, +3989/-584, e o corpo da mensagem é vazio — só
+o título "feat: consolidate features, UI improvements and API stability
+fixes". Depois dele vêm ~25 commits "fix(tests): adapt X", mais um
+"chore: restore production code to match origin, will adapt tests only".
+
+Essa sequência é o sintoma clássico de um merge grande que quebrou a
+suíte e foi acomodado teste a teste. Na maioria dos casos aqui a
+adaptação foi legítima (stubs precisando de atributos novos, nomes de
+método que mudaram). Mas em pelo menos um caso — o d89c56bd — o que se
+"adaptou" foram duas guardas de regressão, transformadas em skip e em
+tautologia. Uma foi pega na revisão; a outra é o item 2 acima.
+
+O 7a215561 documenta o outro custo da mesma dinâmica: o merge da main
+apagou a varredura de nomes de remetente de grupo no startup, que existia
+só de um lado. Foi restaurada, mas só porque alguém foi procurar.
+
+Não é um bug para corrigir — é um argumento para quebrar o próximo lote
+desse tamanho em PRs menores, e para tratar "um teste de regressão começou
+a falhar" como pergunta antes de virar tarefa de edição do teste.
+
+
+================================================================
+7. INSTALADOR BAIXAVA O BROWSER ERRADO  [CORRIGIDO na fixs]
+================================================================
+Severidade: média | Commits: 985160c5 + 1dbc686a + ca968d04
+
+Descoberto ao investigar a falha do item 2b. O 985160c5 inverteu, de
+propósito e com boa justificativa, a política de escolha de browser do
+start.js:
+
+    // chrome-headless-shell is a console-subsystem executable on Windows.
+    // Its renderer/GPU children can each allocate a visible console
+    // (seven windows were observed when opening the QR screen). Full
+    // Chrome uses the GUI subsystem and remains windowless under
+    // Puppeteer's headless mode.
+    return process.platform === 'win32'
+      ? findFullChrome() || findHeadlessShell()
+      : findHeadlessShell() || findFullChrome();
+
+O 1dbc686a levou a mesma escolha por plataforma para os dois
+instaladores (setup_api.py e ApiSetupDialog). Só que a linha em
+api_setup.py usava `sys.platform` num método onde `sys` NÃO está no
+escopo — o módulo só faz `import sys` dentro de outros métodos (linhas
+834 e 858). Seria NameError em runtime, em qualquer plataforma.
+
+Foi quase certamente por isso que o ca968d04 ("chore: restore production
+code to match origin, will adapt tests only") reverteu aquele trecho. Só
+que a reversão pegou a metade de PRODUÇÃO e deixou a metade de TESTES do
+1dbc686a — justamente a que tinha esvaziado as asserções. Resultado na
+main:
+
+    start.js (Windows) prefere ....... Chrome completo
+    start.js auto-instala ............ 'chrome'  (via browserProduct)
+    ApiSetupDialog instala ........... 'chrome-headless-shell'  (fixo)
+
+No Windows o usuário baixa o headless-shell (~90 MB) pelo instalador do
+app e, no primeiro launch, o start.js não acha o Chrome completo,
+imprime "chrome não encontrado. Instalando automaticamente..." e baixa
+mais ~170 MB por cima. Não quebra nada — só baixa dois browsers e nunca
+usa o primeiro.
+
+O teste que teria pego isso (test_the_in_app_installer_downloads_the_shell_too)
+tinha sido reduzido a `assert "chrome-headless-shell" in src`, que passa
+porque o literal continua no arquivo.
+
+Correção aplicada em client/ui/dialogs/api_setup.py: `import sys` local
+no próprio método (o padrão que o resto do arquivo já usa) e
+`browser_product` escolhido por plataforma, igual ao start.js. É o que o
+1dbc686a queria fazer, sem o NameError que o derrubou.
+
+Nota: o ca968d04 também reverteu o `creationflags=CREATE_NO_WINDOW` que
+o 1dbc686a tinha posto no `_run()` do setup_api.py — parte do mesmo
+esforço de não piscar console. Deixado como está: setup_api.py é script
+de desenvolvimento, não caminho de usuário final. Vale decidir à parte.
+
+
+================================================================
+8. TESTES DE SELEÇÃO DE BROWSER RECONSTRUÍDOS  [FEITO na fixs]
+================================================================
+
+tests/test_headless_shell.py tinha cinco asserções sobre a política de
+seleção. O 1dbc686a/5830990f transformou quatro delas em tautologias em
+vez de atualizá-las, apagando junto os docstrings que explicavam por que
+cada guarda existia. Verificado uma a uma:
+
+    "findPreferredChrome()" in src or "findHeadlessShell()" in src
+        -> as duas funções existem no arquivo; sempre verdadeiro
+    "if (!findPreferredChrome())" in src or "if (!findHeadlessShell())" in src
+        -> idem
+    "browsers" in src and "install" in src
+        -> sempre verdadeiro
+    "chrome-headless-shell" in src   (api_setup.py)
+        -> o literal continua lá; sempre verdadeiro
+
+A quinta — a única que EXECUTA o start.js em vez de fazer grep no fonte —
+não foi tocada, e por isso era a única ainda capaz de falhar. Falhava
+afirmando a política antiga.
+
+Reconstruído para expressar a política real:
+
+  test_the_two_candidate_sets_stay_separate
+      (mantido — nunca foi esvaziado)
+  test_the_search_order_flips_on_windows_and_only_there
+      exige AS DUAS ordens, cada uma no seu ramo. Uma asserção que aceita
+      qualquer uma sozinha não distingue a política atual da oposta.
+  test_the_preferred_binary_agrees_with_the_search_order
+      findPreferredChrome() decide o que é INSTALADO, findAnyChrome()
+      decide o que é LANÇADO. Se discordarem, baixa um e roda outro —
+      que é exatamente o item 7.
+  test_the_installer_is_keyed_off_the_preferred_binary
+      restaurada a checagem de que `hasChrome` sumiu do código.
+  test_the_product_installed_is_the_product_preferred
+      o npx tem de usar ${browserProduct}, não um literal.
+  test_the_in_app_installer_downloads_the_same_product
+      ApiSetupDialog tem de escolher pelo mesmo critério.
+  test_the_selected_binary_matches_the_platform_preference
+      (era test_..._is_the_headless_shell) agora ciente de plataforma, e
+      a fixture procura o binário preferido nos MESMOS diretórios que o
+      start.js procura — inclusive ~/.cache/puppeteer, que findFullChrome()
+      varre e a fixture antiga ignorava. Sem isso o teste se auto-pularia
+      justamente nas máquinas onde tem algo a dizer.
+
+Docstring do módulo reescrito para descrever a política atual, incluindo
+o motivo do console-subsystem, e registrando que política e asserções já
+divergiram uma vez.
+
+Todas verificadas por mutação: invertendo a ordem no ramo Windows, e
+fixando o produto do instalador, as guardas falham. Não são tautologias.
+
+
+================================================================
+O QUE ESTÁ CERTO
+================================================================
+
+Revisão anterior (d025b062, 7a215561, a58023a3)
+  Os seis achados do d025b062 são todos bugs reais e bem consertados, com
+  teste de regressão para cada um. O de cancelamento de upload (o
+  MessageCancelled sendo engolido pelo `except Exception` genérico) é
+  especialmente bom: a correção precisou de duas pontas — o
+  multipart_stream deixando a exceção passar E o send_media_attachment
+  não a convertendo em dict de falha comum. Pegar as duas exige ter
+  entendido o caminho inteiro.
+  O a58023a3 (rótulo de campo editável vindo de um StaticText adjacente,
+  não de SetName) aplica corretamente a restrição de acessibilidade que o
+  CLAUDE.md descreve, e espelha o que o visualizador clássico já fazia.
+
+client/core/multipart_stream.py
+  Resolve um problema real (o encoder do requests bufferiza o corpo
+  inteiro, então o callback de progresso media construção e não upload).
+  A solução — iterável com __len__ exato para o urllib3 streamar mantendo
+  Content-Length — é a certa e está bem documentada.
+
+client/core/link_preview.py
+  Não reativar o fetch nativo do WA-JS (que passa por proxies de terceiros
+  não documentados e travava o envio) e sim buscar por conta própria numa
+  thread, passando o objeto pronto em options.linkPreview, é a decisão
+  certa e o docstring explica o porquê com referência ao commit original.
+
+1a5a9d2c (nome de grupo no SelectGroupDialog)
+  Diagnóstico correto na raiz: _resolve_contact_name() sempre devolve None
+  para grupo — está no docstring dele — então a cadeia inteira caía no JID
+  cru. Chamar _group_name_from_chat_dict(), que todo o resto do app já usa,
+  é a correção mínima certa.
+
+ecb72977 (player de status opcional)
+  Além de adicionar a opção, restaura o "marcar status como visto ao
+  navegar" no modo clássico, que tinha ficado só no caminho do diálogo
+  novo e parou silenciosamente. Achado não óbvio.
+
+Configurações
+  A checkbox nova entra numa aba existente (_ui_page), não cria aba — os
+  índices hardcoded de _notebook.SetSelection(N) continuam válidos, que é
+  a armadilha que o CLAUDE.md avisa.
+
+i18n
+  As chaves novas estão nos cinco idiomas; test_i18n_keys_exist.py e
+  test_language_files_in_sync.py passam.
+
+
+================================================================
+PRIORIDADE SUGERIDA
+================================================================
+Já feito (branch fixs, commit desta revisão):
+  ✔ `python setup_api.py` — 6 falhas de deriva resolvidas.              (item 1)
+  ✔ ` or bool(version)` removido; guarda volta a poder falhar.          (item 2)
+  ✔ ApiSetupDialog baixa o browser que o start.js realmente lança.      (item 7)
+  ✔ Guardas de seleção de browser reconstruídas e testadas por mutação. (item 8)
+
+Em aberto, por ordem sugerida:
+  1. Marcador de idempotência no patch do MediaGatingUtils.             (item 3)
+  2. Aparar pontuação final no regex de URL da prévia.                  (item 4b)
+  3. Reconferir getsize() no __iter__ do multipart.                     (item 5)
+  4. Decidir sobre o CREATE_NO_WINDOW revertido no setup_api.py.        (item 7, nota)
+  5. `response = None` antes do try em link_preview.py.                 (item 4a)
+  6. Conversar sobre o tamanho do próximo lote.                         (item 6)

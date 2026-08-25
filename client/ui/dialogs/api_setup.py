@@ -20,7 +20,8 @@ state api/ is actually in:
        package.json — the same patch set setup_api.py applies, so an end-user
        install and a developer one end up with identical API code
     3. npm install --no-audit --no-fund      (install all dependencies)
-    4. npm exec puppeteer browsers install chrome-headless-shell (best-effort)
+    4. npm exec puppeteer browsers install <chrome on Windows, chrome-headless-shell
+       elsewhere — must match start.js's findPreferredChrome()> (best-effort)
     5. npm run db:generate                   (only if the script is defined)
     6. npm run build                         (compile TypeScript → dist/server.js)
 
@@ -1089,16 +1090,26 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 4.5: download chrome-headless-shell ──────────────────
-            # Must match what start.js looks for and launches. This used to
-            # fetch full "chrome", and that is how a machine ends up with a
-            # GUI-capable Chrome under .cache/ and no shell at all — the exact
-            # state in which start.js's old any-Chrome-will-do search silently
-            # handed WPPConnect full Chrome forever (see tests/test_headless_shell.py).
-            # The shell is also the smaller download and the faster start.
+            # ── Step 4.5: download the browser start.js will launch ───────
+            # Must match start.js's findPreferredChrome(), which is
+            # platform-dependent: chrome-headless-shell is a console-subsystem
+            # executable on Windows and its renderer/GPU children each allocate
+            # a visible console window, so Windows prefers full Chrome and
+            # every other platform prefers the shell (smaller download, faster
+            # start, no windowing layer at all). See tests/test_headless_shell.py.
+            #
+            # Fetching the other one is not a crash, just waste that is easy to
+            # miss: start.js finds its preferred binary absent on first launch
+            # and downloads a second browser on top of this one, which is what
+            # happened while this step was hardcoded to the shell.
+            import sys
+
+            browser_product = (
+                "chrome" if sys.platform == "win32" else "chrome-headless-shell"
+            )
             self._set_stage(self._i18n.t("api_setup_downloading_chrome"), *stages["chrome"])
             ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", browser_product],
                 cwd=api_dir,
                 env=npm_env,
             )
