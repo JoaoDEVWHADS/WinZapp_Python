@@ -374,6 +374,7 @@
     "reply_to": "Re&ply to {name}",
     "reply_to_group": "Re&ply to {name} in {group}",
     "remove_quote": "Remove quoted message",
+    "remove_link_preview": "Remove link preview",
     "reaction_preview_them": "{name} reacted with {emoji} to:",
     "reaction_preview_you": "you reacted with {emoji} to:",
     "reactions_dialog_title": "Reactions list",

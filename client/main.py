@@ -15391,7 +15391,34 @@ class MainWindow(wx.Frame):
 
 
 
-    def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
+    @staticmethod
+    def _build_link_preview_options(link_preview: dict | None) -> dict:
+        """The "options" value every send-message/-reply/-mentioned payload
+        below carries for its link preview.
+
+        ``linkPreview: False`` (no argument) keeps WPPConnect from ever
+        generating one itself on send — that used to make sending hang until
+        timeout, since WA-JS's own on-send fetch goes through undocumented
+        third-party proxy servers (see send_text_message()'s own comment,
+        commit 6cec2d0e). When the composer already resolved a preview via
+        core/link_preview.py (independent of that mechanism, run ahead of
+        time on a background thread), passing it here as an object instead
+        of `True` makes WA-JS use it as-is with no fetch of its own — see
+        `prepareLinkPreview` in wa-js: an object skips the network call
+        entirely, only literal `true` triggers it.
+        """
+        if not link_preview:
+            return {"linkPreview": False}
+        return {
+            "linkPreview": {
+                "title": link_preview.get("title", ""),
+                "description": link_preview.get("description", ""),
+                "canonicalUrl": link_preview.get("canonicalUrl", ""),
+                "matchedText": link_preview.get("canonicalUrl", ""),
+            }
+        }
+
+    def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None, link_preview=None):
         """Send a plain-text message via the WPPConnect Server API."""
         # Canonical destination: @lid when known, else the @c.us phone form —
         # see _resolve_jid_for_send's docstring for why @lid has to win here.
@@ -15407,6 +15434,7 @@ class MainWindow(wx.Frame):
         quoted_id = None
         quote_stripped = False
         is_status_reply = False
+        link_preview_options = self._build_link_preview_options(link_preview)
 
         if mentioned_jids:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
@@ -15423,9 +15451,7 @@ class MainWindow(wx.Frame):
                 "mentioned": mentioned_clean,
                 "isGroup": phone_net.endswith("@g.us"),
                 "isLid": is_lid_target,
-                "options": {
-                    "linkPreview": False
-                }
+                "options": link_preview_options
             }
         else:
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
@@ -15450,9 +15476,7 @@ class MainWindow(wx.Frame):
                     "messageId": quoted_id,
                     "isGroup": phone_net.endswith("@g.us"),
                     "isLid": is_lid_target,
-                    "options": {
-                        "linkPreview": False
-                    }
+                    "options": link_preview_options
                 }
                 logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
             elif quoted_is_status:
@@ -15468,9 +15492,7 @@ class MainWindow(wx.Frame):
                     "message": text,
                     "isGroup": phone_net.endswith("@g.us"),
                     "isLid": is_lid_target,
-                    "options": {
-                        "linkPreview": False
-                    }
+                    "options": link_preview_options
                 }
         try:
             # 25s (not 15s): WPPConnect can take longer to ack under load (e.g.
@@ -15505,7 +15527,7 @@ class MainWindow(wx.Frame):
                             "mentioned": mentioned_clean,
                             "isGroup": fb_phone.endswith("@g.us"),
                             "isLid": False,
-                            "options": {"linkPreview": False}
+                            "options": link_preview_options
                         }
                     elif quoted_id:
                         retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
@@ -15513,7 +15535,7 @@ class MainWindow(wx.Frame):
                             "phone": [fb_phone], "message": text,
                             "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
                             "isLid": False,
-                            "options": {"linkPreview": False}
+                            "options": link_preview_options
                         }
                     else:
                         retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
@@ -15521,7 +15543,7 @@ class MainWindow(wx.Frame):
                             "phone": [fb_phone], "message": text,
                             "isGroup": fb_phone.endswith("@g.us"),
                             "isLid": False,
-                            "options": {"linkPreview": False}
+                            "options": link_preview_options
                         }
                     active_dest = fb_phone
                     response = api_post(retry_url, json=retry_payload, headers=headers, timeout=25)
@@ -15544,9 +15566,7 @@ class MainWindow(wx.Frame):
                         "message": text,
                         "isGroup": active_dest.endswith("@g.us"),
                         "isLid": active_dest.endswith("@lid"),
-                        "options": {
-                            "linkPreview": False
-                        }
+                        "options": link_preview_options
                     }
                     response = api_post(url, json=payload, headers=headers, timeout=25)
 

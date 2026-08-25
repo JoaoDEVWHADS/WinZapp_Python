@@ -55,6 +55,9 @@ class _Stub:
     def _on_text_changed_mention_check(self):
         self._on_text_changed_mention_check_calls += 1
 
+    def _schedule_link_preview_check(self):
+        pass
+
 
 class TestShiftEnterInsertsNewline:
     def test_shift_enter_inserts_newline_at_cursor(self, wx_app):

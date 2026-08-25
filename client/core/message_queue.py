@@ -31,7 +31,8 @@ class PendingMessage:
                  caption: str = None,
                  contact_info: dict = None,
                  quoted: dict = None,
-                 mentioned_jids: list = None):
+                 mentioned_jids: list = None,
+                 link_preview: dict = None):
         # local_id matches the "_local_id" field in the virtual message dict
         # that was already added to the UI.
         self.local_id      = local_id
@@ -45,6 +46,7 @@ class PendingMessage:
         self.contact_info  = contact_info   # dict for contact attachment
         self.quoted        = quoted         # quoted/replied-to message dict
         self.mentioned_jids = mentioned_jids or []  # JIDs @mentioned in text
+        self.link_preview  = link_preview   # resolved {"title","description","canonicalUrl"} or None
         self.fail_count    = 0             # consecutive send failures
         self.last_error    = ""            # last send error shown if retries exhaust
 
@@ -159,6 +161,7 @@ class MessageQueue:
                         real_id = self.main_window.send_text_message(
                             msg.jid, msg.text, quoted=msg.quoted,
                             mentioned_jids=msg.mentioned_jids or None,
+                            link_preview=msg.link_preview,
                         )
                     retryable_failure = False
                     disconnected      = False
