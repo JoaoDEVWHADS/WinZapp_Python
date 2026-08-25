@@ -160,8 +160,8 @@ class TestEveryOtherFieldThatReachesWhatsApp:
     """
 
     @pytest.mark.parametrize("module,method,expression", [
-        ("ui.conversations", "ConversationsPanel._on_send_attachment",
-         "normalize_line_separators(self._caption_field.GetValue())"),
+        ("ui.conversations", "ConversationsPanel._consume_attachment_caption",
+         "normalize_line_separators"),
         ("status_panel", "StatusPanel._on_send_status_reply",
          "normalize_line_separators(self._reply_field.GetValue())"),
         ("status_panel", "StatusPanel._on_send_text_status",
