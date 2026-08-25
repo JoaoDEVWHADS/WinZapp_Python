@@ -51,6 +51,21 @@ class _Stub:
     _local_record_count = MainWindow._local_record_count
 
 
+class TestBackfillGeneration:
+    def test_stale_worker_stops_before_touching_the_chat(self):
+        stub = type("Stub", (), {
+            "_sync_run_id": 8,
+            "sync_chat_messages": MainWindow.sync_chat_messages,
+        })()
+
+        result = stub.sync_chat_messages(
+            {"remoteJid": "5511999999999@s.whatsapp.net"},
+            expected_run_id=7,
+        )
+
+        assert result is False
+
+
 def _chat(records=(), unread=0, t=0):
     c = {"unreadCount": unread, "t": t}
     if records:
@@ -182,9 +197,17 @@ class TestShortOfAPage:
         s._note_backfill_state("a@lid", _chat(records=_records(640), t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
-    def test_a_short_chat_is_taken_at_face_value_once_the_queue_is_drained(self):
-        """Nothing left to decode means a re-query returns the identical list."""
+    def test_a_short_chat_gets_one_background_confirmation_after_queue_drains(self):
+        """Below the configured target is ambiguous until the phone answers."""
         s = _Stub(page_size=200, chunks_pending=False)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == {"a@lid"}
+
+    def test_a_gap_chat_gets_one_confirming_retry_after_queue_drains(self):
+        s = _Stub(page_size=200, chunks_pending=False)
+        s._history_gap_jids = {"a@lid"}
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == {"a@lid"}
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
@@ -384,6 +407,22 @@ class TestBackfillPacing:
         assert MainWindow._BACKFILL_MAX_DELAY >= MainWindow._BACKFILL_FIRST_DELAY
         assert MainWindow._BACKFILL_BUDGET >= 15 * 60, "must outlast a slow warm-up"
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
+
+    def test_short_page_confirmation_starts_without_initial_delay(self):
+        assert MainWindow._initial_backfill_delay(short_chats_pending=True) == 0
+
+    def test_background_only_work_keeps_the_initial_delay(self):
+        assert MainWindow._initial_backfill_delay(
+            short_chats_pending=False) == MainWindow._BACKFILL_FIRST_DELAY
+
+    def test_short_pages_block_names_and_deep_history(self):
+        assert MainWindow._background_backfill_work_allowed(True, False) is False
+
+    def test_partial_short_sweep_still_blocks_background_work(self):
+        assert MainWindow._background_backfill_work_allowed(False, True) is False
+
+    def test_background_work_starts_after_short_pages_finish(self):
+        assert MainWindow._background_backfill_work_allowed(False, False) is True
 
     @staticmethod
     def _next_delay(delay, recovered):

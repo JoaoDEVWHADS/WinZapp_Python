@@ -2333,10 +2333,36 @@ export async function requestOlderMessages(req: Request, res: Response) {
         // own UI only offers the "older messages" banner once the recent sync is
         // done, so this refusal keeps us to what the real client would do.
         try {
-          const status = await req_(
-            'WAWebUserPrefsHistorySync'
-          ).getHistorySyncStatus();
+          const prefs = req_('WAWebUserPrefsHistorySync');
+          const status = await prefs.getHistorySyncStatus();
           out.recentCompleted = status?.recentCompleted === true;
+          if (out.recentCompleted !== true) {
+            const table = req_(
+              'WAWebSchemaHistorySyncNotification'
+            ).getHistorySyncNotificationTable();
+            const rows = await table.equals(['processed'], 0, {
+              shouldDecrypt: false,
+            });
+            out.unprocessed = rows.length;
+
+            // Interrupted RECENT syncs can leave the persisted flag false even
+            // after every notification was applied. In that exact state the
+            // old guard made short chats permanent: no work remained that
+            // could ever flip the flag, while on-demand recovery was refused.
+            // Repair the getter used by WhatsApp's own ON_DEMAND processor, but
+            // only after the notification table proves there is no chunk that
+            // could be overtaken or deadlocked.
+            if (rows.length === 0) {
+              const original = prefs.getHistorySyncStatus.bind(prefs);
+              prefs.getHistorySyncStatus = async (...args: any[]) => {
+                const current = await original(...args);
+                return { ...(current || {}), recentCompleted: true };
+              };
+              const repaired = await prefs.getHistorySyncStatus();
+              out.recentCompleted = repaired?.recentCompleted === true;
+              out.recentCompletedRepaired = out.recentCompleted;
+            }
+          }
         } catch (e) {
           out.recentCompleted = null;
         }
@@ -2365,6 +2391,15 @@ export async function requestOlderMessages(req: Request, res: Response) {
           return out;
         }
         try {
+          const oldestMsg = await utils.getOldestMsgInChatFromDB(wid);
+          const oldestMsgKey = oldestMsg?.id ?? oldestMsg?.key ?? oldestMsg;
+          if (!oldestMsgKey) {
+            out.error = 'oldest message key unavailable for on-demand request';
+            return out;
+          }
+          out.oldestMsgKey = String(
+            oldestMsgKey?._serialized ?? oldestMsgKey
+          );
           // 3 === Message$PeerDataOperationRequestType.HISTORY_SYNC_ON_DEMAND.
           // Read from the protobuf enum when available so a renumbering in a
           // future build does not silently send the wrong request type.
@@ -2378,7 +2413,22 @@ export async function requestOlderMessages(req: Request, res: Response) {
             /* keep the literal */
           }
           out.requestType = kind;
-          await sender.sendPeerDataOperationRequest(kind, { chatId: wid });
+          let chatModel = req_('WAWebCollections')?.Chat?.get?.(wid);
+          if (!chatModel) {
+            try {
+              chatModel = await req_('WAWebCollections')?.Chat?.find?.(wid);
+            } catch (e) {
+              /* handled below */
+            }
+          }
+          if (!chatModel?.id) {
+            out.error = 'chat model unavailable for on-demand history request';
+            return out;
+          }
+          out.requestPayloadMode = 'chatId';
+          await sender.sendPeerDataOperationRequest(kind, {
+            chatId: chatModel.id,
+          });
           out.requested = true;
         } catch (e: any) {
           out.error = `send failed: ${e?.message || e}`;
@@ -2657,11 +2707,30 @@ export async function unblockHistorySync(req: Request, res: Response) {
           const source = req_(
             'WAWebHistorySyncNotificationUtils'
           ).HistorySyncScheduleSource;
+          const continueSync =
+            boot?.continueProgressiveHistorySyncProcessingV2;
+          if (typeof continueSync !== 'function') {
+            throw new Error(
+              'continueProgressiveHistorySyncProcessingV2 unavailable'
+            );
+          }
+          // A page reload creates a fresh bootstrap instance after the
+          // persisted initial sync has already completed. Its in-memory
+          // initialChatHistory flag then stays false, and every manual restart
+          // silently exits without touching the queued RECENT chunks.
+          const initialComplete = await req_(
+            'WAWebUserPrefsHistorySync'
+          ).getInitialHistorySyncComplete();
+          if (
+            initialComplete === true &&
+            typeof boot?.setInitialChatHistorySynced === 'function'
+          ) {
+            await boot.setInitialChatHistorySynced();
+            out.bootstrapRehydrated = true;
+          }
           // Fire-and-forget: the job runs for as long as it needs (chunks are
           // ~1.4MB each), and this response must not wait for it.
-          boot?.continueProgressiveHistorySyncProcessingV2?.(
-            source.ManualRestart
-          );
+          continueSync.call(boot, source.ManualRestart);
           out.restarted = true;
         } catch (e) {
           out.restartError = String(e);

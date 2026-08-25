@@ -117,6 +117,7 @@ class WebSocketClient:
         self.sio.on("chats-update", self.on_chats_update)
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
+        self.sio.on("media-upload-progress", self.on_media_upload_progress)
         self.sio.on("incomingcall", self.on_wpp_incoming_call)
         # These two handlers existed but were never registered — contact
         # name/photo updates and presence changes only ever reached the app
@@ -754,19 +755,26 @@ class WebSocketClient:
             # of the conversation as if they had just been sent — dispatch them
             # to the historical handler to be saved silently instead.
             #
-            # BUT: this assumption only holds for a chat that hasn't been synced
-            # yet (not present in self.chats). Once a chat is already in the
-            # list, WPPConnect can still tag a genuinely new, real-time message
-            # with isMdHistoryMsg=True (observed in practice) — silently routing
-            # it to on_historical_message would save it without a notification,
-            # sound, or unread-count bump, effectively "losing" it from the
-            # user's point of view. So: only take the silent path for chats not
-            # yet in the list; an already-listed chat always gets full live
-            # treatment regardless of the flag.
+            # WPPConnect can also tag a genuinely new message with this flag.
+            # Use the stable socket connection time to distinguish it from a
+            # replayed chunk: old timestamps stay silent even after list-chats
+            # has already populated self.chats, while current messages retain
+            # notifications, sound and unread handling.
             if msg.get("isMdHistoryMsg"):
                 key = msg.get("key", {})
                 remote_jid = self.main_window._normalize_jid(key.get("remoteJid", ""))
-                if remote_jid not in self.main_window.chats:
+                raw_timestamp = msg.get("messageTimestamp") or msg.get("timestamp") or 0
+                try:
+                    message_timestamp = float(raw_timestamp)
+                    if message_timestamp > 1_000_000_000_000:
+                        message_timestamp /= 1000
+                except (TypeError, ValueError):
+                    message_timestamp = 0
+                predates_connection = (
+                    message_timestamp > 0
+                    and message_timestamp < getattr(self, "_connect_time", 0) - 5
+                )
+                if predates_connection or remote_jid not in self.main_window.chats:
                     wx.CallAfter(self.main_window.on_historical_message, msg)
                     return
                 # Chat already known/synced — fall through to live handling below.
@@ -1274,7 +1282,7 @@ class WebSocketClient:
             if session and session != self.instance_name:
                 return
                 
-            if status in ("disconnectedMobile", "notLogged"):
+            if status in ("disconnectedMobile", "notLogged", "UNPAIRED", "UNPAIRED_IDLE"):
                 # Handle permanent WhatsApp logout / disconnection.
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):
@@ -1396,6 +1404,17 @@ class WebSocketClient:
             # diagnosable from the logs instead of a message just vanishing
             # with no trace of why.
             logging.exception("[WebSocketClient] on_wpp_message_received error")
+
+    def on_media_upload_progress(self, data):
+        if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            return
+        try:
+            upload_id = str(data.get("uploadId") or "")
+            progress = float(data.get("progress"))
+            if upload_id and 0 <= progress <= 1:
+                wx.CallAfter(self.main_window.on_media_upload_progress, upload_id, progress)
+        except (TypeError, ValueError):
+            return
 
     def on_wpp_reaction(self, data):
         try:
@@ -1666,14 +1685,31 @@ class WebSocketClient:
                 "extendedTextMessage": _with_link_preview({"text": conversation})
             }
         elif msg_type in ("audio", "ptt"):
+            media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
             seconds_val = _media_seconds(wpp_msg)
-            message_content = {
-                "audioMessage": {
-                    "url": wpp_msg.get("clientUrl", ""),
-                    "seconds": seconds_val,
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
-                }
+
+            # Keep the original audio metadata.  Save As resolves the filename
+            # extension from these values; dropping them here made every
+            # received non-PTT audio with no local filename fall through to
+            # the old hard-coded .mp3 fallback even when WPPConnect reported
+            # audio/ogg, audio/mp4 (M4A), audio/aac, audio/wav, etc.
+            audio_mimetype = wpp_msg.get("mimetype") or media_data.get("mimetype") or ""
+            audio_file_name = (
+                wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title")
+                or media_data.get("filename") or media_data.get("fileName") or media_data.get("title")
+                or ""
+            )
+            audio_message = {
+                "url": wpp_msg.get("clientUrl", ""),
+                "seconds": seconds_val,
+                "mediaKey": _safe_media_key(wpp_msg.get("mediaKey")),
             }
+            if audio_mimetype:
+                audio_message["mimetype"] = audio_mimetype
+            if audio_file_name:
+                audio_message["fileName"] = audio_file_name
+
+            message_content = {"audioMessage": audio_message}
             # Preserve the PTT/voice-note flag: WPPConnect reports voice notes
             # with type="ptt", but that raw type is later mapped to
             # "audioMessage" (see type_mapping below) and the flag would be

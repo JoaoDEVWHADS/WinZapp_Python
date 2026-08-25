@@ -35,6 +35,7 @@ class _FakeI18n:
         "clear_confirm_msg_bulk": "Clear {count} selected chats?",
         "delete_confirm_msg_bulk": "Delete {count} selected chats?",
         "delete_msg_confirm_bulk": "Delete {count} selected messages?",
+        "datetime_fmt": "%d/%m/%Y %H:%M",
     }
 
     def t(self, key):
@@ -403,6 +404,17 @@ class TestCtrlSpaceInTheConversationsList:
         panel._on_conv_list_key_down(_shift_down())
         assert panel.selected_chats == {"b@s.whatsapp.net"}
         assert panel.conversations_list._focused == 1
+
+    def test_shift_up_extends_selection_and_moves_focus(self):
+        chats = [_chat("a@s.whatsapp.net"), _chat("b@s.whatsapp.net"), _chat("c@s.whatsapp.net")]
+        panel = _Panel(chats=chats, focused=2)
+
+        panel._on_conv_list_key_down(_shift_up())
+
+        assert panel.selected_chats == {"b@s.whatsapp.net"}
+        assert panel.conversations_list._focused == 1
+        assert panel.selection_sound.plays == 1
+        assert panel.main_window.announced == ["selected"]
 
     def test_shift_end_selects_everything_below_and_jumps_to_the_last_row(self):
         chats = [_chat(f"{i}@s.whatsapp.net") for i in range(4)]

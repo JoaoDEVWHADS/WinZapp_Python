@@ -49,7 +49,9 @@ from ui.accessible import (
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
 from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
+from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
+from ui.media_viewer import MediaViewerDialog
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime, timedelta
@@ -68,6 +70,44 @@ _URL_RE = re.compile(r'https?://\S+|www\.\S+')
 _SAVEABLE_MESSAGE_TYPES = frozenset({
     "documentMessage", "imageMessage", "videoMessage", "audioMessage",
 })
+
+
+class _FocusedTransferGaugeAccessible(wx.Accessible):
+    """Expose value changes to screen readers only while the gauge has focus."""
+
+    def __init__(self, gauge):
+        super().__init__()
+        self._gauge = gauge
+
+    def GetState(self, childId):
+        state = wx.ACC_STATE_SYSTEM_FOCUSABLE
+        if self._gauge.HasFocus():
+            state |= wx.ACC_STATE_SYSTEM_FOCUSED
+        else:
+            # NVDA's native ProgressBar handler deliberately ignores value
+            # changes carrying INVISIBLE/OFFSCREEN. The gauge remains visible
+            # on screen; only unsolicited accessibility updates are suppressed.
+            state |= wx.ACC_STATE_SYSTEM_INVISIBLE
+        return (wx.ACC_OK, state)
+
+
+class _FocusedTransferGauge(wx.Gauge):
+    """Native gauge reachable by Tab, with focus-scoped NVDA progress output."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.SetAccessible(_FocusedTransferGaugeAccessible(self))
+        self.Bind(wx.EVT_LEFT_DOWN, self._focus_from_mouse)
+
+    def AcceptsFocus(self):
+        return True
+
+    def AcceptsFocusFromKeyboard(self):
+        return True
+
+    def _focus_from_mouse(self, event):
+        self.SetFocus()
+        event.Skip()
 
 
 def message_caption(msg) -> str:
@@ -352,10 +392,16 @@ class ConversationsPanel(wx.Panel):
         self._reaction_map: dict = {}
         # Keep track of chats where we reached the start of history on the server
         self._reached_server_start: dict = {}
+        # When a server page overlaps local history completely, keep walking
+        # from that page's oldest message instead of repeating the same anchor.
+        self._server_history_anchor: dict = {}
 
         # ── Reply / quoted message state ────────────────────────────────────
         # When not None, the next sent message will be a quoted reply
         self._quoted_message: dict | None = None
+        self._outgoing_virtual_messages: dict = {}
+        self._media_upload_progress: dict = {}
+        self._media_transfer_started: set = set()
 
         # ── Search in conversation state ─────────────────────────────────────
         # Indices in _sorted_messages that match the current search query
@@ -608,29 +654,53 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._media_bitmap, 0, wx.ALIGN_LEFT | wx.LEFT | wx.BOTTOM, 5)
         self._media_bitmap.Hide()
 
+        # Stable row shared by transfer progress and the selected media's
+        # actions. This gives the native Windows gauge an already-laid-out
+        # parent and puts it exactly where Open / Save As normally appear.
+        self._media_action_slot = wx.Panel(self.conversation_panel)
+        self._media_action_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._media_action_slot.SetSizer(self._media_action_sizer)
+        conv_sizer.Add(
+            self._media_action_slot, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
+        )
+
+        self._media_transfer_gauge = _FocusedTransferGauge(
+            self._media_action_slot,
+            range=100,
+            style=wx.GA_HORIZONTAL | wx.GA_SMOOTH,
+        )
+        self._media_transfer_gauge.SetMinSize((-1, 24))
+        self._media_action_sizer.Add(self._media_transfer_gauge, 0, wx.EXPAND)
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge:
+            gauge.Hide()
+
         # ── Action buttons (document / image / video) ───────────────────────
         self._action_open_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("open")
+            self._media_action_slot, label=i18n.t("open")
         )
         self._action_open_btn.Bind(wx.EVT_BUTTON, self._on_action_open)
-        conv_sizer.Add(self._action_open_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_open_btn, 0, wx.TOP, 2)
         self._action_open_btn.Hide()
 
         self._action_save_as_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("save_as")
+            self._media_action_slot, label=i18n.t("save_as")
         )
         self._action_save_as_btn.SetAccessible(AccessibleSaveAs())
         self._action_save_as_btn.Bind(wx.EVT_BUTTON, self._on_action_save_as)
-        conv_sizer.Add(self._action_save_as_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_save_as_btn, 0, wx.TOP, 2)
         self._action_save_as_btn.Hide()
 
         # ── Download button (shown when media is not yet cached locally) ───
         self._action_download_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("download")
+            self._media_action_slot, label=i18n.t("download")
         )
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
-        conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._media_action_sizer.Add(self._action_download_btn, 0, wx.TOP, 2)
         self._action_download_btn.Hide()
+        self._hide_media_transfer_gauge()
+        self._media_action_slot.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
@@ -1325,6 +1395,7 @@ class ConversationsPanel(wx.Panel):
                 pass
         self._hide_audio_controls()
         self._hide_all_media_controls()
+        self._hide_media_transfer_gauge()
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
@@ -1374,6 +1445,15 @@ class ConversationsPanel(wx.Panel):
                 }
         except Exception as e:
             logging.error(f"[navigate_to_conversation] Failed to load messages from DB: {e}")
+
+        pending_rows = [
+            row for row in self._outgoing_virtual_messages.values()
+            if row.get("key", {}).get("remoteJid") == conversation.get("remoteJid", "")
+            and row.get("_local_pending")
+        ]
+        records = conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", [])
+        known_local_ids = {row.get("_local_id") for row in records}
+        records.extend(row for row in pending_rows if row.get("_local_id") not in known_local_ids)
 
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
@@ -1437,6 +1517,7 @@ class ConversationsPanel(wx.Panel):
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
+        self._sync_pending_document_gauge()
 
         # Re-show audio controls only if the playing audio message is focused.
         if (self._current_audio_id is not None
@@ -1999,6 +2080,8 @@ class ConversationsPanel(wx.Panel):
                 .setdefault("records", [])
         )
         local_id = virtual_msg.get("_local_id", "")
+        if local_id:
+            self._outgoing_virtual_messages[local_id] = virtual_msg
         if local_id and any(r.get("_local_id") == local_id for r in records):
             return  # already registered
         records.append(virtual_msg)
@@ -2026,6 +2109,14 @@ class ConversationsPanel(wx.Panel):
         message's reply contextInfo is dropped so the row stops reading as a
         reply — the quote never actually reached the recipient.
         """
+        self._hide_media_transfer_gauge()
+        tracked = self._outgoing_virtual_messages.get(local_id)
+        if tracked is not None:
+            tracked["_local_pending"] = False
+            if real_id and isinstance(real_id, str):
+                tracked.setdefault("key", {})["id"] = real_id
+        self._media_upload_progress.pop(local_id, None)
+        self._media_transfer_started.discard(local_id)
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)
@@ -2110,6 +2201,7 @@ class ConversationsPanel(wx.Panel):
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
+        self._hide_media_transfer_gauge()
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
@@ -2128,6 +2220,7 @@ class ConversationsPanel(wx.Panel):
         as "sending" forever before, which reads as success once the spinner
         stops meaning anything.
         """
+        self._hide_media_transfer_gauge()
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"]     = False
@@ -2852,6 +2945,7 @@ class ConversationsPanel(wx.Panel):
         self._cancel_active_recording()
         self._hide_audio_controls()
         self._hide_all_media_controls()
+        self._hide_media_transfer_gauge()
         self._hide_attachment_panel()
         # Clear any active edit state
         if self._editing_message_id is not None:
@@ -3194,6 +3288,8 @@ class ConversationsPanel(wx.Panel):
         # ── Mention detection ─────────────────────────────────────────────
         self._update_mentions_panel(self._extract_mentions(msg))
 
+        self._sync_media_action_slot_visibility()
+
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
         idx = self.messages_list.GetFocusedItem()
@@ -3244,14 +3340,14 @@ class ConversationsPanel(wx.Panel):
                 audio_ext=".ogg",
             )
 
-        elif msg_type == "videoMessage":
-            video = msg_obj.get("videoMessage") or {}
-            if video.get("gifPlayback"):
-                return  # GIFs have no audio track to play
-            self._play_toggle_video_message(msg)
+        elif msg_type in ("imageMessage", "videoMessage"):
+            # Media opens in the same accessible, maximized viewer used by
+            # statuses. This avoids wx.StaticBitmap clipping and gives video
+            # proper seek/volume/speed controls.
+            self._open_conversation_media_viewer(index)
 
-        elif msg_type in ("imageMessage", "documentMessage", "locationMessage", "liveLocationMessage"):
-            # Enter on an image, document, or location → open in default app
+        elif msg_type in ("documentMessage", "locationMessage", "liveLocationMessage"):
+            # Documents and locations keep their existing system-open behaviour.
             self._on_action_open(None, index=index)
 
         elif msg_type == "contactMessage":
@@ -3578,6 +3674,11 @@ class ConversationsPanel(wx.Panel):
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
         self._action_download_btn.Hide()
+        self._hide_media_transfer_gauge()
+        # The transfer gauge is not a selection-specific media control.  Hiding
+        # it here made an in-flight upload/download disappear whenever focus or
+        # message selection changed.  Transfer completion / conversation exit
+        # owns its lifetime instead.
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
         self._contact_save_btn.Hide()
@@ -4621,6 +4722,19 @@ class ConversationsPanel(wx.Panel):
         result.reverse()
         return result
 
+    def _history_storage_jid(self, remote_jid: str) -> str:
+        """Return the JID under which this conversation is stored locally."""
+        phone_to_lid = getattr(self.main_window, "_phone_to_lid", {})
+        mapped_lid = phone_to_lid.get(remote_jid, "")
+        if mapped_lid:
+            logging.info(
+                "[_load_older_messages] Using mapped local-history JID %s for %s",
+                mapped_lid,
+                remote_jid,
+            )
+            return mapped_lid
+        return remote_jid
+
     def _load_older_messages(self):
         """Load older messages from the local database, or fall back to the server if none remain locally."""
         if not self.conversation or not self._all_sorted_messages:
@@ -4635,10 +4749,11 @@ class ConversationsPanel(wx.Panel):
             )
             # Count separator objects to get the actual database message count currently in memory.
             loaded_db_count = sum(1 for m in self._all_sorted_messages if not self._is_separator(m))
-            logging.info(f"[_load_older_messages] Querying local DB for {remote_jid} with count={loaded_db_count}")
+            storage_jid = self._history_storage_jid(remote_jid)
+            logging.info(f"[_load_older_messages] Querying local DB for {storage_jid} with count={loaded_db_count}")
             
             # Fetch from local DB
-            local_msgs = self.main_window.db.get_messages(remote_jid, limit=limit, offset=loaded_db_count)
+            local_msgs = self.main_window.db.get_messages(storage_jid, limit=limit, offset=loaded_db_count)
             logging.info(f"[_load_older_messages] Local DB returned {len(local_msgs) if local_msgs else 0} messages")
             
             if local_msgs:
@@ -4700,17 +4815,20 @@ class ConversationsPanel(wx.Panel):
             self._is_loading_more = False
             return
         
-        # Get oldest non-separator and non-pending message ID
-        oldest_msg = None
-        for m in self._all_sorted_messages:
-            if m.get("_type") == "unread_separator":
-                continue
-            m_id = m.get("key", {}).get("id", "")
-            # Skip local pending/virtual messages (UUIDs contain hyphens or start with 'pending-')
-            if m.get("_local_pending") or m_id.startswith("pending-") or "-" in m_id:
-                continue
-            oldest_msg = m
-            break
+        # A duplicate-only page still advances the server cursor. Prefer that
+        # cursor on the next attempt so we do not request the same 200 rows.
+        oldest_msg = self._server_history_anchor.get(phone_jid)
+        if oldest_msg is None:
+            # Get oldest non-separator and non-pending message ID
+            for m in self._all_sorted_messages:
+                if m.get("_type") == "unread_separator":
+                    continue
+                m_id = m.get("key", {}).get("id", "")
+                # Skip local pending/virtual messages (UUIDs contain hyphens or start with 'pending-')
+                if m.get("_local_pending") or m_id.startswith("pending-") or "-" in m_id:
+                    continue
+                oldest_msg = m
+                break
 
         if oldest_msg is None:
             # Fallback to the first message if all are pending/separators
@@ -4730,9 +4848,22 @@ class ConversationsPanel(wx.Panel):
                 logging.info(f"[_load_older_messages_from_server thread] Launching fetch_older_messages for {phone_jid_val}")
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
                 logging.info(f"[_load_older_messages_from_server thread] fetch_older_messages returned {len(fetched) if fetched is not None else 'None'}")
+                if fetched is None:
+                    fetched = self.main_window.wait_for_older_messages(
+                        phone_jid_val,
+                        oldest_msg,
+                        should_continue=lambda: bool(
+                            self.conversation
+                            and self.conversation.get("remoteJid") == phone_jid_val
+                        ),
+                    )
+                    logging.info(
+                        "[_load_older_messages_from_server thread] "
+                        "wait_for_older_messages returned %s",
+                        len(fetched) if fetched is not None else "None")
                 if fetched is not None:
                     if fetched:
-                        wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
+                        wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val, oldest_msg)
                     else:
                         wx.CallAfter(self._set_reached_start, phone_jid_val)
                 else:
@@ -4756,7 +4887,7 @@ class ConversationsPanel(wx.Panel):
             return
         self._is_loading_more = False
 
-    def _on_older_messages_loaded(self, fetched_messages, requested_jid):
+    def _on_older_messages_loaded(self, fetched_messages, requested_jid, requested_anchor=None):
         """Prepend fetched history to UI message list."""
         if not self.conversation or self.conversation.get("remoteJid") != requested_jid:
             logging.info(f"[_on_older_messages_loaded] Ignoring fetched messages for {requested_jid} (current active: {self.conversation.get('remoteJid') if self.conversation else 'None'})")
@@ -4792,12 +4923,28 @@ class ConversationsPanel(wx.Panel):
             logging.info(f"[_on_older_messages_loaded] n_new={n_new}, displayable_count={len(displayable)}, total={len(self._sorted_messages)}")
             
             if n_new == 0:
-                # All fetched messages are duplicates — we've reached the beginning
+                # Overlap is not proof of the beginning. LID/phone aliases can
+                # make a valid older page look entirely duplicated locally.
+                # Advance to the oldest row returned and keep the chat retryable.
                 phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
-                logging.info(f"[_on_older_messages_loaded] No new messages after dedup — marking reached_server_start for {phone_jid_val}")
-                if phone_jid_val:
-                    self._reached_server_start[phone_jid_val] = True
+                next_anchor = displayable[0]
+                previous_id = (requested_anchor or {}).get("key", {}).get("id", "")
+                next_id = next_anchor.get("key", {}).get("id", "")
+                if phone_jid_val and next_id and next_id != previous_id:
+                    self._server_history_anchor[phone_jid_val] = next_anchor
+                    logging.info(
+                        "[_on_older_messages_loaded] Duplicate page advanced anchor %s -> %s; keeping history retryable",
+                        previous_id,
+                        next_id,
+                    )
+                else:
+                    logging.warning(
+                        "[_on_older_messages_loaded] Duplicate page did not advance anchor for %s; not treating overlap as server start",
+                        phone_jid_val,
+                    )
                 return
+
+            self._server_history_anchor.pop(requested_jid, None)
             
             self._recompute_unread_sep_idx()
 
@@ -5141,8 +5288,8 @@ class ConversationsPanel(wx.Panel):
     def _on_conv_list_key_down(self, event):
         """Ctrl+Space toggles the focused chat's membership in
         self.selected_chats (the mass actions act on that set) — kept off
-        plain Space for consistency with the messages list. Shift+Down
-        extends the selection to the next row; Shift+Home/Shift+End select
+        plain Space for consistency with the messages list. Shift+Up/Down
+        extend the selection to the previous/next row; Shift+Home/Shift+End select
         every row above/below the focused one and move focus to the
         first/last row; Ctrl+Shift+Space selects every chat, or clears the
         selection if everything is already selected. Opening a conversation
@@ -5164,6 +5311,19 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.add_chats_to_ui()
                     self.selection_sound.play()
                     self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
+            target = (idx - 1) if idx >= 0 else 0
+            if target >= 0:
+                self.conversations_list.Focus(target)
+                self.conversations_list.Select(target, True)
+                self.conversations_list.EnsureVisible(target)
+                if self._select_chat_at(target):
+                    self.main_window.add_chats_to_ui()
+                    self.selection_sound.play()
+                    self.main_window.output(
+                        self.main_window.i18n.t("selected"), interrupt=True)
             return
 
         if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
@@ -5360,6 +5520,83 @@ class ConversationsPanel(wx.Panel):
                     if hasattr(os, "startfile"):
                         os.startfile(filepath)
 
+    def _open_conversation_media_viewer(self, index: int):
+        """Open an image/video message in the shared maximized MediaViewer.
+
+        The dialog appears immediately; download/decryption happens through
+        its background loader so the user gets a stable loading state instead
+        of waiting for a second window to appear after the network request.
+        """
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        msg_type = msg.get("messageType", "")
+        if msg_type not in ("imageMessage", "videoMessage"):
+            return
+
+        msg_obj = msg.get("message") or {}
+        inner = msg_obj.get(msg_type) or {}
+        if not isinstance(inner, dict):
+            inner = {}
+        caption = str(inner.get("caption") or "")
+        kind = "image" if msg_type == "imageMessage" else "video"
+        label = self.main_window.i18n.t("photo" if kind == "image" else "video")
+
+        msg_id = msg.get("key", {}).get("id", "")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
+        filename = self._resolve_media_filename(msg)
+        suffix = os.path.splitext(filename)[1]
+        if not suffix:
+            suffix = ".jpg" if kind == "image" else ".mp4"
+
+        def _loader():
+            if not os.path.isfile(media_path):
+                wx.CallAfter(self.main_window.output, self.main_window.i18n.t("downloading"))
+                self.main_window.handle_media_message(msg)
+            if not os.path.isfile(media_path):
+                raise FileNotFoundError(media_path)
+            with open(media_path, "rb") as fh:
+                return decrypt_bytes(fh.read(), self.main_window.key)
+
+        # Do not allow voice playback or the legacy embedded video surface to
+        # keep running underneath the modal viewer.
+        try:
+            self._stop_audio()
+        except Exception:
+            pass
+        try:
+            self._video_player.stop()
+        except Exception:
+            pass
+
+        dlg = MediaViewerDialog(
+            self,
+            self.main_window,
+            [{
+                "kind": kind,
+                "loader": _loader,
+                "extension": suffix,
+                "filename": filename,
+                "caption": caption,
+                "label": label,
+            }],
+        )
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+            if 0 <= index < self.messages_list.GetItemCount():
+                try:
+                    self.messages_list.Focus(index)
+                    self.messages_list.Select(index)
+                    self.messages_list.SetFocus()
+                except Exception:
+                    pass
+
     def _on_action_open(self, event, index=None):
         if index is None:
             index = self.messages_list.GetFirstSelected()
@@ -5376,6 +5613,10 @@ class ConversationsPanel(wx.Panel):
             url = self._location_maps_url(msg)
             if url:
                 self._open_file_safely(url)
+            return
+
+        if msg_type in ("imageMessage", "videoMessage"):
+            self._open_conversation_media_viewer(index)
             return
 
         if msg_type == "documentMessage":
@@ -5623,8 +5864,26 @@ class ConversationsPanel(wx.Panel):
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
         mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
-        clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
-        guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
+        clean_mime = mimetype.split(";")[0].strip().lower() if mimetype else ""
+        # A few audio MIME aliases are either absent from Python's mimetypes
+        # table or map to a non-user-facing extension.  Resolve these before
+        # falling back to the platform table so Save As keeps the real format.
+        canonical_ext = {
+            "audio/m4a": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/mp4": ".m4a",
+            "audio/ogg": ".ogg",
+            "audio/x-ogg": ".ogg",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/aac": ".aac",
+            "audio/flac": ".flac",
+            "audio/x-flac": ".flac",
+            "audio/opus": ".opus",
+            "audio/webm": ".webm",
+            "audio/mpeg": ".mp3",
+        }.get(clean_mime, "")
+        guessed_ext = canonical_ext or (mimetypes.guess_extension(clean_mime) if clean_mime else "")
         if not guessed_ext and "/" in clean_mime:
             guessed_ext = f".{clean_mime.split('/')[-1]}"
 
@@ -5641,11 +5900,22 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
 
         if msg_type == "audioMessage" and is_ptt:
-            # Recorded voice messages: default to .ogg
-            default_file = f"{i18n.t('default_filename_voice_message')}_{time_str or msg_id}.ogg"
+            # WhatsApp voice notes are normally OGG/Opus, but use the MIME
+            # reported by WPPConnect when present instead of hard-coding an
+            # extension that may not match the original bytes.
+            ext = guessed_ext or ".ogg"
+            default_file = f"{i18n.t('default_filename_voice_message')}_{time_str or msg_id}{ext}"
         elif file_name:
-            # Preserve original filename and extension
-            if "." in file_name and not file_name.endswith("."):
+            # WPPConnect's filenameFromMimeType() treats MIME as authoritative:
+            # if a supplied filename has a different extension, replace only
+            # the extension instead of mislabelling the original bytes.
+            current_root, current_ext = os.path.splitext(file_name)
+            if msg_type == "audioMessage" and guessed_ext:
+                if current_ext.lower() != guessed_ext.lower():
+                    default_file = f"{current_root or file_name}{guessed_ext}"
+                else:
+                    default_file = file_name
+            elif current_ext:
                 default_file = file_name
             elif guessed_ext:
                 default_file = f"{file_name}{guessed_ext}"
@@ -5661,7 +5931,11 @@ class ConversationsPanel(wx.Panel):
             ext = guessed_ext or ".mp4"
             default_file = f"{i18n.t('default_filename_video')}_{time_str or msg_id}{ext}"
         elif msg_type == "audioMessage":
-            ext = guessed_ext or ".mp3"
+            # Do not invent .mp3.  Regular audio attachments keep their real
+            # extension via fileName/mimetype above.  If WPPConnect supplies
+            # neither, leave the extension empty instead of mislabelling the
+            # original bytes as MP3.
+            ext = guessed_ext or ""
             default_file = f"{i18n.t('default_filename_audio')}_{time_str or msg_id}{ext}"
         else:
             ext = guessed_ext or ".bin"
@@ -5713,16 +5987,33 @@ class ConversationsPanel(wx.Panel):
         # Build specific wildcard filter based on target file extension
         ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
         i18n = self.main_window.i18n
+        all_files = i18n.t("all_files")
         if ext_clean:
-            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
+            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{all_files} (*.*)|*.*"
         elif msg_type == "audioMessage":
-            wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
+            # Unknown audio extension: put *.* first so the native save dialog
+            # does not silently append the first audio pattern (typically
+            # .mp3) to a file whose actual format we could not identify.
+            wildcard = (
+                f"{all_files} (*.*)|*.*|"
+                f"{i18n.t('file_filter_audio')} (*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus)|"
+                "*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus"
+            )
         elif msg_type == "imageMessage":
-            wildcard = "Imagens (*.jpg;*.png;*.webp;*.gif)|*.jpg;*.png;*.webp;*.gif|*.*|*.*"
+            wildcard = (
+                f"{i18n.t('file_filter_images')} (*.jpg;*.png;*.webp;*.gif)|"
+                f"*.jpg;*.png;*.webp;*.gif|{all_files} (*.*)|*.*"
+            )
         elif msg_type == "videoMessage":
-            wildcard = "Vídeos (*.mp4;*.mkv;*.avi;*.mov)|*.mp4;*.mkv;*.avi;*.mov|*.*|*.*"
+            wildcard = (
+                f"{i18n.t('file_filter_videos')} (*.mp4;*.mkv;*.avi;*.mov)|"
+                f"*.mp4;*.mkv;*.avi;*.mov|{all_files} (*.*)|*.*"
+            )
         else:
-            wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
+            wildcard = (
+                f"{i18n.t('file_filter_documents')} (*.pdf;*.doc;*.docx;*.txt;*.zip)|"
+                f"*.pdf;*.doc;*.docx;*.txt;*.zip|{all_files} (*.*)|*.*"
+            )
 
         logging.info(f"[Save As] msg_id={msg_id}, msg_type={msg_type}, is_ptt={is_ptt}, mimetype='{mimetype}', default_file='{default_file}', wildcard='{wildcard}'")
 
@@ -5826,26 +6117,41 @@ class ConversationsPanel(wx.Panel):
             return
 
         mw.output(i18n.t("downloading"))
-        self._action_download_btn.Disable()
+        self._action_download_btn.Hide()
+        self._hide_media_transfer_gauge()
+        self._show_media_transfer_gauge()
+        self.conversation_panel.Layout()
+
+        last_percent = -1
+
+        def _update_download_progress(progress):
+            nonlocal last_percent
+            percent = int(progress * 100)
+            if percent == last_percent:
+                return
+            last_percent = percent
+            wx.CallAfter(self.update_message_download_progress, msg_id, progress)
 
         def _run():
             try:
                 if msg_type == "audioMessage":
                     mw.handle_audio_message(msg)
                 else:
-                    mw.handle_media_message(msg)
+                    mw.handle_media_message(msg, progress_callback=_update_download_progress)
             except Exception:
                 pass
 
             def _done():
-                self._action_download_btn.Enable()
+                self._hide_media_transfer_gauge()
                 if os.path.isfile(media_path) and os.path.getsize(media_path) > 0:
                     # File ready — swap Download for Open + Save As
-                    self._action_download_btn.Hide()
                     self._action_open_btn.SetLabel(i18n.t("open"))
                     self._action_open_btn.Show()
                     self._action_save_as_btn.Show()
-                    self.conversation_panel.Layout()
+                else:
+                    self._action_download_btn.Show()
+                self._sync_media_action_slot_visibility()
+                self.conversation_panel.Layout()
 
             wx.CallAfter(_done)
 
@@ -7821,6 +8127,15 @@ class ConversationsPanel(wx.Panel):
             if index is not None and total is not None and total > 0:
                 pieces.append(f", {index + 1} {i18n.t('of')} {total}")
 
+        local_id = str(msg.get("_local_id") or "")
+        if local_id and (msg.get("_local_pending") or msg.get("_awaiting_sent_ack")):
+            pct = max(0, min(100, round(
+                self._media_upload_progress.get(local_id, 0.0) * 100
+            )))
+            pieces.append(
+                f", {i18n.t('uploading_progress').format(pct=pct)}"
+            )
+
         line = " ".join(pieces)
         is_selected = bool(msg_id) and msg_id in getattr(self, "selected_messages", ())
         position = self.main_window.settings.get("user_interface", {}).get(
@@ -7836,10 +8151,96 @@ class ConversationsPanel(wx.Panel):
         download progress changes.  Refreshes the relevant row in the list.
         """
         self._download_progress[msg_id] = progress
+        self._update_media_transfer_gauge(progress)
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 break
+
+    def update_media_upload_progress(self, upload_id: str, progress: float):
+        try:
+            progress = max(0.0, min(1.0, float(progress)))
+        except (TypeError, ValueError):
+            return
+        previous = self._media_upload_progress.get(upload_id, 0.0)
+        progress = max(previous, progress)
+        self._media_upload_progress[upload_id] = progress
+        self._media_transfer_started.add(upload_id)
+        for index, msg in enumerate(self._sorted_messages):
+            if msg.get("_local_id") != upload_id:
+                continue
+            self._update_media_transfer_gauge(progress)
+            self.messages_list.SetItemText(index, self._render_message_line(msg))
+            self.messages_list.RefreshItem(index)
+            return
+        self._hide_media_transfer_gauge()
+
+    def _sync_pending_document_gauge(self, preferred_local_id: str = ""):
+        """Restore progress only for the selected active transfer."""
+        waiting = [
+            msg for msg in self._sorted_messages
+            if msg.get("_local_id") in self._media_transfer_started
+            and msg.get("_local_pending")
+        ]
+        if not waiting:
+            self._hide_media_transfer_gauge()
+            return
+        selected = self.messages_list.GetFirstSelected()
+        selected_id = ""
+        if 0 <= selected < len(self._sorted_messages):
+            selected_id = self._sorted_messages[selected].get("_local_id", "")
+        target_id = preferred_local_id or selected_id
+        target = next(
+            (msg for msg in waiting if msg.get("_local_id") == target_id),
+            None,
+        )
+        if target is None:
+            self._hide_media_transfer_gauge()
+            return
+        self._update_media_transfer_gauge(
+            self._media_upload_progress.get(target_id, 0.0)
+        )
+
+    def _sync_media_action_slot_visibility(self):
+        slot = getattr(self, "_media_action_slot", None)
+        if slot is None:
+            return
+        controls = (
+            getattr(self, "_media_transfer_gauge", None),
+            getattr(self, "_action_open_btn", None),
+            getattr(self, "_action_save_as_btn", None),
+            getattr(self, "_action_download_btn", None),
+        )
+        visible = any(control is not None and control.IsShown() for control in controls)
+        slot.Show(visible)
+        self.conversation_panel.Layout()
+
+    def _show_media_transfer_gauge(self):
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.SetValue(1)
+        gauge.Show()
+        self._media_action_slot.Show()
+        self.conversation_panel.Layout()
+
+    def _update_media_transfer_gauge(self, progress: float):
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.SetValue(max(0, min(100, round(progress * 100))))
+        if not gauge.IsShown():
+            gauge.Show()
+            self._media_action_slot.Show()
+            self.conversation_panel.Layout()
+
+    def _hide_media_transfer_gauge(self):
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.Hide()
+        self._sync_media_action_slot_visibility()
+        self.conversation_panel.Layout()
 
     # ── Ctrl+Shift+D / Ctrl+Shift+P dispatch ────────────────────────────────
 
@@ -8537,6 +8938,45 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
+        # The target may be older than the rendered page but still be present
+        # in the local database.  The old code incorrectly reported an error.
+        jid = (self.conversation or {}).get("remoteJid", "")
+        try:
+            quoted = self.main_window.db.get_message(jid, quoted_id)
+        except Exception:
+            logging.exception("[goto quoted] Database lookup failed")
+            quoted = None
+        if quoted:
+            records = (
+                (self.conversation.get("messages") or {}).get("messages") or {}
+            ).get("records") or []
+            records = self._deduplicate_messages(list(records) + [quoted])
+            records.sort(key=self._extract_timestamp)
+            self.conversation.setdefault("messages", {}).setdefault(
+                "messages", {}
+            )["records"] = records
+            self.populate_messages(preserve_focus=True)
+            for i, candidate in enumerate(self._sorted_messages):
+                if (
+                    not self._is_separator(candidate)
+                    and candidate.get("key", {}).get("id") == quoted_id
+                ):
+                    self.messages_list.Focus(i)
+                    self.messages_list.Select(i, True)
+                    self.messages_list.EnsureVisible(i)
+                    self.messages_list.SetFocus()
+                    return
+            # Pagination keeps the newest configured page.  An older quoted
+            # target can therefore still fall just outside it; expose that one
+            # row at the top without starting a server-side history request.
+            self._all_sorted_messages.insert(0, quoted)
+            self._sorted_messages.insert(0, quoted)
+            self.messages_list.InsertItem(0, self._render_message_line(quoted))
+            self.messages_list.Focus(0)
+            self.messages_list.Select(0, True)
+            self.messages_list.EnsureVisible(0)
+            self.messages_list.SetFocus()
+            return
         if self._goto_quoted_status(quoted_id, ctx):
             return
         self._show_quoted_not_found_error()
@@ -9209,7 +9649,17 @@ class ConversationsPanel(wx.Panel):
             self.conversation.get("remoteJid", "") if self.conversation else ""
         )
 
-        if for_everyone:
+        pending_local_id = str(msg.get("_local_id") or "")
+        cancelled_pending = bool(msg.get("_local_pending") and pending_local_id)
+        if cancelled_pending:
+            # There is no WhatsApp message ID to revoke yet. Whichever scope the
+            # dialog had selected, cancel the queued/in-flight upload and apply
+            # a local deletion; asking the API for "everyone" here can only fail.
+            self.main_window.message_queue.cancel(pending_local_id)
+            self._media_upload_progress.pop(pending_local_id, None)
+            self._media_transfer_started.discard(pending_local_id)
+            self._hide_media_transfer_gauge()
+        elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
             # correct serialized id and actually revoke it.
@@ -11032,10 +11482,7 @@ class ConversationsPanel(wx.Panel):
         remote_jid = self.conversation.get("remoteJid", "")
         if not remote_jid:
             return
-        # Same reason as on_send_message(): a caption pasted from a rich
-        # source carries U+2028/U+2029, which look like nothing here and
-        # arrive as paragraph breaks on the recipient's side.
-        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
+        caption = self._consume_attachment_caption()
 
         _VTYPE = {
             "image":    "imageMessage",
@@ -11108,11 +11555,15 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
+                self.messages_list.Select(last, True)
                 self.messages_list.EnsureVisible(last)
+            def _update_upload_progress(progress, local_id=local_id):
+                wx.CallAfter(self.update_media_upload_progress, local_id, progress)
+
             pm = PendingMessage(
                 local_id, remote_jid,
                 media_path=path, media_type=media_type, caption=caption,
-                quoted=quoted,
+                quoted=quoted, progress_callback=_update_upload_progress,
             )
             self._register_virtual_msg(virtual_msg)
 
@@ -11128,9 +11579,14 @@ class ConversationsPanel(wx.Panel):
 
             threading.Thread(target=_cache_then_enqueue, daemon=True).start()
 
+            self._show_media_transfer_gauge()
+
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
+        # Attachment-panel teardown performs its own layout pass. Reassert the
+        # transfer UI afterwards so that pass cannot swallow the new gauge.
+        self._sync_pending_document_gauge()
         self.main_window._schedule_set_chats()
         self.message_field.SetFocus()
 
@@ -11138,6 +11594,12 @@ class ConversationsPanel(wx.Panel):
         self.main_window._schedule_set_chats()
 
     # ── Contact message helpers ──────────────────────────────────────────────
+
+    def _consume_attachment_caption(self) -> str:
+        """Return the staged caption and clear it for the next attachment."""
+        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
+        self._caption_field.Clear()
+        return caption
 
     def _location_maps_url(self, msg: dict) -> str | None:
         """Build an openable Google Maps URL from a locationMessage/
@@ -11904,9 +12366,9 @@ class ConversationsPanel(wx.Panel):
         """Copy every selected plain-text message to the clipboard as one
         WhatsApp-export-style block of text, one line per message formatted
         "<date> <time> - <sender>: <text>" — the date/time pattern follows
-        the user's Windows regional format (core.locale_format) with a
-        fallback to the active language's own datetime_fmt, same as every
-        other timestamp _format_date() renders elsewhere in this panel.
+        the active app language's datetime_fmt through
+        core.message_copy_format, independently of the Windows regional
+        format used by timestamps displayed elsewhere in the interface.
         Other message types (media, location, contact cards, ...) are
         silently skipped, same as how _on_menu_copy_message only ever
         handles "conversation"/"extendedTextMessage". Order follows
@@ -11931,13 +12393,8 @@ class ConversationsPanel(wx.Panel):
                 continue
             sender = self._sender_label(m)
             ts = self._extract_timestamp(m)
-            if ts:
-                timestamp = datetime.fromtimestamp(ts).strftime(
-                    get_datetime_format(i18n.t("datetime_fmt"))
-                )
-                lines.append(f"{timestamp} - {sender}: {text}")
-            else:
-                lines.append(f"{sender}: {text}")
+            lines.append(format_copied_message(
+                ts, sender, text, i18n.t("datetime_fmt")))
 
         if not lines:
             self.main_window.output(i18n.t("copy_selected_nothing_to_copy"), interrupt=True)
