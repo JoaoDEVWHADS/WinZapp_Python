@@ -89,10 +89,21 @@ function forceKillByUserDataDir(userDataDir: string, logger?: any) {
     // Windows has no built-in "kill by command-line substring" either, so
     // this uses PowerShell's CIM/WMI process query — the closest equivalent
     // to `pkill -f` available without a third-party dependency.
+    //
+    // Critical gotcha: the filter text ends up embedded verbatim in this
+    // very powershell.exe's own `-Command` argument, so its own CommandLine
+    // always matches the `-like` pattern too. Without excluding $PID, the
+    // query finds and Stop-Process's *itself* mid-script on every single
+    // invocation — it never reaches the process it was meant to kill, exits
+    // with a bare non-zero code and no stdout/stderr, and the real stale
+    // Chrome process (holding the userDataDir profile lock) survives. That
+    // silent 100%-failure is exactly what let a locked profile force a full
+    // API/Node restart to clear on the next pairing attempt.
     const psFilter = userDataDir.replace(/'/g, "''").replace(/\\/g, '\\\\');
     const script =
+      `$mypid = $PID; ` +
       `Get-CimInstance Win32_Process | ` +
-      `Where-Object { $_.CommandLine -like '*${psFilter}*' } | ` +
+      `Where-Object { $_.ProcessId -ne $mypid -and $_.CommandLine -like '*${psFilter}*' } | ` +
       `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
     execFile(
       'powershell.exe',
