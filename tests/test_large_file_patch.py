@@ -41,7 +41,34 @@ def test_sender_patch_migrates_intermediate_chunked_source():
     assert "if (base64.length >" not in migrated
 
 
-def test_large_files_use_bounded_browser_transfers():
+def test_sender_patch_migrates_the_previous_chunked_patch_to_1gb():
+    previous = sender_patch.PATCHED_SEND_FILE.replace(
+        "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+        "                        if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+        "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+        "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+        "                                ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+        "                                : getUploadLimit(type, origin, isVcard);\n"
+        "                        }\n",
+        "",
+    ).replace(
+        "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+        "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+        "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+        "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+        "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+        "                            : getUploadLimit(type, origin, isVcard);\n"
+        "                    }\n",
+        "",
+    )
+
+    migrated = sender_patch.patch_sender_layer_source(previous)
+
+    assert "WPP.whatsapp?.MediaGatingUtils" in migrated
+    assert "1 * 1024 * 1024 * 1024" in migrated
+
+
+def test_large_documents_use_bounded_browser_transfers_and_a_1gb_browser_limit():
     patched = sender_patch.PATCHED_SEND_FILE
 
     assert "createReadStream(largeFilePath" in patched
@@ -49,9 +76,11 @@ def test_large_files_use_bounded_browser_transfers():
     assert "new File(chunks" in patched
     assert "__winzappFileTransfers.delete(id)" in patched
     assert "if (largeFilePath)" in patched
+    assert "WPP.whatsapp?.MediaGatingUtils" in patched
+    assert "1 * 1024 * 1024 * 1024" in patched
 
 
-def test_document_limits_match_whatsapp_ceiling():
+def test_document_limits_match_the_1gb_whatsapp_ceiling():
     conversations = (ROOT / "client" / "ui" / "conversations.py").read_text(
         encoding="utf-8"
     )

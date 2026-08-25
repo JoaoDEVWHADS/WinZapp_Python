@@ -163,7 +163,7 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
                  # returning None used to force a `is None` fallback into
                  # main.py that existed for no other reason than this stub.
                  "_collapse_and_list_backfill_pending", "_backfill_state_guard",
-                 "_canonical_backfill_jid",
+                 "_canonical_backfill_jid", "_backfill_names",
                  "_announce_sync_events_enabled", "count_contradicts_page",
                  "store_looks_broken", "snapshot_matches_page_store",
                  "_attempts_needed_to_confirm",
@@ -177,9 +177,8 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
                   "_STORE_PLAUSIBLE_RATIO", "_BROKEN_STORE_CONFIRM",
                   "_STORE_SNAPSHOT_TOLERANCE_RATIO",
                   "_STORE_SNAPSHOT_TOLERANCE_MIN",
-                  "_STORE_SNAPSHOT_MIN_RATIO",
-                  "_BROKEN_STORE_REPAIR_ROUNDS", "_DEEP_SYNC_TOP_N",
-                  "_DEEP_SYNC_COUNT", "_BACKFILL_CHUNK"):
+                  "_STORE_SNAPSHOT_MIN_RATIO", "_BACKFILL_CHUNK",
+                  "_BROKEN_STORE_REPAIR_ROUNDS", "_BACKFILL_CHUNK"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
@@ -336,12 +335,14 @@ class TestTheSyncDoesNotBlockOnNameResolution:
 
     def test_only_one_chunk_is_resolved_inline(self):
         stub = self._synced(728)
+        stub._backfill_names()
         assert stub.lid_batches == [MainWindow._BACKFILL_CHUNK]
 
     def test_a_small_account_is_still_fully_resolved_inline(self):
         """Below one chunk there is nothing to defer, so behaviour is
         unchanged for the accounts that were never slow."""
         stub = self._synced(12)
+        stub._backfill_names()
         assert stub.lid_batches == [12]
 
     def test_the_remainder_is_handed_to_the_backfill(self):

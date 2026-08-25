@@ -56,12 +56,17 @@ class _Stub:
     request_older_messages = MainWindow.request_older_messages
     unblock_history_sync = MainWindow.unblock_history_sync
     refresh_history_still_landing = MainWindow.refresh_history_still_landing
+    wait_for_restarted_history_sync = MainWindow.wait_for_restarted_history_sync
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
 
     def __init__(self, connected=True):
         self._wa_connected = connected
+        self.offline_mode = False
         self._phone_to_lid = {}
         self._lid_to_phone = {}
+
+    def _should_abort_sync_for_offline(self):
+        return False
 
 
 class TestFetchHistorySyncStatus:
@@ -88,6 +93,15 @@ class TestFetchHistorySyncStatus:
         stub = _Stub()
         monkeypatch.setattr("main.requests.get", lambda *a, **k: _Response(404, text="nope"))
         assert stub.fetch_history_sync_status() is None
+        assert stub._history_status_disconnected is False
+
+    def test_disconnected_response_is_remembered(self, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.get",
+            lambda *a, **k: _Response(404, text='{"status":"Disconnected"}'))
+        assert stub.fetch_history_sync_status() is None
+        assert stub._history_status_disconnected is True
 
     def test_transport_error_is_swallowed(self, monkeypatch):
         stub = _Stub()
@@ -239,7 +253,7 @@ class TestRequestOlderMessages:
             raise OSError("connection refused")
 
         monkeypatch.setattr("main.requests.post", _raise)
-        assert stub.request_older_messages("120363000000000000@g.us") is False
+        assert stub.request_older_messages("120363000000000000@g.us") is None
 
 
 class TestRefreshHistoryStillLanding:
@@ -275,18 +289,89 @@ class TestRefreshHistoryStillLanding:
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
-    def test_an_interrupted_recent_sync_does_not_pin_the_flag(self, monkeypatch):
-        """recentCompleted stays false forever on such a session — keying off it
-        would re-query every short chat on every launch for good."""
+
+    def test_an_incomplete_recent_sync_keeps_history_landing(self, monkeypatch):
         stub = self._stub(
             {"unprocessedChunks": 0, "initialSyncComplete": True, "recentCompleted": False},
             monkeypatch)
-        assert stub.refresh_history_still_landing() is False
+        assert stub.refresh_history_still_landing() is True
+        assert stub._history_still_landing is True
 
-    def test_an_unreadable_status_is_treated_as_settled(self, monkeypatch):
-        """Better to take a short chat at face value than to re-query 600 of
-        them for the whole budget because the status endpoint is missing."""
+    def test_an_unreadable_status_is_safe_before_the_first_check(self, monkeypatch):
         stub = self._stub(None, monkeypatch)
+        assert stub.refresh_history_still_landing() is True
+        assert stub._history_still_landing is True
+
+    def test_an_unreadable_status_preserves_the_last_known_state(self, monkeypatch):
+        stub = self._stub(None, monkeypatch)
+        stub._history_still_landing = False
+        assert stub.refresh_history_still_landing() is False
+        assert stub._history_still_landing is False
+
+
+class TestWaitForRestartedHistorySync:
+    def _clock(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("main.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            "main.time.sleep",
+            lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def test_stable_count_is_not_completion_while_recent_is_false(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: {
+                "unprocessedChunks": 0,
+                "recentCompleted": False,
+                "storeCounts": {"message": 10199},
+            })
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is False
+
+    def test_recent_true_and_empty_queue_completes_wait(self, monkeypatch):
+        self._clock(monkeypatch)
+        statuses = iter((
+            {"unprocessedChunks": 0, "recentCompleted": False,
+             "storeCounts": {"message": 10199}},
+            {"unprocessedChunks": 0, "recentCompleted": True,
+             "storeCounts": {"message": 39288}},
+        ))
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status",
+            lambda self, timeout=10: next(statuses))
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is True
+
+    def test_incomplete_recent_waits_even_when_queue_was_not_restarted(self):
+        payload = {
+            "restarted": False,
+            "recentCompleted": False,
+            "unprocessed": 0,
+        }
+
+        assert MainWindow._recent_history_needs_wait(payload) is True
+
+    def test_completed_recent_does_not_wait(self):
+        payload = {
+            "restarted": False,
+            "recentCompleted": True,
+            "unprocessed": 0,
+        }
+
+        assert MainWindow._recent_history_needs_wait(payload) is False
+
+    def _stub(self, status, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=30: status)
+        return stub
+
+    def test_a_disconnected_status_stops_history_landing(self, monkeypatch):
+        stub = self._stub(None, monkeypatch)
+        stub._history_status_disconnected = True
+        stub._history_still_landing = True
         assert stub.refresh_history_still_landing() is False
         assert stub._history_still_landing is False
 
@@ -373,6 +458,22 @@ class TestUnblockHistorySync:
 
         monkeypatch.setattr("main.requests.post", _raise)
         assert stub.unblock_history_sync() is None
+
+    def test_restart_rehydrates_bootstrap_after_page_reload(self):
+        """A fresh bootstrap instance otherwise rejects every manual restart."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller"
+            / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+        rehydrate_at = controller.index("setInitialChatHistorySynced")
+        restart_at = controller.index(
+            "continueSync.call(boot, source.ManualRestart)"
+        )
+        assert rehydrate_at < restart_at
+        assert "initialComplete === true" in controller
 
 
 class _FetchStub:
@@ -503,6 +604,31 @@ class TestRoutesArePatched:
         guard_at = controller.index("out.recentCompleted !== true")
         assert guard_at < send_at, "the guard must run before the request goes out"
 
+    def test_stale_recent_flag_is_repaired_only_for_an_empty_queue(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+
+        empty_queue = controller.index("if (rows.length === 0)")
+        repair = controller.index("recentCompleted: true", empty_queue)
+        send = controller.index("sendPeerDataOperationRequest(kind")
+        assert empty_queue < repair < send
+        assert "out.unprocessed = rows.length" in controller
+
+    def test_unchanged_short_pages_request_phone_history(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        main = (root / "client" / "main.py").read_text(encoding="utf-8")
+        retry = main.index("An unchanged short page is not proof")
+        request = main.index("self.request_older_messages(jid)", retry)
+        keep = main.index("self._keep_backfill_pending(jid, now)", retry)
+        completed = main.index("self._completed_backfill_targets(window)", retry)
+        assert retry < keep < request < completed
+
 
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.
@@ -561,3 +687,58 @@ class TestDocumentOnlyInterception:
         # why the old call was wrong and legitimately names it.
         assert "await (window as any).WAPI.loadEarlierMessages(" not in controller
         assert "await (window as any).WPP.chat.loadEarlierMessages(" not in controller
+
+
+class _InteractiveWaitStub:
+    wait_for_older_messages = MainWindow.wait_for_older_messages
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+
+    def __init__(self, responder):
+        self._wa_connected = True
+        self.offline_mode = False
+        self.calls = []
+        self._responder = responder
+
+    def fetch_older_messages(
+        self, jid, oldest, store_only=False, allow_phone_request=True
+    ):
+        self.calls.append(allow_phone_request)
+        return self._responder(allow_phone_request, len(self.calls))
+
+
+class TestInteractiveHistoryWait:
+    def _clock(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("main.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            "main.time.sleep",
+            lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def test_polling_reads_passively_until_the_page_arrives(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _InteractiveWaitStub(
+            lambda allow, call: [{"key": {"id": "older"}}] if call == 2 else None)
+        got = stub.wait_for_older_messages(
+            "120363000000000000@g.us", {"key": {"id": "anchor"}},
+            timeout=5, poll_interval=1, retry_request_every=10)
+        assert got and got[0]["key"]["id"] == "older"
+        assert stub.calls == [False, False]
+
+    def test_temporarily_refused_request_is_retried_interactively(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _InteractiveWaitStub(
+            lambda allow, call: [{"key": {"id": "older"}}] if allow else None)
+        got = stub.wait_for_older_messages(
+            "5511999999999@s.whatsapp.net", {"key": {"id": "anchor"}},
+            timeout=5, poll_interval=0.5, retry_request_every=1)
+        assert got and got[0]["key"]["id"] == "older"
+        assert stub.calls == [False, False, True]
+
+    def test_switching_conversation_cancels_the_wait(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _InteractiveWaitStub(lambda allow, call: None)
+        got = stub.wait_for_older_messages(
+            "chat@g.us", {"key": {"id": "anchor"}},
+            timeout=5, should_continue=lambda: False)
+        assert got is None
+        assert stub.calls == []

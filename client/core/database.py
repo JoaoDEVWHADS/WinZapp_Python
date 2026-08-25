@@ -1057,6 +1057,18 @@ class DatabaseManager:
             await conn.commit()
             return cursor.rowcount if cursor.rowcount is not None else 0
 
+    async def delete_status_update(self, message_id: str) -> int:
+        """Delete one locally cached status by its WhatsApp message id."""
+        if not message_id:
+            return 0
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            cursor = await conn.execute(
+                "DELETE FROM status_updates WHERE message_id = ?", (message_id,)
+            )
+            await conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+
     async def upsert_status_update(self, participant: str, msg: dict) -> None:
         """Insert or replace a status update message."""
         async with self._write_lock:

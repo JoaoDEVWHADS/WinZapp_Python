@@ -31,7 +31,9 @@ class _FakeI18n:
     def t(self, key):
         return {
             "save_as_nothing_to_save": "Esta mensagem não tem arquivo para salvar",
-        }[key]
+            "default_filename_voice_message": "mensagem_de_voz",
+            "default_filename_audio": "audio",
+        }.get(key, key)
 
 
 class _FakeMainWindow:
@@ -151,3 +153,100 @@ def test_the_saveable_set_is_what_the_context_menu_offers():
     assert _SAVEABLE_MESSAGE_TYPES == {
         "documentMessage", "imageMessage", "videoMessage", "audioMessage",
     }
+
+
+class _FilenameStub:
+    def __init__(self):
+        self.main_window = _FakeMainWindow()
+
+    _resolve_media_filename = ConversationsPanel._resolve_media_filename
+
+
+@pytest.mark.parametrize(
+    ("mimetype", "expected_ext"),
+    [
+        ("audio/ogg; codecs=opus", ".ogg"),
+        ("audio/mp4", ".m4a"),
+        ("audio/m4a", ".m4a"),
+        ("audio/x-m4a", ".m4a"),
+        ("audio/aac", ".aac"),
+        ("audio/wav", ".wav"),
+        ("audio/flac", ".flac"),
+        ("audio/opus", ".opus"),
+    ],
+)
+def test_audio_save_as_uses_real_mimetype_extension(mimetype, expected_ext):
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {"audioMessage": {"mimetype": mimetype}},
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    filename = _FilenameStub()._resolve_media_filename(msg)
+
+    assert filename.endswith(expected_ext)
+    assert not filename.endswith(".mp3") or expected_ext == ".mp3"
+
+
+def test_audio_save_as_preserves_original_filename_extension():
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {
+            "audioMessage": {
+                "mimetype": "audio/mp4",
+                "fileName": "minha-musica.m4a",
+            }
+        },
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    assert _FilenameStub()._resolve_media_filename(msg) == "minha-musica.m4a"
+
+
+def test_audio_save_as_mimetype_overrides_wrong_filename_extension():
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {
+            "audioMessage": {
+                "mimetype": "audio/ogg; codecs=opus",
+                "fileName": "minha-musica.mp3",
+            }
+        },
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    assert _FilenameStub()._resolve_media_filename(msg) == "minha-musica.ogg"
+
+
+def test_ptt_uses_reported_mimetype_extension_when_available():
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {
+            "audioMessage": {
+                "ptt": True,
+                "mimetype": "audio/webm",
+            }
+        },
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    assert _FilenameStub()._resolve_media_filename(msg).endswith(".webm")
+
+
+def test_unknown_regular_audio_no_longer_forces_mp3():
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {"audioMessage": {}},
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    filename = _FilenameStub()._resolve_media_filename(msg)
+
+    assert not filename.lower().endswith(".mp3")
+    assert "." not in filename
+

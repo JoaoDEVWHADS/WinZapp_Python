@@ -16,10 +16,10 @@ an exhausted chat, and that early return is shared with the user scrolling up,
 so the conversation stopped loading older messages in every future session,
 with no removal path anywhere in the code and F5 preserving the metadata.
 
-So: mark in memory as eagerly as before (the deep-backfill queue has to drain
-at the same rate), but only persist once the request has had longer than its
-reply window. _older_requested_chats is persisted too, which is what lets the
-bar be cleared on a later launch rather than inside one session.
+So: keep the chat re-queryable for the whole reply window. A temporary API
+refusal while RECENT history is still landing returns None and must not start
+the grace clock at all. Only an empty page observed after the grace window is
+evidence strong enough to mark or persist exhaustion.
 
 MainWindow is a wx.Frame and cannot be instantiated without a running wx.App,
 so the method is bound to a plain stub, as elsewhere in this suite.
@@ -125,12 +125,11 @@ class TestTheSecondEmptyPageInsideTheReplyWindow:
     """The captured failure: a backfill pass revisits the chat ~30 s after the
     ask, long before the phone's history-sync chunk lands."""
 
-    def test_it_marks_in_memory_so_the_queue_still_drains(self):
+    def test_it_stays_requeryable(self):
         stub = _make()
         stub.fetch_older_messages(JID, ANCHOR)          # asks
         stub.fetch_older_messages(JID, ANCHOR)          # 30 s later, still empty
-        assert JID in stub._exhausted_chats, (
-            "the deep-backfill queue must drain at the same rate it always did")
+        assert JID not in stub._exhausted_chats
 
     def test_it_does_NOT_persist(self):
         stub = _make()
@@ -162,28 +161,41 @@ class TestOnceTheReplyWindowHasPassed:
         """prepare_sync maps the old list form to timestamp 0.0 — those asks
         were made by an earlier run, which is exactly the evidence wanted."""
         stub = _make()
-        stub._older_requested_chats[JID] = 0.0
+        stub._older_requested_chats[JID] = 0.001
         stub.fetch_older_messages(JID, ANCHOR)
         assert stub.db.metadata["exhausted_chats"] == [JID]
 
-    def test_an_exhausted_chat_is_never_queried_again(self):
-        """Unchanged, and the reason the write-off has to be right: this early
-        return is shared with the user scrolling up, not just the backfill."""
+    def test_user_scroll_reopens_an_exhausted_chat(self):
+        """A durable conclusion must not permanently disable explicit scroll."""
         stub = _make()
         stub._exhausted_chats.add(JID)
-        assert stub.fetch_older_messages(JID, ANCHOR) == []
+        assert stub.fetch_older_messages(JID, ANCHOR) is None
+        assert stub.asks == [JID]
+        assert JID not in stub._exhausted_chats
+
+    def test_background_walk_still_respects_exhaustion(self):
+        stub = _make()
+        stub._exhausted_chats.add(JID)
+        assert stub.fetch_older_messages(JID, ANCHOR, store_only=True) == []
         assert stub.asks == []
 
 
 class TestAFailedAskIsNotDurableEvidenceEither:
-    def test_a_request_that_never_went_out_marks_only_in_memory(self):
+    def test_a_request_that_never_went_out_stays_requeryable(self):
         """request_older_messages() returning False covers a 60 s timeout and a
         dropped connection. Its own docstring calls this out as writing off
         exactly the chats that still have history coming."""
         stub = _make(ask_succeeds=False)
-        stub.fetch_older_messages(JID, ANCHOR)
-        assert JID in stub._exhausted_chats
+        assert stub.fetch_older_messages(JID, ANCHOR) is None
+        assert JID not in stub._exhausted_chats
         assert "exhausted_chats" not in stub.db.metadata
+
+    def test_recent_sync_refusal_does_not_start_the_grace_clock(self):
+        stub = _make(ask_succeeds=None)
+        assert stub.fetch_older_messages(JID, ANCHOR) is None
+        assert JID not in stub._older_requested_chats
+        assert stub.db.metadata["older_history_requested"] == {}
+        assert JID not in stub._exhausted_chats
 
 
 class TestTheUserCanUndoIt:

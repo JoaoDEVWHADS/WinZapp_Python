@@ -80,8 +80,15 @@ class _Stub:
         self.calls = []
         self.requested = []
 
-    def fetch_older_messages(self, jid, anchor, store_only=False):
-        self.calls.append({"jid": jid, "anchor": anchor, "store_only": store_only})
+    def fetch_older_messages(
+        self, jid, anchor, store_only=False, allow_phone_request=True
+    ):
+        self.calls.append({
+            "jid": jid,
+            "anchor": anchor,
+            "store_only": store_only,
+            "allow_phone_request": allow_phone_request,
+        })
         if not self._pages:
             return []
         page = self._pages.pop(0)
@@ -192,7 +199,8 @@ class TestWalkingOneChatBack:
         stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
         assert stub.deep_backfill_chat("chat@g.us") == 0
         assert len(stub.calls) == 1
-        assert stub.requested == ["chat@g.us"]
+        assert stub.requested == []
+        assert stub.calls[0]["allow_phone_request"] is False
         stalled_identity, retry_at = stub._deep_stalled_anchors["chat@g.us"]
         assert stalled_identity == (1_700_000_005, "m5")
         assert retry_at > main.time.monotonic()
@@ -318,6 +326,9 @@ def _loop(deep_pending, pending=(), names=()):
     for name in ("_backfill_empty_chats", "_collapse_and_list_backfill_pending",
                  "_backfill_state_guard", "_canonical_backfill_jid"):
         setattr(stub, name, types.MethodType(MainWindow.__dict__[name], stub))
+    for name in ("_initial_backfill_delay", "_background_backfill_work_allowed",
+                 "_backfill_short_queue_delays"):
+        setattr(stub, name, getattr(MainWindow, name))
     for const in ("_BACKFILL_BUDGET", "_BACKFILL_LANDING_BUDGET",
                   "_BACKFILL_FIRST_DELAY", "_BACKFILL_CHUNK_DELAY",
                   "_BACKFILL_MAX_DELAY",
@@ -503,17 +514,7 @@ class TestAnchorIdentity:
         assert MainWindow._anchor_identity({}) == (0, "")
 
 
-class TestAskingThePhoneAgain:
-    """The request for older history used to be once per chat, for good.
-
-    _older_requested_chats is persisted, and the old condition was "have we
-    ever asked?" — so the first request was the only one a conversation would
-    ever get. Any later end-of-IndexedDB sent nothing, and a chat that needs
-    several on-demand cycles (each chunk revealing one more end) stayed
-    truncated permanently. It is now gated by _OLDER_REQUEST_GRACE, the same
-    window that governs writing a chat off, so asking again is never cheaper
-    than waiting for the answer already outstanding.
-    """
+class TestBackgroundNeverFloodsThePhone:
 
     def test_a_second_stall_within_the_grace_does_not_ask_again(self):
         stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
@@ -522,7 +523,8 @@ class TestAskingThePhoneAgain:
         stub._deep_stalled_anchors.clear()   # let the walk reach the stall again
         stub.deep_backfill_chat("chat@g.us")
 
-        assert stub.requested == ["chat@g.us"]
+        assert stub.requested == []
+        assert all(c["allow_phone_request"] is False for c in stub.calls)
 
     def test_once_the_grace_has_passed_the_phone_is_asked_again(self):
         """The case the old code could not reach at all: the previous chunk
@@ -536,4 +538,4 @@ class TestAskingThePhoneAgain:
         stub._deep_stalled_anchors.clear()
         stub.deep_backfill_chat("chat@g.us")
 
-        assert stub.requested == ["chat@g.us", "chat@g.us"]
+        assert stub.requested == []

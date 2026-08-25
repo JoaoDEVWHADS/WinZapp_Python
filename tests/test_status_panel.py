@@ -220,6 +220,8 @@ class _Stub:
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
     _on_status_contact_activated = StatusPanel._on_status_contact_activated
     _on_status_list_key_down     = StatusPanel._on_status_list_key_down
+    _use_status_media_viewer_dialog = StatusPanel._use_status_media_viewer_dialog
+    _status_to_media_viewer_item = StatusPanel._status_to_media_viewer_item
     _is_current_status_playable  = StatusPanel._is_current_status_playable
     _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
     _resolve_name                = StatusPanel._resolve_name
@@ -251,6 +253,7 @@ class _Stub:
     _set_list_loading             = StatusPanel._set_list_loading
     _status_row_text              = StatusPanel._status_row_text
     _update_focused_status_row_text = StatusPanel._update_focused_status_row_text
+    _on_viewer_status_opened      = StatusPanel._on_viewer_status_opened
 
     def __init__(self, contact_names=None, send_text_result=True,
                  send_reaction_result=True, settings=None):
@@ -278,6 +281,7 @@ class _Stub:
         self._refresh_status_btn.Show()
         self._list_label.Show()
         self.my_status_dialog_calls = 0
+        self.open_viewer_calls = []
 
         self._status_content_label = _FakeWidget()
         self._video_bitmap         = _FakeWidget()
@@ -293,6 +297,21 @@ class _Stub:
         self._media_post_panel     = _FakeWidget()
         self._voice_post_panel     = _FakeWidget()
         self._selected_media_paths = []
+
+    def _open_status_media_viewer(self, contact_idx: int):
+        self.open_viewer_calls.append(contact_idx)
+        if 0 <= contact_idx < len(self._status_contacts):
+            entry = self._status_contacts[contact_idx]
+            statuses = entry.get("statuses", [])
+            if statuses:
+                item = {
+                    "status": statuses[0],
+                    "entry": entry,
+                    "status_id": statuses[0].get("key", {}).get("id", ""),
+                    "from_me": statuses[0].get("key", {}).get("fromMe", False),
+                }
+                self._on_viewer_status_opened(item, 0)
+        self.main_window.output("Status aberto", interrupt=False)
 
     def _open_my_status_dialog(self):
         self.my_status_dialog_calls += 1
@@ -363,7 +382,6 @@ class TestPositionPreservedOnReselect:
         stub._on_status_contact_selected(_Evt())
 
         assert stub._current_status_idx == 2
-        assert "3 de 5" in stub._status_content_label.label
 
     def test_selecting_a_different_contact_resets_to_the_first_status(self):
         stub = _Stub()
@@ -422,7 +440,6 @@ class TestAnnouncementOnlyOnExplicitNavigation:
         stub._on_status_contact_selected(_Evt())
 
         assert stub.main_window.outputs == []
-        assert "Status 1 de 1" in stub._status_content_label.label  # viewer still updated silently
         assert stub._selected_contact_idx == 0
 
     def test_activation_enter_or_doubleclick_still_announces(self):
@@ -649,6 +666,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
     def test_enter_on_a_video_status_already_shown_toggles_pause(self):
         stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _video_status()
@@ -660,7 +678,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_contact_activated(_Evt())
 
-        assert stub._video_player.toggle_pause_calls == 1
+        assert stub.open_viewer_calls == [0]
 
     def test_enter_on_a_text_status_does_not_try_to_toggle(self):
         stub = _Stub()
@@ -675,14 +693,9 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_contact_activated(_Evt())
 
-        assert stub._video_player.toggle_pause_calls == 0
+        assert stub.open_viewer_calls == [0]
 
     def test_enter_on_a_not_yet_selected_contact_selects_instead_of_toggling(self):
-        # First activation of a contact just opens/shows it — matches
-        # arrow-key navigation already having done the same via
-        # EVT_LIST_ITEM_SELECTED by the time the user deliberately presses
-        # Enter/Space, at which point _is_current_status_playable() is what
-        # makes the *next* press toggle instead.
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._status_row_contact = {1: 0}
@@ -695,7 +708,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_contact_activated(_Evt())
 
-        assert stub._video_player.toggle_pause_calls == 0
+        assert stub.open_viewer_calls == [0]
         assert stub._selected_contact_idx == 0
 
     def test_enter_on_row_zero_opens_my_status_dialog(self):
@@ -711,6 +724,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
     def test_space_on_a_video_status_already_shown_toggles_pause_without_reselecting(self):
         stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _video_status()
@@ -719,10 +733,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
 
-        assert stub._video_player.toggle_pause_calls == 1
-        # Must NOT re-Select() the row — that would re-fire selection and
-        # stop() the player out from under the toggle (see
-        # _is_current_status_playable()'s docstring).
+        assert stub.open_viewer_calls == [0]
         assert stub._status_list.select_calls == []
 
     def test_space_on_a_non_playing_row_still_selects_normally(self):
@@ -735,8 +746,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
         stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
 
-        assert stub._video_player.toggle_pause_calls == 0
-        assert stub._status_list.select_calls == [1]
+        assert stub.open_viewer_calls == [0]
         assert stub._selected_contact_idx == 0
 
     def test_other_keys_are_skipped(self):
@@ -746,6 +756,132 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
         stub._on_status_list_key_down(evt)
 
         assert evt.skip_calls == 1
+
+
+def _classic_stub(**kwargs):
+    kwargs.setdefault(
+        "settings", {"user_interface": {"status_media_viewer_dialog": False}}
+    )
+    return _Stub(**kwargs)
+
+
+class TestClassicInlineModeWhenSeparatePlayerDisabled:
+    """Settings > Interface do usuário > "Mostrar os status em player
+    separado" — unchecked keeps the classic in-panel viewer (pre-PR #103
+    behaviour) instead of opening MediaViewerDialog, for every entry point:
+    Enter/double-click activation, Space, and plain arrow-key selection."""
+
+    def test_default_setting_uses_the_dialog(self):
+        stub = _Stub()  # no settings override — must default to True
+        assert stub._use_status_media_viewer_dialog() is True
+
+    def test_disabled_setting_uses_the_classic_viewer(self):
+        stub = _classic_stub()
+        assert stub._use_status_media_viewer_dialog() is False
+
+    def test_activation_shows_current_status_instead_of_the_dialog(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub.open_viewer_calls == []
+        assert stub._selected_contact_idx == 0
+
+    def test_activation_on_an_already_playing_video_toggles_pause(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._status_row_contact = {1: 0}
+        stub._selected_contact_idx = 0
+        stub._current_status = _video_status()
+        stub._video_player.is_playing = True
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub.open_viewer_calls == []
+        assert stub._video_player.toggle_pause_calls == 1  # toggled, not reopened as a dialog
+
+    def test_space_selects_and_shows_inline_instead_of_the_dialog(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._status_row_contact = {1: 0}
+        stub._selected_contact_idx = -1
+        stub._current_status = None
+        stub._status_list = _FakeStatusList(focused=1)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub.open_viewer_calls == []
+        assert stub._selected_contact_idx == 0
+        assert stub._status_list.select_calls == [1]
+
+    def test_space_on_row_zero_selects_before_opening_my_status_dialog(self):
+        stub = _classic_stub()
+        stub._status_list = _FakeStatusList(focused=0)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub.my_status_dialog_calls == 1
+        assert stub._status_list.select_calls == [0]
+
+    def test_plain_arrow_selection_shows_the_status_inline(self):
+        """The defining difference from dialog mode: mere focus movement
+        (EVT_LIST_ITEM_SELECTED, arrow keys) drives the inline viewer
+        directly instead of only tracking which row has focus."""
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub._selected_contact_idx == 0
+        assert stub._current_status is not None
+        assert stub.open_viewer_calls == []
+
+    def test_selecting_my_status_row_hides_the_inline_viewer(self):
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("a")])]
+        stub._selected_contact_idx = 0
+
+        class _Evt:
+            def GetIndex(self):
+                return 0
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub._selected_contact_idx == -1
+        assert stub._viewer_panel.shown is False
+
+    def test_arrow_selection_marks_the_status_viewed_same_as_before_the_dialog_existed(self):
+        """Regression: the dialog-mode rewrite moved "mark viewed" into
+        _on_viewer_status_opened() only, which _show_current_status() never
+        reaches from dialog mode — but classic mode still routes through
+        _show_current_status() directly, and that legacy path stopped
+        marking anything viewed at all until this was restored."""
+        stub = _classic_stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
+        stub._status_row_contact = {1: 0}
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
 
 
 class TestCopyStatusText:
@@ -938,6 +1074,56 @@ class TestStatusMediaSaveInfoCoversEveryMediaType:
     def test_unsupported_type_returns_none(self):
         assert _status_media_save_info("documentMessage", {}, self.i18n) is None
         assert _status_media_save_info("conversation", {}, self.i18n) is None
+
+    def test_jpeg_is_canonicalized_to_jpg_not_a_bare_mimetype_split(self):
+        """Regression: a naive mimetype.split("/")[-1] gives ".jpeg" for
+        image/jpeg — the far more common case than "image/jpg" ever
+        actually appearing on the wire. _status_to_media_viewer_item()'s
+        own canonicalizing table already got this right; this function
+        used to disagree with it for the exact same status."""
+        msg_obj = {"imageMessage": {"mimetype": "image/jpeg"}}
+        ext, _wildcard = _status_media_save_info("imageMessage", msg_obj, self.i18n)
+        assert ext == ".jpg"
+
+
+class TestStatusMediaSaveInfoAgreesWithTheMediaViewer:
+    """Regression: the classic "Salvar mídia" button/shortcut
+    (_status_media_save_info(), reachable again once Settings > Interface
+    do usuário > "Mostrar os status em player separado" can be unchecked)
+    and the unified MediaViewerDialog's own Save As
+    (_status_to_media_viewer_item()) used to compute the file extension
+    with two independent implementations — the same image/jpeg status photo
+    saved as status.jpeg from one button and status.jpg from the other.
+    Both now share _status_media_extension()."""
+
+    i18n = _FakeI18n()
+
+    def _stub(self):
+        return _Stub(contact_names={})
+
+    @pytest.mark.parametrize(
+        "msg_type, mimetype",
+        [
+            ("imageMessage", "image/jpeg"),
+            ("imageMessage", "image/png"),
+            ("videoMessage", "video/webm"),
+            ("audioMessage", "audio/mp4"),
+            ("audioMessage", "audio/ogg; codecs=opus"),
+        ],
+    )
+    def test_both_entry_points_pick_the_same_extension(self, msg_type, mimetype):
+        msg_obj = {msg_type: {"mimetype": mimetype}}
+        ext_classic, _wildcard = _status_media_save_info(msg_type, msg_obj, self.i18n)
+
+        stub = self._stub()
+        status = {
+            "messageType": msg_type,
+            "message": msg_obj,
+            "key": {"id": "s1", "fromMe": False},
+        }
+        item = stub._status_to_media_viewer_item({"name": "Ana", "jid": "a@s.whatsapp.net"}, status)
+
+        assert item["extension"] == ext_classic
 
 
 class TestResolveNamePrefersSavedContactNameOverPushName:
@@ -1235,22 +1421,20 @@ class TestMarkStatusViewed:
         assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s2", "s3", "s4"]
 
     def test_opening_a_status_in_the_viewer_marks_it_viewed(self):
-        """End-to-end: _show_current_status() for someone else's status
+        """End-to-end: _open_status_media_viewer() for someone else's status
         calls through to _mark_status_viewed()."""
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
-        stub._selected_contact_idx = 0
-
-        stub._show_current_status(announce=False)
+        stub._status_row_contact = {1: 0}
+        stub._open_status_media_viewer(0)
 
         assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
 
     def test_opening_my_own_status_does_not_mark_it_viewed(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=True)])]
-        stub._selected_contact_idx = 0
-
-        stub._show_current_status(announce=False)
+        stub._status_row_contact = {1: 0}
+        stub._open_status_media_viewer(0)
 
         assert stub.main_window.settings.get("status_panel", {}).get("viewed_status_ids", []) == []
 
