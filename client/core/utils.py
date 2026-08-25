@@ -246,6 +246,52 @@ def append_selected_marker(text: str, word: str, position: str, is_selected: boo
     return f"{word} {text}" if position == "start" else f"{text} {word}"
 
 
+def link_preview_text(ext: dict, text: str, main_window=None) -> str:
+    """Prepend a link's WhatsApp-generated preview to the message *text*.
+
+    An ``extendedTextMessage`` that carries a link preview holds the title and
+    description WhatsApp itself resolved for the URL (see
+    websocket_client._has_link_preview). Rendered as
+    ``"<title>. <description>. <text>"`` — preview first, then the link — which
+    is the same order WhatsApp's own card conveys visually, expressed as plain
+    text because neither surface here has room for a thumbnail.
+
+    Both surfaces that read a link out loud go through this one function: the
+    message list (ui/conversations._get_message_content) and the notification
+    toast (core/notification_manager.format_notification_body). They used to
+    each carry their own copy of this switch — and for a long time the toast's
+    copy simply didn't exist, so a link with a preview read as its raw URL
+    there while the list read the title. Same reasoning as status_panel's
+    _status_content_label(): a near-duplicate of a small switch is exactly the
+    shape that silently drifts.
+
+    Gated on Settings > Interface do usuário > "Mostrar prévias de links"
+    (``user_interface.show_link_previews``, on by default). *main_window* is
+    optional so a caller with no window in reach still gets the default
+    behaviour instead of an AttributeError.
+    """
+    if main_window is not None:
+        show_previews = main_window.settings.get("user_interface", {}).get(
+            "show_link_previews", True
+        )
+        if not show_previews:
+            return text
+    if not isinstance(ext, dict):
+        return text
+    bits = [
+        part
+        for part in (
+            (ext.get("title") or "").strip(),
+            (ext.get("description") or "").strip(),
+        )
+        if part
+    ]
+    if not bits:
+        return text
+    preview = ". ".join(bits)
+    return f"{preview}. {text}" if text else preview
+
+
 def get_downloads_folder() -> str:
     """Return the current user's Downloads folder.
 

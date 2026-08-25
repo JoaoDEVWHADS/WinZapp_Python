@@ -48,7 +48,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
@@ -7308,21 +7308,11 @@ class ConversationsPanel(wx.Panel):
             text = self._resolve_mentions_in_text(text, mentioned)
 
             # Link preview (title/description WhatsApp itself generated for
-            # the URL — see websocket_client.py's _has_link_preview): shown
-            # ahead of the message text itself, the same "preview, then the
-            # link" order WhatsApp's own card conveys visually here as plain
-            # text, since this list has no room for a thumbnail image.
-            show_previews = self.main_window.settings.get("user_interface", {}).get(
-                "show_link_previews", True
-            )
-            if show_previews:
-                preview_title = (ext.get("title") or "").strip()
-                preview_desc = (ext.get("description") or "").strip()
-                preview_bits = [b for b in (preview_title, preview_desc) if b]
-                if preview_bits:
-                    preview_str = ". ".join(preview_bits)
-                    text = f"{preview_str}. {text}" if text else preview_str
-            return text
+            # the URL — see websocket_client.py's _has_link_preview). Shared
+            # with the notification toast through link_preview_text() so the
+            # two can't drift; see that function for the ordering and the
+            # settings gate.
+            return link_preview_text(ext, text, self.main_window)
 
         # ── Audio ────────────────────────────────────────────────────────────
         if msg_type == "audioMessage":

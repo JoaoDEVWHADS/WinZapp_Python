@@ -133,6 +133,114 @@ class TestFetchLinkPreview:
         assert fetch_link_preview("https://example.com/missing") is None
 
 
+class _CountingChunkedResponse(_FakeResponse):
+    """Serves the body in real chunks and records how many were consumed, so
+    a test can tell "stopped at </head>" apart from "read the whole page"."""
+
+    def __init__(self, body: bytes, chunk_size=64, **kwargs):
+        super().__init__(body, **kwargs)
+        self._chunk_size = chunk_size
+        self.chunks_served = 0
+
+    def iter_content(self, chunk_size=16384):
+        for start in range(0, len(self._body), self._chunk_size):
+            self.chunks_served += 1
+            yield self._body[start:start + self._chunk_size]
+
+
+class TestFetchLinkPreviewStopsAtHeadClose:
+    """The read loop keeps pulling chunks until it has actually seen the end
+    of <head> — a fixed low byte cap silently produced no preview at all on
+    JS-heavy pages (YouTube inlines ~680KB of hydration script before its own
+    og:title). The cap that remains is a ceiling against pathological markup,
+    not the expected stopping point.
+    """
+
+    _HEAD = (
+        b"<html><head><meta property=\"og:title\" content=\"Depois do lixo\">"
+    )
+    _FILLER = b"<!--" + (b"x" * 4000) + b"-->"
+
+    def test_a_preview_past_the_old_256kb_cap_is_still_found(self, monkeypatch):
+        html = (
+            b"<html><head>" + (b"<!--" + b"j" * 400000 + b"-->")
+            + b"<meta property=\"og:title\" content=\"Tarde demais\">"
+            + b"</head><body></body></html>"
+        )
+        monkeypatch.setattr(
+            "core.link_preview.requests.get",
+            lambda *a, **kw: _FakeResponse(html),
+        )
+        assert fetch_link_preview("https://example.com")["title"] == "Tarde demais"
+
+    def test_reading_stops_once_head_closes_instead_of_draining_the_body(
+        self, monkeypatch
+    ):
+        body_filler = b"<p>" + (b"z" * 20000) + b"</p>"
+        html = self._HEAD + b"</head><body>" + body_filler + b"</body></html>"
+        response = _CountingChunkedResponse(html, chunk_size=64)
+        monkeypatch.setattr(
+            "core.link_preview.requests.get", lambda *a, **kw: response
+        )
+
+        preview = fetch_link_preview("https://example.com")
+
+        assert preview["title"] == "Depois do lixo"
+        # The <head> ends well inside the first few hundred bytes; the ~20KB
+        # body must never have been pulled.
+        assert response.chunks_served * 64 < len(html) / 2
+
+    def test_an_uppercase_head_close_also_stops_the_read(self, monkeypatch):
+        """`</HEAD>` is valid HTML and still turns up on older pages. Missing
+        it wouldn't corrupt the preview — the parser finds the tags either
+        way — but it would drop the early exit and drain up to the 3MB
+        ceiling."""
+        body_filler = b"<p>" + (b"z" * 20000) + b"</p>"
+        html = self._HEAD + b"</HEAD><BODY>" + body_filler + b"</BODY></html>"
+        response = _CountingChunkedResponse(html, chunk_size=64)
+        monkeypatch.setattr(
+            "core.link_preview.requests.get", lambda *a, **kw: response
+        )
+
+        preview = fetch_link_preview("https://example.com")
+
+        assert preview["title"] == "Depois do lixo"
+        assert response.chunks_served * 64 < len(html) / 2
+
+    def test_head_close_split_across_a_chunk_boundary_is_still_detected(
+        self, monkeypatch
+    ):
+        """Only the freshly-arrived tail is searched each iteration (scanning
+        the whole buffer every chunk is quadratic in the 3MB ceiling), so the
+        overlap has to cover a `</head>` straddling two chunks. A chunk size
+        of 1 puts every one of its bytes on its own boundary."""
+        body_filler = b"<p>" + (b"z" * 500) + b"</p>"
+        html = self._HEAD + b"</head><body>" + body_filler + b"</body></html>"
+        response = _CountingChunkedResponse(html, chunk_size=1)
+        monkeypatch.setattr(
+            "core.link_preview.requests.get", lambda *a, **kw: response
+        )
+
+        preview = fetch_link_preview("https://example.com")
+
+        assert preview["title"] == "Depois do lixo"
+        assert response.chunks_served < len(html) / 2
+
+    def test_a_page_that_never_closes_head_is_capped(self, monkeypatch):
+        from core.link_preview import _MAX_BYTES_READ
+
+        html = b"<html><head><title>Sem fim</title>" + (b"y" * (_MAX_BYTES_READ + 5000))
+        response = _CountingChunkedResponse(html, chunk_size=16384)
+        monkeypatch.setattr(
+            "core.link_preview.requests.get", lambda *a, **kw: response
+        )
+
+        preview = fetch_link_preview("https://example.com")
+
+        assert preview["title"] == "Sem fim"
+        assert response.chunks_served * 16384 <= _MAX_BYTES_READ + 16384
+
+
 # ── MainWindow._build_link_preview_options() ───────────────────────────────
 
 class TestBuildLinkPreviewOptions:

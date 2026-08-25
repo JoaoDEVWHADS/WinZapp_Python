@@ -99,7 +99,32 @@ function forceKillByUserDataDir(userDataDir: string, logger?: any) {
     // Chrome process (holding the userDataDir profile lock) survives. That
     // silent 100%-failure is exactly what let a locked profile force a full
     // API/Node restart to clear on the next pairing attempt.
-    const psFilter = userDataDir.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    //
+    // Second half of the same gotcha: the pattern has to be separator- and
+    // shortname-agnostic. Both call sites below pass `userDataDir/<session>`
+    // with a FORWARD slash, but that value never reaches Chrome verbatim —
+    // createSessionUtil hands puppeteer the relative `./userDataDir/<session>`
+    // and ChromeLauncher resolves it (`path.resolve()`) before building the
+    // argument, so the process's real CommandLine reads
+    // `--user-data-dir=C:\<install path>\api\userDataDir\<session>`:
+    // backslashes, and possibly 8.3-shortened components anywhere in the
+    // install path (`PROGRA~1`-style) when it has spaces or long names.
+    // PowerShell's `-like` treats `\` and `/` as ordinary, non-interchangeable
+    // characters, so the forward-slash filter matched the real Chrome process
+    // exactly zero times — the only process it ever matched was the
+    // powershell.exe running the query itself, whose `-Command` argument does
+    // contain the forward-slash text verbatim. That is why the $PID exclusion
+    // above, on its own, only turns the self-kill into a silent no-op.
+    // Collapsing every run of separators into a `*` wildcard matches just the
+    // tail of the path, which is immune to both the separator flavour and to
+    // 8.3 shortening of the parent directories. The `-like` metacharacters are
+    // backtick-escaped first (a backtick survives a single-quoted PowerShell
+    // string literal and is exactly what `-like` reads as "literal next
+    // character"), so a session id is never mistaken for a wildcard.
+    const psFilter = userDataDir
+      .replace(/'/g, "''")
+      .replace(/[`*?[\]]/g, '`$&')
+      .replace(/[\\/]+/g, '*');
     const script =
       `$mypid = $PID; ` +
       `Get-CimInstance Win32_Process | ` +
