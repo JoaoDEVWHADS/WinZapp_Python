@@ -28,6 +28,7 @@ class AddMemberDialog(wx.Dialog):
         )
         self._build_ui()
         self._populate_contacts()
+        self._select_first_contact()
         self.SetMinSize((360, 400))
         self.SetSize((420, 500))
         self.CentreOnParent()
@@ -54,6 +55,18 @@ class AddMemberDialog(wx.Dialog):
         self._list.InsertColumn(0, i18n.t("conversations"), width=220)
         self._list.InsertColumn(1, i18n.t("phone_label"),   width=140)
         sizer.Add(self._list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        # "Add" button for contacts picked from the list above lives right
+        # here — immediately after the list, before the "add by number"
+        # section — so a user who just wants to select from their own
+        # contacts doesn't have to tab through the whole number/country
+        # sub-form to reach it. It still carries wx.ID_OK, so Enter inside
+        # the dialog (and the dialog's own default-button handling) keeps
+        # working exactly as before.
+        self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("add_member"))
+        self._ok_btn.Bind(wx.EVT_BUTTON, self._on_add)
+        self._ok_btn.SetDefault()
+        sizer.Add(self._ok_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
         # ── Custom phone number entry (alternative path) ────────────────────
         # Wrapped in a StaticBox (not a bare StaticText immediately before
@@ -94,17 +107,21 @@ class AddMemberDialog(wx.Dialog):
         num_box_sizer.Add(num_sizer, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(num_box_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
-        btn_sizer = wx.StdDialogButtonSizer()
-        self._ok_btn  = wx.Button(self, wx.ID_OK,     label=i18n.t("add_member"))
-        cancel_btn    = wx.Button(self, wx.ID_CANCEL, label=i18n.t("cancel"))
-        btn_sizer.AddButton(self._ok_btn)
-        btn_sizer.AddButton(cancel_btn)
-        btn_sizer.Realize()
-        sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 8)
+        cancel_btn = wx.Button(self, wx.ID_CANCEL, label=i18n.t("cancel"))
+        sizer.Add(cancel_btn, 0, wx.EXPAND | wx.ALL, 8)
 
         self.SetSizer(sizer)
-        self._ok_btn.Bind(wx.EVT_BUTTON, self._on_add)
         cancel_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CANCEL))
+
+    def _select_first_contact(self):
+        """Auto-select and focus the first contact so a screen-reader user
+        lands directly on a pickable item instead of having to arrow down
+        into the list themselves before anything is selected."""
+        if self._list.GetItemCount() == 0:
+            return
+        self._list.Select(0)
+        self._list.Focus(0)
+        self._list.SetFocus()
 
     def _on_phone_char(self, event):
         """Only digits, navigation and Ctrl/Alt combos pass through — mirrors
