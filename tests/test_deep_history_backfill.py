@@ -326,6 +326,9 @@ def _loop(deep_pending, pending=(), names=()):
     for name in ("_backfill_empty_chats", "_collapse_and_list_backfill_pending",
                  "_backfill_state_guard", "_canonical_backfill_jid"):
         setattr(stub, name, types.MethodType(MainWindow.__dict__[name], stub))
+    for name in ("_initial_backfill_delay", "_background_backfill_work_allowed",
+                 "_backfill_short_queue_delays"):
+        setattr(stub, name, getattr(MainWindow, name))
     for const in ("_BACKFILL_BUDGET", "_BACKFILL_LANDING_BUDGET",
                   "_BACKFILL_FIRST_DELAY", "_BACKFILL_CHUNK_DELAY",
                   "_BACKFILL_MAX_DELAY",
