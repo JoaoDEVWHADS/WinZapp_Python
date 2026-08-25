@@ -129,6 +129,14 @@ API_EXCLUDE_SUB_DIRS = {"tests"}
 # folder too (alongside .env/start.js/package.json/config.json) so they're
 # visible/patchable directly from an extracted install, not just at dev time.
 API_CUSTOM_SRC_FILES = [
+    ".babelrc",
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+    "decrypt.js",
     "src/config.ts",
     "src/index.ts",
     "src/util/createSessionUtil.ts",
@@ -136,13 +144,20 @@ API_CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/errors/domain.ts",
+    "src/middleware/errorHandler.ts",
+    "src/services/messageResolver.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
+    "src/tests/middleware/errorHandler.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/controller/statusController.ts",
     "src/routes/index.ts",
-    "dist/middleware/auth.js",
-    "dist/controller/sessionController.js",
-    "decrypt.js",
 ]
 
 # -- CLI --------------------------------------------------------------------

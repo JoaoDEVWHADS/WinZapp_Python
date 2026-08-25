@@ -49,6 +49,7 @@ if _CLIENT_DIR not in sys.path:
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
 CUSTOM_ROOT_FILES = [
+    ".babelrc",
     "start.js",
     "config.json",
     ".eslintrc.json",
