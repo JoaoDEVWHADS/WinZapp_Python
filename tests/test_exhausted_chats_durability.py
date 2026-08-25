@@ -161,7 +161,7 @@ class TestOnceTheReplyWindowHasPassed:
         """prepare_sync maps the old list form to timestamp 0.0 — those asks
         were made by an earlier run, which is exactly the evidence wanted."""
         stub = _make()
-        stub._older_requested_chats[JID] = 0.0
+        stub._older_requested_chats[JID] = 0.001
         stub.fetch_older_messages(JID, ANCHOR)
         assert stub.db.metadata["exhausted_chats"] == [JID]
 
