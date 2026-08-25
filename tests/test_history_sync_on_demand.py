@@ -253,7 +253,7 @@ class TestRequestOlderMessages:
             raise OSError("connection refused")
 
         monkeypatch.setattr("main.requests.post", _raise)
-        assert stub.request_older_messages("120363000000000000@g.us") is False
+        assert stub.request_older_messages("120363000000000000@g.us") is None
 
 
 class TestRefreshHistoryStillLanding:
