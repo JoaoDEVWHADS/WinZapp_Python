@@ -87,6 +87,9 @@ class _Stub:
     def _hide_attachment_panel(self):
         pass
 
+    def _hide_media_transfer_gauge(self):
+        pass
+
     def _restore_conversation_selection(self):
         self.restore_calls.append(True)
 

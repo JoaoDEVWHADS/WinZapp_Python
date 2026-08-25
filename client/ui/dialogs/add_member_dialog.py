@@ -274,8 +274,17 @@ class SelectGroupDialog(wx.Dialog):
         for jid, chat in self._mw.chats.items():
             if not jid.endswith("@g.us") or jid in deleted:
                 continue
+            # _resolve_contact_name() always returns None for a group (it's
+            # address-book lookup, groups have no such entry — see its own
+            # docstring), so it never contributed anything here; every group
+            # fell straight through to the bare-JID fallback, which is why
+            # this list showed a raw number for every single group. A
+            # group's real name lives under groupMetadata.subject in the raw
+            # chat dict, not a flat "name"/"subject" key — same lookup used
+            # everywhere else a group is named (see _group_name_from_chat_dict()).
             name = (
-                self._mw._resolve_contact_name(chat)
+                self._mw._group_name_from_chat_dict(chat)
+                or getattr(self._mw, "_group_name_cache", {}).get(jid, "")
                 or self._mw.find_name_through_messages(chat)
                 or chat.get("pushName", "")
                 or jid.split("@")[0]

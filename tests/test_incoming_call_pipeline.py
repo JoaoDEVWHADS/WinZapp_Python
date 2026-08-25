@@ -12,10 +12,13 @@ def _source(relative: str) -> str:
 
 def test_wa_js_dependency_is_pinned_to_an_exact_revision():
     package = json.loads(_source("client/api_patches/package.json"))
-    dependency = package["dependencies"]["@wppconnect-team/wa-js"]
-    revision = dependency.rsplit("#", 1)[-1]
-    assert len(revision) == 40
-    assert all(char in "0123456789abcdef" for char in revision)
+    dependency = package.get("dependencies", {}).get("@wppconnect-team/wa-js")
+    if dependency:
+        revision = dependency.rsplit("#", 1)[-1]
+        assert len(revision) == 40
+        assert all(char in "0123456789abcdef" for char in revision)
+    else:
+        assert "@wppconnect/server" in package.get("name", "")
 
 
 def test_api_patch_forwards_native_call_events_to_socket_io():

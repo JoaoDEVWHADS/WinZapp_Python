@@ -6,6 +6,8 @@ import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Callable
 
+from core.message_queue import MessageCancelled
+
 ProgressCallback = Callable[[float], Any]
 
 
@@ -91,8 +93,18 @@ class StreamingMultipartBody:
             return
         try:
             self.progress_callback(max(0.0, min(1.0, float(progress))))
+        except MessageCancelled:
+            # The one exception a progress_callback is meant to raise:
+            # MessageQueue's wrapper uses it to signal that the user
+            # cancelled this send (see message_queue.py's _media_progress).
+            # It must interrupt __iter__() so the upload actually stops —
+            # swallowing it here (like every other exception below) let the
+            # file finish streaming and the message send anyway, even though
+            # the UI had already shown it as cancelled.
+            raise
         except Exception:
-            # UI reporting must not abort the actual send.
+            # Anything else really is just UI reporting gone wrong (e.g. a
+            # destroyed widget) and must not abort the actual send.
             pass
 
     def __iter__(self) -> Iterator[bytes]:

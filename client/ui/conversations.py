@@ -26,6 +26,7 @@ from core.audio_devices import (
 )
 from core.audio_transcode import transcode_audio_to_wav
 from core.sound_system import load_sound
+from core.link_preview import find_first_url, fetch_link_preview
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
@@ -402,6 +403,25 @@ class ConversationsPanel(wx.Panel):
         self._outgoing_virtual_messages: dict = {}
         self._media_upload_progress: dict = {}
         self._media_transfer_started: set = set()
+
+        # ── Outgoing link preview state ──────────────────────────────────────
+        # {"title", "description", "canonicalUrl"} once a preview was
+        # resolved for the URL currently in the message field, else None —
+        # see core/link_preview.py and _check_link_preview_for_current_text().
+        self._pending_link_preview: dict | None = None
+        # The exact URL the resolved preview above was fetched for, so a
+        # further edit that changes/removes that URL invalidates it.
+        self._link_preview_source_url: str = ""
+        # Set when the user explicitly clicks "remove preview" — that exact
+        # URL is not re-fetched again until the field's URL changes away
+        # from it (see _on_remove_link_preview()).
+        self._link_preview_dismissed_url: str = ""
+        # Bumped on every debounce tick; a fetch result is applied only if
+        # this still matches the token captured when that fetch started —
+        # guards against a stale, slow fetch overwriting what a later one
+        # (or the user clearing the field) already resolved.
+        self._link_preview_fetch_token: int = 0
+        self._link_preview_debounce_timer: wx.CallLater | None = None
 
         # ── Search in conversation state ─────────────────────────────────────
         # Indices in _sorted_messages that match the current search query
@@ -802,6 +822,18 @@ class ConversationsPanel(wx.Panel):
         self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
         conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._remove_quote_btn.Hide()
+
+        # Shown once a link preview has been resolved for a URL currently in
+        # the message field (see _check_link_preview_for_current_text()) — mirrors
+        # _remove_quote_btn immediately above: same idea, same placement
+        # rationale (read before the emoji button, since removing an active
+        # preview is the more immediate action).
+        self._remove_link_preview_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("remove_link_preview")
+        )
+        self._remove_link_preview_btn.Bind(wx.EVT_BUTTON, self._on_remove_link_preview)
+        conv_sizer.Add(self._remove_link_preview_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._remove_link_preview_btn.Hide()
 
         self._emoji_btn = wx.Button(
             self.conversation_panel, label=i18n.t("emoji_button")
@@ -1638,6 +1670,73 @@ class ConversationsPanel(wx.Panel):
                     self._is_typing = now_typing
                     self.main_window.send_typing_status(jid, now_typing, is_group)
         self._on_text_changed_mention_check()
+        self._schedule_link_preview_check()
+
+    # ── Outgoing link preview (see core/link_preview.py) ────────────────────
+
+    _LINK_PREVIEW_DEBOUNCE_MS = 700
+
+    def _schedule_link_preview_check(self):
+        """Debounce URL detection: re-checked shortly after typing pauses,
+        not on every keystroke — a preview fetch is a real HTTP request."""
+        if self._link_preview_debounce_timer is not None:
+            self._link_preview_debounce_timer.Stop()
+        self._link_preview_debounce_timer = wx.CallLater(
+            self._LINK_PREVIEW_DEBOUNCE_MS, self._check_link_preview_for_current_text
+        )
+
+    def _check_link_preview_for_current_text(self):
+        url = find_first_url(self.message_field.GetValue())
+
+        if url != self._link_preview_source_url and (
+            self._pending_link_preview is not None or self._link_preview_source_url
+        ):
+            self._clear_link_preview()
+
+        if not url or url == self._link_preview_dismissed_url:
+            return
+        if self._pending_link_preview is not None and self._link_preview_source_url == url:
+            return  # already resolved for this exact URL
+
+        self._link_preview_fetch_token += 1
+        token = self._link_preview_fetch_token
+        self._link_preview_source_url = url
+
+        def _bg_fetch():
+            preview = fetch_link_preview(url)
+            wx.CallAfter(self._on_link_preview_fetched, token, url, preview)
+
+        threading.Thread(target=_bg_fetch, daemon=True).start()
+
+    def _on_link_preview_fetched(self, token, url, preview):
+        # Superseded by a later fetch, or by the field being cleared, while
+        # this one was still in flight on its own thread.
+        if token != self._link_preview_fetch_token:
+            return
+        if find_first_url(self.message_field.GetValue()) != url:
+            return
+        if not preview:
+            return  # no title/description available — silently no-op
+        self._pending_link_preview = preview
+        self._remove_link_preview_btn.Show()
+        self.conversation_panel.Layout()
+
+    def _on_remove_link_preview(self, event=None):
+        """User explicitly dismissed the preview — stays dismissed for this
+        exact URL until the field's URL actually changes to something else
+        (mirrors WhatsApp Web's own composer: closing the card doesn't bring
+        it right back while you keep typing around the same link)."""
+        self._link_preview_dismissed_url = self._link_preview_source_url
+        self._clear_link_preview()
+        wx.CallAfter(self.message_field.SetFocus)
+
+    def _clear_link_preview(self):
+        self._link_preview_fetch_token += 1  # invalidate any in-flight fetch
+        self._pending_link_preview = None
+        self._link_preview_source_url = ""
+        if self._remove_link_preview_btn.IsShown():
+            self._remove_link_preview_btn.Hide()
+            self.conversation_panel.Layout()
 
     def _on_open_emoji_picker(self, event):
         """Insert an emoji at the caret without leaving the message editor."""
@@ -1944,12 +2043,20 @@ class ConversationsPanel(wx.Panel):
         # Build a virtual message dict that renders identically to real messages.
         local_id = str(uuid.uuid4())
         api_text, _mentioned = self._build_mention_payload(text)
+        link_preview = self._pending_link_preview
 
-        # When mentions are present, use extendedTextMessage so the rendering
-        # pipeline can convert @phone → @DisplayName for the local display.
-        if _mentioned:
+        # When mentions or a resolved link preview are present, use
+        # extendedTextMessage: the rendering pipeline needs it either way,
+        # for @phone → @DisplayName resolution and for
+        # _get_message_content()'s title/description rendering respectively.
+        if _mentioned or link_preview:
+            _ext = {"text": api_text}
+            if link_preview:
+                _ext["title"] = link_preview.get("title", "")
+                _ext["description"] = link_preview.get("description", "")
+                _ext["canonicalUrl"] = link_preview.get("canonicalUrl", "")
             _msg_type  = "extendedTextMessage"
-            _msg_body  = {"extendedTextMessage": {"text": api_text}}
+            _msg_body  = {"extendedTextMessage": _ext}
         else:
             _msg_type  = "conversation"
             _msg_body  = {"conversation": text}
@@ -2002,9 +2109,12 @@ class ConversationsPanel(wx.Panel):
             local_id, remote_jid, text=api_text,
             quoted=self._quoted_message,
             mentioned_jids=_mentioned,
+            link_preview=link_preview,
         )
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+        self._link_preview_dismissed_url = ""  # fresh field, nothing dismissed yet
+        self._clear_link_preview()
         # Replying is a clear signal the conversation has been read — clears
         # the unread badge/title/tray count and notifies WPPConnect, even in
         # the edge case where unreadCount is still nonzero for the chat
@@ -8781,7 +8891,13 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
         self.message_field.SetFocus()
 
-    def _get_participant_name(self, participant_jid: str, msg: dict | None = None) -> str:
+    def _get_participant_name(
+        self,
+        participant_jid: str,
+        msg: dict | None = None,
+        *,
+        resolve_missing: bool = True,
+    ) -> str:
         """Return a display name for a group participant."""
         mw = self.main_window
         if mw._is_self_jid(participant_jid):
@@ -8879,11 +8995,12 @@ class ConversationsPanel(wx.Panel):
         # same JID internally) so a LATER render of this same notification
         # (conversation reopened, history resynced, ...) shows the real
         # formatted phone number instead of the raw LID digits forever.
-        threading.Thread(
-            target=mw.resolve_lid_jids_via_api,
-            args=([participant_jid],),
-            daemon=True,
-        ).start()
+        if resolve_missing:
+            threading.Thread(
+                target=mw.resolve_lid_jids_via_api,
+                args=([participant_jid],),
+                daemon=True,
+            ).start()
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]
@@ -9659,6 +9776,11 @@ class ConversationsPanel(wx.Panel):
             self._media_upload_progress.pop(pending_local_id, None)
             self._media_transfer_started.discard(pending_local_id)
             self._hide_media_transfer_gauge()
+            # cancel() only stops the queue from ever sending it — the pending
+            # bubble itself (key.id == pending_local_id for a virtual message)
+            # stays in the list until removed here, same as the other two
+            # branches below do for their own message.
+            self.remove_messages_by_id({pending_local_id}, focus_previous=True)
         elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the

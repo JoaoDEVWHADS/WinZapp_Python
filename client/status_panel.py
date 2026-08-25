@@ -114,6 +114,35 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
     return i18n.t("notif_unsupported")
 
 
+# Shared by both status media-save entry points — the classic "Salvar
+# mídia" button/shortcut (_status_media_save_info(), used by
+# StatusPanel._on_save_status_media() when Settings > Interface do
+# usuário > "Mostrar os status em player separado" is unchecked) and the
+# unified MediaViewerDialog's own Save As (_status_to_media_viewer_item()).
+# Both used to compute the extension independently — a bare
+# mimetype.split("/")[-1] here vs. a canonicalizing table there — so the
+# very same image/jpeg status photo saved as status.jpeg from one button
+# and status.jpg from the other. One table now backs both.
+_STATUS_MIME_SUBTYPE_TO_EXT = {
+    "jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp",
+    "gif": ".gif", "mp4": ".mp4", "webm": ".webm",
+    "ogg": ".ogg", "opus": ".opus", "mpeg": ".mp3", "mp3": ".mp3",
+    "mp4a-latm": ".m4a", "x-m4a": ".m4a", "aac": ".aac",
+    "wav": ".wav", "x-wav": ".wav", "flac": ".flac",
+}
+
+
+def _status_media_extension(mimetype: str, default_ext: str) -> str:
+    """Canonical file extension for a status media mimetype, falling back
+    to *default_ext* (with the leading dot) when the mimetype is missing
+    or its subtype isn't in the table above."""
+    mime = str(mimetype or "").split(";")[0].strip().lower()
+    if "/" not in mime:
+        return default_ext
+    subtype = mime.split("/", 1)[1]
+    return _STATUS_MIME_SUBTYPE_TO_EXT.get(subtype, "." + subtype.split("+")[0])
+
+
 def _status_media_save_info(msg_type: str, msg_obj: dict, i18n):
     """Returns (ext, wildcard) for the "Save media as..." dialog, or None
     if *msg_type* isn't a savable media status. Shared by
@@ -121,15 +150,15 @@ def _status_media_save_info(msg_type: str, msg_obj: dict, i18n):
     for each media type lives in one place."""
     if msg_type == "imageMessage":
         mimetype = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
-        ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "jpg")
+        ext = _status_media_extension(mimetype, ".jpg")
         return ext, f"{i18n.t('photo')} (*{ext})|*{ext}|*.*|*.*"
     if msg_type == "videoMessage":
         mimetype = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
-        ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "mp4")
+        ext = _status_media_extension(mimetype, ".mp4")
         return ext, f"{i18n.t('video')} (*{ext})|*{ext}|*.*|*.*"
     if msg_type == "audioMessage":
         mimetype = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
-        ext = "." + (mimetype.split("/")[-1].split(";")[0] if "/" in mimetype else "ogg")
+        ext = _status_media_extension(mimetype, ".ogg")
         return ext, f"{i18n.t('message_type_audio')} (*{ext})|*{ext}|*.*|*.*"
     return None
 
@@ -905,7 +934,24 @@ class StatusPanel(wx.Panel):
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 
     def _reconcile_my_status_cache(self, remote_my_statuses: list) -> None:
-        """Delete cached own stories absent from authoritative WhatsApp."""
+        """Delete cached own stories absent from authoritative WhatsApp.
+
+        Only runs when *remote_my_statuses* is non-empty. _fetch_statuses_
+        from_api() marks the fetch "ok" as soon as it gets back HTTP 200
+        with a JSON dict body — it has no way to tell "you genuinely have
+        no live stories right now" apart from "WPPConnect's StatusV3Store
+        hasn't finished rehydrating yet" (routine right after a reconnect),
+        both of which look identical here: an empty myStatus list. Treating
+        an empty-but-"ok" response as authoritative used to permanently
+        delete every locally cached own status — from memory AND SQLite,
+        via remove_failed_status_update() — on the next reconnect after
+        posting one, even though it was still live on WhatsApp. A genuinely
+        expired own status (the one real case this deliberately no longer
+        catches) is the far cheaper failure to leave uncorrected than
+        wiping a user's own live content out from under them.
+        """
+        if not remote_my_statuses:
+            return
         mw = self.main_window
         remote_ids = {
             (status.get("key") or {}).get("id")
@@ -1272,6 +1318,15 @@ class StatusPanel(wx.Panel):
             and self._current_status.get("messageType") in ("videoMessage", "audioMessage")
         )
 
+    def _use_status_media_viewer_dialog(self) -> bool:
+        """True (default) opens a status in the dedicated, full
+        MediaViewerDialog; False keeps the classic in-panel inline viewer
+        instead. Settings > Interface do usuário > "Mostrar os status em
+        player separado"."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "status_media_viewer_dialog", True
+        )
+
     def _on_status_list_key_down(self, event):
         """Space opens the focused status exactly like Enter.
 
@@ -1285,11 +1340,28 @@ class StatusPanel(wx.Panel):
         if idx < 0:
             return
         if idx == 0:
+            if not self._use_status_media_viewer_dialog():
+                self._status_list.Select(idx)
             self._open_my_status_dialog()
             return
         contact_idx = self._status_row_contact.get(idx, -1)
         if contact_idx < 0 or contact_idx >= len(self._status_contacts):
             return
+
+        if not self._use_status_media_viewer_dialog():
+            # Play/pause toggle deliberately checked BEFORE Select(idx) runs
+            # below: Select() re-fires EVT_LIST_ITEM_SELECTED even for an
+            # already-selected row, which would otherwise stop() the player
+            # out from under this toggle a moment later — see
+            # _is_current_status_playable()'s docstring.
+            if self._is_current_status_playable(contact_idx):
+                self._on_play_pause_video(None)
+                return
+            self._status_list.Select(idx)
+            self._selected_contact_idx = contact_idx
+            self._show_current_status()
+            return
+
         if contact_idx != self._selected_contact_idx:
             self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
@@ -1301,11 +1373,46 @@ class StatusPanel(wx.Panel):
     # ── Status list selection / activation ───────────────────────────────────
 
     def _on_status_contact_selected(self, event, announce: bool = False):
-        """Track focus only; selecting a row is not the same as viewing it."""
+        """Track focus. In classic (non-dialog) mode this also drives the
+        inline viewer directly — see _use_status_media_viewer_dialog()."""
         idx = event.GetIndex()
-        # The old inline viewer is deliberately not used for passive list
-        # navigation anymore. Keeping it hidden is also important for screen
-        # readers: arrowing the list should announce only the list item.
+
+        if not self._use_status_media_viewer_dialog():
+            if idx == 0:
+                # My Status row selected — hide the inline viewer; dialog
+                # opens on activate.
+                self._selected_contact_idx = -1
+                self._viewer_panel.Hide()
+                self.Layout()
+                return
+            contact_idx = self._status_row_contact.get(idx, -1)
+            if contact_idx < 0 or contact_idx >= len(self._status_contacts):
+                self._viewer_panel.Hide()
+                self.Layout()
+                return
+            # Only jump back to the FIRST status when selecting a genuinely
+            # different contact. This event also fires from Select() calls
+            # elsewhere (e.g. Space re-activating the row the list already
+            # has focused, while the user has since moved forward within
+            # the viewer via Ctrl+Left/Right) — resetting unconditionally
+            # meant pressing Space while sitting on "status 3 de 5" silently
+            # snapped it back to "1 de 5" for no reason.
+            if contact_idx != self._selected_contact_idx:
+                self._current_status_idx = 0
+            self._selected_contact_idx = contact_idx
+            # Defaults to silent: NVDA/JAWS already read the newly-focused
+            # list item on their own on plain arrow-key navigation (EVT_
+            # LIST_ITEM_SELECTED) — see _show_current_status()'s own
+            # docstring. Callers driven by an explicit action rather than
+            # mere focus movement (Space, Enter/double-click activation)
+            # pass announce=True.
+            self._show_current_status(announce=announce)
+            return
+
+        # Dialog mode: the old inline viewer is deliberately not used for
+        # passive list navigation. Keeping it hidden is also important for
+        # screen readers: arrowing the list should announce only the list
+        # item — the dialog only opens on an explicit activation.
         try:
             self._video_player.stop()
         except Exception:
@@ -1331,6 +1438,14 @@ class StatusPanel(wx.Panel):
         contact_idx = self._status_row_contact.get(idx, -1)
         if contact_idx < 0 or contact_idx >= len(self._status_contacts):
             return
+
+        if not self._use_status_media_viewer_dialog():
+            if self._is_current_status_playable(contact_idx):
+                self._on_play_pause_video(None)
+                return
+            self._on_status_contact_selected(event, announce=True)
+            return
+
         if contact_idx != self._selected_contact_idx:
             self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
@@ -1412,18 +1527,7 @@ class StatusPanel(wx.Panel):
         if msg_type in type_map:
             kind, default_ext, label_key = type_map[msg_type]
             inner = msg_obj.get(msg_type) or {}
-            mime = str(inner.get("mimetype") or "").split(";")[0].strip().lower()
-            ext = default_ext
-            if "/" in mime:
-                subtype = mime.split("/", 1)[1]
-                canonical = {
-                    "jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp",
-                    "gif": ".gif", "mp4": ".mp4", "webm": ".webm",
-                    "ogg": ".ogg", "opus": ".opus", "mpeg": ".mp3", "mp3": ".mp3",
-                    "mp4a-latm": ".m4a", "x-m4a": ".m4a", "aac": ".aac",
-                    "wav": ".wav", "x-wav": ".wav", "flac": ".flac",
-                }
-                ext = canonical.get(subtype, "." + subtype.split("+")[0])
+            ext = _status_media_extension(inner.get("mimetype"), default_ext)
             caption = str(inner.get("caption") or "")
 
             def _loader(st=status):
@@ -1597,8 +1701,18 @@ class StatusPanel(wx.Panel):
         from_me     = status_key.get("fromMe", False)
         if not from_me:
             status_id = status_key.get("id", "")
-            # A status is marked viewed only by MediaViewer after the user
-            # explicitly activates it; passive/legacy rendering must not do it.
+            # In dialog mode (the default), a status is marked viewed only
+            # by MediaViewer's on_item_opened callback, after the user
+            # explicitly activates it — see _on_viewer_status_opened().
+            # _show_current_status() itself is now reachable only in
+            # classic/inline mode (Settings > Interface do usuário >
+            # "Mostrar os status em player separado" unchecked — see
+            # _use_status_media_viewer_dialog()), where it is the ONLY
+            # place a status ever gets marked viewed, exactly like before
+            # that setting existed: arrowing to a contact there immediately
+            # shows (and views) their status, same as it always did.
+            if status_id:
+                self._mark_status_viewed(status_id)
             is_liked  = self._is_status_liked(status_id)
             i18n2     = self.main_window.i18n
             self._like_btn.SetLabel(

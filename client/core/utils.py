@@ -340,7 +340,8 @@ DEFAULT_SETTINGS = {
         "self_reference_mode": "eu",
         "self_reference_custom_word": "",
         "show_yesterday_label": True,
-        "show_link_previews": True
+        "show_link_previews": True,
+        "status_media_viewer_dialog": True
     },
     "audio_playback": {
         "audio_default_speed": 1.0

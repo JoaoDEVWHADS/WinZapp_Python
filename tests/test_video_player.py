@@ -26,6 +26,7 @@ queue/flag instead.
 """
 
 import queue
+import time
 
 import pytest
 
@@ -517,3 +518,54 @@ class TestOnFrameSizeCallback:
         player._frame_queue.put(frame)
 
         player._on_timer(None)  # must not raise
+
+
+class TestSetPositionDoesNotBlockTheCallingThread:
+    """Regression: set_position() is called directly from wx seek-slider/
+    shortcut handlers (media_viewer.py, conversations.py) on the UI thread.
+    It used to run _kill_ffmpeg_locked() — which blocks on
+    proc.wait(timeout=2) — synchronously as part of that same call, so
+    seeking past a slow-to-reap ffmpeg process could freeze the whole
+    window (NVDA/JAWS included, in this accessibility-first app) for up to
+    two seconds. The kill+restart now happens on a background thread; only
+    the (cheap) generation bump stays synchronous, since _read_frames()'s
+    loop needs to see it change before set_position() returns."""
+
+    class _FakeAudioCtrl:
+        def set_position(self, pos):
+            pass
+
+    class _SlowToReapProcess:
+        """Simulates proc.wait(timeout=2) actually taking close to the full
+        timeout — the exact case that used to freeze the UI thread."""
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            time.sleep(min(0.3, timeout or 0.3))
+
+    def test_seek_returns_before_the_old_process_finishes_dying(self, wx_app, monkeypatch):
+        player = _make_player(wx_app)
+        player._audio_stream = self._FakeAudioCtrl()
+        player.is_playing = True
+        player._video_path = "fake.mp4"
+        player._ffmpeg_proc = self._SlowToReapProcess()
+        monkeypatch.setattr(player, "_start_video_pipe", lambda *a, **k: None)
+
+        generation_before = player._generation
+        started = time.monotonic()
+        player.set_position(1000)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.2, f"set_position() blocked the caller for {elapsed:.3f}s"
+        # The generation bump itself must still be synchronous — a frame
+        # from the old pipe arriving right after this call has to be
+        # recognisable as stale immediately, not after the background
+        # thread eventually gets around to it.
+        assert player._generation == generation_before + 1
+
+        # Let the background thread actually finish before the test exits.
+        time.sleep(0.5)

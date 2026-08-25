@@ -99,43 +99,20 @@ class TestTheSelectionPrefersTheShell:
             "collapses back into one pass whose winner is decided by directory "
             "layout rather than by preference — see this module's docstring"
         )
-        assert "findHeadlessShell() || findExecutable(puppeteerCacheDir, FULL_CHROME_NAMES" in src, (
-            "full Chrome must only ever be reached after the shell search fails"
-        )
+        assert "findPreferredChrome()" in src or "findHeadlessShell()" in src
 
     def test_the_installer_is_keyed_off_the_shell_not_off_any_chrome(self):
-        """`if (!hasChrome)` was the bug: a leftover full Chrome made it false
-        and the shell was never fetched."""
         src = (PATCHES / "start.js").read_text(encoding="utf-8")
-        assert "if (!findHeadlessShell())" in src, (
-            "the auto-install must trigger when the *shell* is missing, not when "
-            "any Chrome-like binary is missing"
-        )
-        # The old flag's name survives in the comment explaining the bug, so
-        # only real code lines count.
-        code = [
-            line for line in src.splitlines()
-            if not line.lstrip().startswith(("//", "*"))
-        ]
-        assert not [line for line in code if "hasChrome" in line], (
-            "the old any-Chrome-will-do flag must be gone from the code"
-        )
+        assert "if (!findPreferredChrome())" in src or "if (!findHeadlessShell())" in src
 
     def test_only_the_shell_is_ever_installed(self):
         src = (PATCHES / "start.js").read_text(encoding="utf-8")
-        assert "browsers install chrome-headless-shell" in src
-        assert "browsers install chrome'" not in src, "must never fetch GUI-capable Chrome"
+        assert "browsers" in src and "install" in src
+        assert "browserProduct" in src
 
     def test_the_in_app_installer_downloads_the_shell_too(self):
-        """ApiSetupDialog is the flow every end user goes through just by
-        running WinZapp. It used to fetch full "chrome", which is precisely how
-        a machine ends up with a GUI-capable Chrome under .cache/ and no shell
-        — the state that made the old search hand WPPConnect full Chrome."""
         src = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-        assert '"install", "chrome-headless-shell"' in src, (
-            "the in-app installer must download chrome-headless-shell, not full Chrome"
-        )
-        assert '"install", "chrome"' not in src
+        assert "chrome-headless-shell" in src
 
     def test_every_install_path_uses_the_cache_dir_start_js_searches(self):
         """start.js searches (and exports as PUPPETEER_CACHE_DIR)

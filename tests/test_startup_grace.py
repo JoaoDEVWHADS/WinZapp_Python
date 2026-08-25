@@ -97,6 +97,9 @@ class _Stub:
     def _set_status(self, text):
         self.statuses.append(text)
 
+    def _set_preparing_status_if_idle(self):
+        pass
+
     def output(self, text, interrupt=False):
         self.spoken.append(text)
 

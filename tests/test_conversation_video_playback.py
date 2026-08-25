@@ -81,6 +81,7 @@ class _Stub:
     _hide_all_media_controls     = ConversationsPanel._hide_all_media_controls
     _update_links_panel          = lambda self, links: None
     _update_mentions_panel       = lambda self, mentions: None
+    _hide_media_transfer_gauge   = lambda self: None
 
     def __init__(self, sorted_messages, is_playing=False, current_video_msg_id=None):
         self.main_window   = _FakeMainWindow()

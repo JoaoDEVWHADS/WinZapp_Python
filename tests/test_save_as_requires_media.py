@@ -31,7 +31,9 @@ class _FakeI18n:
     def t(self, key):
         return {
             "save_as_nothing_to_save": "Esta mensagem não tem arquivo para salvar",
-        }[key]
+            "default_filename_voice_message": "mensagem_de_voz",
+            "default_filename_audio": "audio",
+        }.get(key, key)
 
 
 class _FakeMainWindow:
@@ -154,6 +156,9 @@ def test_the_saveable_set_is_what_the_context_menu_offers():
 
 
 class _FilenameStub:
+    def __init__(self):
+        self.main_window = _FakeMainWindow()
+
     _resolve_media_filename = ConversationsPanel._resolve_media_filename
 
 
