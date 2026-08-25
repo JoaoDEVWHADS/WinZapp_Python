@@ -8229,17 +8229,31 @@ class ConversationsPanel(wx.Panel):
                 header = sender
 
             pieces = [f"{header}: {body}"]
+        is_forwarded = not self._is_system_event(msg) and self._is_message_forwarded(msg)
         if msg.get("starred"):
             pieces[0] = f"★ {pieces[0]}"
         if msg.get("pinInChat"):
             pieces[0] = f"📌 {pieces[0]}"
+        # Settings > Interface do usuário > "Anunciar 'Encaminhada' no início
+        # da mensagem" (default off). Off keeps the long-standing behavior of
+        # a trailing ", Encaminhada" clause below, same position as "Editada"
+        # and the delivery status. On moves it to the very front — ahead of
+        # the sender, and even ahead of the star/pin markers above — so a
+        # screen reader user arrowing quickly through a busy forwarded chat
+        # (a forward chain, a viral message) hears it's forwarded before
+        # anything else, instead of only after the sender and full body.
+        if is_forwarded and self.main_window.settings.get("user_interface", {}).get(
+            "forwarded_prefix_enabled", False
+        ):
+            pieces[0] = f"{i18n.t('status_forwarded')}, {pieces[0]}"
+            is_forwarded = False  # already announced; don't also append the suffix below
         if time_str:
             pieces.append(f", {time_str}")
         if status:
             pieces[-1] += f", {status}"
         if msg.get("_edited") and not self._is_system_event(msg):
             pieces[-1] += f", {i18n.t('status_edited')}"
-        if not self._is_system_event(msg) and self._is_message_forwarded(msg):
+        if is_forwarded:
             pieces[-1] += f", {i18n.t('status_forwarded')}"
 
         # Append quoted message preview (if this is a reply)

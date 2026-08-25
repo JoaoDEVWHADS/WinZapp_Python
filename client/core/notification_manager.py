@@ -208,6 +208,27 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
                 
             if name and name != placeholder and name != jid:
                 text = text.replace(f"@{placeholder}", f"@{name}", 1)
+
+        # Link preview (title/description WhatsApp itself generated for the
+        # URL): mirrors ConversationsPanel._get_message_content()'s own
+        # handling — same "preview, then the link" order, gated by the same
+        # Settings > Interface do usuário > "Mostrar prévias de links"
+        # toggle — so a link with a preview reads the same whether it shows
+        # up in the message list or in the toast banner. Without this the
+        # toast only ever showed the raw pasted URL, never what it was a
+        # preview of.
+        show_previews = True
+        if main_window is not None:
+            show_previews = main_window.settings.get("user_interface", {}).get(
+                "show_link_previews", True
+            )
+        if show_previews:
+            preview_title = (ext.get("title") or "").strip()
+            preview_desc = (ext.get("description") or "").strip()
+            preview_bits = [b for b in (preview_title, preview_desc) if b]
+            if preview_bits:
+                preview_str = ". ".join(preview_bits)
+                text = f"{preview_str}. {text}" if text else preview_str
         return text
 
     # ── Audio ─────────────────────────────────────────────────────────────────

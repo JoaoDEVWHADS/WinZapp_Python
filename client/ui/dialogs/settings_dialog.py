@@ -494,6 +494,13 @@ class SettingsDialog(wx.Dialog):
             self._show_link_previews_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._forwarded_prefix_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_forwarded_prefix_label")
+        )
+        ui_sizer.Add(
+            self._forwarded_prefix_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._conversation_video_media_viewer_dialog_cb = wx.CheckBox(
             self._ui_page, label=i18n.t("ui_conversation_video_media_viewer_dialog_label")
         )
@@ -999,6 +1006,11 @@ class SettingsDialog(wx.Dialog):
             "show_link_previews", True
         )
         self._show_link_previews_cb.SetValue(bool(show_link_previews))
+
+        forwarded_prefix_enabled = self.main_window.settings.get("user_interface", {}).get(
+            "forwarded_prefix_enabled", False
+        )
+        self._forwarded_prefix_cb.SetValue(bool(forwarded_prefix_enabled))
 
         conversation_video_media_viewer_dialog = self.main_window.settings.get(
             "user_interface", {}
@@ -1749,6 +1761,9 @@ class SettingsDialog(wx.Dialog):
             "show_link_previews"
         ] = self._show_link_previews_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
+            "forwarded_prefix_enabled"
+        ] = self._forwarded_prefix_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
             "conversation_video_media_viewer_dialog"
         ] = self._conversation_video_media_viewer_dialog_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
@@ -2070,6 +2085,7 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
         self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
         self._show_link_previews_cb.SetLabel(i18n.t("ui_show_link_previews_label"))
+        self._forwarded_prefix_cb.SetLabel(i18n.t("ui_forwarded_prefix_label"))
         self._conversation_video_media_viewer_dialog_cb.SetLabel(
             i18n.t("ui_conversation_video_media_viewer_dialog_label")
         )

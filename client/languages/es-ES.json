@@ -649,6 +649,7 @@
     "ui_selected_announce_position_end": "Al final del mensaje / chat",
     "ui_show_yesterday_label": "Mostrar los mensajes de ayer con la fecha omitida (ayer)",
     "ui_show_link_previews_label": "Mostrar vistas previas de enlaces en la lista de mensajes",
+    "ui_forwarded_prefix_label": "Anunciar \"Reenviada\" al inicio del mensaje, antes del remitente",
     "ui_conversation_video_media_viewer_dialog_label": "Mostrar los vídeos de las conversaciones en un reproductor separado (abre un nuevo diálogo)",
     "ui_status_media_viewer_dialog_label": "Mostrar los estados en un reproductor separado (abre un nuevo diálogo)",
     "yesterday_at": "Ayer a las {time}",

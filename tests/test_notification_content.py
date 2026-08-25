@@ -128,6 +128,68 @@ class TestFormatNotificationBodyCoversRealContentTypes:
         assert format_notification_body(empty, None, _FakeI18n()) == "[list-reply]"
 
 
+class TestExtendedTextMessageLinkPreviewInToastBody:
+    """Reported live: a link with a preview (title/description WhatsApp
+    generated for the URL) showed the preview text in the conversation list
+    (ConversationsPanel._get_message_content()) but the toast notification
+    for the same message only ever showed the raw pasted URL — the toast
+    body-builder never read extendedTextMessage.title/.description at all.
+    """
+
+    class _MW:
+        def __init__(self, show_link_previews=True):
+            self.settings = {"user_interface": {"show_link_previews": show_link_previews}}
+            self._lid_to_phone = {}
+
+        @staticmethod
+        def _is_self_jid(jid):
+            return False
+
+    def test_preview_title_and_description_precede_the_link(self):
+        msg = _msg("extendedTextMessage", {"extendedTextMessage": {
+            "text": "https://example.com/artigo",
+            "title": "Exemplo",
+            "description": "Um artigo de exemplo",
+        }})
+        body = format_notification_body(msg, self._MW(), _FakeI18n())
+        assert body == "Exemplo. Um artigo de exemplo. https://example.com/artigo"
+
+    def test_only_title_is_shown_when_there_is_no_description(self):
+        msg = _msg("extendedTextMessage", {"extendedTextMessage": {
+            "text": "https://example.com",
+            "title": "Exemplo",
+        }})
+        body = format_notification_body(msg, self._MW(), _FakeI18n())
+        assert body == "Exemplo. https://example.com"
+
+    def test_no_preview_fields_leaves_the_text_untouched(self):
+        msg = _msg("extendedTextMessage", {"extendedTextMessage": {
+            "text": "https://example.com",
+        }})
+        body = format_notification_body(msg, self._MW(), _FakeI18n())
+        assert body == "https://example.com"
+
+    def test_disabled_setting_suppresses_the_preview(self):
+        msg = _msg("extendedTextMessage", {"extendedTextMessage": {
+            "text": "https://example.com",
+            "title": "Exemplo",
+            "description": "Um artigo de exemplo",
+        }})
+        body = format_notification_body(msg, self._MW(show_link_previews=False), _FakeI18n())
+        assert body == "https://example.com"
+
+    def test_no_main_window_defaults_to_showing_the_preview(self):
+        """format_notification_body() is called with main_window=None in
+        some tests/paths above; the setting must default the same way
+        ConversationsPanel's own check does (default True)."""
+        msg = _msg("extendedTextMessage", {"extendedTextMessage": {
+            "text": "https://example.com",
+            "title": "Exemplo",
+        }})
+        body = format_notification_body(msg, None, _FakeI18n())
+        assert body == "Exemplo. https://example.com"
+
+
 class TestFormatNotificationTitleGroupName:
     def test_uses_chat_name_when_present(self):
         class _MW:

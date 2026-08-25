@@ -649,6 +649,7 @@
     "ui_selected_announce_position_end": "Na końcu wiadomości / czatu",
     "ui_show_yesterday_label": "Pokazuj wczorajsze wiadomości z pominiętą datą (wczoraj)",
     "ui_show_link_previews_label": "Pokazuj podglądy linków na liście wiadomości",
+    "ui_forwarded_prefix_label": "Ogłaszaj \"Przekazano dalej\" na początku wiadomości, przed nadawcą",
     "ui_conversation_video_media_viewer_dialog_label": "Pokazuj filmy w rozmowach w osobnym odtwarzaczu (otwiera nowe okno)",
     "ui_status_media_viewer_dialog_label": "Pokazuj statusy w osobnym odtwarzaczu (otwiera nowe okno)",
     "yesterday_at": "Wczoraj o {time}",
