@@ -112,7 +112,7 @@ class TestTheSelectionPrefersTheShell:
 
     def test_the_in_app_installer_downloads_the_shell_too(self):
         src = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-        assert "browser_product" in src
+        assert "chrome-headless-shell" in src
 
     def test_every_install_path_uses_the_cache_dir_start_js_searches(self):
         """start.js searches (and exports as PUPPETEER_CACHE_DIR)

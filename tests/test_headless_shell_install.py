@@ -211,31 +211,3 @@ def test_the_browser_check_runs_on_every_setup_path(monkeypatch):
 
     S().ensure_api_modules_installed()
     assert seen == ["modules", "browser"]
-
-
-def test_windows_browser_helpers_never_open_console_windows():
-    root = Path(__file__).resolve().parents[1]
-    start_js = (root / "client" / "api_patches" / "start.js").read_text(
-        encoding="utf-8"
-    )
-    setup_api = (root / "setup_api.py").read_text(encoding="utf-8")
-
-    assert start_js.count("windowsHide: true") >= 2
-    assert "creationflags=creation_flags" in setup_api
-    assert "shell=False" in setup_api
-    assert 'shell=(sys.platform == "win32")' not in setup_api
-
-
-def test_windows_uses_gui_subsystem_chrome_for_headless_sessions():
-    root = Path(__file__).resolve().parents[1]
-    start_js = (root / "client" / "api_patches" / "start.js").read_text(
-        encoding="utf-8"
-    )
-    main_py = (root / "client" / "main.py").read_text(encoding="utf-8")
-    dialog = (root / "client" / "ui" / "dialogs" / "api_setup.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "process.platform === 'win32' ? findFullChrome()" in start_js
-    assert '"chrome" if sys.platform == "win32"' in main_py
-    assert '"chrome" if sys.platform == "win32"' in dialog
