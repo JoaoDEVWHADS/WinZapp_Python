@@ -20,6 +20,7 @@ MainWindow is a wx.Frame and cannot be instantiated without a running wx.App,
 so the method is bound to a plain stub, as elsewhere in this suite.
 """
 
+import threading
 import types
 
 import pytest
@@ -49,6 +50,7 @@ class _Stub:
         self.contacts = {}
         self._lid_to_phone = {}
         self._phone_to_lid = {}
+        self._contact_resolution_lock = threading.Lock()
         self.refreshes = 0
         self.message_refreshes = 0
         self.mapped_calls = []
