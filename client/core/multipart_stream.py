@@ -11,6 +11,15 @@ from core.message_queue import MessageCancelled
 ProgressCallback = Callable[[float], Any]
 
 
+class MultipartSourceChanged(RuntimeError):
+    """The file changed size between preparing the body and streaming it.
+
+    Deliberately not a MessageCancelled: the send genuinely failed and the
+    caller should report it, rather than treating it as the user's own
+    cancellation.
+    """
+
+
 def _quote_disposition(value: Any) -> str:
     text = str(value).replace("\r", " ").replace("\n", " ")
     return text.replace("\\", "\\\\").replace('"', '\\"')
@@ -108,6 +117,22 @@ class StreamingMultipartBody:
             pass
 
     def __iter__(self) -> Iterator[bytes]:
+        # Content-Length was computed from the size measured in __init__, but
+        # the bytes are read here — and this body is replayable, so a retry can
+        # run minutes after that measurement. If the file changed in between,
+        # streaming it would contradict the length already announced in the
+        # headers: the server either blocks waiting for bytes that never come
+        # or silently accepts a truncated multipart whose closing boundary
+        # landed inside the file part. Both surface far from the cause, so
+        # refuse here instead, while the reason is still obvious.
+        current_size = os.path.getsize(self.file_path)
+        if current_size != self.file_size:
+            raise MultipartSourceChanged(
+                f"{self.file_path} was {self.file_size} bytes when this upload "
+                f"was prepared and is {current_size} now; Content-Length "
+                f"({self._content_length}) can no longer match the body."
+            )
+
         self._report(0.0)
         yield self._prefix
 
@@ -124,6 +149,16 @@ class StreamingMultipartBody:
                 sent += len(chunk)
                 if self.file_size:
                     self._report(sent / self.file_size)
+
+        # A file whose size still matches can still have been rewritten with
+        # different content of the same length; that is indistinguishable from
+        # here and not what this guard is for. What it does catch is the short
+        # read: fewer bytes arrived than the header promised.
+        if sent != self.file_size:
+            raise MultipartSourceChanged(
+                f"{self.file_path} yielded {sent} bytes but {self.file_size} "
+                f"were announced; the file was truncated mid-upload."
+            )
 
         self._report(1.0)
         yield self._suffix

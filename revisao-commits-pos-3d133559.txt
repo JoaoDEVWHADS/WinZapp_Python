@@ -13,13 +13,14 @@ STATUS DEPOIS DAS CORREÇÕES (branch fixs)
 ────────────────────────────────────────────────────────────────
   item 1  RESOLVIDO   setup_api.py rodado; as 6 falhas de deriva sumiram
   item 2  CORRIGIDO   tautologia removida de test_api_patches_in_sync.py
-  item 3  ABERTO      MediaGatingUtils re-embrulhado a cada envio
+  item 3  CORRIGIDO   marcador de idempotência + migração do bloco antigo
   item 4  ABERTO      três observações em link_preview.py
-  item 5  ABERTO      Content-Length congelado em multipart_stream.py
+  item 5  CORRIGIDO   corpo do multipart confere o tamanho que anunciou
   item 6  ABERTO      discussão de processo
   item 7  CORRIGIDO   NOVO — descoberto ao rodar a suíte já sincronizada
+  item 8  FEITO       guardas de seleção de browser reconstruídas
 
-Suíte na fixs após as correções: 3504 passando, 0 falhando.
+Suíte na fixs após as correções: 3513 passando, 0 falhando.
 
 FORMA DO LOTE
   985160c5  feat: consolidate features, UI improvements and API stability fixes
@@ -123,7 +124,7 @@ Ver item 7 para o que estava por baixo.
 
 
 ================================================================
-3. PROBLEMA REAL — MediaGatingUtils re-embrulhado a cada envio
+3. MediaGatingUtils re-embrulhado a cada envio  [CORRIGIDO na fixs]
 ================================================================
 Severidade: média | Commit: 985160c5
 
@@ -159,7 +160,39 @@ usa para outras coisas (`window.__winzappFileTransfers`):
 tests/test_sender_layer_migration_wired.py tem
 `test_setup_api_is_idempotent_on_already_current_content`, mas ele cobre
 idempotência do PATCH NO ARQUIVO-FONTE, não do embrulho em runtime — são
-coisas diferentes e a segunda não está coberta.
+coisas diferentes e a segunda não estava coberta.
+
+CORREÇÃO APLICADA
+
+Marcador `__winzappUploadLimitPatched` no próprio objeto MediaGatingUtils:
+testado antes de embrulhar, marcado depois. Nas três cópias do bloco (as
+duas dentro de PATCHED_SEND_FILE — ramo chunked e ramo base64 — e a de
+_BROWSER_DOCUMENT_LIMIT_PATCH, usada para injetar num node_modules que
+ainda não tem o override).
+
+Junto veio a parte que era fácil esquecer: máquinas já patchadas com a
+versão SEM marcador. Esse texto não é entrada de ALL_PATCHES, então o
+laço de pares literais não o toca, e a injeção só roda quando
+`WPP.whatsapp?.MediaGatingUtils` está AUSENTE — ou seja, sem migração
+explícita elas ficariam no bloco vazante para sempre. Exatamente a
+armadilha que o d025b062 (item 4 da mensagem dele) já tinha encontrado
+com a variante chunked intermediária.
+
+Adicionados `_LEGACY_DOCUMENT_LIMIT_PATCH` (o texto antigo, guardado só
+para ser migrado) e um passo em `patch_sender_layer_source()` que troca
+antigo -> novo nas duas profundidades de indentação em que o bloco
+aparece. O helper `_deepen()` substituiu o `.replace(20 espaços, 24
+espaços)` que estava inline.
+
+Cobertura nova em tests/test_large_file_patch.py
+(TestTheUploadLimitOverrideInstallsItselfOnlyOnce): que toda cópia do
+bloco TESTA e SETA o marcador — uma versão que só faça um dos dois lê
+como corrigida e vaza igual —, que o bloco injetado carrega o marcador,
+que a variante sem marcador é migrada nas duas indentações, e que migrar
+um fonte já atualizado não duplica nada.
+
+Validado por mutação: removendo o SET do marcador de uma das cópias, dois
+testes falham.
 
 
 ================================================================
@@ -202,7 +235,7 @@ fetch nativo do WA-JS está bem justificada no docstring. Três pontos:
 
 
 ================================================================
-5. client/core/multipart_stream.py — Content-Length congelado
+5. multipart_stream.py — Content-Length congelado  [CORRIGIDO na fixs]
 ================================================================
 Severidade: baixa | Commit: 985160c5
 
@@ -217,9 +250,33 @@ não bate com o Content-Length anunciado: o servidor fica esperando bytes
 que não vêm, ou corta o multipart no meio. Falha silenciosa e difícil de
 diagnosticar.
 
-Barato de fechar: reconferir `os.path.getsize()` no início de `__iter__`
-e levantar se divergir do valor anunciado — melhor um erro claro do que
-um upload truncado.
+CORREÇÃO APLICADA
+
+Duas checagens e uma exceção própria, `MultipartSourceChanged`:
+
+  • no início de `__iter__`, reconfere `os.path.getsize()` contra o
+    tamanho medido no `__init__` e recusa ANTES de mandar qualquer byte —
+    nada de requisição pela metade na rede;
+  • no fim, confere que o total efetivamente lido bate com o anunciado,
+    para o caso de o arquivo ser truncado durante o próprio streaming.
+
+A exceção é deliberadamente RuntimeError e não MessageCancelled: o envio
+falhou de verdade e o chamador deve reportar, não tratar como
+cancelamento do usuário. `send_media_attachment` já a captura no
+`except Exception` e a classifica normalmente; um retry reconstrói o
+corpo com um getsize novo, então a segunda tentativa funciona com o
+tamanho atual — que é o comportamento certo.
+
+Não pega arquivo reescrito com conteúdo de mesmo tamanho, e nem tenta:
+isso é indistinguível daqui e não é o que a guarda existe para cobrir.
+
+Cobertura nova em tests/test_streaming_multipart_upload.py
+(TestTheBodyMatchesTheLengthItAnnounced): arquivo que cresceu, que
+encolheu, que não mudou (e continua replayable para retry), e arquivo de
+zero byte — este último porque 0 é exatamente o valor em que uma guarda
+descuidada escrita como `if not size` tropeçaria.
+
+Validado por mutação: desligando a checagem de tamanho, os testes falham.
 
 O resto do módulo está correto, incluindo o detalhe fino do
 `MessageCancelled` que o d025b062 consertou (deixar essa exceção
@@ -414,16 +471,17 @@ i18n
 ================================================================
 PRIORIDADE SUGERIDA
 ================================================================
-Já feito (branch fixs, commit desta revisão):
+Já feito na branch fixs:
   ✔ `python setup_api.py` — 6 falhas de deriva resolvidas.              (item 1)
   ✔ ` or bool(version)` removido; guarda volta a poder falhar.          (item 2)
+  ✔ Marcador de idempotência + migração no patch do MediaGatingUtils.   (item 3)
+  ✔ Corpo do multipart confere o tamanho que anunciou.                  (item 5)
   ✔ ApiSetupDialog baixa o browser que o start.js realmente lança.      (item 7)
   ✔ Guardas de seleção de browser reconstruídas e testadas por mutação. (item 8)
 
 Em aberto, por ordem sugerida:
-  1. Marcador de idempotência no patch do MediaGatingUtils.             (item 3)
-  2. Aparar pontuação final no regex de URL da prévia.                  (item 4b)
-  3. Reconferir getsize() no __iter__ do multipart.                     (item 5)
+  1. Aparar pontuação final no regex de URL da prévia.                  (item 4b)
+  2. `response = None` antes do try em link_preview.py.                 (item 4a)
+  3. Decidir se a busca da prévia deve respeitar a opção de exibição.   (item 4c)
   4. Decidir sobre o CREATE_NO_WINDOW revertido no setup_api.py.        (item 7, nota)
-  5. `response = None` antes do try em link_preview.py.                 (item 4a)
-  6. Conversar sobre o tamanho do próximo lote.                         (item 6)
+  5. Conversar sobre o tamanho do próximo lote.                         (item 6)
