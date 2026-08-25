@@ -136,6 +136,40 @@ class WebSocketClient:
 
         # Debounce timer for on_disconnect() — see that method.
         self._disconnect_timer = None
+        self._locally_sent_reaction_ids = {}
+
+    def _consume_own_reaction_echo(self, msg):
+        """True only for an echo of a reaction just sent by WinZapp."""
+        reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+        signature = (str((reaction.get("key") or {}).get("id", "")),
+                     (reaction.get("text") or "").strip())
+        reaction_id = str((msg.get("key") or {}).get("id", ""))
+        now = time.monotonic()
+        local_ids = getattr(self, "_locally_sent_reaction_ids", None)
+        if local_ids is None:
+            local_ids = self._locally_sent_reaction_ids = {}
+        self._locally_sent_reaction_ids = {
+            event_id: created_at
+            for event_id, created_at in local_ids.items()
+            if now - created_at <= 60
+        }
+        if reaction_id and reaction_id in self._locally_sent_reaction_ids:
+            return True
+        pending = getattr(self.main_window, "_pending_own_reactions", None)
+        lock = getattr(self.main_window, "_pending_own_reactions_lock", None)
+        if pending is None or lock is None:
+            return False
+        with lock:
+            created_at = pending.get(signature)
+            if created_at is None:
+                return False
+            if now - created_at > 60:
+                pending.pop(signature, None)
+                return False
+            pending.pop(signature, None)
+            if reaction_id:
+                self._locally_sent_reaction_ids[reaction_id] = now
+            return True
 
     def _clean_jid(self, jid_val):
         if not jid_val:
@@ -782,10 +816,11 @@ class WebSocketClient:
             # We distinguish the two cases via _own_sent_ids, which is populated
             # by MessageQueue immediately after the API returns the real message ID.
             if msg.get("key", {}).get("fromMe", False):
-                # Own reactions are applied optimistically in _on_own_reaction_sent;
-                # suppress the WebSocket echo so the reaction count isn't doubled.
                 if msg.get("messageType") == "reactionMessage":
-                    return
+                    # fromMe also covers reactions made on linked devices. Only
+                    # suppress one that matches a reaction WinZapp just sent.
+                    if self._consume_own_reaction_echo(msg):
+                        return
                 msg_id = msg.get("key", {}).get("id", "")
                 _lock = getattr(self.main_window, "_own_sent_ids_lock", None)
                 if _lock is not None:
@@ -1406,15 +1441,13 @@ class WebSocketClient:
             reactor_from_me, r_chat, reaction_id, reactor_participant = _split(
                 reaction_serialized or ""
             )
-            if reactor_from_me:
-                return  # own reaction — applied optimistically, ignore the echo
             if not chat_jid:
                 chat_jid = r_chat
 
             normalized = {
                 "key": {
                     "remoteJid": chat_jid,
-                    "fromMe": False,
+                    "fromMe": reactor_from_me,
                     "id": reaction_id,
                 },
                 "pushName": "",
@@ -1433,6 +1466,8 @@ class WebSocketClient:
             }
             if reactor_participant:
                 normalized["key"]["participant"] = reactor_participant
+            if reactor_from_me and self._consume_own_reaction_echo(normalized):
+                return
             wx.CallAfter(self.main_window.on_new_message, normalized)
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_reaction error")

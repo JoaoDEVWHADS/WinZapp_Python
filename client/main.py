@@ -1161,6 +1161,11 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
+        # Reactions made by WinZapp are rendered optimistically. Keep their
+        # target/emoji briefly so the WebSocket client suppresses only that
+        # echo, not a fromMe reaction made on the phone or another device.
+        self._pending_own_reactions: dict = {}
+        self._pending_own_reactions_lock = threading.Lock()
         # Consecutive failed network probes (see check_whatsapp_reachable).
         self._offline_probe_strikes = 0
         # Consecutive not-yet-connected results from _set_wa_connected() this
@@ -15862,6 +15867,13 @@ class MainWindow(wx.Frame):
             "msgId": self._serialize_msg_id(remote_jid, msg_key),
             "reaction": emoji
         }
+        reaction_signature = (str(msg_key.get("id", "")), emoji)
+        with self._pending_own_reactions_lock:
+            now = time.monotonic()
+            for key, created_at in list(self._pending_own_reactions.items()):
+                if now - created_at > 60:
+                    self._pending_own_reactions.pop(key, None)
+            self._pending_own_reactions[reaction_signature] = now
         try:
             response = api_post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
@@ -15872,10 +15884,14 @@ class MainWindow(wx.Frame):
                 # longer than the old truncation allowed.
                 logging.error("[send_reaction] HTTP %s: %s",
                               response.status_code, response.text[:1500])
+                with self._pending_own_reactions_lock:
+                    self._pending_own_reactions.pop(reaction_signature, None)
                 return False
             return True
         except Exception as exc:
             logging.error("[send_reaction] exception: %s", exc)
+            with self._pending_own_reactions_lock:
+                self._pending_own_reactions.pop(reaction_signature, None)
             return False
 
     def pin_message(self, remote_jid: str, msg_key: dict, pin: bool = True) -> bool:
