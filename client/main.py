@@ -9859,9 +9859,24 @@ class MainWindow(wx.Frame):
             # list-chats was captured before the phone finished its transfer.
             # Refresh it now so chats delivered during the wait are part of
             # this same sync instead of waiting for a later health-check round.
-            self.get_remote_chats()
-            self.chats = self.normalize_chats(self.chats)
-            wx.CallAfter(self.set_chats)
+            #
+            # get_remote_chats() takes the dict to merge into and *returns*
+            # the merged result; it does not mutate self.chats. Calling it
+            # bare raised TypeError on every single run that got this far,
+            # which _run_sync()'s own `except Exception` then swallowed into
+            # one "[start_sync] Unhandled error during sync" line — so this
+            # branch, the only success path out of the wait above, never
+            # reached the message phase at all. Combined with the deferral
+            # `return` above (the failure path), sync_remote_chats() could
+            # not run at all on any session whose RECENT pass was still
+            # incomplete at sync time, i.e. any account with a real backlog.
+            # None means "the chat list is unknown", never "there are no
+            # chats" — keep what we already had in that case.
+            refreshed = self.get_remote_chats(dict(self.chats), persist_full=False,
+                                              notify_errors=False)
+            if refreshed is not None:
+                self.chats = self.normalize_chats(refreshed)
+                wx.CallAfter(self.set_chats)
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13522,6 +13537,34 @@ class MainWindow(wx.Frame):
         except (AttributeError, TypeError, ValueError):
             return 200
 
+    def _history_session_is_gone(self) -> bool:
+        """Whether an unreadable /history-sync-status means "stop", not "retry".
+
+        fetch_history_sync_status() answers None for two very different
+        things, and every caller has to tell them apart the same way:
+
+          * the session really is gone — WPPConnect reported "disconnected",
+            our own connection flag is down, or the user went offline. Nothing
+            more is coming; give up.
+          * a transient read failure — most commonly a 503
+            ``session_not_ready`` / "WAPI is not defined" from the
+            statusConnection middleware, which exists precisely to say "the
+            page is not ready *yet*" rather than "the session is dead" (see
+            api_patches/src/middleware/statusConnection.ts). WhatsApp Web
+            re-injects WAPI routinely while a big history transfer runs, so
+            this shows up mid-wait on exactly the accounts the wait matters
+            for. Also covers an HTTP timeout to the local API.
+
+        Shared so the two callers cannot drift: they did, and the one that
+        treated a transient failure as fatal took the whole message phase down
+        with it.
+        """
+        return bool(
+            getattr(self, "_history_status_disconnected", False)
+            or not getattr(self, "_wa_connected", False)
+            or getattr(self, "offline_mode", False)
+        )
+
     def refresh_history_still_landing(self, context: str = "") -> bool:
         """Note whether more history is still on its way into WhatsApp Web.
 
@@ -13546,11 +13589,7 @@ class MainWindow(wx.Frame):
         """
         status = self.fetch_history_sync_status()
         if status is None:
-            disconnected = (
-                getattr(self, "_history_status_disconnected", False)
-                or not getattr(self, "_wa_connected", False)
-                or getattr(self, "offline_mode", False)
-            )
+            disconnected = self._history_session_is_gone()
             if disconnected:
                 self._history_still_landing = False
                 logging.warning(
@@ -13580,14 +13619,35 @@ class MainWindow(wx.Frame):
         return landing
 
     def wait_for_restarted_history_sync(self, timeout: int = 600) -> bool:
-        """Wait until a manually restarted RECENT pass is actually complete."""
+        """Wait until a manually restarted RECENT pass is actually complete.
+
+        Returning False costs the caller its entire message phase (see
+        _run_sync()'s deferral branch), so a read that merely *failed* must
+        not be mistaken for a pass that will not finish. A single 503
+        ``session_not_ready`` used to end the wait outright: in the captured
+        session it fired 5m20s into a 10-minute budget and deferred a sync
+        whose RECENT pass went on to complete 10 minutes later. Only a session
+        that is actually gone (_history_session_is_gone()) ends the wait early
+        now; anything else keeps polling until the deadline, which is what
+        bounds this in the first place.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._should_abort_sync_for_offline():
                 return False
             status = self.fetch_history_sync_status(timeout=10)
             if not isinstance(status, dict):
-                return False
+                if self._history_session_is_gone():
+                    logging.warning(
+                        "[history-sync] Restarted RECENT wait: session is gone; "
+                        "stopping the wait.")
+                    return False
+                logging.warning(
+                    "[history-sync] Restarted RECENT wait: status unreadable but "
+                    "the session is still up — treating it as transient, %.0fs of "
+                    "budget left.", max(0.0, deadline - time.monotonic()))
+                time.sleep(2)
+                continue
             counts = status.get("storeCounts") or {}
             message_count = counts.get("message")
             queue_empty = status.get("unprocessedChunks") == 0
