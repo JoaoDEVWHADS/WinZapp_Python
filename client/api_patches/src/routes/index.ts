@@ -666,6 +666,24 @@ routes.post(
   statusConnection,
   DeviceController.rejectCall
 );
+routes.post(
+  '/api/:session/accept-call',
+  verifyToken,
+  statusConnection,
+  DeviceController.acceptCall
+);
+routes.post(
+  '/api/:session/end-call',
+  verifyToken,
+  statusConnection,
+  DeviceController.endCall
+);
+routes.post(
+  '/api/:session/offer-call',
+  verifyToken,
+  statusConnection,
+  DeviceController.offerCall
+);
 
 // Catalog
 routes.get(

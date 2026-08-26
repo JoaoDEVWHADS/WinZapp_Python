@@ -3615,7 +3615,15 @@ export async function rejectCall(req: Request, res: Response) {
    */
   const { callId } = req.body;
   try {
-    const response = await req.client.rejectCall(callId);
+    let response;
+    if (typeof req.client.rejectCall === 'function') {
+      response = await req.client.rejectCall(callId);
+    } else {
+      response = await req.client.page.evaluate(
+        (id: string) => (window as any).WPP.call.reject(id),
+        callId
+      );
+    }
 
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
@@ -3623,6 +3631,56 @@ export async function rejectCall(req: Request, res: Response) {
     res
       .status(500)
       .json({ status: 'error', message: 'Error on rejectCall', error: e });
+  }
+}
+
+export async function acceptCall(req: Request, res: Response) {
+  const { callId } = req.body;
+  try {
+    const response = await req.client.page.evaluate(
+      (id: string) => (window as any).WPP.call.accept(id),
+      callId
+    );
+    res.status(200).json({ status: 'success', response: response });
+  } catch (e) {
+    req.logger.error(e);
+    res
+      .status(500)
+      .json({ status: 'error', message: 'Error on acceptCall', error: e });
+  }
+}
+
+export async function endCall(req: Request, res: Response) {
+  const { callId } = req.body;
+  try {
+    const response = await req.client.page.evaluate(
+      (id: string) => (window as any).WPP.call.end(id),
+      callId
+    );
+    res.status(200).json({ status: 'success', response: response });
+  } catch (e) {
+    req.logger.error(e);
+    res
+      .status(500)
+      .json({ status: 'error', message: 'Error on endCall', error: e });
+  }
+}
+
+export async function offerCall(req: Request, res: Response) {
+  const { phone, isVideo } = req.body;
+  try {
+    const response = await req.client.page.evaluate(
+      (to: string, video: boolean) =>
+        (window as any).WPP.call.offer(to, { isVideo: video }),
+      phone,
+      !!isVideo
+    );
+    res.status(200).json({ status: 'success', response: response });
+  } catch (e) {
+    req.logger.error(e);
+    res
+      .status(500)
+      .json({ status: 'error', message: 'Error on offerCall', error: e });
   }
 }
 
