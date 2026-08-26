@@ -5686,18 +5686,25 @@ class MainWindow(wx.Frame):
 
     # ── First-run module installation ──────────────────────────────────────
 
-    # Must match start.js's HEADLESS_SHELL_NAMES — start.js searches
-    # client/api/.cache for exactly these and launches what it finds.
+    # Full Chrome is deliberately preferred on Windows: chrome-headless-shell
+    # is a console-subsystem binary and its renderer children can open visible
+    # console windows. Puppeteer's headless mode keeps full Chrome's GUI hidden.
     _HEADLESS_SHELL_NAMES = ("chrome-headless-shell.exe", "chrome-headless-shell")
+    _WINDOWS_CHROME_NAMES = ("chrome.exe",)
 
     def find_headless_shell(self):
         """Path to chrome-headless-shell inside client/api/.cache, or None."""
         cache_dir = resource_path("api", ".cache")
         if not os.path.isdir(cache_dir):
             return None
+        preferred_names = (
+            self._WINDOWS_CHROME_NAMES
+            if sys.platform == "win32"
+            else self._HEADLESS_SHELL_NAMES
+        )
         for root, _dirs, files in os.walk(cache_dir):
             for name in files:
-                if name in self._HEADLESS_SHELL_NAMES:
+                if name in preferred_names:
                     return os.path.join(root, name)
         return None
 
@@ -5727,9 +5734,10 @@ class MainWindow(wx.Frame):
             logging.info("[headless-shell] Already installed: %s", existing)
             return True
 
+        browser_product = "chrome" if sys.platform == "win32" else "chrome-headless-shell"
         logging.info(
-            "[headless-shell] chrome-headless-shell not found in api/.cache — "
-            "downloading it now (before the API startup timer begins)."
+            "[headless-shell] %s not found in api/.cache — downloading it now "
+            "(before the API startup timer begins).", browser_product
         )
         if sys.platform == "win32":
             node_exe = resource_path("node", "node.exe")
@@ -5760,7 +5768,7 @@ class MainWindow(wx.Frame):
             creation_flags = subprocess.CREATE_NO_WINDOW
         try:
             proc = subprocess.Popen(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", browser_product],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=creation_flags,

@@ -1299,7 +1299,7 @@ class WebSocketClient:
             if session and session != self.instance_name:
                 return
                 
-            if status in ("disconnectedMobile", "notLogged"):
+            if status in ("disconnectedMobile", "notLogged", "UNPAIRED", "UNPAIRED_IDLE"):
                 # Handle permanent WhatsApp logout / disconnection.
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):

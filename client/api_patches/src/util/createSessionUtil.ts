@@ -558,16 +558,52 @@ export default class CreateSessionUtil {
                   client,
                   statusFind
                 );
+                const statusPayload = {
+                  status: statusFind,
+                  session: client.session,
+                };
+                // Deliberately NOT forwarded over Socket.IO as 'status-find'.
+                //
+                // WinZapp registers a listener for that event
+                // (websocket_client.py's on_wpp_status_find), and that handler
+                // treats a single `disconnectedMobile` or `notLogged` as a
+                // permanent logout: it calls _handle_logout() →
+                // _reset_credentials_and_show_pairing(), which wipes the
+                // WA_token, drops `paired`, and runs clear_local_data() over
+                // the whole local database. One event, no confirmation — none
+                // of the four safeguards main.py's _logout_confirmed() applies
+                // (startup grace, consecutive strikes, a 180s dwell, and
+                // _still_linked_on_server() proof) are on that path.
+                //
+                // But `disconnectedMobile` does not mean "unlinked". WPPConnect
+                // documents it as "Client has disconnected to the mobile
+                // device" — the phone became unreachable, which is routine
+                // (dead battery, no signal, the machine sleeping). `notLogged`
+                // is the one that means "scan the QR code again".
+                //
+                // Before this emit existed nothing published 'status-find' over
+                // Socket.IO (only the webhook below), so that handler was dead
+                // code and the mismatch was harmless. Adding the emit armed it,
+                // and forced re-pairings started being reported. The status
+                // still reaches WinZapp truthfully through `client.status`
+                // below, which routes it via the REST poll into the guarded
+                // path instead. Re-add this line only together with a fix for
+                // on_wpp_status_find()'s own classification.
+                if (
+                  statusFind === StatusFind.disconnectedMobile ||
+                  statusFind === StatusFind.notLogged
+                ) {
+                  (client as any)._markedConnected = false;
+                  client.status = statusFind;
+                  client.qrcode = null;
+                }
                 if (statusFind === StatusFind.autocloseCalled) {
                   client.status = 'CLOSED';
                   client.qrcode = null;
                   client.close();
                   clientsArray[session] = undefined;
                 }
-                callWebHook(client, req, 'status-find', {
-                  status: statusFind,
-                  session: client.session,
-                });
+                callWebHook(client, req, 'status-find', statusPayload);
                 req.logger.info(statusFind + '\n\n');
               } catch (error) {}
             },
@@ -1047,7 +1083,7 @@ export default class CreateSessionUtil {
       // harmless, the existing binding still works.
     }
 
-    const installListener = () => {
+    const installListener = (attempt = 0) => {
       // CallStore is hydrated from persisted WhatsApp Web state at startup.
       // Its `add` event therefore does not necessarily mean "a call started
       // now". Refresh the boundary on every page load and reject older calls.
@@ -1060,7 +1096,7 @@ export default class CreateSessionUtil {
             !WPP.on ||
             (window as any).__winzappIncomingCallInstalled
           ) {
-            return;
+            return (window as any).__winzappIncomingCallInstalled === true;
           }
           (window as any).__winzappIncomingCallInstalled = true;
 
@@ -1344,7 +1380,13 @@ export default class CreateSessionUtil {
               }
             }
           }, 500);
+          return true;
         }, listenerStartedAt)
+        .then((installed: boolean) => {
+          if (!installed && attempt < 120) {
+            setTimeout(() => installListener(attempt + 1), 500);
+          }
+        })
         .catch((e: any) =>
           req.logger.warn(
             `[onIncomingCallDirect] install failed: ${e?.message || e}`
@@ -1403,9 +1445,7 @@ export default class CreateSessionUtil {
         // Allow a later CONNECTED to re-finalize (e.g. re-pair) by clearing the
         // once-guard, and drop the CONNECTED status so REST reports the truth.
         (client as any)._markedConnected = false;
-        if (client.status === 'CONNECTED') {
-          client.status = state;
-        }
+        client.status = state;
       }
     });
   }
