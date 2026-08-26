@@ -27,6 +27,9 @@ class _RollbackStub:
         MainWindow._restore_unread_after_send_seen_failure
     )
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _restore_unread_after_mark_unread_failure = (
+        MainWindow._restore_unread_after_mark_unread_failure
+    )
 
     def __init__(self, *, archived=False):
         self.chats = {
@@ -85,3 +88,64 @@ def test_failed_send_seen_does_not_overwrite_a_new_message():
 
     assert stub.chats[JID]["unreadCount"] == 1
     assert stub._locally_read_at[JID] == 2000
+
+
+class _MarkUnreadStub(_RollbackStub):
+    mark_conversation_as_unread = MainWindow.mark_conversation_as_unread
+
+    def __init__(self):
+        super().__init__()
+        self.chats[JID]["unreadCount"] = 0
+        self.remote_changes = []
+        self.set_chats_calls = 0
+
+    def set_chats(self):
+        self.set_chats_calls += 1
+
+    def _sync_conversation_read_state(self, jid, unread, on_failure):
+        self.remote_changes.append((jid, unread, on_failure))
+
+
+def test_mark_unread_clears_stale_read_ack_and_syncs_to_whatsapp(monkeypatch):
+    monkeypatch.setattr("main.wx.CallAfter", lambda fn, *args: fn(*args))
+    stub = _MarkUnreadStub()
+
+    stub.mark_conversation_as_unread(JID)
+
+    assert stub.chats[JID]["unreadCount"] == 1
+    assert JID not in stub._locally_read_at
+    assert stub.remote_changes[0][:2] == (JID, True)
+    assert stub.saved == [JID]
+
+
+def test_failed_remote_mark_unread_rolls_back_if_chat_did_not_change():
+    stub = _MarkUnreadStub()
+    stub.chats[JID]["unreadCount"] = 1
+
+    stub._restore_unread_after_mark_unread_failure(JID, 0, 2000)
+
+    assert stub.chats[JID]["unreadCount"] == 0
+    assert stub.saved == [JID]
+
+
+def test_failed_remote_mark_unread_does_not_overwrite_new_activity():
+    stub = _MarkUnreadStub()
+    stub.chats[JID].update(unreadCount=2, t=2001)
+
+    stub._restore_unread_after_mark_unread_failure(JID, 0, 2000)
+
+    assert stub.chats[JID]["unreadCount"] == 2
+    assert stub.saved == []
+
+
+def test_node_read_state_endpoint_supports_both_states_and_checks_result():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "client/api_patches/src/controller/deviceController.ts"
+    ).read_text(encoding="utf-8")
+
+    send_seen = source[source.index("export async function sendSeen"):]
+    assert "WPP.chat.markIsUnread" in send_seen
+    assert "WPP.chat.markIsRead" in send_seen
+    assert "if (!result) throw new Error" in send_seen
+    assert "markUnread: Boolean(unread)" in send_seen

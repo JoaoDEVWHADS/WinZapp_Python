@@ -27,18 +27,22 @@ import threading
 import pytest
 
 from main import MainWindow
+from core.websocket_client import WebSocketClient
 
 
 class _MainWindowStub:
     _apply_group_subject_change = MainWindow._apply_group_subject_change
     _resolve_subject_change_async = MainWindow._resolve_subject_change_async
     _store_group_subject = MainWindow._store_group_subject
+    on_group_subject_updated = MainWindow.on_group_subject_updated
+    _reconcile_group_info_name = MainWindow._reconcile_group_info_name
 
     def __init__(self, group_info_name=""):
         self._group_info_name = group_info_name
         self.group_info_calls = []
         self.saved = []
         self.set_chats_calls = 0
+        self.chats = {}
 
     # Collaborators the methods under test reach for.
     def _fill_group_name(self, jid):
@@ -204,3 +208,81 @@ class TestNotificationWithoutTheNewName:
 
         assert mw.group_info_calls == []
         assert chat["name"] == "Grupo Novo"
+
+
+def test_groups_update_renames_and_persists_the_known_group():
+    mw = _MainWindowStub()
+    chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+    mw.chats["123@g.us"] = chat
+
+    mw.on_group_subject_updated("123@g.us", "Grupo Novo")
+
+    assert chat["name"] == "Grupo Novo"
+    assert mw.saved == ["123@g.us"]
+    assert mw.set_chats_calls == 1
+
+
+def test_group_info_name_is_fed_back_into_the_conversation_list(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module.wx, "CallAfter", lambda fn, *args: fn(*args))
+    mw = _MainWindowStub()
+    chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+    mw.chats["123@g.us"] = chat
+
+    mw._reconcile_group_info_name(
+        "123@g.us", {"subject": "Grupo Novo", "name": "Grupo Antigo"}
+    )
+
+    assert chat["name"] == "Grupo Novo"
+    assert mw._group_name_cache["123@g.us"] == "Grupo Novo"
+    assert mw.saved == ["123@g.us"]
+    assert mw.set_chats_calls == 1
+
+
+class _GroupUpdateMain:
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+
+    def __init__(self):
+        self.updates = []
+
+    def on_group_subject_updated(self, jid, subject):
+        self.updates.append((jid, subject))
+
+
+class _WebSocketStub:
+    on_groups_update = WebSocketClient.on_groups_update
+    _belongs_to_this_session = WebSocketClient._belongs_to_this_session
+    _clean_jid = WebSocketClient._clean_jid
+
+    def __init__(self):
+        self.instance_name = "session"
+        self.main_window = _GroupUpdateMain()
+
+
+def test_groups_update_accepts_wid_ids_and_trims_the_subject(monkeypatch):
+    import core.websocket_client as websocket_module
+
+    monkeypatch.setattr(websocket_module.wx, "CallAfter", lambda fn, *args: fn(*args))
+    ws = _WebSocketStub()
+
+    ws.on_groups_update({
+        "session": "session",
+        "data": [{
+            "id": {"_serialized": "123@g.us"},
+            "subject": "  Grupo Novo  ",
+        }],
+    })
+
+    assert ws.main_window.updates == [("123@g.us", "Grupo Novo")]
+
+
+def test_node_emits_group_updates_from_subject_notifications():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "client/api_patches/src/util/createSessionUtil.ts"
+    ).read_text(encoding="utf-8")
+
+    assert "message.type === 'gp2' && message.subtype === 'subject'" in source
+    assert "req.io.emit('groups.update'" in source
+    assert "await client.getChatById(groupId)" in source
