@@ -10956,13 +10956,17 @@ class MainWindow(wx.Frame):
                     jid = self._normalize_jid(raw_jid)
                     if "muteExpiration" in chat:
                         mute_expiry = chat["muteExpiration"]
+                        mute_jids = self._mute_state_jids(jid)
                         if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
-                            if self._muted_chats.get(jid) != int(mute_expiry):
-                                self._muted_chats[jid] = int(mute_expiry)
-                                db_changed = True
-                        elif jid in self._muted_chats:
-                            del self._muted_chats[jid]
-                            db_changed = True
+                            for mute_jid in mute_jids:
+                                if self._muted_chats.get(mute_jid) != int(mute_expiry):
+                                    self._muted_chats[mute_jid] = int(mute_expiry)
+                                    db_changed = True
+                        else:
+                            for mute_jid in mute_jids:
+                                if mute_jid in self._muted_chats:
+                                    del self._muted_chats[mute_jid]
+                                    db_changed = True
 
                     # ── Archive state: two-way sync ──────────────────────────
                     # This used to be add-only (normalize_chats() could put a
@@ -11682,17 +11686,20 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.conversations_panel.update_conversation_name, jid, new_name)
 
-    def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
-        """
-        Handle a live group subject update received via the groups.update websocket event.
+    def _reconcile_group_info_name(self, jid: str, info: dict) -> None:
+        """Feed an authoritative /group-info name back into the chat list."""
+        if not isinstance(info, dict):
+            return
+        new_name = (info.get("subject") or info.get("name") or "").strip()
+        chat = self.chats.get(jid)
+        if not new_name or chat is None or chat.get("name") == new_name:
+            return
+        self._store_group_subject(jid, chat, new_name)
+        self._schedule_save(dirty_jid=jid)
+        wx.CallAfter(self._schedule_set_chats)
 
-        Note this path currently never fires: the Node layer emits no
-        'groups.update' Socket.IO event at all (WebSocketClient registers the
-        handler, but nothing on the server side sends it), so a rename only
-        reaches Python as the gp2 notification handled by
-        _apply_group_subject_change(). Kept wired for when that event does get
-        emitted — the work it does is the same either way.
-        """
+    def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
+        """Handle a live group subject update emitted from a gp2 notification."""
         if remote_jid not in self.chats:
             return
 
@@ -18411,6 +18418,19 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
+        self._sync_conversation_read_state(
+            remote_jid,
+            unread=False,
+            on_failure=lambda: wx.CallAfter(
+                self._restore_unread_after_send_seen_failure,
+                remote_jid,
+                unread,
+                int(chat.get("t", 0) or 0),
+            ),
+        )
+
+    def _sync_conversation_read_state(self, remote_jid: str, unread: bool, on_failure):
+        """Apply a read-state change remotely, trying the known JID aliases."""
         # Prefer @lid JID for WPPConnect if mapped
         target_phone = remote_jid
         if not target_phone.endswith("@lid"):
@@ -18426,7 +18446,11 @@ class MainWindow(wx.Frame):
         def _send_seen(phone: str, is_lid: bool) -> "requests.Response | None":
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-            payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
+            payload = {
+                "phone": phone,
+                "isGroup": phone.endswith("@g.us"),
+                "unread": unread,
+            }
             if is_lid:
                 payload["isLid"] = True
             return api_post(url, json=payload, headers=headers, timeout=10)
@@ -18461,11 +18485,18 @@ class MainWindow(wx.Frame):
                             )
                             continue
                         if resp.ok:
-                            success = True
-                            return
+                            try:
+                                results = resp.json().get("response", {}).get("data")
+                            except (AttributeError, TypeError, ValueError):
+                                results = None
+                            if isinstance(results, list) and results and all(
+                                result is True for result in results
+                            ):
+                                success = True
+                                return
                         logging.warning(
-                            "[mark_as_read] API response %s for %s (attempt %s): %s",
-                            resp.status_code, phone, attempt + 1, resp.text[:200],
+                            "[read_state] API response %s for %s (unread=%s, attempt %s): %s",
+                            resp.status_code, phone, unread, attempt + 1, resp.text[:200],
                         )
                     if attempt < 2:
                         time.sleep(attempt + 1)
@@ -18473,12 +18504,7 @@ class MainWindow(wx.Frame):
                 logging.exception("[mark_as_read] Unexpected send-seen failure")
             finally:
                 if not success:
-                    wx.CallAfter(
-                        self._restore_unread_after_send_seen_failure,
-                        remote_jid,
-                        unread,
-                        int(chat.get("t", 0) or 0),
-                    )
+                    on_failure()
         threading.Thread(target=_do_api, daemon=True).start()
 
     def _restore_unread_after_send_seen_failure(
@@ -18513,9 +18539,42 @@ class MainWindow(wx.Frame):
     def mark_conversation_as_unread(self, remote_jid: str):
         chat = self.chats.get(remote_jid)
         if chat is not None:
+            previous_unread = int(chat.get("unreadCount") or 0)
+            timestamp = int(chat.get("t", 0) or 0)
             chat["unreadCount"] = 1
-            self._schedule_save()
+            if hasattr(self, "_locally_read_at"):
+                self._locally_read_at.pop(remote_jid, None)
+                self._persist_locally_read_at()
+            if hasattr(self, "_new_since_read"):
+                self._new_since_read.pop(remote_jid, None)
+            self._schedule_save(dirty_jid=remote_jid)
             wx.CallAfter(self.set_chats)
+            self._sync_conversation_read_state(
+                remote_jid,
+                unread=True,
+                on_failure=lambda: wx.CallAfter(
+                    self._restore_unread_after_mark_unread_failure,
+                    remote_jid,
+                    previous_unread,
+                    timestamp,
+                ),
+            )
+
+    def _restore_unread_after_mark_unread_failure(
+        self, remote_jid: str, previous_unread: int, timestamp: int
+    ):
+        """Undo an optimistic mark-unread if no newer state replaced it."""
+        chat = self.chats.get(remote_jid)
+        if (
+            chat is None
+            or int(chat.get("t", 0) or 0) != timestamp
+            or int(chat.get("unreadCount") or 0) != 1
+        ):
+            return
+        chat["unreadCount"] = max(0, previous_unread)
+        self._schedule_save(dirty_jid=remote_jid)
+        self._refresh_chat_row_in_list(remote_jid)
+        self._schedule_set_chats()
 
     # ── WPPConnect — profile / group info ─────────────────────────────────
     
@@ -19127,7 +19186,10 @@ class MainWindow(wx.Frame):
                 res_data = r.json() or {}
                 response = res_data.get("response") or {}
                 logging.info(f"[get_group_info] response type={type(response).__name__} keys={list(response.keys()) if isinstance(response, dict) else response}")
-                return response if isinstance(response, dict) else {}
+                if isinstance(response, dict):
+                    self._reconcile_group_info_name(jid, response)
+                    return response
+                return {}
         except Exception as e:
             logging.error(f"[get_group_info] error: {e}")
         return {}
@@ -19272,23 +19334,35 @@ class MainWindow(wx.Frame):
 
     # ── Mute ──────────────────────────────────────────────────────────────────
 
+    def _mute_state_jids(self, jid: str) -> set[str]:
+        """Return the canonical chat JID and any known phone/LID alias."""
+        normalized = self._normalize_jid(jid)
+        jids = {normalized}
+        if normalized.endswith("@lid"):
+            alternate = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+        else:
+            alternate = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+        if alternate:
+            jids.add(self._normalize_jid(alternate))
+        return jids
+
     def is_chat_muted(self, jid: str) -> bool:
-        expiry = self._muted_chats.get(jid)
-        if expiry is None:
-            return False
-        if expiry == -1:
-            return True  # permanent
-        return time.time() < expiry
+        for mute_jid in self._mute_state_jids(jid):
+            expiry = self._muted_chats.get(mute_jid)
+            if expiry == -1 or (expiry is not None and time.time() < expiry):
+                return True
+        return False
 
     def _apply_mute_state(self, jid: str, expiry):
         """Local-only half of mute/unmute: mutate _muted_chats, persist to
         DB metadata, and refresh the chat list. Split out from
         mute_chat()/unmute_chat() so _sync_mute_to_server() can call this
         again to roll back the optimistic change if WhatsApp rejects it."""
-        if expiry is None:
-            self._muted_chats.pop(jid, None)
-        else:
-            self._muted_chats[jid] = expiry
+        for mute_jid in self._mute_state_jids(jid):
+            if expiry is None:
+                self._muted_chats.pop(mute_jid, None)
+            else:
+                self._muted_chats[mute_jid] = expiry
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("muted_chats", self._muted_chats)
         self._schedule_set_chats()
@@ -19341,9 +19415,18 @@ class MainWindow(wx.Frame):
                     return api_post(url, json=payload, headers=headers, timeout=10)
 
                 def _accepted(resp) -> bool:
-                    return mute_response_accepted(
+                    accepted = mute_response_accepted(
                         bool(resp.ok), resp.text, duration_secs == 0
                     )
+                    if not accepted or not resp.ok:
+                        return accepted
+                    try:
+                        result = resp.json().get("response", {})
+                    except (AttributeError, TypeError, ValueError):
+                        return accepted
+                    if isinstance(result, dict) and "isMuted" in result:
+                        return bool(result["isMuted"]) is (duration_secs != 0)
+                    return accepted
 
                 # Prefer the @lid form when one is known — same preference
                 # delete_message_for_everyone()/forward_message() already
