@@ -29,29 +29,33 @@ That also means a reformat which stops the parser from matching has to fail
 loudly rather than quietly turn these tests into a green no-op — hence the
 guards asserting the parse found anything at all.
 
-Where these run, and the risk that carries
-------------------------------------------
-release.yml's `test` job runs bare `pytest`, and `reject-on-test-failure`
-DELETES the just-created release and its tag when that job fails. So from this
-commit on, a stale sentence in a Markdown file sits on the same path as
-check_stable_release_ordering.py, where CLAUDE.md itself says a wrong answer is
-expensive both ways. test_every_path_claude_md_names_exists has no tolerance
-band at all: rename a module, forget to grep the doc, and the next stable cut
-is deleted over a Markdown edit.
+Where these run
+---------------
+Marked ``docs`` and deselected by release.yml's test step (``pytest -m "not
+docs"``). That job's ``reject-on-test-failure`` DELETES the just-created
+release and its tag, and these tests have no tolerance band: rename a module,
+forget to grep CLAUDE.md, and a stable cut would be destroyed over a Markdown
+edit.
 
-That is accepted rather than overlooked, for one reason: alpha-release.yml runs
-the same suite on every push to main, and a failed alpha is a draft that simply
-never gets published. Doc drift therefore surfaces as a red alpha within one
-push, and the release-deletion path is only reachable by cutting a stable
-release on top of a main that is already red. If that guarantee ever goes away
-— alphas stop building on every push, or stop running the full suite — this
-file should move behind a marker the release job deselects.
+The first version of this file argued that risk was covered because
+alpha-release.yml runs the suite on every push to main. That argument was
+wrong: alpha-release.yml carries ``paths-ignore: "**/*.md"``, so a push
+touching only CLAUDE.md — the dominant way three of these six tests break,
+since they parse its prose — triggers no alpha build at all, and main goes
+green by absence rather than by testing.
+
+What covers them is ci.yml, which runs the full suite on every pull_request
+against main with no paths-ignore, together with the ruleset that forbids
+pushing to main directly. Every doc-only change reaches main through a PR that
+runs these tests, and none of them can delete a release.
 """
 
 import pathlib
 import re
 
 import pytest
+
+pytestmark = pytest.mark.docs
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLAUDE_MD = ROOT / "CLAUDE.md"
@@ -61,10 +65,14 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 # it protects against are worth writing down:
 #
 #   Too tight (an exact count, or a few percent) and the test fails on almost
-#   every commit that touches main.py — measured over the recent stretch of
-#   history — measured on origin/main, which is the ref that matters and the
-#   one these numbers reproduce against — main.py grew +640 lines over the last
-#   20 commits and +3,461 over the last 100. The fix would always be
+#   every commit that touches main.py: it grows by roughly a thousand lines per
+#   twenty merges to main. Recompute rather than trusting that figure — it
+#   swings by 4x depending on how merge commits are counted, which is the same
+#   rot this file exists to catch:
+#
+#       git log -100 --numstat --format='' origin/main -- client/main.py #         | awk '{a+=$1; d+=$2} END {print a-d}'
+#
+#   The fix for a too-tight band would always be
 #   "edit a number in a document", i.e. a chore, and a test whose only failure
 #   mode is a chore gets reflexively silenced and then deleted — at which point
 #   the drift it existed to catch rides in unopposed. Note also that the doc
@@ -84,6 +92,10 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 # most to a reader deciding whether the file is too big to read straight
 # through.
 LINE_COUNT_TOLERANCE = 0.20
+
+# 42 client/ paths are backticked today. 30 leaves room to legitimately drop a
+# few while still failing if a whole section stops being parsed.
+PATH_FLOOR = 30
 
 # "`client/main.py` (~22,300 lines)" and
 # "`client/ui/conversations.py` (`ConversationsPanel`, ~13,500 lines)" — the
@@ -193,14 +205,12 @@ def test_the_patch_count_word_matches_the_modules_listed(real_patch_modules):
 
 # ── documented modules exist ─────────────────────────────────────────────────
 
-# Every client/**.py CLAUDE.md names in backticks. Restricted to Python modules
-# Any backticked client/… path — the ones a reader is being sent to open or
-# grep, where a renamed or deleted one turns the doc's navigation advice into
-# a dead end. Not only .py: Restricted to .py it
-# would have stayed green on the two claims that were actually stale:
-# `client/WinZapp.spec` (removed and git-ignored in c752124, while the prose
-# still called it "the checked-in" one) and `client/api2/` (deleted in
-# af250f7, still described as if it shipped).
+# Every backticked client/… path CLAUDE.md names — the ones a reader is sent to
+# open or grep, where a renamed or deleted one turns the doc's navigation advice
+# into a dead end. Deliberately not restricted to .py: the two claims that were
+# actually stale when this was written were `client/WinZapp.spec` (removed and
+# git-ignored in c752124, while the prose still called it "the checked-in" one)
+# and `client/api2/` (deleted in af250f7, still described as if it shipped).
 _DOC_PATH = re.compile(r"`(client/[\w./-]+)`")
 
 # client/api/ and client/node/ are git-ignored and deliberately absent from a
@@ -215,16 +225,20 @@ def test_every_path_claude_md_names_exists():
         p for p in _DOC_PATH.findall(_doc())
         if not p.startswith(UNCHECKABLE_PREFIXES)
     }
-    # Anchored, not just non-empty. `assert documented` passes on a single
-    # surviving path, so reformatting the "Multi-conta" bullet list — the
-    # newest and least settled section, which alone contributes 15 of the
-    # paths parsed here — would stop checking those 15 with the suite fully
-    # green. The god files are the claims least likely to legitimately leave
-    # the document.
-    assert set(GOD_FILES) <= documented, (
-        f"CLAUDE.md no longer names the god files in backticks — the parser is "
-        f"matching {len(documented)} path(s) and the checks below have gone vacuous"
+    # A floor, not an anchor. Anchoring on the god files does not work: they are
+    # backticked in five separate places, so `set(GOD_FILES) <= documented`
+    # still holds after every other path loses its backticks — verified by
+    # stripping the "Multi-conta" section, which alone contributes 15 of the
+    # paths parsed here, and watching this stay green with a provably dangling
+    # path inside it. A floor is the same trade-off LINE_COUNT_TOLERANCE
+    # reasons about: high enough that a section going unchecked fails, low
+    # enough that ordinary editing does not.
+    assert len(documented) >= PATH_FLOOR, (
+        f"CLAUDE.md now yields only {len(documented)} backticked client/ paths "
+        f"(floor {PATH_FLOOR}) — a section probably lost its backticks and its "
+        f"claims stopped being checked. Lower the floor only if they really left."
     )
+
     missing = sorted(p for p in documented if not (ROOT / p).exists())
     assert missing == [], (
         f"CLAUDE.md points at paths that do not exist. If they were renamed, "
