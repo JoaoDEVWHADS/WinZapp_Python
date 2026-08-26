@@ -35,3 +35,13 @@ def test_ui_has_native_alert_lifecycle_and_user_stop_controls():
     assert "stop_all_incoming_call_alerts" in main
     assert "_show_incoming_call_dialog" in main
     assert "IncomingCallDialog" in dialog
+
+
+def test_call_routes_do_not_report_failed_browser_actions_as_success():
+    source = _source("client/api_patches/src/controller/deviceController.ts")
+    accept_route = source[source.index("export async function acceptCall"):source.index("export async function endCall")]
+    end_route = source[source.index("export async function endCall"):source.index("export async function offerCall")]
+
+    for route in (accept_route, end_route):
+        assert "if (!response?.success)" in route
+        assert "return res.status(409).json" in route

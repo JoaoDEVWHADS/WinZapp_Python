@@ -3718,7 +3718,14 @@ export async function acceptCall(req: Request, res: Response) {
     );
 
     req.logger?.info?.(`[acceptCall] callId=${callId} result=${JSON.stringify(response)}`);
-    res.status(200).json({ status: 'success', response: response });
+    if (!response?.success) {
+      return res.status(409).json({
+        status: 'error',
+        message: response?.error || 'The incoming call could not be accepted',
+        response,
+      });
+    }
+    res.status(200).json({ status: 'success', response });
   } catch (e: any) {
     req.logger.error(e);
     res
@@ -3789,7 +3796,14 @@ export async function endCall(req: Request, res: Response) {
     );
 
     req.logger?.info?.(`[endCall] callId=${callId} result=${JSON.stringify(response)}`);
-    res.status(200).json({ status: 'success', response: response });
+    if (!response?.success) {
+      return res.status(409).json({
+        status: 'error',
+        message: response?.error || 'The active call could not be ended',
+        response,
+      });
+    }
+    res.status(200).json({ status: 'success', response });
   } catch (e: any) {
     req.logger.error(e);
     res
