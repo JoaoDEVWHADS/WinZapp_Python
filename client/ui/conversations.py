@@ -5765,15 +5765,10 @@ class ConversationsPanel(wx.Panel):
                 self._open_file_safely(url)
             return
 
-        if msg_type == "imageMessage":
-            self._open_conversation_media_viewer(index)
-            return
-        # videoMessage deliberately does NOT open the in-app viewer here,
-        # regardless of _use_conversation_video_media_viewer_dialog(): this
-        # is the "Abrir"/Open action, which the user reaches specifically to
-        # get the file into their own OS-default video player — Enter/click
-        # already covers "play it right here". Falls through to the generic
-        # open-externally flow below (same as documentMessage).
+        # "Abrir" / Open button (next to "Salvar como...") is specifically
+        # intended to open media/files in the operating system's default viewer/app
+        # (photos, videos, documents, etc.). In-app viewing/playback is reached
+        # via Enter/Space directly on the message list item.
 
         if msg_type == "documentMessage":
             filename = (msg_obj.get("documentMessage") or {}).get(
