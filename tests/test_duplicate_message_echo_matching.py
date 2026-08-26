@@ -201,6 +201,14 @@ class _Stub:
     def _extract_lid_mapping(self, msg):
         pass
 
+    def _redirect_self_chat_artifact(self, remote_jid, key, from_me):
+        # Real MainWindow.on_new_message() calls this (see
+        # _redirect_self_chat_artifact()'s own docstring/PR) to catch a fake
+        # self-chat sync artifact — irrelevant to the echo-matching this file
+        # tests, so it's a pure passthrough here rather than a stubbed-out
+        # dependency this stub simply doesn't have.
+        return remote_jid, from_me
+
     def _apply_group_subject_change(self, remote_jid, chat, msg, live=False):
         pass
 
