@@ -14,6 +14,7 @@ Behaviour
 """
 
 import logging
+import os
 import threading
 import time
 import wx
@@ -238,6 +239,33 @@ class MessageQueue:
                         msg.fail_count = 0
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
+                        if msg.cancel_event.is_set():
+                            # The cancel button only ever checked this flag
+                            # before the network call started — never during
+                            # it, since none of the send_* calls above can be
+                            # interrupted mid-flight. So a message could reach
+                            # WhatsApp anyway after the user "cancelled" it,
+                            # and the row it would have updated is already
+                            # gone (the UI removes it as soon as cancel() is
+                            # called, see conversations.py's delete-while-
+                            # pending path). Registering real_id in
+                            # _own_sent_ids here would suppress the WebSocket
+                            # echo for a message that genuinely went out —
+                            # quietly hiding from the user that it was
+                            # actually delivered. Skip that and let the echo
+                            # arrive normally instead: it inserts as an
+                            # ordinary message, which is the truth.
+                            logging.warning(
+                                "[MessageQueue] %s reached WhatsApp (id=%s) after being "
+                                "cancelled — letting the echo re-add it instead of hiding it",
+                                msg.local_id, real_id,
+                            )
+                            if msg.audio_path:
+                                try:
+                                    os.unlink(msg.audio_path)
+                                except OSError:
+                                    pass
+                            continue
                         # Register the real ID immediately so the WebSocket echo
                         # (messages.upsert with fromMe=True) is recognised as
                         # "sent by this instance" and not shown as a new message.
