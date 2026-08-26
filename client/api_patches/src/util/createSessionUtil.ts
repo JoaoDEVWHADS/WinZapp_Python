@@ -353,7 +353,7 @@ async function grantPersistentStorage(page: any, logger: any, session: string) {
     }
     await page.__wzPermissionSession.send('Browser.grantPermissions', {
       origin,
-      permissions: ['durableStorage', 'notifications'],
+      permissions: ['durableStorage', 'notifications', 'audioCapture', 'videoCapture'],
     });
   } catch (e: any) {
     page.__wzPermissionSession = null;

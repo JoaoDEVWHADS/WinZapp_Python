@@ -77,17 +77,11 @@ function findFullChrome() {
 }
 
 function findAnyChrome() {
-  // chrome-headless-shell is a console-subsystem executable on Windows. Its
-  // renderer/GPU children can each allocate a visible console (seven windows
-  // were observed when opening the QR screen). Full Chrome uses the GUI
-  // subsystem and remains windowless under Puppeteer's headless mode.
-  return process.platform === 'win32'
-    ? findFullChrome() || findHeadlessShell()
-    : findHeadlessShell() || findFullChrome();
+  return findFullChrome() || findHeadlessShell();
 }
 
 function findPreferredChrome() {
-  return process.platform === 'win32' ? findFullChrome() : findHeadlessShell();
+  return findFullChrome() || findHeadlessShell();
 }
 
 // Locate a downloaded-but-maybe-unextracted chrome-headless-shell ZIP, so a
