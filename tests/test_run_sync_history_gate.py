@@ -35,7 +35,9 @@ from tests.test_run_sync_broken_store import _fast, _make  # noqa: F401  (_fast 
 
 # A chat list that settles on the first pass, so every test here reaches the
 # gate with the same uninteresting history behind it.
-def _settled_stub(unblock_result, wait_result):
+def _settled_stub(unblock_result, wait_result, outcome=None):
+    """*outcome* is what the real wait records in _history_wait_outcome; it is
+    what tells the two False cases apart ("timeout" vs "session_gone")."""
     stub = _make([931, 931], wa_web=937, local_chats=931)
     # Bound for real: it is the predicate that opens the gate. The stub's
     # __getattr__ answers unknown names with a lambda returning None, which is
@@ -43,12 +45,18 @@ def _settled_stub(unblock_result, wait_result):
     # skip-the-gate path instead of the gate.
     stub._recent_history_needs_wait = MainWindow._recent_history_needs_wait
     stub.waits = 0
+    stub._history_wait_outcome = ""
+    stub._history_still_landing = False
 
     def _unblock(timeout=60):
         return unblock_result
 
     def _wait(timeout=600):
         stub.waits += 1
+        if outcome is not None:
+            stub._history_wait_outcome = outcome
+        elif wait_result:
+            stub._history_wait_outcome = "completed"
         return wait_result
 
     stub.unblock_history_sync = _unblock
@@ -120,13 +128,83 @@ class TestTheWaitSucceeds:
         assert stub.message_sync_ran == 1
 
 
-class TestTheWaitFails:
+class TestTheWaitTimesOut:
+    """Reported live on a first pairing of a large account: the RECENT pass
+    does not finish inside the wait's budget, so every round waited the full
+    ten minutes, threw the round away and let the health check start another
+    — sync_remote_chats() never ran once. Nothing was fetched, and
+    _resolve_missing_group_names() (past the message phase) never ran either,
+    so groups came back unnamed. A partial sync that fills in afterwards beats
+    an empty one that repeats.
+    """
+
+    def test_the_message_phase_runs_anyway(self):
+        stub = _settled_stub(
+            {"restarted": True, "recentCompleted": False}, False, outcome="timeout"
+        )
+        stub._run_sync()
+        assert stub.waits == 1
+        assert stub.message_sync_ran == 1, (
+            "a budget that ran out is not a reason to fetch nothing at all"
+        )
+
+    def test_the_chats_are_marked_as_still_landing(self):
+        """What makes the partial sync safe: _note_backfill_state() reads this
+        to decide that a chat answering short is provisional and has to be
+        re-queried, instead of taking it at face value."""
+        stub = _settled_stub(
+            {"restarted": True, "recentCompleted": False}, False, outcome="timeout"
+        )
+        # The real refresh_history_still_landing() would re-read the flag from
+        # a live status call; the stub's returns False, so capture the value
+        # the gate itself set, before that.
+        seen = {}
+        inner = stub.refresh_history_still_landing
+
+        def _record(context=""):
+            seen["landing_at_entry"] = stub._history_still_landing
+            return inner(context=context)
+
+        stub.refresh_history_still_landing = _record
+        stub._run_sync()
+
+        assert seen.get("landing_at_entry") is True
+
+    def test_the_chat_list_is_still_refreshed_after_the_wait(self):
+        """Chats can have landed during the wait either way, so the refresh is
+        not exclusive to the completed path.
+
+        Identified by elimination rather than by call count: the settle loop's
+        own fetches are the ones carrying prune_stale=True, and the refresh
+        after the message phase happens once message_sync_ran is already 1. A
+        fetch with neither is the post-wait one.
+        """
+        stub = _settled_stub(
+            {"restarted": True, "recentCompleted": False}, False, outcome="timeout"
+        )
+        calls = []
+        inner = stub.get_remote_chats
+
+        def _record(chats, **kwargs):
+            calls.append((kwargs.get("prune_stale"), stub.message_sync_ran))
+            return inner(chats, **kwargs)
+
+        stub.get_remote_chats = _record
+        stub._run_sync()
+
+        post_wait = [
+            c for c in calls if not c[0] and c[1] == 0
+        ]
+        assert post_wait, f"no post-wait chat-list refresh among {calls}"
+
+
+class TestTheSessionGoesAway:
     def test_the_message_phase_is_deferred_and_the_sync_is_not_marked_complete(self):
-        """The deferral itself is intended: running get-messages against a
-        store the phone is still filling would just read short chats. What
-        matters is that it is a clean exit, and that the round is not recorded
-        as a finished sync."""
-        stub = _settled_stub({"restarted": True, "recentCompleted": False}, False)
+        """The one case where deferring is still right: there is no session
+        left to run get-messages against."""
+        stub = _settled_stub(
+            {"restarted": True, "recentCompleted": False}, False, outcome="session_gone"
+        )
         stub._run_sync()
         assert stub.waits == 1
         assert stub.message_sync_ran == 0
