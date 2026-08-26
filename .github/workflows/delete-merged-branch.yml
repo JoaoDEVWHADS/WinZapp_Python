@@ -1,0 +1,63 @@
+# Apaga automaticamente a branch de origem de todo PR mergeado na main.
+#
+# Faz o mesmo que a opção nativa "Automatically delete head branches"
+# (Settings > General), que hoje está DESLIGADA e só um admin do repositório
+# consegue ligar. Como isto é um arquivo versionado, entra pelo fluxo normal
+# de PR — nenhuma permissão de admin envolvida.
+#
+# Existe também porque a opção nativa não tem lista de exceção, e há branches
+# neste repositório que não podem sumir depois de um merge:
+#   - joaopr4      → é o gatilho do prerelease-test.yml (on: push: [joaopr4]).
+#                    Apagá-la mataria o canal de pré-release de teste.
+#   - release/*    → protegida pelo ruleset "block force push & direct push"
+#                    (regra `deletion`); a exclusão seria recusada pelo
+#                    servidor e o job terminaria vermelho à toa.
+#   - evolution_legacy → branch de arquivo, não mergeada na main.
+#
+# Não dispara build alpha: alpha-release.yml ignora `.github/workflows/**`
+# no seu paths-ignore, então mergear/alterar este arquivo não queima os ~15
+# minutos de um build de release.
+name: Delete merged branch
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    # `closed` cobre tanto o PR mergeado quanto o fechado à mão — só o
+    # primeiro deve apagar nada. E a branch de um fork não é nossa para
+    # apagar: além de errado, o GITHUB_TOKEN de um `pull_request` vindo de
+    # fork é só-leitura, então o guard transforma esse caso num no-op em vez
+    # de numa falha.
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref != 'joaopr4' &&
+      github.event.pull_request.head.ref != 'evolution_legacy' &&
+      !startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete head branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passados por env, e não interpolados direto no `run:` — o nome de
+          # uma branch é texto controlado por quem abre o PR e interpolá-lo
+          # no shell é injeção de comando.
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Quem mergeou pode já ter clicado em "Delete branch" na própria
+          # tela do PR: nesse caso a ref não existe mais e a API devolve 422.
+          # Isso é sucesso, não erro — o estado desejado já é o atual.
+          if gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" 2>err.txt; then
+            echo "Branch '$BRANCH' apagada."
+          elif grep -q "Reference does not exist" err.txt; then
+            echo "Branch '$BRANCH' já não existia — nada a fazer."
+          else
+            cat err.txt >&2
+            exit 1
+          fi
