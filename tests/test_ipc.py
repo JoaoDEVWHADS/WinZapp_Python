@@ -5,6 +5,7 @@ On Linux these exercise the AF_UNIX fallback transport + the shared protocol
 The Windows named-pipe transport shares the same protocol layer.
 """
 
+import sys
 import threading
 import time
 
@@ -125,3 +126,133 @@ def test_queue_before_window_then_flush(tmp_path):
         assert delivered == [("ready", "user")]
     finally:
         listener.stop()
+
+
+def test_a_concurrent_activate_is_not_blocked_by_an_in_flight_quit(tmp_path):
+    """Regression: handling "quit" used to happen inline in the accept loop,
+    including its up-to-10s wait for released_predicate() — so any other
+    request sent while a quit was in flight had nowhere to connect to until
+    that wait finished. Each connection is now handed to its own thread so
+    the accept loop is free to pick up the next one immediately."""
+    gd = _gd(tmp_path)
+    acc = "d" * 32
+    released = threading.Event()
+
+    def on_quit():
+        # Slow enough that an inline handler would clearly stall the next
+        # request; short enough to keep the test fast.
+        threading.Timer(1.5, released.set).start()
+
+    listener = ipc.IpcListener(
+        gd, acc, on_activate=lambda s: None, on_quit=on_quit,
+        released_predicate=lambda: released.is_set(),
+    )
+    listener.start()
+    try:
+        assert listener.wait_ready(2.0)
+
+        quit_result = {}
+
+        def _do_quit():
+            quit_result["ok"] = ipc.request_quit(gd, acc, timeout=5.0)
+
+        t = threading.Thread(target=_do_quit)
+        t.start()
+        time.sleep(0.3)  # let the quit request land and start its wait
+
+        start = time.monotonic()
+        ok = ipc.request_activate(gd, acc, source="user", timeout=2.0)
+        elapsed = time.monotonic() - start
+
+        assert ok is True
+        assert elapsed < 1.0, (
+            f"activate took {elapsed:.2f}s while a quit was in flight — "
+            "the accept loop was blocked instead of handling it concurrently"
+        )
+        t.join(timeout=5)
+        assert quit_result.get("ok") is True
+    finally:
+        listener.stop()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="named pipe DACL is Windows-only")
+class TestNamedPipeDacl:
+    """The module docstring has always claimed the named pipe is 'restricted
+    to the current user' — this actually creates a pipe with the real
+    SECURITY_ATTRIBUTES the listener builds and inspects the DACL Windows
+    attached to it, rather than trusting that the pywin32 calls did what the
+    comment says. A bare SECURITY_ATTRIBUTES() (the previous code) was
+    confirmed, by this same technique, to grant full control to the current
+    user AND BUILTIN\\Administrators AND NT AUTHORITY\\SYSTEM."""
+
+    def test_only_the_current_user_has_an_ace(self):
+        import win32pipe
+        import win32file
+        import win32security
+        import win32api
+
+        sa = ipc.IpcListener._current_user_pipe_sa()
+        name = r"\\.\pipe\wz_test_dacl_pytest"
+        handle = win32pipe.CreateNamedPipe(
+            name,
+            win32pipe.PIPE_ACCESS_DUPLEX,
+            win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+            win32pipe.PIPE_UNLIMITED_INSTANCES,
+            65536, 65536, 0, sa,
+        )
+        try:
+            sd = win32security.GetSecurityInfo(
+                handle, win32security.SE_KERNEL_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION,
+            )
+            dacl = sd.GetSecurityDescriptorDacl()
+            assert dacl is not None
+            assert dacl.GetAceCount() == 1
+
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+            )
+            current_sid, _ = win32security.GetTokenInformation(token, win32security.TokenUser)
+            ace = dacl.GetAce(0)
+            assert ace[2] == current_sid
+        finally:
+            win32file.CloseHandle(handle)
+
+    def test_the_current_user_can_still_connect(self):
+        """The security lockdown must not lock out the very process that
+        creates the pipe."""
+        import win32pipe
+        import win32file
+        import pywintypes
+
+        sa = ipc.IpcListener._current_user_pipe_sa()
+        name = r"\\.\pipe\wz_test_dacl_connect_pytest"
+        handle = win32pipe.CreateNamedPipe(
+            name,
+            win32pipe.PIPE_ACCESS_DUPLEX,
+            win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+            win32pipe.PIPE_UNLIMITED_INSTANCES,
+            65536, 65536, 0, sa,
+        )
+        connected = {}
+
+        def _client():
+            try:
+                h = win32file.CreateFile(
+                    name, win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    0, None, win32file.OPEN_EXISTING, 0, None,
+                )
+                connected["ok"] = True
+                win32file.CloseHandle(h)
+            except pywintypes.error as exc:
+                connected["error"] = exc
+
+        t = threading.Thread(target=_client)
+        t.start()
+        try:
+            win32pipe.ConnectNamedPipe(handle, None)
+        finally:
+            t.join(timeout=5)
+            win32file.CloseHandle(handle)
+
+        assert connected.get("ok") is True, connected.get("error")

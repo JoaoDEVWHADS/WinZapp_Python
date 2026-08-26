@@ -168,24 +168,62 @@ class IpcListener:
                 continue
             except OSError:
                 break
-            with conn:
-                self._handle_conn(conn)
+            # Handed off to its own thread for the same reason as the
+            # Windows pipe loop below: a "quit" reply waits here for up to
+            # 10s for released_predicate(), and handling it inline would
+            # stall accept() from picking up any other request (e.g. a
+            # concurrent "activate") for that whole window.
+            threading.Thread(target=self._handle_conn, args=(conn,), daemon=True).start()
         try:
             srv.close()
             os.unlink(path)
         except OSError:
             pass
 
+    @staticmethod
+    def _current_user_pipe_sa():  # pragma: no cover (Windows-only)
+        """SECURITY_ATTRIBUTES with a DACL granting access to this Windows
+        user's SID only — nobody else, not even other local administrators.
+
+        A bare ``win32security.SECURITY_ATTRIBUTES()`` (the previous code
+        here) has no security descriptor of its own, so ``CreateNamedPipe``
+        falls back to the default DACL for a kernel object created by this
+        process: verified directly against a real pipe, that default grants
+        full control to the current user AND to ``BUILTIN\\Administrators``
+        AND ``NT AUTHORITY\\SYSTEM`` — not "current user only" the way the
+        module docstring above has always claimed. Any other account able to
+        reach that pipe name (any local admin, not just this user) could send
+        it an "activate"/"quit" command for a WinZapp instance it does not
+        own. This SID-scoped DACL is what actually delivers on that claim.
+        """
+        import win32security
+        import win32api
+        import ntsecuritycon
+
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+        )
+        user_sid, _ = win32security.GetTokenInformation(token, win32security.TokenUser)
+
+        dacl = win32security.ACL()
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, user_sid)
+
+        sd = win32security.SECURITY_DESCRIPTOR()
+        sd.SetSecurityDescriptorDacl(1, dacl, 0)
+
+        sa = win32security.SECURITY_ATTRIBUTES()
+        sa.SECURITY_DESCRIPTOR = sd
+        sa.bInheritHandle = False
+        return sa
+
     def _serve_windows(self) -> None:  # pragma: no cover (Windows-only)
         # Uses pywin32 named pipes with a current-user DACL. Protocol identical
         # to the AF_UNIX path. Imported lazily so non-Windows never needs it.
         import win32pipe
-        import win32file
         import pywintypes
-        import win32security
 
         name = _pipe_name(self.global_dir, self.account_id)
-        sa = win32security.SECURITY_ATTRIBUTES()  # default = current user token
+        sa = self._current_user_pipe_sa()
         self._ready.set()
         while not self._stop.is_set():
             try:
@@ -197,33 +235,55 @@ class IpcListener:
                     65536, 65536, 0, sa,
                 )
                 win32pipe.ConnectNamedPipe(handle, None)
-                data = win32file.ReadFile(handle, 65536)[1]
-                reply_lines = self._handle_message(data.decode("utf-8"))
-                for line in reply_lines:
-                    win32file.WriteFile(handle, (line + "\n").encode("utf-8"))
-                win32file.FlushFileBuffers(handle)
-                win32pipe.DisconnectNamedPipe(handle)
-                win32file.CloseHandle(handle)
             except pywintypes.error:
                 if self._stop.is_set():
                     break
                 time.sleep(0.05)
+                continue
+            # Handed off to its own thread so a slow reply — "quit" waits
+            # here for up to 10s for released_predicate() — can't stall this
+            # loop from accepting the next connection. Before this, a "quit"
+            # in flight made every other request (e.g. a concurrent
+            # "activate" from another account switching in) simply time out
+            # on the caller's side, since nothing was accepting it.
+            threading.Thread(
+                target=self._handle_pipe_connection, args=(handle,), daemon=True
+            ).start()
+
+    def _handle_pipe_connection(self, handle) -> None:  # pragma: no cover (Windows-only)
+        import win32pipe
+        import win32file
+        import pywintypes
+
+        try:
+            data = win32file.ReadFile(handle, 65536)[1]
+            reply_lines = self._handle_message(data.decode("utf-8"))
+            for line in reply_lines:
+                win32file.WriteFile(handle, (line + "\n").encode("utf-8"))
+            win32file.FlushFileBuffers(handle)
+            win32pipe.DisconnectNamedPipe(handle)
+            win32file.CloseHandle(handle)
+        except pywintypes.error:
+            pass
 
     # ── per-connection handling (shared logic) ───────────────────────────
     def _handle_conn(self, conn: socket.socket) -> None:
-        conn.settimeout(5.0)
-        buf = b""
-        try:
-            while b"\n" not in buf:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    return
-                buf += chunk
-            line = buf.split(b"\n", 1)[0].decode("utf-8")
-            for reply in self._handle_message(line):
-                conn.sendall((reply + "\n").encode("utf-8"))
-        except (OSError, ValueError):
-            pass
+        # Runs on its own thread (see _serve_unix) — closes conn itself now
+        # that the accept loop no longer wraps the call in `with conn:`.
+        with conn:
+            conn.settimeout(5.0)
+            buf = b""
+            try:
+                while b"\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    buf += chunk
+                line = buf.split(b"\n", 1)[0].decode("utf-8")
+                for reply in self._handle_message(line):
+                    conn.sendall((reply + "\n").encode("utf-8"))
+            except (OSError, ValueError):
+                pass
 
     def _handle_message(self, line: str) -> list[str]:
         try:
