@@ -8331,7 +8331,13 @@ class ConversationsPanel(wx.Panel):
                 continue
             self._update_media_transfer_gauge(progress)
             self.messages_list.SetItemText(index, self._render_message_line(msg))
-            self.messages_list.RefreshItem(index)
+            # wx.ListCtrl provides RefreshItem(), but the accessibility
+            # fallback is a native wx.ListBox and only supports Refresh().
+            refresh_item = getattr(self.messages_list, "RefreshItem", None)
+            if refresh_item is not None:
+                refresh_item(index)
+            else:
+                self.messages_list.Refresh()
             return
         self._hide_media_transfer_gauge()
 

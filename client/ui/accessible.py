@@ -377,6 +377,30 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
     def GetItemText(self, row, col=0):
         return self.GetString(row)
 
+    def RefreshItem(self, row):
+        """Repaint one row — wx.ListCtrl's per-row repaint, mapped onto the
+        whole-control Refresh() a native LISTBOX offers instead.
+
+        Callers use this after SetItemText() because Windows otherwise defers
+        the visual update to the next paint cycle, which shows up as a
+        delivery-status icon or an upload percentage that stays frozen until
+        the user leaves and re-enters the conversation. wx.ListBox has no
+        per-row equivalent, so the honest mapping is a full Refresh(): a
+        message list holds one screenful of rows, and this runs on single
+        status/progress updates, not in a loop.
+
+        Defined here rather than guarded at each call site because there are
+        three of them in ui/conversations.py and they behaved differently
+        without it — two are wrapped in `try/except Exception: pass` and so
+        silently skipped the repaint under this control (the exact frozen-icon
+        symptom refresh_message_status()'s own comment says the call exists to
+        prevent), while the third raised AttributeError out of a wx.CallAfter
+        callback and broke upload progress. One method fixes all three, and
+        keeps the next caller from having to know.
+        """
+        if 0 <= row < self.GetCount():
+            self.Refresh()
+
     def Append(self, entry_tuple):
         super().Append(entry_tuple[0])
 
