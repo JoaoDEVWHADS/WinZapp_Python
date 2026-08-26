@@ -1099,6 +1099,9 @@ export default class CreateSessionUtil {
             return (window as any).__winzappIncomingCallInstalled === true;
           }
           (window as any).__winzappIncomingCallInstalled = true;
+          if (WPP.call?.enableCallInterface) {
+            WPP.call.enableCallInterface().catch(() => {});
+          }
 
           // WA-JS 4.5 only exposes the incoming offer publicly. Later states
           // live in CallStore, and some WhatsApp builds mutate them without

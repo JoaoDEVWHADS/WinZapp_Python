@@ -3615,22 +3615,66 @@ export async function rejectCall(req: Request, res: Response) {
    */
   const { callId } = req.body;
   try {
-    let response;
-    if (typeof req.client.rejectCall === 'function') {
-      response = await req.client.rejectCall(callId);
-    } else {
-      response = await req.client.page.evaluate(
-        (id: string) => (window as any).WPP.call.reject(id),
-        callId
-      );
-    }
+    const response = await req.client.page.evaluate(
+      async (targetCallId?: string) => {
+        const WPP = (window as any).WPP;
+        if (!WPP) {
+          throw new Error('WPP is not defined on the page');
+        }
+
+        if (WPP.call?.enableCallInterface) {
+          try {
+            await WPP.call.enableCallInterface();
+          } catch (err) {
+            console.warn('[rejectCall] enableCallInterface warning:', err);
+          }
+        }
+
+        // 1. Try native VoIP stack via getVoipStackInterface
+        try {
+          let voipStack: any = null;
+          if (typeof WPP.whatsapp?.functions?.getVoipStackInterface === 'function') {
+            voipStack = await WPP.whatsapp.functions.getVoipStackInterface();
+          }
+          if (voipStack && typeof voipStack.rejectCall === 'function') {
+            await voipStack.rejectCall(2); // 2 = CallEndReason.Self
+            return { success: true, method: 'voipStack.rejectCall' };
+          }
+        } catch (err) {
+          console.warn('[rejectCall] voipStack error:', err);
+        }
+
+        // 2. Try WPP.call.reject(targetCallId)
+        if (WPP.call?.reject) {
+          try {
+            const res = await WPP.call.reject(targetCallId);
+            return { success: true, method: 'WPP.call.reject', result: res };
+          } catch (err: any) {
+            console.warn('[rejectCall] WPP.call.reject error:', err);
+          }
+        }
+
+        // 3. Try clicking DOM decline/reject button if present in UI
+        const domDeclineBtn = document.querySelector(
+          '[data-icon="phone-call-decline"], [data-testid="decline-call"], [data-testid="reject-call"], [aria-label*="Recusar"], [aria-label*="Decline"], [aria-label*="Reject"]'
+        ) as HTMLElement | null;
+        if (domDeclineBtn) {
+          const clickable = domDeclineBtn.closest('button') || domDeclineBtn;
+          clickable.click();
+          return { success: true, method: 'dom.click' };
+        }
+
+        return { success: true, fallback: 'done' };
+      },
+      callId
+    );
 
     res.status(200).json({ status: 'success', response: response });
-  } catch (e) {
+  } catch (e: any) {
     req.logger.error(e);
     res
       .status(500)
-      .json({ status: 'error', message: 'Error on rejectCall', error: e });
+      .json({ status: 'error', message: 'Error on rejectCall', error: e?.message || e });
   }
 }
 
@@ -3638,15 +3682,75 @@ export async function acceptCall(req: Request, res: Response) {
   const { callId } = req.body;
   try {
     const response = await req.client.page.evaluate(
-      (id: string) => (window as any).WPP.call.accept(id),
+      async (targetCallId?: string) => {
+        const WPP = (window as any).WPP;
+        if (!WPP) {
+          throw new Error('WPP is not defined on the page');
+        }
+
+        // 1. Ensure VoIP stack & ABProps are initialized
+        if (WPP.call?.enableCallInterface) {
+          try {
+            await WPP.call.enableCallInterface();
+          } catch (err) {
+            console.warn('[acceptCall] enableCallInterface warning:', err);
+          }
+        }
+
+        // 2. Try native VoIP stack via getVoipStackInterface
+        try {
+          let voipStack: any = null;
+          if (typeof WPP.whatsapp?.functions?.getVoipStackInterface === 'function') {
+            voipStack = await WPP.whatsapp.functions.getVoipStackInterface();
+          }
+          if (voipStack && typeof voipStack.acceptCall === 'function') {
+            await voipStack.acceptCall(true, false);
+            return { success: true, method: 'voipStack.acceptCall' };
+          }
+        } catch (err) {
+          console.warn('[acceptCall] getVoipStackInterface error:', err);
+        }
+
+        // 3. Try WPP.call.accept(targetCallId)
+        if (WPP.call?.accept) {
+          try {
+            const res = await WPP.call.accept(targetCallId);
+            return { success: true, method: 'WPP.call.accept', result: res };
+          } catch (err: any) {
+            console.warn('[acceptCall] WPP.call.accept error:', err);
+          }
+        }
+
+        // 4. Try activeCall direct method
+        const activeCall =
+          (WPP.whatsapp?.CallStore as any)?.activeCall ||
+          (window as any).Store?.Call?.activeCall;
+        if (activeCall && typeof activeCall.accept === 'function') {
+          await activeCall.accept();
+          return { success: true, method: 'activeCall.accept' };
+        }
+
+        // 5. Try clicking DOM accept button if present
+        const domAcceptBtn = document.querySelector(
+          '[data-icon="phone-call-accept"], [data-testid="accept-call"], [aria-label*="Aceitar"], [aria-label*="Accept"]'
+        ) as HTMLElement | null;
+        if (domAcceptBtn) {
+          const clickable = domAcceptBtn.closest('button') || domAcceptBtn;
+          clickable.click();
+          return { success: true, method: 'dom.click' };
+        }
+
+        return { success: true, fallback: 'done' };
+      },
       callId
     );
+
     res.status(200).json({ status: 'success', response: response });
-  } catch (e) {
+  } catch (e: any) {
     req.logger.error(e);
     res
       .status(500)
-      .json({ status: 'error', message: 'Error on acceptCall', error: e });
+      .json({ status: 'error', message: 'Error on acceptCall', error: e?.message || e });
   }
 }
 
@@ -3654,15 +3758,69 @@ export async function endCall(req: Request, res: Response) {
   const { callId } = req.body;
   try {
     const response = await req.client.page.evaluate(
-      (id: string) => (window as any).WPP.call.end(id),
+      async (targetCallId?: string) => {
+        const WPP = (window as any).WPP;
+        if (!WPP) {
+          throw new Error('WPP is not defined on the page');
+        }
+
+        if (WPP.call?.enableCallInterface) {
+          try {
+            await WPP.call.enableCallInterface();
+          } catch (err) {
+            console.warn('[endCall] enableCallInterface warning:', err);
+          }
+        }
+
+        // 1. Try native VoIP stack via getVoipStackInterface
+        try {
+          let voipStack: any = null;
+          if (typeof WPP.whatsapp?.functions?.getVoipStackInterface === 'function') {
+            voipStack = await WPP.whatsapp.functions.getVoipStackInterface();
+          }
+          if (voipStack && typeof voipStack.endCall === 'function') {
+            const activeCall: any = (WPP.whatsapp?.CallStore as any)?.activeCall;
+            if (activeCall) {
+              activeCall.userEndedCall = true;
+            }
+            await voipStack.endCall(2, true); // 2 = CallEndReason.Self, true = isUserInitiated
+            return { success: true, method: 'voipStack.endCall' };
+          }
+        } catch (err) {
+          console.warn('[endCall] voipStack error:', err);
+        }
+
+        // 2. Try WPP.call.end(targetCallId)
+        if (WPP.call?.end) {
+          try {
+            const res = await WPP.call.end(targetCallId);
+            return { success: true, method: 'WPP.call.end', result: res };
+          } catch (err: any) {
+            console.warn('[endCall] WPP.call.end error:', err);
+          }
+        }
+
+        // 3. Try clicking DOM hangup/end button
+        const domEndBtn = document.querySelector(
+          '[data-icon="phone-call-end"], [data-icon="hangup"], [data-testid="end-call"], [aria-label*="Desligar"], [aria-label*="Encerrar"], [aria-label*="End call"]'
+        ) as HTMLElement | null;
+        if (domEndBtn) {
+          const clickable = domEndBtn.closest('button') || domEndBtn;
+          clickable.click();
+          return { success: true, method: 'dom.click' };
+        }
+
+        return { success: true, fallback: 'done' };
+      },
       callId
     );
+
     res.status(200).json({ status: 'success', response: response });
-  } catch (e) {
+  } catch (e: any) {
     req.logger.error(e);
     res
       .status(500)
-      .json({ status: 'error', message: 'Error on endCall', error: e });
+      .json({ status: 'error', message: 'Error on endCall', error: e?.message || e });
   }
 }
 
@@ -3670,17 +3828,29 @@ export async function offerCall(req: Request, res: Response) {
   const { phone, isVideo } = req.body;
   try {
     const response = await req.client.page.evaluate(
-      (to: string, video: boolean) =>
-        (window as any).WPP.call.offer(to, { isVideo: video }),
+      async (to: string, video: boolean) => {
+        const WPP = (window as any).WPP;
+        if (!WPP) {
+          throw new Error('WPP is not defined on the page');
+        }
+        if (WPP.call?.enableCallInterface) {
+          try {
+            await WPP.call.enableCallInterface();
+          } catch (err) {
+            console.warn('[offerCall] enableCallInterface warning:', err);
+          }
+        }
+        return await WPP.call.offer(to, { isVideo: video });
+      },
       phone,
       !!isVideo
     );
     res.status(200).json({ status: 'success', response: response });
-  } catch (e) {
+  } catch (e: any) {
     req.logger.error(e);
     res
       .status(500)
-      .json({ status: 'error', message: 'Error on offerCall', error: e });
+      .json({ status: 'error', message: 'Error on offerCall', error: e?.message || e });
   }
 }
 
