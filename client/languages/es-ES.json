@@ -255,6 +255,7 @@
     "delete_for_everyone": "Eliminar para todos",
     "delete_for_everyone_failed": "No se pudo eliminar el mensaje para todos. Puede ser demasiado antiguo o no tienes permiso.",
     "edit_message": "Editar",
+    "resend_message": "Reenviar",
     "cancel_edit": "Cancelar edición",
     "noise_reduction_label": "Activar &reducción de ruido del micrófono",
     "notifications_label": "Activar &notificaciones de mensajes nuevos en segundo plano",

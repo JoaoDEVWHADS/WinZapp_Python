@@ -3755,6 +3755,19 @@ class ConversationsPanel(wx.Panel):
                 edit_item,
             )
 
+        # Resend (text messages WinZapp itself never confirmed — see
+        # _mark_message_unconfirmed's docstring). Deleting one already works
+        # today (treated as nothing-to-revoke, see _on_menu_delete_message);
+        # this is the other half — a way to try again instead of only being
+        # able to give up on it.
+        if _is_text and msg.get("_send_unconfirmed"):
+            resend_item = menu.Append(wx.ID_ANY, i18n.t("resend_message"))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_resend_message(m),
+                resend_item,
+            )
+
         menu.AppendSeparator()
 
         # Select / Unselect message (Ctrl+Space) — mirrors the label to
@@ -9823,11 +9836,22 @@ class ConversationsPanel(wx.Panel):
         )
 
         pending_local_id = str(msg.get("_local_id") or "")
-        cancelled_pending = bool(msg.get("_local_pending") and pending_local_id)
+        # An unconfirmed send (see _mark_message_unconfirmed's docstring) has
+        # no real WhatsApp id any more than a still-queued/in-flight one
+        # does — WinZapp just never learned whether it actually went out —
+        # so it belongs in the same "nothing to revoke, local delete only"
+        # bucket as a cancelled pending send, not the fromMe/for-everyone
+        # path below (which would build a revoke request around the local
+        # UUID this row's key.id still holds and could only fail).
+        cancelled_pending = bool(
+            pending_local_id and (msg.get("_local_pending") or msg.get("_send_unconfirmed"))
+        )
         if cancelled_pending:
             # There is no WhatsApp message ID to revoke yet. Whichever scope the
             # dialog had selected, cancel the queued/in-flight upload and apply
             # a local deletion; asking the API for "everyone" here can only fail.
+            # cancel() on an already-resolved (unconfirmed) send is a harmless
+            # no-op — message_queue has nothing left to cancel by this point.
             self.main_window.message_queue.cancel(pending_local_id)
             self._outgoing_virtual_messages.pop(pending_local_id, None)
             self._media_upload_progress.pop(pending_local_id, None)
@@ -10042,6 +10066,70 @@ class ConversationsPanel(wx.Panel):
         # Show cancel button so the user knows they're in edit mode
         self._cancel_edit_btn.Show()
         self.conversation_panel.Layout()
+
+    def _on_menu_resend_message(self, msg: dict):
+        """Manually re-send a text message WinZapp itself never confirmed —
+        the other recovery option besides dismissing it outright (see
+        _on_menu_delete_message's cancelled_pending branch, which already
+        treats this state as nothing-to-revoke).
+
+        Deliberately does not attempt to preserve a quote or @mentions the
+        original had: rebuilding those faithfully from contextInfo is more
+        machinery than a rare manual recovery action warrants, and this
+        must not read the composer's own current _quoted_message/
+        _pending_mentions state either — those describe whatever the user
+        is composing right now, unrelated to the row being resent. A resend
+        goes out as plain text; if the quote mattered, the user can reply
+        again themselves.
+        """
+        remote_jid = msg.get("key", {}).get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+        if not remote_jid:
+            return
+
+        content = self._get_message_content(msg) or ""
+        if content.startswith("> ") and "\n" in content:
+            content = content[content.index("\n") + 1:]
+        if not content:
+            return
+
+        old_local_id = str(msg.get("_local_id") or "")
+        if old_local_id:
+            # Harmless no-op on message_queue's side — an unconfirmed send
+            # has already left its queue by definition — but still clears
+            # this row's own tracking entries the same way a dismiss would.
+            self.main_window.message_queue.cancel(old_local_id)
+            self._outgoing_virtual_messages.pop(old_local_id, None)
+            self.remove_messages_by_id({old_local_id}, focus_previous=True)
+
+        local_id = str(uuid.uuid4())
+        virtual_msg = {
+            "_local_pending": True,
+            "_local_id":      local_id,
+            "key": {
+                "id":       local_id,
+                "fromMe":   True,
+                "remoteJid": remote_jid,
+            },
+            "messageType":      "conversation",
+            "message":          {"conversation": content},
+            "messageTimestamp": int(time.time()),
+            "pushName":         "",
+        }
+        self._clear_empty_placeholder()
+        self._sorted_messages.append(virtual_msg)
+        self.messages_list.Append((self._render_message_line(virtual_msg),))
+        last = self.messages_list.GetItemCount() - 1
+        if last >= 0:
+            self.messages_list.EnsureVisible(last)
+
+        self.main_window.message_queue.enqueue(
+            PendingMessage(local_id, remote_jid, text=content)
+        )
+
+        self._register_virtual_msg(virtual_msg)
+        self.main_window._schedule_set_chats()
 
     def _on_cancel_edit(self, event=None):
         """Leave edit mode without saving."""

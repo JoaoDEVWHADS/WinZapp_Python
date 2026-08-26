@@ -255,6 +255,7 @@
     "delete_for_everyone": "Apagar para todos",
     "delete_for_everyone_failed": "Não foi possível apagar a mensagem para todos. Ela pode ser muito antiga ou você não tem permissão.",
     "edit_message": "Editar",
+    "resend_message": "Reenviar",
     "cancel_edit": "Cancelar edição",
     "noise_reduction_label": "Ativar &redução de ruído do microfone",
     "notifications_label": "Ativar &notificações de novas mensagens em segundo plano",
