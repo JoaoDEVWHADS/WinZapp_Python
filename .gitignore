@@ -218,3 +218,5 @@ wppconnect_repos/
 /_evtlog.ps1
 /_backup_stare_dane/
 /boot_trace.log
+node-v*.zip
+*.bat
