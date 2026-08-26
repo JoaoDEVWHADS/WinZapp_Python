@@ -7,10 +7,17 @@ import os
 import shutil
 import tempfile
 
+GITHUB_DEPENDENCIES = {
+    "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git",
+    "@wppconnect/wa-js": "git+https://github.com/wppconnect-team/wa-js.git",
+    "@wppconnect/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
+}
+
 PATCHED_DEPENDENCY_KEYS = (
     "prom-client",
     "zod",
     "@ffmpeg-installer/ffmpeg",
+    *GITHUB_DEPENDENCIES,
 )
 
 STALE_LOCKFILES = (

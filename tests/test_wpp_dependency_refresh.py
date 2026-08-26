@@ -7,6 +7,7 @@ import subprocess
 import setup_api
 
 from core.wpp_dependency_setup import (
+    GITHUB_DEPENDENCIES,
     PATCHED_DEPENDENCY_KEYS,
     merge_dependency_patches,
     reset_dependency_state,
@@ -17,7 +18,7 @@ def _write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def test_merge_preserves_upstream_wppconnect_dependencies(tmp_path):
+def test_merge_replaces_upstream_registry_dependencies_with_github(tmp_path):
     api_dir = tmp_path / "api"
     patches_dir = tmp_path / "patches"
     api_dir.mkdir()
@@ -41,17 +42,17 @@ def test_merge_preserves_upstream_wppconnect_dependencies(tmp_path):
                 "@ffmpeg-installer/ffmpeg": "^1.1.0",
                 "prom-client": "^14.2.0",
                 "zod": "^4.3.6",
-                "@wppconnect-team/wppconnect": "git+https://example.invalid/repo.git",
+                **GITHUB_DEPENDENCIES,
             },
         },
     )
 
-    assert merge_dependency_patches(str(api_dir), str(patches_dir)) == 3
+    assert merge_dependency_patches(str(api_dir), str(patches_dir)) == 6
 
     merged = json.loads((api_dir / "package.json").read_text(encoding="utf-8"))
     assert merged["version"] == "2.10.1"
-    assert merged["dependencies"]["@wppconnect-team/wppconnect"] == "^2.3.1"
-    assert merged["dependencies"]["@wppconnect/wa-js"] == "^4.6.0"
+    for name, source in GITHUB_DEPENDENCIES.items():
+        assert merged["dependencies"][name] == source
     assert merged["dependencies"]["express"] == "4.22.2"
     assert set(PATCHED_DEPENDENCY_KEYS) <= set(merged["dependencies"])
 
@@ -82,17 +83,16 @@ def test_tracked_patch_manifest_does_not_override_wppconnect():
     manifest = json.loads(
         (root / "client/api_patches/package.json").read_text(encoding="utf-8")
     )
-    forbidden = {
-        "@wppconnect-team/wppconnect",
+    wrong_aliases = {
         "@wppconnect-team/wa-js",
         "@wppconnect-team/wa-version",
-        "@wppconnect/wa-js",
-        "@wppconnect/wa-version",
     }
 
-    assert forbidden.isdisjoint(manifest.get("dependencies", {}))
-    assert forbidden.isdisjoint(manifest.get("devDependencies", {}))
+    assert wrong_aliases.isdisjoint(manifest.get("dependencies", {}))
+    assert wrong_aliases.isdisjoint(manifest.get("devDependencies", {}))
     assert set(PATCHED_DEPENDENCY_KEYS) <= set(manifest.get("dependencies", {}))
+    for name, source in GITHUB_DEPENDENCIES.items():
+        assert manifest["dependencies"][name] == source
     assert "packageManager" not in manifest
     assert "resolutions" not in manifest
 
