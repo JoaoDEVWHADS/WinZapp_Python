@@ -28,6 +28,24 @@ the document stays the single source of the claim and this file only checks it.
 That also means a reformat which stops the parser from matching has to fail
 loudly rather than quietly turn these tests into a green no-op — hence the
 guards asserting the parse found anything at all.
+
+Where these run, and the risk that carries
+------------------------------------------
+release.yml's `test` job runs bare `pytest`, and `reject-on-test-failure`
+DELETES the just-created release and its tag when that job fails. So from this
+commit on, a stale sentence in a Markdown file sits on the same path as
+check_stable_release_ordering.py, where CLAUDE.md itself says a wrong answer is
+expensive both ways. test_every_path_claude_md_names_exists has no tolerance
+band at all: rename a module, forget to grep the doc, and the next stable cut
+is deleted over a Markdown edit.
+
+That is accepted rather than overlooked, for one reason: alpha-release.yml runs
+the same suite on every push to main, and a failed alpha is a draft that simply
+never gets published. Doc drift therefore surfaces as a red alpha within one
+push, and the release-deletion path is only reachable by cutting a stable
+release on top of a main that is already red. If that guarantee ever goes away
+— alphas stop building on every push, or stop running the full suite — this
+file should move behind a marker the release job deselects.
 """
 
 import pathlib
@@ -44,8 +62,9 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 #
 #   Too tight (an exact count, or a few percent) and the test fails on almost
 #   every commit that touches main.py — measured over the recent stretch of
-#   history, main.py took ~200 lines across 20 commits and ~3,200 across 100,
-#   with a median touch of +25 lines and a p90 of +130. The fix would always be
+#   history — measured on origin/main, which is the ref that matters and the
+#   one these numbers reproduce against — main.py grew +640 lines over the last
+#   20 commits and +3,461 over the last 100. The fix would always be
 #   "edit a number in a document", i.e. a chore, and a test whose only failure
 #   mode is a chore gets reflexively silenced and then deleted — at which point
 #   the drift it existed to catch rides in unopposed. Note also that the doc
@@ -175,15 +194,14 @@ def test_the_patch_count_word_matches_the_modules_listed(real_patch_modules):
 # ── documented modules exist ─────────────────────────────────────────────────
 
 # Every client/**.py CLAUDE.md names in backticks. Restricted to Python modules
-# on purpose: those are the ones a reader is being sent to open or grep, and a
-# renamed or deleted one turns the doc's navigation advice into a dead end —
-# the same failure as the patch-module list above, one file at a time.
-# Any backticked client/… path, not only .py modules. Restricted to .py it
+# Any backticked client/… path — the ones a reader is being sent to open or
+# grep, where a renamed or deleted one turns the doc's navigation advice into
+# a dead end. Not only .py: Restricted to .py it
 # would have stayed green on the two claims that were actually stale:
 # `client/WinZapp.spec` (removed and git-ignored in c752124, while the prose
 # still called it "the checked-in" one) and `client/api2/` (deleted in
 # af250f7, still described as if it shipped).
-_DOC_PY_PATH = re.compile(r"`(client/[\w./-]+)`")
+_DOC_PATH = re.compile(r"`(client/[\w./-]+)`")
 
 # client/api/ and client/node/ are git-ignored and deliberately absent from a
 # fresh checkout — the fast CI test job never has either (hence the skips in
@@ -192,14 +210,23 @@ _DOC_PY_PATH = re.compile(r"`(client/[\w./-]+)`")
 UNCHECKABLE_PREFIXES = ("client/api/", "client/node/")
 
 
-def test_every_python_module_claude_md_names_exists():
+def test_every_path_claude_md_names_exists():
     documented = {
-        p for p in _DOC_PY_PATH.findall(_doc())
+        p for p in _DOC_PATH.findall(_doc())
         if not p.startswith(UNCHECKABLE_PREFIXES)
     }
-    assert documented, "no client/**.py paths found in CLAUDE.md — the parser stopped matching"
+    # Anchored, not just non-empty. `assert documented` passes on a single
+    # surviving path, so reformatting the "Multi-conta" bullet list — the
+    # newest and least settled section, which alone contributes 15 of the
+    # paths parsed here — would stop checking those 15 with the suite fully
+    # green. The god files are the claims least likely to legitimately leave
+    # the document.
+    assert set(GOD_FILES) <= documented, (
+        f"CLAUDE.md no longer names the god files in backticks — the parser is "
+        f"matching {len(documented)} path(s) and the checks below have gone vacuous"
+    )
     missing = sorted(p for p in documented if not (ROOT / p).exists())
     assert missing == [], (
-        f"CLAUDE.md points at Python modules that do not exist. If they were renamed, "
+        f"CLAUDE.md points at paths that do not exist. If they were renamed, "
         f"update the doc; if they were deleted, delete the claim: {missing}"
     )
