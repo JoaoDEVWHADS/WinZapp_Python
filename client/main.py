@@ -1090,6 +1090,8 @@ class MainWindow(wx.Frame):
         # lifecycle maps.  Keeping ownership here lets terminal socket events
         # close a popup that is no longer relevant.
         self._incoming_call_dialogs = {}
+        self._active_call_dialogs = {}
+        self._incoming_call_info = {}
         # List of deleted, archived, pinned, and muted chats, loaded from DB on prepare_sync()
         self._deleted_chats = set()
         self._archived_chats = set()
@@ -4013,6 +4015,8 @@ class MainWindow(wx.Frame):
             self._cancel_incoming_call_watchdog(identity)
         for identity in list(getattr(self, "_incoming_call_dialogs", {})):
             self._close_incoming_call_dialog(identity)
+        for identity in list(getattr(self, "_active_call_dialogs", {})):
+            self._close_active_call_dialog(identity)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
         if getattr(self, "tray_icon", None) is not None:
@@ -4139,11 +4143,100 @@ class MainWindow(wx.Frame):
         dialog = IncomingCallDialog(
             self,
             message,
-            on_stop=lambda: self.stop_incoming_call_alert(identity),
+            on_accept=lambda: self.accept_incoming_call(identity),
+            on_reject=lambda: self.reject_incoming_call(identity),
             on_closed=lambda: self._forget_incoming_call_dialog(identity),
         )
         self._incoming_call_dialogs[identity] = dialog
         dialog.show_accessibly()
+
+    def _show_active_call_dialog(self, call_id: str, caller_name: str = "", peer_jid: str = ""):
+        from ui.dialogs.active_call import ActiveCallDialog
+
+        if getattr(self, "_window_hidden", False):
+            self.restore_window()
+        self._close_active_call_dialog(call_id)
+        dialog = ActiveCallDialog(
+            self,
+            call_id=call_id,
+            caller_name=caller_name,
+            on_end=lambda: self.end_active_call(call_id),
+            on_toggle_mute=lambda is_muted: self.toggle_call_mute(call_id, is_muted),
+        )
+        if not hasattr(self, "_active_call_dialogs"):
+            self._active_call_dialogs = {}
+        self._active_call_dialogs[call_id] = dialog
+        dialog.show_accessibly()
+
+    def _close_active_call_dialog(self, call_id: str):
+        dialog = getattr(self, "_active_call_dialogs", {}).pop(call_id, None)
+        if dialog is not None:
+            try:
+                dialog.close_from_call_lifecycle()
+            except Exception:
+                logging.exception("[active_call] could not close popup id=%s", call_id)
+
+    def accept_incoming_call(self, identity: str):
+        """Accept incoming call via API and show active call window."""
+        info = getattr(self, "_incoming_call_info", {}).pop(identity, {})
+        call_id = info.get("call_id") or identity
+        caller_name = info.get("caller_name", "")
+        peer_jid = info.get("peer_jid", "")
+
+        self.stop_incoming_call_alert(identity)
+
+        url = f"{self.api_url}/api/{self.session}/accept-call"
+        headers = {"Authorization": f"Bearer {self.api_token}"}
+        payload = {"callId": call_id}
+
+        def _do_accept():
+            try:
+                api_post(url, json=payload, headers=headers, timeout=15)
+            except Exception:
+                logging.exception("[call] error accepting call id=%s", call_id)
+
+        threading.Thread(target=_do_accept, daemon=True).start()
+        self._show_active_call_dialog(call_id=call_id, caller_name=caller_name, peer_jid=peer_jid)
+
+    def reject_incoming_call(self, identity: str):
+        """Decline/reject incoming call via API on WhatsApp."""
+        info = getattr(self, "_incoming_call_info", {}).pop(identity, {})
+        call_id = info.get("call_id") or identity
+
+        self.stop_incoming_call_alert(identity)
+
+        url = f"{self.api_url}/api/{self.session}/reject-call"
+        headers = {"Authorization": f"Bearer {self.api_token}"}
+        payload = {"callId": call_id}
+
+        def _do_reject():
+            try:
+                api_post(url, json=payload, headers=headers, timeout=15)
+            except Exception:
+                logging.exception("[call] error rejecting call id=%s", call_id)
+
+        threading.Thread(target=_do_reject, daemon=True).start()
+
+    def end_active_call(self, call_id: str):
+        """End active call on WhatsApp."""
+        self._close_active_call_dialog(call_id)
+
+        url = f"{self.api_url}/api/{self.session}/end-call"
+        headers = {"Authorization": f"Bearer {self.api_token}"}
+        payload = {"callId": call_id}
+
+        def _do_end():
+            try:
+                api_post(url, json=payload, headers=headers, timeout=15)
+            except Exception:
+                logging.exception("[call] error ending call id=%s", call_id)
+
+        threading.Thread(target=_do_end, daemon=True).start()
+        self.output(self.i18n.t("call_ended_announcement"))
+
+    def toggle_call_mute(self, call_id: str, is_muted: bool):
+        """Toggle microphone mute state during active call."""
+        logging.info("[call] toggle mute call_id=%s is_muted=%s", call_id, is_muted)
 
     def _on_stop_incoming_call_bar(self, _event=None):
         """Handle the native in-window Desligar button."""
@@ -4242,6 +4335,9 @@ class MainWindow(wx.Frame):
                 close_dialog = getattr(self, "_close_incoming_call_dialog", None)
                 if close_dialog is not None:
                     close_dialog(call_id)
+                close_active = getattr(self, "_close_active_call_dialog", None)
+                if close_active is not None:
+                    close_active(call_id)
             elif peer_jid:
                 ended_ids = [
                     cid for cid, jid in self._active_incoming_calls.items()
@@ -4256,6 +4352,9 @@ class MainWindow(wx.Frame):
                     close_dialog = getattr(self, "_close_incoming_call_dialog", None)
                     if close_dialog is not None:
                         close_dialog(identity)
+                    close_active = getattr(self, "_close_active_call_dialog", None)
+                    if close_active is not None:
+                        close_active(identity)
             else:
                 self._active_incoming_calls.clear()
                 for identity in list(self._incoming_call_watchdogs):
@@ -4264,6 +4363,10 @@ class MainWindow(wx.Frame):
                     close_dialog = getattr(self, "_close_incoming_call_dialog", None)
                     if close_dialog is not None:
                         close_dialog(identity)
+                for identity in list(getattr(self, "_active_call_dialogs", {})):
+                    close_active = getattr(self, "_close_active_call_dialog", None)
+                    if close_active is not None:
+                        close_active(identity)
             if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
                 self.call_incoming_sound.stop()
             self._sync_incoming_call_bar()
@@ -4298,6 +4401,12 @@ class MainWindow(wx.Frame):
             if not caller_name:
                 caller_name = self.i18n.t("unknown_contact")
             message = self.i18n.t("incoming_call_announcement").format(name=caller_name)
+        self._incoming_call_info[identity] = {
+            "call_id": call_id or identity,
+            "caller_name": group_name if is_group else caller_name,
+            "peer_jid": peer_jid,
+            "is_video": bool(event.get("isVideo")),
+        }
         self.output(message, interrupt=True)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.play()
