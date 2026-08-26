@@ -131,7 +131,7 @@ function extractZip(zipPath, destDir) {
 }
 
 if (!findPreferredChrome()) {
-  const browserProduct = process.platform === 'win32' ? 'chrome' : 'chrome-headless-shell';
+  const browserProduct = 'chrome';
   console.log(`[chrome-install] ${browserProduct} não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...`);
   try {
     const { execSync } = require('child_process');

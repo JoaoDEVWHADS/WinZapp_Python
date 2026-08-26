@@ -10,7 +10,7 @@
     "url": "https://github.com/wppconnect-team/wppconnect-server"
   },
   "scripts": {
-    "postinstall": "npx --yes @puppeteer/browsers install chrome-headless-shell@stable --path ./.cache",
+    "postinstall": "npx --yes @puppeteer/browsers install chrome@stable --path ./.cache",
     "build:types": "tsc",
     "build:js": "rimraf dist && babel src --out-dir dist --extensions \".ts,.tsx\" --source-maps inline --copy-files",
     "build": "npm run build:types && npm run build:js",
