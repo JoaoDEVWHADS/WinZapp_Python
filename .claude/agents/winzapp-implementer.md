@@ -14,7 +14,7 @@ read end to end.
 
 ## Before writing anything
 
-1. **Grep `main.py` first.** It is ~15,500 lines and `conversations.py` ~9,200.
+1. **Grep `main.py` first.** It is ~22,300 lines and `conversations.py` ~13,500.
    The method you are about to write very likely already exists. CLAUDE.md
    says this outright, and it is the most common wasted change here.
 2. **Load the skill that covers the area** — `accessible-ui`, `i18n-ui-string`,

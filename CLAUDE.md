@@ -49,7 +49,7 @@ Requires, in addition to the venv: `client/node/` (portable Windows x64 Node.js 
 - `client/api2/` is a small standalone Puppeteer/Chrome auto-install helper script, unrelated to the main WPPConnect flow above.
 
 ### `client/main.py` — the god object
-Almost everything (WebSocket/HTTP calls to WPPConnect, JID normalization, chat/contact state, sync, sound/notification dispatch, menu wiring, update checks) lives on the single `MainWindow(wx.Frame)` class in `client/main.py` (~15,500 lines). When making a change, `grep` this file first — the method you need very likely already exists here rather than in a smaller module. `client/ui/conversations.py` (`ConversationsPanel`, ~9,200 lines) is the other large file, holding essentially all message-list/composer UI and behavior.
+Almost everything (WebSocket/HTTP calls to WPPConnect, JID normalization, chat/contact state, sync, sound/notification dispatch, menu wiring, update checks) lives on the single `MainWindow(wx.Frame)` class in `client/main.py` (~22,300 lines). When making a change, `grep` this file first — the method you need very likely already exists here rather than in a smaller module. `client/ui/conversations.py` (`ConversationsPanel`, ~13,500 lines) is the other large file, holding essentially all message-list/composer UI and behavior.
 
 ### Message/data pipeline
 1. **`client/core/websocket_client.py`** (`WebSocketClient`) connects to WPPConnect's Socket.IO and normalizes raw WPPConnect/Baileys event payloads into WinZapp's canonical message dict shape: `{"key": {"remoteJid", "fromMe", "id", "participant"?}, "message": {...}, "messageType": "...", "messageTimestamp": ..., "pushName": "..."}`. All downstream code (`main.py`, `core/database.py`, `ui/conversations.py`) assumes this shape.

@@ -59,8 +59,8 @@ release before.
 
 ## Tier 2 — structure, but only where it changes something
 
-This repo's default is to append to `main.py` (15,500 lines) and
-`conversations.py` (9,200). Pushing back is useful — but only with the real
+This repo's default is to append to `main.py` (22,300 lines) and
+`conversations.py` (13,500). Pushing back is useful — but only with the real
 reason attached, which here is **testability**: `MainWindow` is a `wx.Frame`
 and `ConversationsPanel` a `wx.Panel`, so logic left on those classes can only
 be tested through a stub, while logic extracted to module level is tested
@@ -89,7 +89,7 @@ individual findings.
    `tests/test_accessible_speech.py`, and the suites touching the changed area.
    A failing test is worth more than any comment you could write about it.
 3. **Verify before asserting.** `grep` for the function, read it, check the
-   call sites. This codebase has ~15,500 lines in one file — the method you
+   call sites. This codebase has ~22,300 lines in one file — the method you
    assume is missing usually exists.
 4. **Say when it is fine.** A diff with no Tier 1 findings should be reported
    as such, plainly. Manufacturing findings to look thorough is the failure
