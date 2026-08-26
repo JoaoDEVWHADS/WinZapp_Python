@@ -146,7 +146,7 @@
     "save_as_nothing_to_save": "Este mensaje no tiene ningún archivo que guardar",
     "save_as_nothing_to_save_bulk": "Ninguno de los mensajes seleccionados tiene un archivo que guardar",
     "all_files": "Todos los archivos",
-    "audio_convert_failed": "Error al convertir el audio. FFmpeg no está disponible en este sistema.",
+    "audio_convert_failed": "No se pudo convertir el audio a un formato aceptado por WhatsApp.",
     "downloading_progress": "descargando, {pct}% completado",
     "uploading_progress": "enviando, {pct}% completado",
     "discard_voice_message": "Descartar mensaje de voz",

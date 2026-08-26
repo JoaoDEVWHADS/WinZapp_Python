@@ -20064,6 +20064,11 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.error("[send_media] failed to stat file %s: %s", file_path, exc)
             return False
+        MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024
+        if file_size > MAX_FILE_SIZE:
+            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 1 GB WhatsApp attachment limit."
+            logging.error("[send_media] %s", err_msg)
+            return {"ok": False, "error": err_msg, "retry": False}
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         filename = os.path.basename(file_path)
         upload_path = file_path
@@ -20074,7 +20079,7 @@ class MainWindow(wx.Frame):
             if prepared is None:
                 return {
                     "ok": False,
-                    "error": "Não foi possível converter o áudio OGG para Opus.",
+                    "error": self.i18n.t("media_audio_convert_failed"),
                     "retry": False,
                 }
             upload_path, mime = prepared
@@ -20125,13 +20130,18 @@ class MainWindow(wx.Frame):
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
             if quoted_id:
                 data["quotedMessageId"] = quoted_id
-        # WPPConnect accepts documents up to 1 GB. Its WinZapp patch moves large
-        # payloads into Chromium in bounded chunks instead of one oversized CDP
-        # argument. Non-document media remains capped by the UI at 70 MB.
-        MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024
+        # WPPConnect accepts attachments up to 1 GB. Its WinZapp patch moves
+        # large payloads into Chromium in bounded chunks instead of one
+        # oversized CDP argument, for document/image/video/audio alike.
         if file_size > MAX_FILE_SIZE:
-            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 1 GB WhatsApp document limit."
+            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 1 GB WhatsApp attachment limit."
             logging.error("[send_media] %s", err_msg)
+            for converted_path in (converted_audio_path, converted_video_path):
+                if converted_path:
+                    try:
+                        os.unlink(converted_path)
+                    except OSError:
+                        pass
             return {"ok": False, "error": err_msg, "retry": False}
         timeout = max(120, file_size // (100 * 1024))
         timeout = min(timeout, 1800)
@@ -20186,6 +20196,21 @@ class MainWindow(wx.Frame):
                     resp = resp[0]
                 msg_id = ""
                 if isinstance(resp, dict):
+                    raw_ack = resp.get("ack")
+                    try:
+                        ack = int(raw_ack) if raw_ack is not None else None
+                    except (TypeError, ValueError):
+                        ack = None
+                    if ack is not None and ack < 0:
+                        logging.error(
+                            "[send_media] WhatsApp rejected %s after upload (ack=%s)",
+                            filename, raw_ack,
+                        )
+                        return {
+                            "ok": False,
+                            "error": self.i18n.t("media_unsupported_error"),
+                            "retry": False,
+                        }
                     msg_id = resp.get("id") or resp.get("key", {}).get("id") or ""
                     if isinstance(msg_id, dict):
                         msg_id = msg_id.get("_serialized", "")

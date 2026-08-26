@@ -43,24 +43,10 @@ def test_sender_patch_migrates_intermediate_chunked_source():
 
 def test_sender_patch_migrates_the_previous_chunked_patch_to_1gb():
     previous = sender_patch.PATCHED_SEND_FILE.replace(
-        "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
-        "                        if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
-        "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
-        "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
-        "                                ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
-        "                                : getUploadLimit(type, origin, isVcard);\n"
-        "                            mediaGating.__winzappUploadLimitPatched = true;\n"
-        "                        }\n",
+        sender_patch._deepen(sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH),
         "",
     ).replace(
-        "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
-        "                    if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
-        "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
-        "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
-        "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
-        "                            : getUploadLimit(type, origin, isVcard);\n"
-        "                        mediaGating.__winzappUploadLimitPatched = true;\n"
-        "                    }\n",
+        sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH,
         "",
     )
 
@@ -99,7 +85,74 @@ def test_sender_patch_guards_upload_limit_wrap_against_repeated_wrapping():
 
     assert patched.count("__winzappUploadLimitPatched = true") == 2
     assert patched.count("&& !mediaGating.__winzappUploadLimitPatched") == 2
-    assert "&& !mediaGating.__winzappUploadLimitPatched" in sender_patch._BROWSER_DOCUMENT_LIMIT_PATCH
+    assert "&& !mediaGating.__winzappUploadLimitPatched" in sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH
+
+
+def test_sender_patch_migrates_the_guarded_document_only_limit():
+    """Existing installs already carry the guarded document-only wrapper.
+    Updating must widen that exact source instead of treating it as current."""
+    migrated = sender_patch.patch_sender_layer_source(
+        sender_patch.LEGACY_PATCHED_SEND_FILE_V3
+    )
+
+    assert migrated == sender_patch.PATCHED_SEND_FILE
+    assert sender_patch._BROWSER_DOCUMENT_LIMIT_PATCH not in migrated
+    assert sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH in migrated
+
+
+def test_browser_upload_limit_covers_every_supported_attachment_type():
+    """The bounded transfer already accepts every media kind; its page-side
+    size gate must not leave audio at WhatsApp Web's default 16 MB ceiling."""
+    block = sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH
+
+    for kind in ("document", "image", "video", "audio"):
+        assert f"'{kind}'" in block
+    assert "includes(options.type)" in block
+    assert "includes(type)" in block
+    assert "type === 'document'" not in sender_patch.PATCHED_SEND_FILE
+
+
+def test_browser_media_prep_explicitly_marks_audio_mime_as_audio():
+    """WA-JS exposes MediaPrep's isAudio option but sendFileMessage leaves it
+    unset. Converted OGG/Opus must not depend on container auto-detection to
+    reach the audio path."""
+    block = sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH
+
+    assert "WPP.whatsapp?.MediaPrep" in block
+    assert "startsWith('audio/')" in block
+    assert "{ ...prepOptions, isAudio: true }" in block
+    assert "!mediaPrep.__winzappAudioTypePatched" in block
+    assert "mediaPrep.__winzappAudioTypePatched = true" in block
+
+
+def test_sender_patch_migrates_limit_only_block_to_explicit_audio_type():
+    old = sender_patch.PATCHED_SEND_FILE.replace(
+        sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH,
+        sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH_V1,
+    ).replace(
+        sender_patch._deepen(sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH),
+        sender_patch._deepen(sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH_V1),
+    )
+
+    assert sender_patch.patch_sender_layer_source(old) == sender_patch.PATCHED_SEND_FILE
+
+
+def test_browser_patch_does_not_bypass_whatsapps_wav_validation():
+    """A native WAV upload reaches HTTP 201 but WhatsApp rejects the message
+    with ACK -1, so WAV compatibility belongs in the Python transcoder."""
+    block = sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH
+
+    assert "WAWebSendMessageToMediaWorker" not in block
+    assert "__winzappWavPassthroughPatched" not in block
+
+
+def test_sender_patch_removes_the_failed_native_wav_bypass():
+    migrated = sender_patch.patch_sender_layer_source(
+        sender_patch.LEGACY_PATCHED_SEND_FILE_V4
+    )
+
+    assert migrated == sender_patch.PATCHED_SEND_FILE
+    assert "__winzappWavPassthroughPatched" not in migrated
 
 
 def test_large_documents_use_bounded_browser_transfers_and_a_1gb_browser_limit():
@@ -201,7 +254,7 @@ class TestTheUploadLimitOverrideInstallsItselfOnlyOnce:
     def test_the_injected_block_carries_the_marker_too(self):
         """The block injected into a node_modules that predates the override
         entirely is a separate constant from the two inline copies."""
-        head = sender_patch._BROWSER_DOCUMENT_LIMIT_PATCH
+        head = sender_patch._BROWSER_ATTACHMENT_LIMIT_PATCH
         assert "!mediaGating.__winzappUploadLimitPatched" in head
         assert "mediaGating.__winzappUploadLimitPatched = true;" in head
 

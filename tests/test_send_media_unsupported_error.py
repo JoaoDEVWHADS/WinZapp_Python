@@ -28,6 +28,8 @@ from main import MainWindow
 class _FakeI18n:
     def t(self, key):
         return {
+            "audio_convert_failed": "Failed to convert audio.",
+            "media_audio_convert_failed": "Could not convert audio for WhatsApp.",
             "media_unsupported_error": "the file appears to be corrupted or in a format WhatsApp cannot process",
         }.get(key, key)
 
@@ -75,6 +77,35 @@ def media_file(tmp_path):
 
 
 class TestMediaUnsupportedErrorStopsRetrying:
+    def test_negative_ack_is_failure_even_when_upload_returned_http_201(
+        self, media_file, monkeypatch
+    ):
+        import main
+
+        monkeypatch.setattr(
+            main.requests,
+            "post",
+            lambda *a, **k: _FakeResponse(
+                201,
+                {
+                    "response": {
+                        "ack": -1,
+                        "id": "true_5511999999999@c.us_REJECTED123",
+                    }
+                },
+            ),
+        )
+
+        result = _Stub().send_media_attachment(
+            "5511999999999@s.whatsapp.net", media_file, "video"
+        )
+
+        assert result == {
+            "ok": False,
+            "error": "the file appears to be corrupted or in a format WhatsApp cannot process",
+            "retry": False,
+        }
+
     def test_media_unsupported_error_is_not_retried_and_has_a_clear_message(self, media_file, monkeypatch):
         import main
 
@@ -128,3 +159,69 @@ class TestMediaUnsupportedErrorStopsRetrying:
 
         assert result["ok"] is False
         assert result["retry"] is False
+
+
+class TestConvertedAudioLifecycle:
+    def test_successful_upload_removes_only_the_converted_temporary_file(
+        self, tmp_path, monkeypatch
+    ):
+        import main
+        import core.audio_transcode as audio_transcode
+
+        source = tmp_path / "vorbis.ogg"
+        source_bytes = b"OggS" + b"original vorbis audio"
+        source.write_bytes(source_bytes)
+        converted = tmp_path / "vorbis.ogg.opus.ogg"
+        converted.write_bytes(b"OggS" + b"OpusHead" + b"converted audio")
+
+        monkeypatch.setattr(
+            audio_transcode,
+            "prepare_audio_for_whatsapp",
+            lambda ffmpeg, path: (str(converted), "audio/ogg; codecs=opus"),
+        )
+        monkeypatch.setattr(
+            main.requests,
+            "post",
+            lambda *args, **kwargs: _FakeResponse(
+                201, {"response": {"id": "true_5511999999999@c.us_AUDIO123"}}
+            ),
+        )
+
+        result = _Stub().send_media_attachment(
+            "5511999999999@s.whatsapp.net", str(source), "audio"
+        )
+
+        assert result == "AUDIO123"
+        assert source.read_bytes() == source_bytes
+        assert not converted.exists()
+
+    def test_conversion_failure_uses_the_localized_error_and_never_uploads(
+        self, tmp_path, monkeypatch
+    ):
+        import main
+        import core.audio_transcode as audio_transcode
+
+        source = tmp_path / "invalid.ogg"
+        source.write_bytes(b"OggS")
+        monkeypatch.setattr(
+            audio_transcode,
+            "prepare_audio_for_whatsapp",
+            lambda ffmpeg, path: None,
+        )
+        monkeypatch.setattr(
+            main.requests,
+            "post",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("a failed conversion must not be uploaded")
+            ),
+        )
+
+        result = _Stub().send_media_attachment(
+            "5511999999999@s.whatsapp.net", str(source), "audio"
+        )
+
+        assert result == {
+            "ok": False,
+            "error": "Could not convert audio for WhatsApp.",
+            "retry": False,
+        }
