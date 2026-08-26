@@ -3582,37 +3582,6 @@ export async function setProfileStatus(req: Request, res: Response) {
   }
 }
 export async function rejectCall(req: Request, res: Response) {
-  /**
-     #swagger.tags = ["Misc"]
-     #swagger.autoBody=false
-     #swagger.security = [{
-            "bearerAuth": []
-     }]
-     #swagger.parameters["session"] = {
-      schema: 'NERDWHATS_AMERICA'
-     }
-     
-     #swagger.requestBody = {
-      required: true,
-      "@content": {
-        "application/json": {
-          schema: {
-            type: "object",
-            properties: {
-              callId: { type: "string" },
-            }
-          },
-          examples: {
-            "Default": {
-              value: {
-                callId: "<callid>",
-              }
-            },
-          }
-        }
-      }
-     }
-   */
   const { callId } = req.body;
   try {
     const response = await req.client.page.evaluate(
@@ -3630,7 +3599,18 @@ export async function rejectCall(req: Request, res: Response) {
           }
         }
 
-        // 1. Try native VoIP stack via getVoipStackInterface
+        // 1. Primary: WPP.call.reject(targetCallId)
+        // Handles voipStack.rejectCall and sends reject smax stanza to WhatsApp server
+        if (typeof WPP.call?.reject === 'function') {
+          try {
+            const res = await WPP.call.reject(targetCallId || undefined);
+            return { success: true, method: 'WPP.call.reject', result: res };
+          } catch (err: any) {
+            console.warn('[rejectCall] WPP.call.reject error:', err?.message || err);
+          }
+        }
+
+        // 2. Fallback: Native VoIP stack via getVoipStackInterface
         try {
           let voipStack: any = null;
           if (typeof WPP.whatsapp?.functions?.getVoipStackInterface === 'function') {
@@ -3644,17 +3624,7 @@ export async function rejectCall(req: Request, res: Response) {
           console.warn('[rejectCall] voipStack error:', err);
         }
 
-        // 2. Try WPP.call.reject(targetCallId)
-        if (WPP.call?.reject) {
-          try {
-            const res = await WPP.call.reject(targetCallId);
-            return { success: true, method: 'WPP.call.reject', result: res };
-          } catch (err: any) {
-            console.warn('[rejectCall] WPP.call.reject error:', err);
-          }
-        }
-
-        // 3. Try clicking DOM decline/reject button if present in UI
+        // 3. Fallback: Click DOM decline/reject button if present in UI
         const domDeclineBtn = document.querySelector(
           '[data-icon="phone-call-decline"], [data-testid="decline-call"], [data-testid="reject-call"], [aria-label*="Recusar"], [aria-label*="Decline"], [aria-label*="Reject"]'
         ) as HTMLElement | null;
@@ -3664,11 +3634,12 @@ export async function rejectCall(req: Request, res: Response) {
           return { success: true, method: 'dom.click' };
         }
 
-        return { success: true, fallback: 'done' };
+        return { success: false, error: 'No reject method succeeded' };
       },
       callId
     );
 
+    req.logger?.info?.(`[rejectCall] callId=${callId} result=${JSON.stringify(response)}`);
     res.status(200).json({ status: 'success', response: response });
   } catch (e: any) {
     req.logger.error(e);
@@ -3697,7 +3668,18 @@ export async function acceptCall(req: Request, res: Response) {
           }
         }
 
-        // 2. Try native VoIP stack via getVoipStackInterface
+        // 2. Primary: WPP.call.accept(targetCallId)
+        // Handles voipStack.acceptCall, E2E WebRTC signaling, and sending the accept smax stanza to WhatsApp server
+        if (typeof WPP.call?.accept === 'function') {
+          try {
+            const res = await WPP.call.accept(targetCallId || undefined);
+            return { success: true, method: 'WPP.call.accept', result: res };
+          } catch (err: any) {
+            console.warn('[acceptCall] WPP.call.accept error:', err?.message || err);
+          }
+        }
+
+        // 3. Fallback: Native VoIP stack via getVoipStackInterface
         try {
           let voipStack: any = null;
           if (typeof WPP.whatsapp?.functions?.getVoipStackInterface === 'function') {
@@ -3711,17 +3693,7 @@ export async function acceptCall(req: Request, res: Response) {
           console.warn('[acceptCall] getVoipStackInterface error:', err);
         }
 
-        // 3. Try WPP.call.accept(targetCallId)
-        if (WPP.call?.accept) {
-          try {
-            const res = await WPP.call.accept(targetCallId);
-            return { success: true, method: 'WPP.call.accept', result: res };
-          } catch (err: any) {
-            console.warn('[acceptCall] WPP.call.accept error:', err);
-          }
-        }
-
-        // 4. Try activeCall direct method
+        // 4. Fallback: activeCall direct method
         const activeCall =
           (WPP.whatsapp?.CallStore as any)?.activeCall ||
           (window as any).Store?.Call?.activeCall;
@@ -3730,7 +3702,7 @@ export async function acceptCall(req: Request, res: Response) {
           return { success: true, method: 'activeCall.accept' };
         }
 
-        // 5. Try clicking DOM accept button if present
+        // 5. Fallback: Click DOM accept button if present
         const domAcceptBtn = document.querySelector(
           '[data-icon="phone-call-accept"], [data-testid="accept-call"], [aria-label*="Aceitar"], [aria-label*="Accept"]'
         ) as HTMLElement | null;
@@ -3740,11 +3712,12 @@ export async function acceptCall(req: Request, res: Response) {
           return { success: true, method: 'dom.click' };
         }
 
-        return { success: true, fallback: 'done' };
+        return { success: false, error: 'No accept method succeeded' };
       },
       callId
     );
 
+    req.logger?.info?.(`[acceptCall] callId=${callId} result=${JSON.stringify(response)}`);
     res.status(200).json({ status: 'success', response: response });
   } catch (e: any) {
     req.logger.error(e);
@@ -3772,7 +3745,17 @@ export async function endCall(req: Request, res: Response) {
           }
         }
 
-        // 1. Try native VoIP stack via getVoipStackInterface
+        // 1. Primary: WPP.call.end()
+        if (typeof WPP.call?.end === 'function') {
+          try {
+            const res = await WPP.call.end();
+            return { success: true, method: 'WPP.call.end', result: res };
+          } catch (err: any) {
+            console.warn('[endCall] WPP.call.end error:', err?.message || err);
+          }
+        }
+
+        // 2. Fallback: Native VoIP stack via getVoipStackInterface
         try {
           let voipStack: any = null;
           if (typeof WPP.whatsapp?.functions?.getVoipStackInterface === 'function') {
@@ -3790,17 +3773,7 @@ export async function endCall(req: Request, res: Response) {
           console.warn('[endCall] voipStack error:', err);
         }
 
-        // 2. Try WPP.call.end(targetCallId)
-        if (WPP.call?.end) {
-          try {
-            const res = await WPP.call.end(targetCallId);
-            return { success: true, method: 'WPP.call.end', result: res };
-          } catch (err: any) {
-            console.warn('[endCall] WPP.call.end error:', err);
-          }
-        }
-
-        // 3. Try clicking DOM hangup/end button
+        // 3. Fallback: Click DOM hangup/end button
         const domEndBtn = document.querySelector(
           '[data-icon="phone-call-end"], [data-icon="hangup"], [data-testid="end-call"], [aria-label*="Desligar"], [aria-label*="Encerrar"], [aria-label*="End call"]'
         ) as HTMLElement | null;
@@ -3810,11 +3783,12 @@ export async function endCall(req: Request, res: Response) {
           return { success: true, method: 'dom.click' };
         }
 
-        return { success: true, fallback: 'done' };
+        return { success: false, error: 'No endCall method succeeded' };
       },
       callId
     );
 
+    req.logger?.info?.(`[endCall] callId=${callId} result=${JSON.stringify(response)}`);
     res.status(200).json({ status: 'success', response: response });
   } catch (e: any) {
     req.logger.error(e);
