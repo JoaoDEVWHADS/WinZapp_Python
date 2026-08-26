@@ -123,7 +123,34 @@ class AccessibleEmojiButton(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+.")
 
 
-class AccessibleDiscardVoiceMessage(wx.Accessible):
+class _SilenceableVoiceButtonAccessible(wx.Accessible):
+    """Base for a voice-recording-panel button whose accessible *name* is
+    blanked out while Settings > Conteúdo Falado's "silence while
+    recording" toggle is on.
+
+    The screen reader queries the newly-focused object's name synchronously
+    while handling the focus WinEvent, so returning an empty name here stops
+    the announcement's content from ever being generated — instead of
+    racing to cancel speech that has already started, which
+    ConversationsPanel._silence_send_voice_focus_if_enabled()'s silence()
+    calls do and can lose against a synthesizer like SAPI5 running under
+    NVDA (see that method's own docstring for why the race exists at all).
+    The two defenses run together: this one prevents most of the
+    announcement's content before it's ever queued, silence() mops up
+    whatever residual (e.g. a bare role announcement) slips through anyway.
+    """
+
+    def __init__(self, main_window):
+        super().__init__()
+        self._mw = main_window
+
+    def GetName(self, childId):
+        if self._mw.settings.get("speech_content", {}).get("silence_while_recording", False):
+            return (wx.ACC_OK, "")
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
+class AccessibleDiscardVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
 
     def GetKeyboardShortcut(self, childId):
@@ -137,11 +164,31 @@ class AccessiblePauseResumeRecording(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+P")
 
 
-class AccessibleSendVoiceMessage(wx.Accessible):
+class AccessibleSendVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
 
     def GetKeyboardShortcut(self, childId):
         return (wx.ACC_OK, "Ctrl+R")
+
+
+class AccessibleMediaViewerSeekBack(wx.Accessible):
+    """Reports Alt+V as the keyboard shortcut for the media viewer's
+    "voltar 10 segundos" button (ui/media_viewer.py) — shared by both the
+    conversation video player and the status player, both being the same
+    MediaViewerDialog."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Alt+V")
+
+
+class AccessibleMediaViewerSeekForward(wx.Accessible):
+    """Reports Alt+A as the keyboard shortcut for the media viewer's
+    "avançar 10 segundos" button (ui/media_viewer.py) — shared by both the
+    conversation video player and the status player, both being the same
+    MediaViewerDialog."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Alt+A")
 
 
 class AccessiblePlayRecordedAudio(wx.Accessible):
@@ -329,6 +376,30 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
 
     def GetItemText(self, row, col=0):
         return self.GetString(row)
+
+    def RefreshItem(self, row):
+        """Repaint one row — wx.ListCtrl's per-row repaint, mapped onto the
+        whole-control Refresh() a native LISTBOX offers instead.
+
+        Callers use this after SetItemText() because Windows otherwise defers
+        the visual update to the next paint cycle, which shows up as a
+        delivery-status icon or an upload percentage that stays frozen until
+        the user leaves and re-enters the conversation. wx.ListBox has no
+        per-row equivalent, so the honest mapping is a full Refresh(): a
+        message list holds one screenful of rows, and this runs on single
+        status/progress updates, not in a loop.
+
+        Defined here rather than guarded at each call site because there are
+        three of them in ui/conversations.py and they behaved differently
+        without it — two are wrapped in `try/except Exception: pass` and so
+        silently skipped the repaint under this control (the exact frozen-icon
+        symptom refresh_message_status()'s own comment says the call exists to
+        prevent), while the third raised AttributeError out of a wx.CallAfter
+        callback and broke upload progress. One method fixes all three, and
+        keeps the next caller from having to know.
+        """
+        if 0 <= row < self.GetCount():
+            self.Refresh()
 
     def Append(self, entry_tuple):
         super().Append(entry_tuple[0])

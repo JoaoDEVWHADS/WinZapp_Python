@@ -48,7 +48,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
@@ -161,9 +161,16 @@ def probe_media_duration(path: str):
     #    "could not measure" — see core.utils.video_seconds(). A length of
     #    exactly 0.0 is the second case (nothing decodable), so it falls
     #    through to the parsers below.
+    #    decode=True matters, not just cosmetics: it's the exact stream mode
+    #    every actual playback path in the app already opens the file with
+    #    (VideoPlayer._start_audio, ConversationsPanel._play_audio's
+    #    _open_stream) — BASS can report a slightly different get_length()
+    #    for a plain (decode=False) stream vs. a decoded one on the same AAC/
+    #    MP4 file, which is why a probed duration used to drift a second or
+    #    two from what the player itself later showed for the same file.
     try:
         from sound_lib import stream
-        s = stream.FileStream(file=path)
+        s = stream.FileStream(file=path, decode=True)
         length_bytes = s.get_length()
         length_secs = s.bytes_to_seconds(length_bytes)
         s.free()
@@ -931,7 +938,7 @@ class ConversationsPanel(wx.Panel):
         self._discard_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("discard_voice_message")
         )
-        self._discard_voice_btn.SetAccessible(AccessibleDiscardVoiceMessage())
+        self._discard_voice_btn.SetAccessible(AccessibleDiscardVoiceMessage(self.main_window))
         self._discard_voice_btn.Bind(wx.EVT_BUTTON, self._discard_voice_message)
         voice_sizer.Add(self._discard_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -961,7 +968,7 @@ class ConversationsPanel(wx.Panel):
         self._send_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("send_voice_message")
         )
-        self._send_voice_btn.SetAccessible(AccessibleSendVoiceMessage())
+        self._send_voice_btn.SetAccessible(AccessibleSendVoiceMessage(self.main_window))
         self._send_voice_btn.Bind(wx.EVT_BUTTON, self._send_voice_message)
         voice_sizer.Add(self._send_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -2220,7 +2227,7 @@ class ConversationsPanel(wx.Panel):
         reply — the quote never actually reached the recipient.
         """
         self._hide_media_transfer_gauge()
-        tracked = self._outgoing_virtual_messages.get(local_id)
+        tracked = self._outgoing_virtual_messages.pop(local_id, None)
         if tracked is not None:
             tracked["_local_pending"] = False
             if real_id and isinstance(real_id, str):
@@ -2312,6 +2319,7 @@ class ConversationsPanel(wx.Panel):
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
         self._hide_media_transfer_gauge()
+        self._outgoing_virtual_messages.pop(local_id, None)
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
@@ -2331,6 +2339,7 @@ class ConversationsPanel(wx.Panel):
         stops meaning anything.
         """
         self._hide_media_transfer_gauge()
+        self._outgoing_virtual_messages.pop(local_id, None)
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"]     = False
@@ -2369,7 +2378,18 @@ class ConversationsPanel(wx.Panel):
     def _silence_send_voice_focus_if_enabled(self):
         """When Settings > Conteúdo Falado's "silence while recording" toggle
         is on, cut off the screen reader's own focus announcement for the
-        Enviar button right after SetFocus() moves to it.
+        Enviar/Descartar button right after SetFocus() moves to it.
+
+        This is the second line of defense, not the first: AccessibleSendVoiceMessage
+        / AccessibleDiscardVoiceMessage (ui/accessible.py) already blank out the
+        button's accessible *name* while the toggle is on, which stops most of the
+        announcement's content from ever being generated in the first place — the
+        screen reader queries the name synchronously while handling the focus
+        WinEvent, so an empty name usually means there is nothing to speak at all.
+        This method only mops up whatever slips through anyway (e.g. a bare role
+        announcement, or a screen reader whose synthesizer — SAPI5 under NVDA is
+        the reported case — has already started speaking before the empty name is
+        read back).
 
         A silence() call issued synchronously right after SetFocus() is too
         early: on Windows the focus WinEvent is dispatched to the screen
@@ -3449,6 +3469,16 @@ class ConversationsPanel(wx.Panel):
                 file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                 audio_ext=".ogg",
             )
+
+        elif msg_type == "videoMessage" and not self._use_conversation_video_media_viewer_dialog():
+            # Classic mode (Settings > Interface do usuário > "Mostrar vídeos
+            # nas conversas em player separado" unchecked): play in-app via
+            # BASS/ffmpeg instead of the dialog, exactly like before that
+            # dialog existed — see _play_toggle_video_message().
+            video = msg_obj.get("videoMessage") or {}
+            if video.get("gifPlayback"):
+                return  # GIFs have no audio track to play
+            self._play_toggle_video_message(msg)
 
         elif msg_type in ("imageMessage", "videoMessage"):
             # Media opens in the same accessible, maximized viewer used by
@@ -5630,6 +5660,16 @@ class ConversationsPanel(wx.Panel):
                     if hasattr(os, "startfile"):
                         os.startfile(filepath)
 
+    def _use_conversation_video_media_viewer_dialog(self) -> bool:
+        """True (default) opens a conversation video in the dedicated, full
+        MediaViewerDialog; False keeps the classic in-app player instead
+        (BASS/ffmpeg, no separate dialog). Settings > Interface do usuário >
+        "Mostrar vídeos nas conversas em player separado". Images are not
+        affected by this setting — they always use the dialog."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "conversation_video_media_viewer_dialog", True
+        )
+
     def _open_conversation_media_viewer(self, index: int):
         """Open an image/video message in the shared maximized MediaViewer.
 
@@ -5725,9 +5765,15 @@ class ConversationsPanel(wx.Panel):
                 self._open_file_safely(url)
             return
 
-        if msg_type in ("imageMessage", "videoMessage"):
+        if msg_type == "imageMessage":
             self._open_conversation_media_viewer(index)
             return
+        # videoMessage deliberately does NOT open the in-app viewer here,
+        # regardless of _use_conversation_video_media_viewer_dialog(): this
+        # is the "Abrir"/Open action, which the user reaches specifically to
+        # get the file into their own OS-default video player — Enter/click
+        # already covers "play it right here". Falls through to the generic
+        # open-externally flow below (same as documentMessage).
 
         if msg_type == "documentMessage":
             filename = (msg_obj.get("documentMessage") or {}).get(
@@ -7264,21 +7310,11 @@ class ConversationsPanel(wx.Panel):
             text = self._resolve_mentions_in_text(text, mentioned)
 
             # Link preview (title/description WhatsApp itself generated for
-            # the URL — see websocket_client.py's _has_link_preview): shown
-            # ahead of the message text itself, the same "preview, then the
-            # link" order WhatsApp's own card conveys visually here as plain
-            # text, since this list has no room for a thumbnail image.
-            show_previews = self.main_window.settings.get("user_interface", {}).get(
-                "show_link_previews", True
-            )
-            if show_previews:
-                preview_title = (ext.get("title") or "").strip()
-                preview_desc = (ext.get("description") or "").strip()
-                preview_bits = [b for b in (preview_title, preview_desc) if b]
-                if preview_bits:
-                    preview_str = ". ".join(preview_bits)
-                    text = f"{preview_str}. {text}" if text else preview_str
-            return text
+            # the URL — see websocket_client.py's _has_link_preview). Shared
+            # with the notification toast through link_preview_text() so the
+            # two can't drift; see that function for the ordering and the
+            # settings gate.
+            return link_preview_text(ext, text, self.main_window)
 
         # ── Audio ────────────────────────────────────────────────────────────
         if msg_type == "audioMessage":
@@ -8185,17 +8221,31 @@ class ConversationsPanel(wx.Panel):
                 header = sender
 
             pieces = [f"{header}: {body}"]
+        is_forwarded = not self._is_system_event(msg) and self._is_message_forwarded(msg)
         if msg.get("starred"):
             pieces[0] = f"★ {pieces[0]}"
         if msg.get("pinInChat"):
             pieces[0] = f"📌 {pieces[0]}"
+        # Settings > Interface do usuário > "Anunciar 'Encaminhada' no início
+        # da mensagem" (default off). Off keeps the long-standing behavior of
+        # a trailing ", Encaminhada" clause below, same position as "Editada"
+        # and the delivery status. On moves it to the very front — ahead of
+        # the sender, and even ahead of the star/pin markers above — so a
+        # screen reader user arrowing quickly through a busy forwarded chat
+        # (a forward chain, a viral message) hears it's forwarded before
+        # anything else, instead of only after the sender and full body.
+        if is_forwarded and self.main_window.settings.get("user_interface", {}).get(
+            "forwarded_prefix_enabled", False
+        ):
+            pieces[0] = f"{i18n.t('status_forwarded')}, {pieces[0]}"
+            is_forwarded = False  # already announced; don't also append the suffix below
         if time_str:
             pieces.append(f", {time_str}")
         if status:
             pieces[-1] += f", {status}"
         if msg.get("_edited") and not self._is_system_event(msg):
             pieces[-1] += f", {i18n.t('status_edited')}"
-        if not self._is_system_event(msg) and self._is_message_forwarded(msg):
+        if is_forwarded:
             pieces[-1] += f", {i18n.t('status_forwarded')}"
 
         # Append quoted message preview (if this is a reply)
@@ -8281,7 +8331,13 @@ class ConversationsPanel(wx.Panel):
                 continue
             self._update_media_transfer_gauge(progress)
             self.messages_list.SetItemText(index, self._render_message_line(msg))
-            self.messages_list.RefreshItem(index)
+            # wx.ListCtrl provides RefreshItem(), but the accessibility
+            # fallback is a native wx.ListBox and only supports Refresh().
+            refresh_item = getattr(self.messages_list, "RefreshItem", None)
+            if refresh_item is not None:
+                refresh_item(index)
+            else:
+                self.messages_list.Refresh()
             return
         self._hide_media_transfer_gauge()
 
@@ -9773,6 +9829,7 @@ class ConversationsPanel(wx.Panel):
             # dialog had selected, cancel the queued/in-flight upload and apply
             # a local deletion; asking the API for "everyone" here can only fail.
             self.main_window.message_queue.cancel(pending_local_id)
+            self._outgoing_virtual_messages.pop(pending_local_id, None)
             self._media_upload_progress.pop(pending_local_id, None)
             self._media_transfer_started.discard(pending_local_id)
             self._hide_media_transfer_gauge()
@@ -11655,6 +11712,18 @@ class ConversationsPanel(wx.Panel):
                 _dur = self._probe_audio_duration(path)
                 if _dur is not None:
                     _body["seconds"] = _dur
+            elif media_type == "video":
+                # Unlike audio, video_seconds() doesn't trust a plain "seconds"
+                # of 0 (WhatsApp itself sends that to mean "not stated" — see
+                # that function's own docstring), so a video we're sending
+                # needs its length under _measured_seconds instead, same key
+                # _learn_video_duration() fills in for a received video once
+                # it's played. Without this, a video sent as a WinZapp
+                # attachment showed no duration in the list until the sender
+                # opened it themselves at least once.
+                _dur = self._probe_audio_duration(path)
+                if _dur is not None and _dur >= 0:
+                    _body[MEASURED_SECONDS_KEY] = _dur
             virtual_msg = {
                 "_local_pending": True,
                 "_local_id":      local_id,

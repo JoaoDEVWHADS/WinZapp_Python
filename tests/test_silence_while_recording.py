@@ -9,6 +9,7 @@ import types
 
 import ui.conversations as conversations_module
 from core.accessible_speech import AccessibleSpeechOutput
+from ui.accessible import AccessibleDiscardVoiceMessage, AccessibleSendVoiceMessage
 from ui.conversations import ConversationsPanel
 
 
@@ -161,3 +162,37 @@ class TestSilenceSendVoiceFocusIfEnabled:
         assert delay > 0
         func()
         assert stub.main_window.speak_output.silence_calls == 2
+
+
+class TestSilenceableVoiceButtonAccessibleName:
+    """AccessibleSendVoiceMessage / AccessibleDiscardVoiceMessage blank out
+    their MSAA name while the toggle is on, so the screen reader has nothing
+    to announce for the focus event in the first place — the first line of
+    defense ahead of _silence_send_voice_focus_if_enabled()'s after-the-fact
+    silence() calls above."""
+
+    class _FakeMainWindow:
+        def __init__(self, enabled):
+            self.settings = {"speech_content": {"silence_while_recording": enabled}}
+
+    def test_name_blanked_when_setting_enabled(self):
+        import wx
+
+        for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
+            acc = cls(self._FakeMainWindow(enabled=True))
+            assert acc.GetName(0) == (wx.ACC_OK, "")
+
+    def test_name_left_to_default_when_setting_disabled(self):
+        import wx
+
+        for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
+            acc = cls(self._FakeMainWindow(enabled=False))
+            assert acc.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
+
+    def test_keyboard_shortcuts_still_reported(self):
+        import wx
+
+        send = AccessibleSendVoiceMessage(self._FakeMainWindow(enabled=True))
+        discard = AccessibleDiscardVoiceMessage(self._FakeMainWindow(enabled=True))
+        assert send.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+R")
+        assert discard.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+D")

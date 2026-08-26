@@ -2,6 +2,26 @@
 compiled sender.layer.js — two independent fixes to sendFile(), applied
 together since they touch the same method:
 
+3. The MediaGatingUtils.getUploadLimit() override below used to run on
+   EVERY document send, unconditionally re-wrapping whatever function was
+   currently installed with a brand-new closure around it — with no check
+   for "already wrapped". mediaGating is WPP.whatsapp.MediaGatingUtils, a
+   singleton that lives for the whole WhatsApp Web page's lifetime (the
+   entire session, since the page is never reloaded on its own), so every
+   document a user sent added one more permanent link to a closure chain
+   nothing ever released: send 500 documents in one session and
+   getUploadLimit() is 500 closures deep, and none of it is reclaimed until
+   the page itself reloads. This is a real, unbounded, one-way memory leak
+   in the browser process for any WinZapp user who sends documents
+   regularly. Fixed by setting a one-time flag
+   (mediaGating.__winzappUploadLimitPatched) before wrapping, so the
+   override installs exactly once per page load no matter how many
+   documents follow — see the guard added to PATCHED_SEND_FILE and
+   _BROWSER_DOCUMENT_LIMIT_PATCH below, and LEGACY_PATCHED_SEND_FILE_V2 /
+   ALL_PATCHES for how an already-patched (leaking) install on an existing
+   user's machine gets migrated to the guarded version on the next
+   setup_api.py run / app update.
+
 1. sendFile() losing the real error when a send fails inside the browser
    page. Every video sent from WinZapp (message attachment AND status)
    used to fail with an opaque HTTP 500 whose logged "error" was just
@@ -40,6 +60,17 @@ together since they touch the same method:
    options.type (always explicitly set by WinZapp, never left at
    'auto-detect') is what tells it that, identically on both paths — so
    PATCHED_FILE_LOADING widens the gate to image/video/audio too.
+
+3. Raising WhatsApp Web's own client-side document ceiling to 1 GB, by
+   wrapping MediaGatingUtils.getUploadLimit inside the page. This runs in a
+   per-send callback, so it MUST install itself only once: the guard that
+   decides whether to wrap cannot be "does getUploadLimit exist", because a
+   wrapper is itself a getUploadLimit and the answer is yes forever after.
+   The first version did exactly that and layered a new closure over the
+   previous one on every document sent, each call then walking the whole
+   chain, growing for as long as the page lived. `__winzappUploadLimitPatched`
+   on the object is the marker that makes it once-per-page instead; the
+   unmarked variant is migrated by patch_sender_layer_source() below.
 
 Both setup_api.py and ApiSetupDialog (client/ui/dialogs/api_setup.py) apply
 this patch to node_modules right after every `npm install` — see
@@ -227,6 +258,105 @@ PATCHED_SEND_FILE = (
     "                        const chunks = window.__winzappFileTransfers.get(id);\n"
     "                        const file = new File(chunks, options.filename || 'file', { type: mime });\n"
     "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                        if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
+    "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                                ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                                : getUploadLimit(type, origin, isVcard);\n"
+    "                            mediaGating.__winzappUploadLimitPatched = true;\n"
+    "                        }\n"
+    "                        const result = await WPP.chat.sendFileMessage(to, file, {\n"
+    "                            waitForAck: true,\n"
+    "                            ...options,\n"
+    "                        });\n"
+    "                        return { ack: result.ack, id: result.id };\n"
+    "                    }\n"
+    "                    catch (e) {\n"
+    "                        return {\n"
+    "                            __winzappSendFileError: true,\n"
+    "                            message: (e && e.message) || String(e),\n"
+    "                            name: (e && e.name) || 'Error',\n"
+    "                            stack: e && e.stack,\n"
+    "                        };\n"
+    "                    }\n"
+    "                }, { id: transferId, to, mime, options: options });\n"
+    "            }\n"
+    "            finally {\n"
+    "                await this.page.evaluate((id) => {\n"
+    "                    if (window.__winzappFileTransfers)\n"
+    "                        window.__winzappFileTransfers.delete(id);\n"
+    "                }, transferId).catch(() => undefined);\n"
+    "            }\n"
+    "        }\n"
+    "        else {\n"
+    "            sendResult = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ to, base64, options }) => {\n"
+    "                try {\n"
+    "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                    if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
+    "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                            : getUploadLimit(type, origin, isVcard);\n"
+    "                        mediaGating.__winzappUploadLimitPatched = true;\n"
+    "                    }\n"
+    "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n"
+    "                        waitForAck: true,\n"
+    "                        ...options,\n"
+    "                    });\n"
+    "                    return { ack: result.ack, id: result.id };\n"
+    "                }\n"
+    "                catch (e) {\n"
+    "                    return {\n"
+    "                        __winzappSendFileError: true,\n"
+    "                        message: (e && e.message) || String(e),\n"
+    "                        name: (e && e.name) || 'Error',\n"
+    "                        stack: e && e.stack,\n"
+    "                    };\n"
+    "                }\n"
+    "            }, { to, base64, options: options });\n"
+    "        }\n"
+    "        if (sendResult && sendResult.__winzappSendFileError) {\n"
+    "            const err = new Error(sendResult.message);\n"
+    "            err.name = sendResult.name;\n"
+    "            if (sendResult.stack)\n"
+    "                err.stack = sendResult.stack;\n"
+    "            throw err;\n"
+    "        }\n"
+    "        return sendResult;\n"
+)
+
+# The exact PATCHED_SEND_FILE text shipped before the
+# __winzappUploadLimitPatched guard existed — every install that already
+# ran setup_api.py/ApiSetupDialog against an earlier WinZapp build has
+# this verbatim text sitting in its node_modules right now, silently
+# leaking one closure per document sent. Kept only so ALL_PATCHES below
+# can find and migrate it forward; never touched otherwise.
+LEGACY_PATCHED_SEND_FILE_V2 = (
+    "        let sendResult;\n"
+    "        if (largeFilePath) {\n"
+    "            const transferId = `winzapp-${Date.now()}-${Math.random()}`;\n"
+    "            const mime = options.mimetype || 'application/octet-stream';\n"
+    "            await this.page.evaluate((id) => {\n"
+    "                window.__winzappFileTransfers = window.__winzappFileTransfers || new Map();\n"
+    "                window.__winzappFileTransfers.set(id, []);\n"
+    "            }, transferId);\n"
+    "            try {\n"
+    "                const stream = require('fs').createReadStream(largeFilePath, { highWaterMark: 3 * 1024 * 1024 });\n"
+    "                for await (const data of stream) {\n"
+    "                    const chunk = data.toString('base64');\n"
+    "                    await this.page.evaluate(({ id, chunk }) => {\n"
+    "                        const binary = atob(chunk);\n"
+    "                        const bytes = new Uint8Array(binary.length);\n"
+    "                        for (let i = 0; i < binary.length; i++)\n"
+    "                            bytes[i] = binary.charCodeAt(i);\n"
+    "                        window.__winzappFileTransfers.get(id).push(bytes);\n"
+    "                    }, { id: transferId, chunk });\n"
+    "                }\n"
+    "                sendResult = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ id, to, mime, options }) => {\n"
+    "                    try {\n"
+    "                        const chunks = window.__winzappFileTransfers.get(id);\n"
+    "                        const file = new File(chunks, options.filename || 'file', { type: mime });\n"
+    "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
     "                        if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
     "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
     "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
@@ -297,10 +427,25 @@ ALL_PATCHES = (
     (PATCHED_FILE_LOADING_V1, PATCHED_FILE_LOADING),
     (ORIGINAL_SEND_FILE, PATCHED_SEND_FILE),
     (LEGACY_PATCHED_SEND_FILE, PATCHED_SEND_FILE),
+    (LEGACY_PATCHED_SEND_FILE_V2, PATCHED_SEND_FILE),
 )
 
 
-_BROWSER_DOCUMENT_LIMIT_PATCH = (
+#: The same override as _BROWSER_DOCUMENT_LIMIT_PATCH below, but WITHOUT the
+#: one-time `__winzappUploadLimitPatched` guard — i.e. the leaking version that
+#: re-wrapped getUploadLimit() on every single document send. Kept only as the
+#: left-hand side of the migration in patch_sender_layer_source(), so a
+#: node_modules already patched with it is rewritten to the guarded form on the
+#: next setup_api.py run / app update instead of being left leaking forever.
+#:
+#: This constant went missing in a merge: the same leak was fixed twice in
+#: parallel (once on this branch, once on main), and the resolution kept the
+#: other side's definitions together with this side's patch_sender_layer_source()
+#: body — which references this name. The result was a NameError that both
+#: installers caught and logged as a warning, silently skipping the whole
+#: sender.layer.js patch (1 GB chunked upload and real send-error detail
+#: included). tests/test_large_file_patch.py covers the migration itself.
+_LEGACY_DOCUMENT_LIMIT_PATCH = (
     "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
     "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
     "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
@@ -311,15 +456,40 @@ _BROWSER_DOCUMENT_LIMIT_PATCH = (
 )
 
 
+_BROWSER_DOCUMENT_LIMIT_PATCH = (
+    "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                    if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
+    "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                            : getUploadLimit(type, origin, isVcard);\n"
+    "                        mediaGating.__winzappUploadLimitPatched = true;\n"
+    "                    }\n"
+)
+
+
+def _deepen(block: str) -> str:
+    """The same block one nesting level further in (the chunked branch)."""
+    return block.replace("                    ", "                        ")
+
+
 def patch_sender_layer_source(source: str) -> str:
-    """Apply the current patch and migrate the short-lived chunked variant."""
+    """Apply the current patch and migrate every earlier transitional state."""
     for original, patched in ALL_PATCHES:
         source = source.replace(original, patched)
+
+    # Unmarked -> marked, at both nesting depths the block appears at.
+    source = source.replace(
+        _deepen(_LEGACY_DOCUMENT_LIMIT_PATCH), _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH)
+    )
+    source = source.replace(
+        _LEGACY_DOCUMENT_LIMIT_PATCH, _BROWSER_DOCUMENT_LIMIT_PATCH
+    )
 
     if "WPP.whatsapp?.MediaGatingUtils" not in source:
         source = source.replace(
             "                    const result = await WPP.chat.sendFileMessage(to, file, {\n",
-            _BROWSER_DOCUMENT_LIMIT_PATCH.replace("                    ", "                        ")
+            _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH)
             + "                        const result = await WPP.chat.sendFileMessage(to, file, {\n",
         )
         source = source.replace(

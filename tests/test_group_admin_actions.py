@@ -226,6 +226,37 @@ class TestAddGroupMembersPerParticipantResult:
         assert ok is False
         assert "5511999999999" in err
 
+    def test_failure_reports_the_contact_name_instead_of_the_raw_number(self, monkeypatch):
+        """A number the user has as a saved contact must be announced by
+        name in the failure message — NVDA users otherwise hear a bare
+        phone number read out digit by digit with no idea whose it is."""
+        post = _fake_post_json([{"5511999999999@c.us": {
+            "code": 408, "message": "blocked", "wid": "5511999999999@c.us",
+            "invite_code": None, "invite_code_exp": None,
+        }}])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()
+        stub.contacts = {"5511999999999@c.us": {"name": "Maria Silva"}}
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is False
+        assert "Maria Silva" in err
+        assert "5511999999999" not in err
+
+    def test_failure_falls_back_to_the_raw_number_when_no_contact_is_known(self, monkeypatch):
+        post = _fake_post_json([{"5511999999999@c.us": {
+            "code": 408, "message": "blocked", "wid": "5511999999999@c.us",
+            "invite_code": None, "invite_code_exp": None,
+        }}])
+        monkeypatch.setattr("main.requests.post", post)
+        stub = _Stub()  # no .contacts at all — must not raise
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is False
+        assert "5511999999999" in err
+
     def test_failure_code_with_no_invite_code_is_still_reported(self, monkeypatch):
         post = _fake_post_json([{"5511999999999@c.us": {
             "code": 408, "message": "blocked", "wid": "5511999999999@c.us",

@@ -12,7 +12,7 @@ import wx
 
 from core.utils import get_downloads_folder
 from core.video_player import VideoPlayer
-from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs
+from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs, AccessibleMediaViewerSeekBack, AccessibleMediaViewerSeekForward
 
 
 class CenteredBitmapPanel(wx.Panel):
@@ -115,6 +115,7 @@ class MediaViewerDialog(wx.Dialog):
 
     SPEEDS = (1.0, 1.5, 2.0)
     SLIDER_MAX = 1000
+    SEEK_SECONDS = 10
 
     def __init__(
         self,
@@ -224,11 +225,30 @@ class MediaViewerDialog(wx.Dialog):
         transport.Add(seek_row, 0, wx.EXPAND | wx.BOTTOM, 6)
 
         actions = wx.BoxSizer(wx.HORIZONTAL)
+        # Seek back/forward sit right around Pause in both the visual and tab
+        # order (back before, forward after) — Alt+V/Alt+A, reported via their
+        # own Accessible like every other fixed-shortcut button in the app
+        # (ui/accessible.py), not a locale-dependent mnemonic, since these two
+        # keys are meant to work the same way regardless of the app's language.
+        self._seek_back_btn = wx.Button(
+            self._transport_panel, label=self.i18n.t("media_viewer_seek_back")
+        )
+        self._seek_back_btn.SetAccessible(AccessibleMediaViewerSeekBack())
+        self._seek_back_btn.Bind(wx.EVT_BUTTON, self._on_seek_back)
+        actions.Add(self._seek_back_btn, 0, wx.RIGHT, 8)
+
         self._play_btn = wx.Button(
             self._transport_panel, label=self.i18n.t("media_viewer_pause")
         )
         self._play_btn.Bind(wx.EVT_BUTTON, self._on_play_pause)
         actions.Add(self._play_btn, 0, wx.RIGHT, 8)
+
+        self._seek_forward_btn = wx.Button(
+            self._transport_panel, label=self.i18n.t("media_viewer_seek_forward")
+        )
+        self._seek_forward_btn.SetAccessible(AccessibleMediaViewerSeekForward())
+        self._seek_forward_btn.Bind(wx.EVT_BUTTON, self._on_seek_forward)
+        actions.Add(self._seek_forward_btn, 0, wx.RIGHT, 8)
 
         volume_label = wx.StaticText(
             self._transport_panel, label=self.i18n.t("media_viewer_volume")
@@ -309,6 +329,8 @@ class MediaViewerDialog(wx.Dialog):
         self.ID_CTRL_LEFT = wx.NewIdRef()
         self.ID_CTRL_RIGHT = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S = wx.NewIdRef()
+        self.ID_ALT_V = wx.NewIdRef()  # seek back 10s
+        self.ID_ALT_A = wx.NewIdRef()  # seek forward 10s
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL, wx.WXK_LEFT, self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL, wx.WXK_RIGHT, self.ID_CTRL_RIGHT),
@@ -316,11 +338,15 @@ class MediaViewerDialog(wx.Dialog):
             # "save as" — consistent muscle memory across every place media
             # can be saved from.
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("S"), self.ID_CTRL_SHIFT_S),
+            (wx.ACCEL_ALT, ord("V"), self.ID_ALT_V),
+            (wx.ACCEL_ALT, ord("A"), self.ID_ALT_A),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self._on_prev, id=self.ID_CTRL_LEFT)
         self.Bind(wx.EVT_MENU, self._on_next, id=self.ID_CTRL_RIGHT)
         self.Bind(wx.EVT_MENU, self._on_save, id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_seek_back, id=self.ID_ALT_V)
+        self.Bind(wx.EVT_MENU, self._on_seek_forward, id=self.ID_ALT_A)
 
     # ── Item lifecycle ───────────────────────────────────────────────────
 
@@ -517,6 +543,31 @@ class MediaViewerDialog(wx.Dialog):
             self._player.set_position(target)
         self._slider_dragging = False
         event.Skip()
+
+    def _seek_relative(self, delta_seconds: float):
+        """Seek the active video/audio by *delta_seconds* (negative = back),
+        clamped to the track. Mirrors ConversationsPanel.seek_active_playback_by()."""
+        if self._current_kind not in ("video", "audio"):
+            return
+        length = self._player.get_length()
+        if length <= 0:
+            return
+        pos = self._player.get_position()
+        delta_bytes = self._player.seconds_to_bytes(abs(delta_seconds))
+        if delta_seconds < 0:
+            new_pos = max(0, pos - delta_bytes)
+        else:
+            new_pos = min(length, pos + delta_bytes)
+        self._player.set_position(new_pos)
+        if not self._slider_dragging:
+            value = int(max(0, min(self.SLIDER_MAX, new_pos * self.SLIDER_MAX / length)))
+            self._position_slider.SetValue(value)
+
+    def _on_seek_back(self, event):
+        self._seek_relative(-self.SEEK_SECONDS)
+
+    def _on_seek_forward(self, event):
+        self._seek_relative(self.SEEK_SECONDS)
 
     def _on_volume(self, event):
         self._player.set_volume(self._volume_slider.GetValue() / 100.0)

@@ -21,6 +21,35 @@ def test_message_edit_accepts_current_and_legacy_callback_shapes():
     assert "session: client.session" in source
 
 
+def test_force_kill_filter_is_separator_agnostic_and_skips_itself():
+    """forceKillByUserDataDir()'s PowerShell filter has to match the *real*
+    Chrome CommandLine, and both halves of that used to be wrong.
+
+    Both call sites pass `userDataDir/<session>` with a forward slash, but
+    that string never reaches Chrome verbatim: puppeteer path.resolve()s the
+    relative './userDataDir/<session>' before building --user-data-dir, so the
+    live process reads `...\\userDataDir\\<session>` (backslashes, and 8.3 short
+    names for the parent directories). PowerShell's `-like` treats `\\` and `/`
+    as ordinary, non-interchangeable characters, so a filter that keeps the
+    literal separator matched the browser zero times — while still matching
+    the powershell.exe running the query, whose own -Command argument does
+    contain the forward-slash text, which is what made the script Stop-Process
+    itself on every invocation.
+    """
+    source = _patch("src/util/createSessionUtil.ts")
+
+    # Every run of separators collapses to a `*`, so only the tail of the path
+    # is matched — immune to the separator flavour and to 8.3 shortening.
+    assert r".replace(/[\\/]+/g, '*')" in source
+    # The old backslash-doubling escape must not come back: `-like` reads `\\`
+    # as two literal backslashes, which no command line ever contains.
+    assert r"replace(/\\/g, '\\\\')" not in source
+    # Wildcard metacharacters are neutralised before the separator wildcards
+    # are introduced, so a session id can never act as a pattern.
+    assert r".replace(/[`*?[\]]/g, '`$&')" in source
+    assert "$_.ProcessId -ne $mypid" in source
+
+
 def test_status_probe_distinguishes_not_ready_from_disconnected():
     source = _patch("src/middleware/statusConnection.ts")
 

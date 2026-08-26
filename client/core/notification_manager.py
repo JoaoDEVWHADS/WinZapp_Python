@@ -43,7 +43,7 @@ import wx
 from app_paths import _is_frozen
 from core.i18n import I18n
 from core.message_queue import PendingMessage
-from core.utils import looks_like_binary_blob
+from core.utils import looks_like_binary_blob, link_preview_text
 
 
 def _notif_duration(seconds) -> str:
@@ -208,7 +208,14 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
                 
             if name and name != placeholder and name != jid:
                 text = text.replace(f"@{placeholder}", f"@{name}", 1)
-        return text
+
+        # Link preview (title/description WhatsApp itself generated for the
+        # URL): the exact same rendering ConversationsPanel._get_message_content()
+        # uses for the message list, shared through link_preview_text() so a
+        # link reads the same whether it shows up in the list or in the toast
+        # banner. Without it the toast only ever showed the raw pasted URL,
+        # never what it was a preview of.
+        return link_preview_text(ext, text, main_window)
 
     # ── Audio ─────────────────────────────────────────────────────────────────
     if msg_type == "audioMessage":
@@ -584,6 +591,22 @@ class NotificationManager:
     # margin past that (Windows' own dismiss timing isn't perfectly exact)
     # before we stop bothering to clear it first — see _last_shown_at.
     _TOAST_LIKELY_GONE_SECONDS = 8
+    # How long _coalesce_pending() waits for a near-simultaneous second
+    # notification before committing to dispatch the one it already has.
+    # Reported live: two messages arriving within the same instant (e.g. two
+    # chats both getting a message in the same live burst) raced past
+    # _coalesce_pending() as it stood — it only ever looked at whatever was
+    # ALREADY sitting in the queue at that exact moment, a window measured in
+    # microseconds. The first one nearly always won that race, started its
+    # show_toast()/remove_toast_group() WinRT/COM round-trip (occasionally
+    # slow for reasons outside this app's control — the Windows notification
+    # platform itself can stall for seconds under load), and the second sat
+    # queued behind it the whole time instead of super­seding it — the exact
+    # opposite of the "newest wins" behaviour this coalescing exists for.
+    # This settle window is deliberately short: it only has to outlast the
+    # gap between two calls to send() that both trace back to the same live
+    # event burst, not create a perceptible delay for a single message.
+    _COALESCE_SETTLE_SECONDS = 0.2
 
     def __init__(self, main_window):
         self.main_window = main_window
@@ -640,13 +663,21 @@ class NotificationManager:
             )
 
     def _coalesce_pending(self, item):
-        """Collapse everything already queued down to the newest notification.
+        """Collapse everything already queued (plus anything that arrives in
+        the next _COALESCE_SETTLE_SECONDS) down to the newest notification.
 
         If more notifications piled up while the toaster was busy (a reconnect
         delivering a burst of messages, say), only the most recent one is worth
         showing — the rest would queue up behind it and be displayed one after
         another, which is the behaviour being fixed.  Anything dropped here is
         still reflected in the app's unread state and chat list.
+
+        Two phases: first drain whatever is ALREADY queued with no wait at all
+        (a real backlog deserves no artificial delay — it's already there to
+        be found). Only once that's empty do we wait, and only up to the one
+        bounded settle window from the moment this method was called — not
+        reset by each arrival — so two messages seconds apart still only cost
+        a single _COALESCE_SETTLE_SECONDS, not one per message.
 
         Returns ``(item, dropped_count)``; item is None when a shutdown signal
         was found in the queue.
@@ -656,9 +687,23 @@ class NotificationManager:
             try:
                 newer = self._queue.get_nowait()
             except queue.Empty:
-                return item, dropped
+                break
             if newer is None:
                 # Shutdown signal arrived mid-burst: honour it.
+                return None, dropped
+            item = newer
+            dropped += 1
+
+        deadline = time.monotonic() + self._COALESCE_SETTLE_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return item, dropped
+            try:
+                newer = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                return item, dropped
+            if newer is None:
                 return None, dropped
             item = newer
             dropped += 1

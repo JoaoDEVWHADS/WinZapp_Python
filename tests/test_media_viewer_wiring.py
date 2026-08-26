@@ -121,6 +121,37 @@ def test_prev_next_save_have_real_shortcuts_and_are_announced():
     assert "wx.ACCEL_CTRL | wx.ACCEL_SHIFT" in accel_src
 
 
+def test_seek_back_forward_buttons_flank_pause_with_alt_v_and_alt_a():
+    """Bug report: the new (dialog-based) status/video player has no way to
+    skip forward/back — only Space (via _on_char_hook) to toggle play/pause.
+    Voltar (Alt+V) must sit right before Pausar and Avançar (Alt+A) right
+    after it, both in the same actions row/tab order, with the same fixed
+    (locale-independent) shortcut mechanism the rest of the app's
+    keyboard-shortcut buttons use — a custom Accessible reporting the literal
+    combo, not a translated mnemonic."""
+    src = _source("client/ui/media_viewer.py")
+    assert "AccessibleMediaViewerSeekBack" in src
+    assert "AccessibleMediaViewerSeekForward" in src
+
+    build_src_start = src.index("def _build_ui")
+    build_src = src[build_src_start:src.index("\n    def ", build_src_start + 1)]
+    back_pos = build_src.index("self._seek_back_btn = wx.Button")
+    play_pos = build_src.index("self._play_btn = wx.Button")
+    fwd_pos = build_src.index("self._seek_forward_btn = wx.Button")
+    assert back_pos < play_pos < fwd_pos
+
+    accel_src_start = src.index("def _create_accelerators")
+    accel_src = src[accel_src_start:src.index("\n    def ", accel_src_start + 1)]
+    assert "wx.ACCEL_ALT" in accel_src
+    assert 'ord("V")' in accel_src and "self._on_seek_back" in accel_src
+    assert 'ord("A")' in accel_src and "self._on_seek_forward" in accel_src
+
+    calls = _method_calls("client/ui/media_viewer.py", "MediaViewerDialog", "_seek_relative")
+    assert "get_length" in calls
+    assert "get_position" in calls
+    assert "set_position" in calls
+
+
 def test_reply_field_has_a_visible_label_not_just_setname():
     """Reported live: the status reply field announced nothing on focus.
     SetName() alone is not reliably read by NVDA/JAWS for an editable
@@ -151,6 +182,8 @@ def test_media_viewer_translations_exist_in_every_locale():
         "media_viewer_loading",
         "media_viewer_play",
         "media_viewer_pause",
+        "media_viewer_seek_back",
+        "media_viewer_seek_forward",
         "media_viewer_position",
         "media_viewer_volume",
         "media_viewer_speed",

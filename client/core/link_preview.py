@@ -32,9 +32,23 @@ _REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WinZapp/LinkPreview",
 }
 
-# An Open Graph/title tag lives in <head>, near the top of the document —
-# no need to download (or parse) an entire page for it.
-_MAX_BYTES_READ = 262144
+# An Open Graph/title tag lives in <head>, but "near the top of the
+# document" does not hold for JS-heavy pages: YouTube's watch page, for
+# example, inlines ~680KB of hydration JSON/script before its own og:title
+# meta tag. A fixed low byte cap silently produced no preview at all for
+# those sites (no error — fetch_link_preview() just legitimately found
+# nothing in what it read). Instead, keep reading chunks until </head> has
+# actually been seen, so the cap below is a safety ceiling against
+# pathological/never-closing markup, not the expected stopping point.
+_MAX_BYTES_READ = 3 * 1024 * 1024
+
+# Matched case-folded: `</HEAD>` is valid HTML and still turns up on older
+# pages. Missing it wouldn't corrupt the preview — the parser below finds the
+# tags either way — but it would drop the early exit and download the whole
+# 3MB ceiling before giving up, which is precisely the cost this stop
+# condition exists to avoid.
+_HEAD_CLOSE = b"</head>"
+_CHUNK_SIZE = 16384
 
 
 def find_first_url(text: str) -> str:
@@ -87,8 +101,19 @@ def fetch_link_preview(url: str, timeout: float = 6.0) -> dict | None:
         if "html" not in content_type.lower():
             return None
         raw = b""
-        for chunk in response.iter_content(chunk_size=16384):
+        for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+            if not chunk:
+                continue
+            # Search only the freshly-arrived tail, plus the few bytes a
+            # `</head>` split across the chunk boundary could have left behind:
+            # everything before that was already searched on an earlier
+            # iteration. Re-scanning the whole buffer each time is quadratic in
+            # the ceiling above (~192 passes over up to 3MB), for no more
+            # information than this.
+            tail_start = max(0, len(raw) - (len(_HEAD_CLOSE) - 1))
             raw += chunk
+            if _HEAD_CLOSE in raw[tail_start:].lower():
+                break
             if len(raw) >= _MAX_BYTES_READ:
                 break
         html_text = raw.decode(response.encoding or "utf-8", errors="ignore")

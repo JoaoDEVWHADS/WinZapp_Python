@@ -44,20 +44,22 @@ def test_sender_patch_migrates_intermediate_chunked_source():
 def test_sender_patch_migrates_the_previous_chunked_patch_to_1gb():
     previous = sender_patch.PATCHED_SEND_FILE.replace(
         "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
-        "                        if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+        "                        if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
         "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
         "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
         "                                ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
         "                                : getUploadLimit(type, origin, isVcard);\n"
+        "                            mediaGating.__winzappUploadLimitPatched = true;\n"
         "                        }\n",
         "",
     ).replace(
         "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
-        "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+        "                    if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
         "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
         "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
         "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
         "                            : getUploadLimit(type, origin, isVcard);\n"
+        "                        mediaGating.__winzappUploadLimitPatched = true;\n"
         "                    }\n",
         "",
     )
@@ -66,6 +68,38 @@ def test_sender_patch_migrates_the_previous_chunked_patch_to_1gb():
 
     assert "WPP.whatsapp?.MediaGatingUtils" in migrated
     assert "1 * 1024 * 1024 * 1024" in migrated
+    assert "__winzappUploadLimitPatched" in migrated
+
+
+def test_sender_patch_migrates_the_leaking_unguarded_upload_limit_wrap():
+    """LEGACY_PATCHED_SEND_FILE_V2 is the exact text every existing install
+    already has on disk from before the __winzappUploadLimitPatched guard
+    existed. Without this migration, re-running setup_api.py on an
+    already-patched machine would leave the leak in place forever, since
+    none of the other ALL_PATCHES pairs match already-patched text."""
+    assert (
+        sender_patch.LEGACY_PATCHED_SEND_FILE_V2,
+        sender_patch.PATCHED_SEND_FILE,
+    ) in sender_patch.ALL_PATCHES
+    assert "__winzappUploadLimitPatched" not in sender_patch.LEGACY_PATCHED_SEND_FILE_V2
+
+    migrated = sender_patch.LEGACY_PATCHED_SEND_FILE_V2
+    for original, replacement in sender_patch.ALL_PATCHES:
+        migrated = migrated.replace(original, replacement)
+
+    assert migrated == sender_patch.PATCHED_SEND_FILE
+
+
+def test_sender_patch_guards_upload_limit_wrap_against_repeated_wrapping():
+    """The getUploadLimit() override must install at most once per page
+    load — re-wrapping it on every document send chains one more closure
+    onto a singleton (WPP.whatsapp.MediaGatingUtils) that lives for the
+    whole session, leaking memory in the browser process forever."""
+    patched = sender_patch.PATCHED_SEND_FILE
+
+    assert patched.count("__winzappUploadLimitPatched = true") == 2
+    assert patched.count("&& !mediaGating.__winzappUploadLimitPatched") == 2
+    assert "&& !mediaGating.__winzappUploadLimitPatched" in sender_patch._BROWSER_DOCUMENT_LIMIT_PATCH
 
 
 def test_large_documents_use_bounded_browser_transfers_and_a_1gb_browser_limit():
@@ -126,3 +160,90 @@ def test_sender_patch_widens_bounded_transfer_to_every_attachment_type():
     for kind in ("document", "image", "video", "audio"):
         assert f"'{kind}'" in sender_patch.PATCHED_FILE_LOADING
     assert "options.type === 'document'" not in sender_patch.PATCHED_FILE_LOADING
+
+
+class TestTheUploadLimitOverrideInstallsItselfOnlyOnce:
+    """The getUploadLimit override lives inside the per-send page callback, so
+    it runs again on every document sent. Its first version guarded on
+    `mediaGating?.getUploadLimit` — but a wrapper IS a getUploadLimit, so that
+    guard is true forever after the first wrap. Each send then captured the
+    previous wrapper and layered another one on top, with nothing ever
+    resetting it: an unbounded closure chain for as long as the WhatsApp Web
+    page lived, walked in full on every call.
+
+    `__winzappUploadLimitPatched` on the object is what makes it once-per-page.
+    Being source-text assertions, these can't run the JS — what they pin down
+    is that the marker is both TESTED before wrapping and SET after, in every
+    copy of the block. A version that only sets it, or only tests it, would
+    read as fixed and behave exactly like the leak."""
+
+    def _blocks(self, text):
+        """Each copy of the override block, split off at its opening line."""
+        parts = text.split("const mediaGating = WPP.whatsapp?.MediaGatingUtils;")
+        return parts[1:]
+
+    def test_every_copy_of_the_block_tests_and_sets_the_marker(self):
+        blocks = self._blocks(sender_patch.PATCHED_SEND_FILE)
+        assert len(blocks) == 2, (
+            "expected the override in both the chunked and the base64 branch; "
+            f"found {len(blocks)}"
+        )
+        for block in blocks:
+            head = block.split("const result")[0]
+            assert "!mediaGating.__winzappUploadLimitPatched" in head, (
+                "the guard must consult the marker, not just getUploadLimit's "
+                "existence — a wrapper satisfies that check forever"
+            )
+            assert "mediaGating.__winzappUploadLimitPatched = true;" in head, (
+                "the marker must be set, or the guard can never become false"
+            )
+
+    def test_the_injected_block_carries_the_marker_too(self):
+        """The block injected into a node_modules that predates the override
+        entirely is a separate constant from the two inline copies."""
+        head = sender_patch._BROWSER_DOCUMENT_LIMIT_PATCH
+        assert "!mediaGating.__winzappUploadLimitPatched" in head
+        assert "mediaGating.__winzappUploadLimitPatched = true;" in head
+
+    def test_the_unmarked_variant_is_migrated_not_left_alone(self):
+        """A machine patched by the build that shipped the leaking version has
+        the unmarked block in node_modules. It matches no ALL_PATCHES pair, so
+        without an explicit migration every later setup run would leave it
+        exactly as it is — the same trap the intermediate chunked variant fell
+        into."""
+        legacy = sender_patch._LEGACY_DOCUMENT_LIMIT_PATCH
+        stale = (
+            "        let sendResult;\n"
+            + legacy
+            + "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n"
+        )
+
+        migrated = sender_patch.patch_sender_layer_source(stale)
+
+        assert "__winzappUploadLimitPatched" in migrated
+        assert legacy not in migrated
+
+    def test_the_unmarked_variant_is_migrated_at_the_deeper_indentation_too(self):
+        """The chunked branch carries the same block one nesting level in."""
+        legacy_deep = sender_patch._deepen(sender_patch._LEGACY_DOCUMENT_LIMIT_PATCH)
+        stale = (
+            "        let sendResult;\n"
+            + legacy_deep
+            + "                        const result = await WPP.chat.sendFileMessage(to, file, {\n"
+        )
+
+        migrated = sender_patch.patch_sender_layer_source(stale)
+
+        assert "__winzappUploadLimitPatched" in migrated
+        assert legacy_deep not in migrated
+
+    def test_migrating_an_already_marked_source_changes_nothing(self):
+        current = sender_patch.PATCHED_SEND_FILE + "\n    }\n    /**"
+
+        once = sender_patch.patch_sender_layer_source(current)
+        twice = sender_patch.patch_sender_layer_source(once)
+
+        assert once == twice
+        assert once.count("__winzappUploadLimitPatched = true;") == 2, (
+            "re-running the migration must not duplicate the marker assignment"
+        )

@@ -25,7 +25,26 @@ LOGOUT = "logout"                 # confirmed logout after being connected — w
 
 # WPPConnect exposes the same permanent unlink through different channels:
 # statusFind uses disconnectedMobile/notLogged, while onStateChange and the
-# REST status endpoint use UNPAIRED variants. They are one semantic state.
+# REST status endpoint use UNPAIRED variants.
+#
+# `disconnectedMobile` is the loose one and is only safe HERE. WPPConnect
+# documents it as "Client has disconnected to the mobile device" — the phone
+# became unreachable, which is routine (no signal, dead battery, the machine
+# asleep) and is not the same thing as the user unlinking the device;
+# `notLogged` is the one that means "scan the QR code again". Listing it in
+# this tuple is defensible only because every consumer of it goes through
+# MainWindow._logout_confirmed(), which demands four independent things before
+# anything is wiped: the startup grace has passed, _LOGOUT_CONFIRM_STRIKES
+# consecutive readings at least STRIKE_MIN_INTERVAL_SECONDS apart, the state
+# has held for _LOGOUT_CONFIRM_SECONDS, and _still_linked_on_server() cannot
+# prove the device is in fact still linked.
+#
+# It is NOT safe on an unguarded path. websocket_client.on_wpp_status_find()
+# treats a single one of these as a permanent logout and wipes credentials and
+# the local database immediately — which is why createSessionUtil.ts
+# deliberately does not emit 'status-find' over Socket.IO (see the comment
+# there). Anything new that reads this tuple has to go through the guarded
+# path too.
 UNLINKED_STATES = (
     "notLogged",
     "QRCODE",

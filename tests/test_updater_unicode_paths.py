@@ -129,6 +129,23 @@ class TestInstallerScript:
         assert r'"C:\WinZapp\update_install.log"' in s
         assert "chcp" in s, "the active code page is the fact that explains a bad path"
 
+    def test_the_previous_log_is_kept_as_dot_old_before_truncating(self):
+        """Reported live: a disconnection/re-pairing incident happened right
+        as an update landed, but by the time it was investigated
+        update_install.log only held the NEXT, unrelated, healthy update —
+        the script's `> "{log_path}" echo ...` unconditionally truncates the
+        log at the start of every run, with no way to see what an earlier,
+        problematic update actually did. Moving the previous log aside
+        first means at least the run before the current one survives."""
+        s = _script()
+        move_idx = s.index('move /Y "C:\\WinZapp\\update_install.log" "C:\\WinZapp\\update_install.log.old"')
+        truncate_idx = s.index('> "C:\\WinZapp\\update_install.log" echo [WinZapp] update started')
+        assert move_idx < truncate_idx, "must move the old log aside BEFORE truncating the current one"
+        # Best-effort: a missing/locked file from the very first update ever
+        # must not fail the script.
+        move_line = s[move_idx:s.index("\n", move_idx)]
+        assert ">NUL 2>&1" in move_line
+
     def test_a_failed_copy_marks_it_and_keeps_the_evidence(self):
         s = _script()
         assert r'echo update failed > "C:\WinZapp\update_failed.marker"' in s

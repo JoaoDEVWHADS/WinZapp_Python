@@ -971,6 +971,19 @@ class MainWindow(wx.Frame):
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
+        # Published as soon as i18n exists, not at the end of __init__: if
+        # anything further down this constructor raises (issue #104 — a
+        # missing constructor argument deep in a sub-panel's init_UI()), the
+        # `frame = MainWindow(...)` assignment in __main__ never completes,
+        # so __main__'s own except-block has no `frame` to read a language
+        # from — that's the reason its crash dialog was always hardcoded to
+        # Portuguese, even though the user may have picked another language.
+        # This partial (but already-i18n-ready) self is what lets that
+        # except-block translate the message anyway. See _write_crash_log()'s
+        # caller for how it's used, and the module-level docstring near
+        # _last_partial_frame's definition for why it can't just be `frame`.
+        global _last_partial_frame
+        _last_partial_frame = self
 
         # Apply the configured output/input audio devices (Settings > Audio
         # Devices). A device that fails to open here falls back to the
@@ -9850,18 +9863,62 @@ class MainWindow(wx.Frame):
         unblock_result = self.unblock_history_sync()
         if self._recent_history_needs_wait(unblock_result):
             if not self.wait_for_restarted_history_sync():
+                if getattr(self, "_history_wait_outcome", "") == "session_gone":
+                    logging.warning(
+                        "[start_sync] The session went away during the RECENT "
+                        "history wait; deferring the message phase — there is "
+                        "nothing left to query against."
+                    )
+                    self._sync_completed = False
+                    return
+                # Budget exhausted while the phone is still pushing history.
+                #
+                # This used to `return` here too, and that is the whole of the
+                # "it syncs nothing and keeps re-announcing Sincronizando"
+                # report: a first pairing on a large account does not finish
+                # its RECENT pass inside the wait, so every round waited the
+                # full budget, threw the round away, and the health check
+                # started another one — with sync_remote_chats() never running
+                # once. Nothing was fetched, and _resolve_missing_group_names()
+                # (which lives past the message phase) never ran either, so
+                # groups fetched with ignoreGroupMetadata stayed unnamed.
+                #
+                # Proceed instead, which is what this code did before the wait
+                # existed at all: get-messages returns whatever WhatsApp Web
+                # has decoded SO FAR, and _history_still_landing tells
+                # _note_backfill_state() those short answers are provisional,
+                # so each chat is re-queried as the rest of its history lands.
+                # A partial sync that fills in beats an empty one that repeats.
                 logging.warning(
-                    "[start_sync] RECENT history is still incomplete; deferring "
-                    "the message phase so it does not compete with the phone transfer."
+                    "[start_sync] RECENT history did not finish inside the wait — "
+                    "running the message phase anyway against what has landed so "
+                    "far; short chats will be re-queried as the rest arrives."
                 )
-                self._sync_completed = False
-                return
+                self._history_still_landing = True
             # list-chats was captured before the phone finished its transfer.
             # Refresh it now so chats delivered during the wait are part of
             # this same sync instead of waiting for a later health-check round.
-            self.get_remote_chats()
-            self.chats = self.normalize_chats(self.chats)
-            wx.CallAfter(self.set_chats)
+            #
+            # Reached on both outcomes that go on to sync — the RECENT pass
+            # completing, and the budget running out while it is still
+            # arriving — since chats can have landed during the wait either
+            # way.
+            #
+            # get_remote_chats() takes the dict to merge into and *returns*
+            # the merged result; it does not mutate self.chats. Calling it
+            # bare raised TypeError on every single run that got this far,
+            # which _run_sync()'s own `except Exception` then swallowed into
+            # one "[start_sync] Unhandled error during sync" line — back when
+            # this was the wait's only non-deferring exit, that meant
+            # sync_remote_chats() could not run at all on any account whose
+            # RECENT pass was still incomplete at sync time.
+            # None means "the chat list is unknown", never "there are no
+            # chats" — keep what we already had in that case.
+            refreshed = self.get_remote_chats(dict(self.chats), persist_full=False,
+                                              notify_errors=False)
+            if refreshed is not None:
+                self.chats = self.normalize_chats(refreshed)
+                wx.CallAfter(self.set_chats)
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13522,6 +13579,34 @@ class MainWindow(wx.Frame):
         except (AttributeError, TypeError, ValueError):
             return 200
 
+    def _history_session_is_gone(self) -> bool:
+        """Whether an unreadable /history-sync-status means "stop", not "retry".
+
+        fetch_history_sync_status() answers None for two very different
+        things, and every caller has to tell them apart the same way:
+
+          * the session really is gone — WPPConnect reported "disconnected",
+            our own connection flag is down, or the user went offline. Nothing
+            more is coming; give up.
+          * a transient read failure — most commonly a 503
+            ``session_not_ready`` / "WAPI is not defined" from the
+            statusConnection middleware, which exists precisely to say "the
+            page is not ready *yet*" rather than "the session is dead" (see
+            api_patches/src/middleware/statusConnection.ts). WhatsApp Web
+            re-injects WAPI routinely while a big history transfer runs, so
+            this shows up mid-wait on exactly the accounts the wait matters
+            for. Also covers an HTTP timeout to the local API.
+
+        Shared so the two callers cannot drift: they did, and the one that
+        treated a transient failure as fatal took the whole message phase down
+        with it.
+        """
+        return bool(
+            getattr(self, "_history_status_disconnected", False)
+            or not getattr(self, "_wa_connected", False)
+            or getattr(self, "offline_mode", False)
+        )
+
     def refresh_history_still_landing(self, context: str = "") -> bool:
         """Note whether more history is still on its way into WhatsApp Web.
 
@@ -13546,11 +13631,7 @@ class MainWindow(wx.Frame):
         """
         status = self.fetch_history_sync_status()
         if status is None:
-            disconnected = (
-                getattr(self, "_history_status_disconnected", False)
-                or not getattr(self, "_wa_connected", False)
-                or getattr(self, "offline_mode", False)
-            )
+            disconnected = self._history_session_is_gone()
             if disconnected:
                 self._history_still_landing = False
                 logging.warning(
@@ -13579,15 +13660,57 @@ class MainWindow(wx.Frame):
         )
         return landing
 
+    #: How often the wait below reports what it is seeing. It polls every two
+    #: seconds for up to ten minutes and used to log NOTHING unless a read
+    #: failed, so "the phone is still transferring" and "this is wedged" looked
+    #: identical from log.log — the only observable was a wall of
+    #: `GET /history-sync-status -> 200`. That ambiguity is what made a normal
+    #: (if slow) first pairing get reported as a sync regression.
+    _HISTORY_WAIT_PROGRESS_SECONDS = 15
+
     def wait_for_restarted_history_sync(self, timeout: int = 600) -> bool:
-        """Wait until a manually restarted RECENT pass is actually complete."""
+        """Wait until a manually restarted RECENT pass is actually complete.
+
+        A read that merely *failed* must not be mistaken for a pass that will
+        not finish. A single 503 ``session_not_ready`` used to end the wait
+        outright: in the captured session it fired 5m20s into a 10-minute
+        budget and deferred a sync whose RECENT pass went on to complete 10
+        minutes later. Only a session that is actually gone
+        (_history_session_is_gone()) ends the wait early now; anything else
+        keeps polling until the deadline, which is what bounds this at all.
+
+        Sets ``self._history_wait_outcome`` to why it stopped, because the two
+        False cases are not the same thing to the caller:
+
+          * ``"completed"`` — the RECENT pass finished (returns True).
+          * ``"timeout"``   — the budget ran out while the transfer was still
+            making progress. The phone still has history to push; that is a
+            reason to expect short chats, NOT a reason to skip the message
+            phase (see _run_sync()).
+          * ``"session_gone"`` — offline, or the session is really gone. There
+            is nothing to query and the caller should stop.
+        """
+        self._history_wait_outcome = ""
         deadline = time.monotonic() + timeout
+        last_progress_log = 0.0
         while time.monotonic() < deadline:
             if self._should_abort_sync_for_offline():
+                self._history_wait_outcome = "session_gone"
                 return False
             status = self.fetch_history_sync_status(timeout=10)
             if not isinstance(status, dict):
-                return False
+                if self._history_session_is_gone():
+                    logging.warning(
+                        "[history-sync] Restarted RECENT wait: session is gone; "
+                        "stopping the wait.")
+                    self._history_wait_outcome = "session_gone"
+                    return False
+                logging.warning(
+                    "[history-sync] Restarted RECENT wait: status unreadable but "
+                    "the session is still up — treating it as transient, %.0fs of "
+                    "budget left.", max(0.0, deadline - time.monotonic()))
+                time.sleep(2)
+                continue
             counts = status.get("storeCounts") or {}
             message_count = counts.get("message")
             queue_empty = status.get("unprocessedChunks") == 0
@@ -13596,12 +13719,26 @@ class MainWindow(wx.Frame):
                     "[history-sync] Restarted RECENT history completed at %s messages.",
                     message_count,
                 )
+                self._history_wait_outcome = "completed"
                 return True
+            now = time.monotonic()
+            if now - last_progress_log >= self._HISTORY_WAIT_PROGRESS_SECONDS:
+                last_progress_log = now
+                logging.info(
+                    "[history-sync] Restarted RECENT wait: messages=%s chats=%s "
+                    "unprocessed=%s recent_complete=%s initial_complete=%s — "
+                    "%.0fs of budget left.",
+                    message_count, counts.get("chat"),
+                    status.get("unprocessedChunks"), status.get("recentCompleted"),
+                    status.get("initialSyncComplete"),
+                    max(0.0, deadline - time.monotonic()),
+                )
             time.sleep(2)
         logging.warning(
-            "[history-sync] Restarted RECENT history did not complete within %ds; "
-            "deferring the REST message sync.", timeout,
+            "[history-sync] Restarted RECENT history did not complete within %ds — "
+            "the phone is still pushing history.", timeout,
         )
+        self._history_wait_outcome = "timeout"
         return False
 
     @staticmethod
@@ -19812,7 +19949,12 @@ class MainWindow(wx.Frame):
                         code = None
                     if code in (200, 409):
                         continue  # genuinely in the group now (or already was)
-                    display = jid.split("@")[0]
+                    contact = getattr(self, "contacts", {}).get(jid, {})
+                    display = (
+                        contact.get("name")
+                        or contact.get("pushName")
+                        or jid.split("@")[0]
+                    )
                     if code == 403 and info.get("invite_code"):
                         invited.append(display)
                     else:
@@ -21893,6 +22035,44 @@ class MainWindow(wx.Frame):
             pass
 
 
+# Set by MainWindow.__init__ the moment self.i18n exists (see that call
+# site's own comment) — this module-level name, not the `frame` local in
+# __main__, is what survives a constructor crash: `frame = MainWindow(...)`
+# never completes assigning `frame` when the constructor itself raises, but
+# the partially-built instance already ran that assignment before failing
+# further down. Only ever read by _startup_critical_error_text() below, and
+# only for its title/message strings — never assumed fully initialized.
+_last_partial_frame = None
+
+
+def _startup_critical_error_text(crash_path: str, tb: str) -> tuple[str, str]:
+    """(title, message) for the native MessageBoxW shown when __main__'s
+    top-level except-block catches an error during startup — translated
+    into the user's selected language when possible.
+
+    Falls back to the original hardcoded Portuguese only when no usable
+    i18n is available at all (a crash before MainWindow even constructs
+    self.i18n, or i18n.t() itself raising) — this dialog is the one thing
+    standing between the user and a silent exit, so it must never crash
+    trying to be helpful.
+    """
+    frame = _last_partial_frame
+    if frame is not None and getattr(frame, "i18n", None) is not None:
+        try:
+            title = frame.i18n.t("startup_critical_title")
+            message = frame.i18n.t("startup_critical_message").format(
+                path=crash_path, details=tb[:800]
+            )
+            return title, message
+        except Exception:
+            pass
+    return (
+        "WinZapp — Erro de inicialização",
+        f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
+        f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
+    )
+
+
 def _write_crash_log(tb: str) -> str:
     """Write a traceback to crash.log next to the exe and return the path."""
     from app_paths import _outer_exe_dir
@@ -22129,11 +22309,11 @@ if __name__ == "__main__":
         crash_path = _write_crash_log(tb)
         # Try to show a native Windows error box (works even without wx).
         try:
+            title, message = _startup_critical_error_text(crash_path, tb)
             ctypes.windll.user32.MessageBoxW(
                 0,
-                f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
-                f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
-                "WinZapp — Erro de inicialização",
+                message,
+                title,
                 0x10,  # MB_ICONERROR
             )
         except Exception:

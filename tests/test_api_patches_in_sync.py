@@ -425,15 +425,23 @@ def test_wppconnect_is_not_frozen_in_the_live_package_json():
     must track whatever range wppconnect-server's own upstream package.json
     declares, not a value someone hardcoded here at some point in the past.
     This can't assert a specific version (upstream releases constantly), only
-    that it's a caret range rather than the old exact pin."""
+    that it's a caret range — or a git dependency, which is likewise resolved
+    fresh rather than frozen — rather than the old exact pin."""
     live = API / "package.json"
     if not live.exists():
         pytest.skip("client/api/package.json not present")
     deps = json.loads(live.read_text(encoding="utf-8")).get("dependencies", {})
     version = deps.get("@wppconnect-team/wppconnect", "")
-    assert version.startswith("^") or version.startswith("git+") or bool(version), (
-        f"@wppconnect-team/wppconnect is pinned to an unexpected version ({version!r}) "
-        f"in client/api/package.json — let it float on upstream's own range or git dependency."
+    # `or bool(version)` used to be a third clause here, which made the two
+    # above it dead: every non-empty string passed, including the exact pin
+    # this test exists to reject. A guard that cannot fail is worse than no
+    # guard, because the green run reads as evidence.
+    assert version.startswith("^") or version.startswith("git+"), (
+        f"@wppconnect-team/wppconnect is pinned to an exact version ({version!r}) "
+        f"in client/api/package.json — this is exactly the bug that made a real "
+        f"clone of wppconnect-server 2.10.1 (which wants ^2.2.6) run against a "
+        f"stale, incompatible 2.2.4. Let it float on upstream's own range, or "
+        f"point at a git dependency."
     )
 
 

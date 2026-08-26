@@ -350,3 +350,191 @@ class TestApplyAudioSpeedVideoBranch:
         assert stub.applied_speed == 2.0
         assert stub.audio_speed_btn.label == "2.0×"
         assert stub.main_window.save_settings_calls == 1
+
+
+# ── Settings > Interface do usuário > "Mostrar vídeos nas conversas em
+# player separado" — unchecked keeps the classic in-app player (BASS/ffmpeg,
+# no dialog) instead of MediaViewerDialog, mirroring the equivalent status
+# setting (_use_status_media_viewer_dialog in status_panel.py). Images are
+# never affected by this setting. ───────────────────────────────────────────
+
+class _FakeSettingsHolder:
+    def __init__(self, settings):
+        self.settings = settings
+
+
+class _ActivationStub:
+    _is_separator                              = ConversationsPanel._is_separator
+    _use_conversation_video_media_viewer_dialog = (
+        ConversationsPanel._use_conversation_video_media_viewer_dialog
+    )
+    _do_activate_message                        = ConversationsPanel._do_activate_message
+
+    def __init__(self, sorted_messages, settings=None):
+        self.main_window = _FakeSettingsHolder(settings or {})
+        self._sorted_messages = sorted_messages
+        self._render_message_line = lambda msg: ""
+        self._extract_links = lambda rendered: []
+        self._extract_mentions = lambda msg: []
+        self._update_links_panel = lambda links: None
+        self._update_mentions_panel = lambda mentions: None
+        self._sync_media_action_slot_visibility = lambda: None
+        self.media_viewer_calls = []
+        self.play_toggle_calls = []
+
+    def _open_conversation_media_viewer(self, index):
+        self.media_viewer_calls.append(index)
+
+    def _play_toggle_video_message(self, msg):
+        self.play_toggle_calls.append(msg)
+
+
+class TestUseConversationVideoMediaViewerDialogSetting:
+    def test_default_setting_uses_the_dialog(self):
+        stub = _ActivationStub([])  # no settings override — must default to True
+        assert stub._use_conversation_video_media_viewer_dialog() is True
+
+    def test_disabled_setting_uses_the_classic_player(self):
+        stub = _ActivationStub(
+            [], settings={"user_interface": {"conversation_video_media_viewer_dialog": False}}
+        )
+        assert stub._use_conversation_video_media_viewer_dialog() is False
+
+
+class TestVideoActivationRespectsTheSetting:
+    def test_dialog_mode_opens_the_media_viewer(self):
+        stub = _ActivationStub([_video_msg("v1")])
+
+        stub._do_activate_message(0)
+
+        assert stub.media_viewer_calls == [0]
+        assert stub.play_toggle_calls == []
+
+    def test_classic_mode_plays_in_app_instead(self):
+        stub = _ActivationStub(
+            [_video_msg("v1")],
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}},
+        )
+
+        stub._do_activate_message(0)
+
+        assert stub.play_toggle_calls == [_video_msg("v1")]
+        assert stub.media_viewer_calls == []
+
+    def test_classic_mode_ignores_gif_playback(self):
+        """GIFs (videoMessage with gifPlayback) have no audio track — Enter
+        must no-op in classic mode instead of trying to play one, matching
+        the pre-dialog behaviour this mode restores."""
+        gif_msg = {
+            "key": {"id": "g1"}, "messageType": "videoMessage",
+            "message": {"videoMessage": {"gifPlayback": True}},
+        }
+        stub = _ActivationStub(
+            [gif_msg],
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}},
+        )
+
+        stub._do_activate_message(0)
+
+        assert stub.play_toggle_calls == []
+        assert stub.media_viewer_calls == []
+
+    def test_image_messages_always_use_the_dialog_regardless_of_the_setting(self):
+        image_msg = {
+            "key": {"id": "i1"}, "messageType": "imageMessage",
+            "message": {"imageMessage": {}},
+        }
+        stub = _ActivationStub(
+            [image_msg],
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}},
+        )
+
+        stub._do_activate_message(0)
+
+        assert stub.media_viewer_calls == [0]
+        assert stub.play_toggle_calls == []
+
+
+# ── The "Abrir" (Open) action is a different action from Enter/click: it
+# always means "hand this file to my OS-default video player", regardless
+# of the in-app dialog/classic setting above — that setting only controls
+# what Enter/click does. Reported live: "Abrir" on a video opened the exact
+# same in-app viewer Enter already opens, instead of the external player. ──
+
+class _FakeThread:
+    """Records the target/args instead of actually spawning a thread —
+    _on_action_open's fallthrough path (decrypt + tempfile + external open)
+    needs a live wx.App/network to run for real; only the *dispatch*, not
+    its result, is under test here."""
+    instances = []
+
+    def __init__(self, target=None, args=(), daemon=None):
+        self.target = target
+        self.args = args
+        _FakeThread.instances.append(self)
+
+    def start(self):
+        pass
+
+
+class _OpenActionStub:
+    _on_action_open = ConversationsPanel._on_action_open
+    _use_conversation_video_media_viewer_dialog = (
+        ConversationsPanel._use_conversation_video_media_viewer_dialog
+    )
+
+    def __init__(self, sorted_messages, settings=None):
+        self.main_window = _FakeSettingsHolder(settings or {})
+        self._sorted_messages = sorted_messages
+        self.messages_list = _FakeMessagesList(focused=0)
+        self._location_maps_url = lambda msg: None
+        self.media_viewer_calls = []
+
+    def _open_conversation_media_viewer(self, index):
+        self.media_viewer_calls.append(index)
+
+
+class TestOpenActionAlwaysExternalForVideo:
+    def _run(self, settings):
+        _FakeThread.instances = []
+        video_msg = {
+            "key": {"id": "v1"}, "messageType": "videoMessage",
+            "message": {"videoMessage": {}},
+        }
+        stub = _OpenActionStub([video_msg], settings=settings)
+        import ui.conversations as conv_mod
+        orig_thread = conv_mod.threading.Thread
+        orig_data_path = conv_mod.data_path
+        conv_mod.threading.Thread = _FakeThread
+        conv_mod.data_path = lambda *parts: "/".join(("fake_data",) + parts)
+        try:
+            stub._on_action_open(None, index=0)
+        finally:
+            conv_mod.threading.Thread = orig_thread
+            conv_mod.data_path = orig_data_path
+        return stub
+
+    def test_dialog_mode_still_opens_externally_not_the_dialog(self):
+        stub = self._run(settings=None)  # default: dialog mode for Enter/click
+
+        assert stub.media_viewer_calls == []
+        assert len(_FakeThread.instances) == 1
+
+    def test_classic_mode_also_opens_externally(self):
+        stub = self._run(
+            settings={"user_interface": {"conversation_video_media_viewer_dialog": False}}
+        )
+
+        assert stub.media_viewer_calls == []
+        assert len(_FakeThread.instances) == 1
+
+    def test_image_open_action_is_unaffected_and_still_uses_the_dialog(self):
+        image_msg = {
+            "key": {"id": "i1"}, "messageType": "imageMessage",
+            "message": {"imageMessage": {}},
+        }
+        stub = _OpenActionStub([image_msg])
+
+        stub._on_action_open(None, index=0)
+
+        assert stub.media_viewer_calls == [0]

@@ -265,6 +265,43 @@ class TestStatedZeroVersusMeasuredZero:
         assert stub._get_message_content(msg) == "Vídeo, duração: 0 segundos"
 
 
+class TestOwnVideoAttachmentGetsAMeasuredDuration:
+    """Reported live: a video sent as a WinZapp attachment (not received)
+    showed no duration in the message list at all, until the sender opened
+    it themselves at least once. _on_send_attachment() already probed audio
+    attachments and stored the result under "seconds" (video_seconds()
+    trusts that key above zero only), but had no equivalent branch for
+    video, which needs _measured_seconds instead — a stated 0 there is
+    trusted, matching what _learn_video_duration() already does for a
+    received video the moment it's played.
+
+    ConversationsPanel._on_send_attachment() has too many UI/threading side
+    effects to instantiate here (message_queue, messages_list, background
+    caching thread, ...) — this pins the source-level contract instead, same
+    approach ui/test_media_viewer_wiring.py already uses for this class of
+    regression.
+    """
+
+    def _send_attachment_source(self):
+        import ast
+        tree = ast.parse(_source_conversations())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_on_send_attachment":
+                return ast.get_source_segment(_source_conversations(), node)
+        raise AssertionError("_on_send_attachment not found")
+
+    def test_video_attachments_are_probed_into_measured_seconds(self):
+        src = self._send_attachment_source()
+        assert 'media_type == "video"' in src
+        assert "MEASURED_SECONDS_KEY" in src
+        assert "_probe_audio_duration(path)" in src
+
+
+def _source_conversations():
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parents[1] / "client" / "ui" / "conversations.py").read_text(encoding="utf-8")
+
+
 class TestProbeTellsShortFromUnreadable:
     """probe_media_duration() is what makes the distinction possible, so it
     has to answer 0 for a real sub-second file and None when it cannot read
@@ -293,3 +330,15 @@ class TestProbeTellsShortFromUnreadable:
 
     def test_a_missing_file_cannot_be_measured(self, tmp_path):
         assert conversations.probe_media_duration(str(tmp_path / "nao_existe.wav")) is None
+
+    def test_probes_with_the_same_stream_mode_playback_uses(self):
+        """Reported live: a video's duration in the message list drifted a
+        second or two from what the player itself showed for the exact same
+        file. Both VideoPlayer._start_audio() and ConversationsPanel.
+        _play_audio()'s _open_stream() already open the file with
+        decode=True (needed for Tempo/speed control) — probe_media_duration()
+        used to open a plain (decode=False) stream just to read its length,
+        which BASS can report a slightly different get_length() for on the
+        same AAC/MP4 file. Opening the probe the same way playback does is
+        what makes the two numbers agree."""
+        assert "stream.FileStream(file=path, decode=True)" in _source_conversations()
