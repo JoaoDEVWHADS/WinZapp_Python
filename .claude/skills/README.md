@@ -6,6 +6,67 @@ primeiro vem junto com o `git clone`.
 
 ---
 
+## Como usar
+
+### Skills: ninguém invoca, elas aparecem
+
+Uma skill **carrega sozinha** quando a tarefa bate com a descrição dela. Mexeu
+em `client/languages/`, a `i18n-ui-string` entra em cena e o agente já sabe dos
+cinco arquivos, do `&&` e dos placeholders — você não precisa lembrar de nada.
+Para forçar, digite `/nome-da-skill`.
+
+### Agentes: você chama pelo nome
+
+```
+usa o winzapp-reviewer pra revisar meu diff contra origin/main
+```
+
+Descrever a tarefa sem citar o nome também costuma funcionar (a escolha sai do
+campo `description` de cada agente), mas **falar o nome é o caminho
+confiável**.
+
+Três coisas que mudam como se usa:
+
+1. **O agente não vê a sua conversa.** Ele nasce com contexto zero — só o
+   repositório e o que você escrever no pedido. É isso que torna o revisor
+   útil: ele não sabe o que você já argumentou, então não concorda por
+   inércia. Em troca, **o contexto é você quem passa**: "revisa a branch X
+   contra o commit Y" funciona, "revisa aquilo que a gente falou" não.
+2. **Agente não chama agente.** O `winzapp-implementer` não consegue invocar o
+   revisor — não tem essa ferramenta. Quem encadeia é você.
+3. **Carregam no início da sessão.** Depois de puxar um merge que adiciona ou
+   altera um agente, feche e reabra o Claude Code.
+
+### Os dois juntos
+
+- **Skill = conhecimento.** Como se faz X neste repositório.
+- **Agente = trabalhador.** Uma cabeça separada, com contexto próprio, que
+  carrega as skills da área antes de escrever.
+
+Os três agentes daqui têm a ferramenta `Skill` e são instruídos a carregar as
+skills relevantes antes de tocar em qualquer coisa.
+
+### O fluxo de uma feature nova
+
+```
+1. grill-with-docs      entrevista até o plano parar de ter buraco (e gera ADR)
+2. to-spec              vira a conversa em spec
+3. winzapp-implementer  implementa, com as skills da área carregadas
+4. winzapp-reviewer     revisa o diff, com contexto zero
+5. PR                   CI roda a suíte + 1 aprovação humana
+```
+
+O passo 1 é o que parece estranho e é o mais valioso para quem está começando:
+`grill-with-docs` **se recusa a gerar código** e fica perguntando até o plano
+ficar de pé. É o antídoto para "pedi uma tela de configurações e recebi 400
+linhas com a premissa errada".
+
+Nada disso é obrigatório. Para um ajuste de uma linha, pular direto para o
+passo 3 é o certo; a cerimônia é proporcional ao tamanho do que se está
+decidindo.
+
+---
+
 ## 1. Skills do projeto — versionadas, todo mundo tem
 
 Vivem em `.claude/skills/<nome>/SKILL.md` e entram no repositório como qualquer
