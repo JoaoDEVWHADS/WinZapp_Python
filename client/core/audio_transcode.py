@@ -5,6 +5,7 @@ import mimetypes
 import os
 import subprocess
 import sys
+import tempfile
 
 
 def transcode_audio_to_wav(ffmpeg: str, source_path: str) -> str | None:
@@ -59,28 +60,53 @@ def transcode_audio_to_wav(ffmpeg: str, source_path: str) -> str | None:
 def prepare_audio_for_whatsapp(ffmpeg: str, source_path: str) -> tuple[str, str] | None:
     """Return a WhatsApp-compatible audio path and MIME type.
 
-    WhatsApp accepts OGG audio through sendFile only when its stream is Opus.
-    Generic ``.ogg`` files may contain Vorbis, which WPPConnect rejects with
-    ``InvalidMediaCheckRepairFailedType``. Existing OGG/Opus files pass through.
+    WhatsApp accepts OGG audio through sendFile only when its stream is Opus,
+    while WAV reaches its media worker but is rejected after upload. Generic
+    ``.ogg`` files may also contain Vorbis, which WPPConnect rejects with
+    ``InvalidMediaCheckRepairFailedType``. Convert only those incompatible
+    inputs; formats already handled by WhatsApp (MP3, M4A, FLAC, etc.) keep
+    passing through unchanged.
     """
     mime = mimetypes.guess_type(source_path)[0] or "application/octet-stream"
-    if os.path.splitext(source_path)[1].lower() != ".ogg":
+    extension = os.path.splitext(source_path)[1].lower()
+    if extension not in {".ogg", ".wav", ".wave"}:
         return source_path, mime
 
-    try:
-        with open(source_path, "rb") as source:
-            header = source.read(4096)
-    except OSError:
-        return None
-    if b"OpusHead" in header:
-        return source_path, "audio/ogg; codecs=opus"
+    if extension == ".ogg":
+        try:
+            with open(source_path, "rb") as source:
+                header = source.read(4096)
+        except OSError:
+            return None
+        if b"OpusHead" in header:
+            return source_path, "audio/ogg; codecs=opus"
     if not ffmpeg or not os.path.isfile(ffmpeg):
         return None
 
-    output_path = source_path + ".opus.ogg"
+    try:
+        output_fd, output_path = tempfile.mkstemp(
+            prefix=os.path.basename(source_path) + ".",
+            suffix=".whatsapp.opus.ogg",
+        )
+        os.close(output_fd)
+    except OSError:
+        logging.exception("[send_media] could not create temporary Opus file")
+        return None
+
     creationflags = 0
     if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
+    try:
+        source_size = os.path.getsize(source_path)
+    except OSError:
+        source_size = 0
+    timeout = max(120, min(1800, source_size // (512 * 1024)))
+    logging.info(
+        "[send_media] converting %s audio to OGG/Opus with %s (temporary output: %s)",
+        extension or "unknown",
+        ffmpeg,
+        output_path,
+    )
     try:
         result = subprocess.run(
             [
@@ -88,7 +114,7 @@ def prepare_audio_for_whatsapp(ffmpeg: str, source_path: str) -> tuple[str, str]
                 "-c:a", "libopus", "-b:a", "64k", output_path,
             ],
             capture_output=True,
-            timeout=120,
+            timeout=timeout,
             creationflags=creationflags,
         )
         if (
@@ -98,12 +124,12 @@ def prepare_audio_for_whatsapp(ffmpeg: str, source_path: str) -> tuple[str, str]
         ):
             return output_path, "audio/ogg; codecs=opus"
         logging.error(
-            "[send_media] OGG/Vorbis to OGG/Opus conversion failed (rc=%s): %s",
+            "[send_media] audio conversion to OGG/Opus failed (rc=%s): %s",
             result.returncode,
             (result.stderr or b"").decode("utf-8", errors="replace")[-800:],
         )
     except Exception:
-        logging.exception("[send_media] OGG/Vorbis to OGG/Opus conversion failed")
+        logging.exception("[send_media] audio conversion to OGG/Opus failed")
     try:
         os.unlink(output_path)
     except OSError:
