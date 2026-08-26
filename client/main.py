@@ -4547,105 +4547,54 @@ class MainWindow(wx.Frame):
             return False
         return getattr(self, "_sync_ever_started", False)
 
-    def on_new_message(self, msg: dict):
+    def _redirect_self_chat_artifact(self, remote_jid: str, key: dict, from_me: bool):
+        """Detect and redirect a WPPConnect/Baileys self-chat sync artifact.
+
+        WPPConnect/Baileys occasionally reports one of our own sends (seen
+        with self-chat text, audio and documents) tagged with an identity
+        that isn't our real phone JID, in one of two shapes:
+
+          (a) "participant" (the actual sender/author, per wa-js semantics)
+              has the same digits as "remoteJid" (the chat). For a real
+              GROUP, remoteJid is the group's own independently-allocated
+              ID, never equal to any participant's JID — so this overlap
+              alone proves it's not a real group, regardless of whatever
+              fromMe flag WPPConnect attached to the event (observed: it
+              can arrive as fromMe=False, producing a bogus "new message
+              from an unnamed participant" notification). For a bare,
+              not-yet-resolved @lid or @s.whatsapp.net remoteJid, the same
+              overlap is only unambiguous when fromMe is already True —
+              for a real 1:1 chat, an incoming (fromMe=False) message's
+              participant legitimately mirrors remoteJid (the sender IS
+              the chat), so that combination must NOT be redirected.
+
+          (b) remoteJid is suffixed "@g.us" but its digits are simply our
+              own phone number (with the Brazilian 9th-digit variant) — no
+              real group JID is ever shaped like a plain phone number.
+
+        Either shape otherwise spawns an unnamed phantom "group"/duplicate
+        chat that (1) duplicates a message already stored under "Eu" and
+        (2) can't be cleanly identified/deleted afterwards.
+
+        Returns (remote_jid, from_me), redirected/forced True when either
+        shape matched, unchanged otherwise.
+
+        Shared by on_new_message() (the live path) and
+        on_historical_message() (history sync) — the latter used to have no
+        guard at all, so a fake self-chat arriving through a history-sync
+        batch sat in the chat list unfiltered until the next full
+        deduplicate_chats() pass happened to run. deduplicate_chats() keeps
+        its own equivalent guard pass for chats that slipped through before
+        either of these ran (e.g. a session resumed from a store that
+        already had one saved) — all three must keep agreeing on what
+        counts as a fake self-chat.
         """
-        Called on the main thread (via wx.CallAfter) when a new message
-        arrives via the messages.upsert WebSocket event.
-        Adds the message to local storage, updates the UI, and sends a
-        notification if appropriate.
-        """
-        # Popped here, not at the notification point: a message that never
-        # notifies (our own echo, a muted chat, a system event) would otherwise
-        # carry this straight into the stored record.
-        arrived_at = msg.pop("_arrived_at", None)
-        # See _live_events_ready() for why this must be checked before
-        # touching self.chats/self.db at all. Safe to drop unconditionally:
-        # the sync that is either about to start or already running fetches
-        # the complete current chat/message state regardless, so nothing
-        # arriving this early is ever actually lost.
-        if not self._live_events_ready():
-            return
-        key        = msg.get("key", {})
-        from_me    = key.get("fromMe", False)
-        remote_jid = self._normalize_jid(key.get("remoteJid", ""))
-        msg_id     = key.get("id", "")
-
-        # If the message is from ourselves, ensure from_me is True
-        sender = key.get("participant") or key.get("remoteJid") or ""
-        if sender and self._is_self_jid(sender):
-            from_me = True
-
-        if not remote_jid:
-            return
-
-        # ── Guard against self-chat multi-device-sync artifacts ─────────────
-        # WPPConnect/Baileys occasionally reports one of our own sends (seen
-        # with self-chat text, audio and documents) tagged with an identity
-        # that isn't our real phone JID, in one of two shapes:
-        #
-        #  (a) "participant" (the actual sender/author, per wa-js semantics)
-        #      has the same digits as "remoteJid" (the chat). For a real
-        #      GROUP, remoteJid is the group's own independently-allocated
-        #      ID, never equal to any participant's JID — so this overlap
-        #      alone proves it's not a real group, regardless of whatever
-        #      fromMe flag WPPConnect attached to the sync echo (observed:
-        #      it can arrive as fromMe=False, producing a bogus "new message
-        #      from an unnamed participant" notification). For a bare,
-        #      not-yet-resolved @lid or @s.whatsapp.net remoteJid, the same
-        #      overlap is only unambiguous when fromMe is already True —
-        #      for a real 1:1 chat, an incoming (fromMe=False) message's
-        #      participant legitimately mirrors remoteJid (the sender IS
-        #      the chat), so that combination must NOT be redirected.
-        #
-        #  (b) remoteJid is suffixed "@g.us" but its digits are simply our
-        #      own phone number (with the Brazilian 9th-digit variant) — no
-        #      real group JID is ever shaped like a plain phone number.
-        #
-        # Either shape otherwise spawns an unnamed phantom "group"/duplicate
-        # chat that (1) duplicates a message already stored under "Eu" and
-        # (2) can't be cleanly identified/deleted afterwards. Redirect to
-        # the real self-chat, and opportunistically learn my_lid from case
-        # (a) so later messages resolve immediately via _is_self_jid()
-        # without waiting on resolve_self_lid()'s async API round-trip.
         participant_raw = key.get("participant") or ""
         remote_digits = remote_jid.split("@", 1)[0]
         part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
-        # Normalize before using as a redirect target below — my_jid can be
-        # in raw "@c.us" form early in a session (set directly from the
-        # host-device API response, before resolve_self_lid() gets a chance
-        # to normalize it), and redirecting to it as-is created yet another
-        # duplicate "Eu" chat under @c.us instead of the canonical @s.whatsapp.net one.
         my_jid = self._normalize_jid(getattr(self, "my_jid", ""))
         my_lid = getattr(self, "my_lid", "")
         is_group_jid = remote_jid.endswith("@g.us")
-
-        # A fromMe message's own "participant" field always identifies us —
-        # wa-js only populates it to tag the sender within a group, and the
-        # sender of our own outgoing message is always us. Learn my_lid from
-        # this far more common signal (any ordinary group message we send),
-        # not just the rarer self-referential artifacts checked below, so
-        # _is_self_jid()/self_reference_label() resolve correctly (e.g. for
-        # quoted-reply headers) from the first group message sent this
-        # session — without waiting on resolve_self_lid()'s async API call,
-        # which otherwise left _get_participant_name() falling through to a
-        # saved contact name (e.g. a self-addressed contact literally named
-        # "Eu") instead of honouring the "Como se referir a mim?" setting.
-        # A forwarded copy is the exception to the comment above: its own
-        # participant/key fields can carry residual provenance about
-        # whoever originally sent the message being forwarded, not about
-        # the forward action itself (which is always us, on a fromMe
-        # message). Learning my_lid from that residual value here corrupted
-        # self-identity globally — reported live as a forwarded contact's
-        # OWN later messages, in a completely different chat, rendering as
-        # "Eu" everywhere (last-message preview, quoted-reply header, ...)
-        # the instant one of their messages got forwarded to "Mensagens
-        # para mim". Recognizable via the same contextInfo.isForwarded flag
-        # _is_message_forwarded() already checks for other purposes.
-        if (from_me and participant_raw.endswith("@lid") and not getattr(self, "my_lid", "")
-                and my_lid != participant_raw and not is_message_forwarded(msg)):
-            self.my_lid = my_lid = participant_raw
-            if my_jid:
-                self.register_jid_mapping(participant_raw, my_jid)
 
         digits_self_referential = bool(part_digits and remote_digits == part_digits)
         is_self_referential = digits_self_referential and (
@@ -4679,6 +4628,85 @@ class MainWindow(wx.Frame):
             # "Eu" chat for the (9-digit) document echo and a second "Eu"
             # chat for the (8-digit) sync-artifact echo of the same send.
             remote_jid = my_jid
+
+        return remote_jid, from_me
+
+    def on_new_message(self, msg: dict):
+        """
+        Called on the main thread (via wx.CallAfter) when a new message
+        arrives via the messages.upsert WebSocket event.
+        Adds the message to local storage, updates the UI, and sends a
+        notification if appropriate.
+        """
+        # Popped here, not at the notification point: a message that never
+        # notifies (our own echo, a muted chat, a system event) would otherwise
+        # carry this straight into the stored record.
+        arrived_at = msg.pop("_arrived_at", None)
+        # See _live_events_ready() for why this must be checked before
+        # touching self.chats/self.db at all. Safe to drop unconditionally:
+        # the sync that is either about to start or already running fetches
+        # the complete current chat/message state regardless, so nothing
+        # arriving this early is ever actually lost.
+        if not self._live_events_ready():
+            return
+        key        = msg.get("key", {})
+        from_me    = key.get("fromMe", False)
+        remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+        msg_id     = key.get("id", "")
+
+        # If the message is from ourselves, ensure from_me is True
+        sender = key.get("participant") or key.get("remoteJid") or ""
+        if sender and self._is_self_jid(sender):
+            from_me = True
+
+        if not remote_jid:
+            return
+
+        # ── Guard against self-chat multi-device-sync artifacts ─────────────
+        # See _redirect_self_chat_artifact()'s own docstring for the two
+        # shapes this catches — shared with on_historical_message() so both
+        # the live and history-sync paths agree on what counts as fake.
+        # Opportunistically learn my_lid from case (a) first, so later
+        # messages resolve immediately via _is_self_jid() without waiting on
+        # resolve_self_lid()'s async API round-trip.
+        participant_raw = key.get("participant") or ""
+        # Normalize before using as a redirect target below — my_jid can be
+        # in raw "@c.us" form early in a session (set directly from the
+        # host-device API response, before resolve_self_lid() gets a chance
+        # to normalize it), and redirecting to it as-is created yet another
+        # duplicate "Eu" chat under @c.us instead of the canonical @s.whatsapp.net one.
+        my_jid = self._normalize_jid(getattr(self, "my_jid", ""))
+        my_lid = getattr(self, "my_lid", "")
+
+        # A fromMe message's own "participant" field always identifies us —
+        # wa-js only populates it to tag the sender within a group, and the
+        # sender of our own outgoing message is always us. Learn my_lid from
+        # this far more common signal (any ordinary group message we send),
+        # not just the rarer self-referential artifacts checked below, so
+        # _is_self_jid()/self_reference_label() resolve correctly (e.g. for
+        # quoted-reply headers) from the first group message sent this
+        # session — without waiting on resolve_self_lid()'s async API call,
+        # which otherwise left _get_participant_name() falling through to a
+        # saved contact name (e.g. a self-addressed contact literally named
+        # "Eu") instead of honouring the "Como se referir a mim?" setting.
+        # A forwarded copy is the exception to the comment above: its own
+        # participant/key fields can carry residual provenance about
+        # whoever originally sent the message being forwarded, not about
+        # the forward action itself (which is always us, on a fromMe
+        # message). Learning my_lid from that residual value here corrupted
+        # self-identity globally — reported live as a forwarded contact's
+        # OWN later messages, in a completely different chat, rendering as
+        # "Eu" everywhere (last-message preview, quoted-reply header, ...)
+        # the instant one of their messages got forwarded to "Mensagens
+        # para mim". Recognizable via the same contextInfo.isForwarded flag
+        # _is_message_forwarded() already checks for other purposes.
+        if (from_me and participant_raw.endswith("@lid") and not getattr(self, "my_lid", "")
+                and my_lid != participant_raw and not is_message_forwarded(msg)):
+            self.my_lid = my_lid = participant_raw
+            if my_jid:
+                self.register_jid_mapping(participant_raw, my_jid)
+
+        remote_jid, from_me = self._redirect_self_chat_artifact(remote_jid, key, from_me)
 
         # Learn/update presence pushName map from incoming message
         if not from_me and self._learn_sender_name(msg):
@@ -5288,9 +5316,20 @@ class MainWindow(wx.Frame):
         key        = msg.get("key", {})
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
+        from_me    = key.get("fromMe", False)
 
         if not remote_jid or not msg_id:
             return
+
+        # Guard against the same self-chat multi-device-sync artifacts
+        # on_new_message() redirects on the live path — see
+        # _redirect_self_chat_artifact()'s own docstring. Without this, a
+        # fake self-chat arriving through a history-sync batch (rather than
+        # a live event) sat in the chat list unfiltered — an unnamed
+        # phantom "group"/duplicate of "Eu" that couldn't be cleanly
+        # identified or deleted afterwards — until the next full
+        # deduplicate_chats() pass happened to run.
+        remote_jid, from_me = self._redirect_self_chat_artifact(remote_jid, key, from_me)
 
         # Statuses (stories) or channels ignored
         if remote_jid.endswith("@broadcast") or remote_jid.endswith("@newsletter"):
