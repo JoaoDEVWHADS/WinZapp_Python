@@ -4176,6 +4176,18 @@ class MainWindow(wx.Frame):
             except Exception:
                 logging.exception("[active_call] could not close popup id=%s", call_id)
 
+    def _call_api_endpoint(self, endpoint: str, payload: dict, timeout: int = 15):
+        token = getattr(self, "token", None)
+        if not token:
+            logging.warning("[call] cannot call endpoint %s — no active token", endpoint)
+            return None
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        return api_post(url, json=payload, headers=headers, timeout=timeout)
+
     def accept_incoming_call(self, identity: str):
         """Accept incoming call via API and show active call window."""
         info = getattr(self, "_incoming_call_info", {}).pop(identity, {})
@@ -4185,13 +4197,9 @@ class MainWindow(wx.Frame):
 
         self.stop_incoming_call_alert(identity)
 
-        url = f"{self.api_url}/api/{self.session}/accept-call"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
-        payload = {"callId": call_id}
-
         def _do_accept():
             try:
-                api_post(url, json=payload, headers=headers, timeout=15)
+                self._call_api_endpoint("accept-call", {"callId": call_id})
             except Exception:
                 logging.exception("[call] error accepting call id=%s", call_id)
 
@@ -4205,13 +4213,9 @@ class MainWindow(wx.Frame):
 
         self.stop_incoming_call_alert(identity)
 
-        url = f"{self.api_url}/api/{self.session}/reject-call"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
-        payload = {"callId": call_id}
-
         def _do_reject():
             try:
-                api_post(url, json=payload, headers=headers, timeout=15)
+                self._call_api_endpoint("reject-call", {"callId": call_id})
             except Exception:
                 logging.exception("[call] error rejecting call id=%s", call_id)
 
@@ -4221,13 +4225,9 @@ class MainWindow(wx.Frame):
         """End active call on WhatsApp."""
         self._close_active_call_dialog(call_id)
 
-        url = f"{self.api_url}/api/{self.session}/end-call"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
-        payload = {"callId": call_id}
-
         def _do_end():
             try:
-                api_post(url, json=payload, headers=headers, timeout=15)
+                self._call_api_endpoint("end-call", {"callId": call_id})
             except Exception:
                 logging.exception("[call] error ending call id=%s", call_id)
 
