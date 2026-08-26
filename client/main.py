@@ -4851,17 +4851,30 @@ class MainWindow(wx.Frame):
             incoming_type = msg.get("messageType", "")
             _text_types = ("conversation", "extendedTextMessage")
             pending_msg = None
-            for r in records:
-                if not r.get("_local_pending"):
-                    continue
-                r_type = r.get("messageType", "")
-                if incoming_type in _text_types:
-                    if r_type not in _text_types:
+            # A message whose real id we already know (recorded in
+            # _own_sent_ids the moment the HTTP send response came back, well
+            # before this echo could arrive) was already matched to its
+            # correct pending record then. Running the type search again for
+            # a redelivery of that same echo — or a delayed one that lands
+            # after a *second* same-type message started sending in the
+            # meantime — would pick the first still-pending record of that
+            # type and hand it an id that belongs to a different message
+            # entirely. Skipping the search here lets it fall through to the
+            # exact id/edit check below instead, which is unambiguous.
+            with self._own_sent_ids_lock:
+                already_resolved = bool(msg_id) and msg_id in self._own_sent_ids
+            if not already_resolved:
+                for r in records:
+                    if not r.get("_local_pending"):
                         continue
-                elif r_type != incoming_type:
-                    continue
-                pending_msg = r
-                break
+                    r_type = r.get("messageType", "")
+                    if incoming_type in _text_types:
+                        if r_type not in _text_types:
+                            continue
+                    elif r_type != incoming_type:
+                        continue
+                    pending_msg = r
+                    break
             if pending_msg:
                 # Found the corresponding pending message: update it and skip appending a duplicate
                 pending_msg["_local_pending"] = False
