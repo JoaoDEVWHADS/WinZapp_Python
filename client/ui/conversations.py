@@ -2227,7 +2227,7 @@ class ConversationsPanel(wx.Panel):
         reply — the quote never actually reached the recipient.
         """
         self._hide_media_transfer_gauge()
-        tracked = self._outgoing_virtual_messages.get(local_id)
+        tracked = self._outgoing_virtual_messages.pop(local_id, None)
         if tracked is not None:
             tracked["_local_pending"] = False
             if real_id and isinstance(real_id, str):
@@ -2319,6 +2319,7 @@ class ConversationsPanel(wx.Panel):
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
         self._hide_media_transfer_gauge()
+        self._outgoing_virtual_messages.pop(local_id, None)
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
@@ -2338,6 +2339,7 @@ class ConversationsPanel(wx.Panel):
         stops meaning anything.
         """
         self._hide_media_transfer_gauge()
+        self._outgoing_virtual_messages.pop(local_id, None)
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"]     = False
@@ -9831,6 +9833,7 @@ class ConversationsPanel(wx.Panel):
             # dialog had selected, cancel the queued/in-flight upload and apply
             # a local deletion; asking the API for "everyone" here can only fail.
             self.main_window.message_queue.cancel(pending_local_id)
+            self._outgoing_virtual_messages.pop(pending_local_id, None)
             self._media_upload_progress.pop(pending_local_id, None)
             self._media_transfer_started.discard(pending_local_id)
             self._hide_media_transfer_gauge()
