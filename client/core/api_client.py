@@ -78,6 +78,19 @@ def redact_api_url(url: str) -> str:
     return "/" + endpoint if endpoint else "/api/"
 
 
+def redact_token(token: str) -> str:
+    """A log-safe label for a WPPConnect token: session name, secret masked.
+
+    Tokens are "<session>:<secret>". The session name alone is enough to
+    trace which session a log line refers to; the secret half is the same
+    credential Fernet-protects at rest and must never reach a log file.
+    """
+    if not token:
+        return ""
+    session_name, sep, _secret = token.partition(":")
+    return f"{session_name}:***" if sep else "***"
+
+
 def api_headers(token: str, *, json_body: bool = True,
                 request_id: str = "") -> dict:
     """The headers every call to the Node API should carry."""

@@ -5,7 +5,7 @@ import threading
 import socketio
 import wx
 import requests
-from core.api_client import api_get, api_post, redact_api_url
+from core.api_client import api_get, api_post, redact_api_url, redact_token
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from app_paths import data_path, resource_path
@@ -510,7 +510,7 @@ class Connect:
             token = getattr(self.main_window, 'token', '')
         if not token:
             token = getattr(self, '_last_started_qr_token', '')
-        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", token, sync)
+        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", redact_token(token), sync)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=False)
@@ -1415,7 +1415,7 @@ class Connect:
 
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
-        logging.info("[cleanup_pairing_session] Retrieved token: %s", token)
+        logging.info("[cleanup_pairing_session] Retrieved token: %s", redact_token(token))
         if token:
             headers = self._wpp_headers(use_global_key=False)
             def _close_api_session():

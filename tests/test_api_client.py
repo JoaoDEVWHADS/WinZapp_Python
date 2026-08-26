@@ -25,6 +25,7 @@ from core.api_client import (
     api_request,
     new_request_id,
     redact_api_url,
+    redact_token,
 )
 
 TOKEN = "$2b$10$RlaSnVmEmmflWvfGGED9xe2xG_5UKxFoeyhB1zz6B._nbf4YOnfBi"
@@ -90,6 +91,15 @@ class TestTheCredentialNeverReachesTheLog:
 
     def test_an_empty_url_does_not_crash(self):
         assert redact_api_url("") == ""
+
+    def test_redact_token_keeps_the_session_masks_the_secret(self):
+        label = redact_token(f"{SESSION}:{TOKEN}")
+
+        assert label == f"{SESSION}:***"
+        assert TOKEN not in label
+
+    def test_redact_token_on_an_empty_token_does_not_crash(self):
+        assert redact_token("") == ""
 
 
 class TestCorrelation:
