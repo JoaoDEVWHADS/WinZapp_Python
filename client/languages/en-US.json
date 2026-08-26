@@ -146,7 +146,7 @@
     "save_as_nothing_to_save": "This message has no file to save",
     "save_as_nothing_to_save_bulk": "None of the selected messages has a file to save",
     "all_files": "All files",
-    "audio_convert_failed": "Failed to convert audio. FFmpeg is missing or unavailable on this system.",
+    "audio_convert_failed": "Could not convert the audio to a format accepted by WhatsApp.",
     "downloading_progress": "downloading, {pct}% done",
     "uploading_progress": "uploading, {pct}% done",
     "discard_voice_message": "Discard voice message",

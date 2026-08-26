@@ -269,6 +269,7 @@ class ApiSetupDialog(wx.Dialog):
 
         self._proc        = None   # active npm subprocess (for kill on cancel)
         self._cancelled   = False
+        self._finished    = False  # exactly one of success/error/cancel may win
         self._forced_tag  = forced_tag   # overrides .env WPPCONNECT_TAG_VERSION
 
         # Progress-bar state — see _STAGES_FULL/_STAGES_MODULES_ONLY and
@@ -1196,15 +1197,61 @@ class ApiSetupDialog(wx.Dialog):
 
     # ── Event handlers ────────────────────────────────────────────────────────
 
+    def _is_modal_active(self) -> bool:
+        """Whether this dialog still owns a running modal event loop.
+
+        Worker completion is delivered through ``wx.CallAfter``. A cancel or
+        close event can end ``ShowModal()`` after the worker queues that
+        callback but before the callback runs. Calling ``EndModal()`` in that
+        state triggers wxWidgets' ``IsRunning()`` assertion, so every terminal
+        path checks the actual dialog state instead of trusting the worker's
+        earlier ``_cancelled`` snapshot.
+        """
+        try:
+            return bool(self.IsModal())
+        except RuntimeError:
+            # The native wx object is already being destroyed.
+            return False
+
+    def _end_modal_safely(self, result: int) -> bool:
+        """End the modal loop once, ignoring callbacks that arrived too late."""
+        if not self._is_modal_active():
+            logging.info(
+                "[api_setup] ignoring late dialog completion result=%s; modal loop is no longer running",
+                result,
+            )
+            return False
+        try:
+            self.EndModal(result)
+            return True
+        except (RuntimeError, AssertionError):
+            # Defensive second check: a nested native dialog (the success/error
+            # MessageBox) can pump pending wx events before control returns here.
+            logging.info(
+                "[api_setup] modal loop ended before completion result=%s could be applied",
+                result,
+                exc_info=True,
+            )
+            return False
+
     def _on_cancel(self, _event=None):
-        if self._cancelled:
+        if self._cancelled or self._finished:
             return
         self._cancelled = True
+        self._finished = True
         self._timer.Stop()
         self._kill_proc_tree()
-        self.EndModal(wx.ID_CANCEL)
+        self._end_modal_safely(wx.ID_CANCEL)
 
     def _finish_success(self):
+        if self._cancelled or self._finished:
+            logging.info("[api_setup] ignoring late/duplicate success callback")
+            return
+        if not self._is_modal_active():
+            logging.info("[api_setup] ignoring success callback after modal loop ended")
+            self._finished = True
+            return
+        self._finished = True
         self._timer.Stop()
         self._trickling = False
         self._gauge.SetValue(100)
@@ -1214,12 +1261,20 @@ class ApiSetupDialog(wx.Dialog):
             wx.OK | wx.ICON_INFORMATION,
             self,
         )
-        self.EndModal(wx.ID_OK)
+        self._end_modal_safely(wx.ID_OK)
 
     def _finish_error(self, details: str = ""):
+        if self._cancelled or self._finished:
+            logging.info("[api_setup] ignoring late/duplicate error callback")
+            return
+        if not self._is_modal_active():
+            logging.info("[api_setup] ignoring error callback after modal loop ended")
+            self._finished = True
+            return
+        self._finished = True
         self._timer.Stop()
         msg = self._i18n.t("api_setup_error_generic")
         if details:
             msg = f"{msg}\n\n{details}"
         wx.MessageBox(msg, self._i18n.t("api_setup_error_title"), wx.OK | wx.ICON_ERROR, self)
-        self.EndModal(wx.ID_CANCEL)
+        self._end_modal_safely(wx.ID_CANCEL)

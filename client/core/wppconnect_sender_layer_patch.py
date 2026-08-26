@@ -1,5 +1,5 @@
 """Shared source-text constant for patching @wppconnect-team/wppconnect's
-compiled sender.layer.js — two independent fixes to sendFile(), applied
+compiled sender.layer.js — three independent fixes to sendFile(), applied
 together since they touch the same method:
 
 3. The MediaGatingUtils.getUploadLimit() override below used to run on
@@ -16,8 +16,8 @@ together since they touch the same method:
    regularly. Fixed by setting a one-time flag
    (mediaGating.__winzappUploadLimitPatched) before wrapping, so the
    override installs exactly once per page load no matter how many
-   documents follow — see the guard added to PATCHED_SEND_FILE and
-   _BROWSER_DOCUMENT_LIMIT_PATCH below, and LEGACY_PATCHED_SEND_FILE_V2 /
+   attachments follow — see the guard added to PATCHED_SEND_FILE and
+   _BROWSER_ATTACHMENT_LIMIT_PATCH below, and LEGACY_PATCHED_SEND_FILE_V2 /
    ALL_PATCHES for how an already-patched (leaking) install on an existing
    user's machine gets migrated to the guarded version on the next
    setup_api.py run / app update.
@@ -61,7 +61,7 @@ together since they touch the same method:
    'auto-detect') is what tells it that, identically on both paths — so
    PATCHED_FILE_LOADING widens the gate to image/video/audio too.
 
-3. Raising WhatsApp Web's own client-side document ceiling to 1 GB, by
+3. Raising WhatsApp Web's own client-side attachment ceiling to 1 GB, by
    wrapping MediaGatingUtils.getUploadLimit inside the page. This runs in a
    per-send callback, so it MUST install itself only once: the guard that
    decides whether to wrap cannot be "does getUploadLimit exist", because a
@@ -325,6 +325,12 @@ PATCHED_SEND_FILE = (
     "        return sendResult;\n"
 )
 
+# The exact document-only upload-limit patch shipped before the browser-side
+# limit override caught up with PATCHED_FILE_LOADING's image/video/audio
+# support.  Keep the whole previous method so patch_sender_layer_source() can
+# migrate an already-patched node_modules on the next app start/update.
+LEGACY_PATCHED_SEND_FILE_V3 = PATCHED_SEND_FILE
+
 # The exact PATCHED_SEND_FILE text shipped before the
 # __winzappUploadLimitPatched guard existed — every install that already
 # ran setup_api.py/ApiSetupDialog against an earlier WinZapp build has
@@ -422,15 +428,6 @@ LEGACY_PATCHED_SEND_FILE_V2 = (
     "        return sendResult;\n"
 )
 
-ALL_PATCHES = (
-    (ORIGINAL_FILE_LOADING, PATCHED_FILE_LOADING),
-    (PATCHED_FILE_LOADING_V1, PATCHED_FILE_LOADING),
-    (ORIGINAL_SEND_FILE, PATCHED_SEND_FILE),
-    (LEGACY_PATCHED_SEND_FILE, PATCHED_SEND_FILE),
-    (LEGACY_PATCHED_SEND_FILE_V2, PATCHED_SEND_FILE),
-)
-
-
 #: The same override as _BROWSER_DOCUMENT_LIMIT_PATCH below, but WITHOUT the
 #: one-time `__winzappUploadLimitPatched` guard — i.e. the leaking version that
 #: re-wrapped getUploadLimit() on every single document send. Kept only as the
@@ -468,9 +465,110 @@ _BROWSER_DOCUMENT_LIMIT_PATCH = (
 )
 
 
+_BROWSER_ATTACHMENT_LIMIT_PATCH_V1 = (
+    "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                    if (['document', 'image', 'video', 'audio'].includes(options.type) && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
+    "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                        mediaGating.getUploadLimit = (type, origin, isVcard) => ['document', 'image', 'video', 'audio'].includes(type)\n"
+    "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                            : getUploadLimit(type, origin, isVcard);\n"
+    "                        mediaGating.__winzappUploadLimitPatched = true;\n"
+    "                    }\n"
+)
+
+
+_BROWSER_ATTACHMENT_LIMIT_PATCH_V2 = (
+    _BROWSER_ATTACHMENT_LIMIT_PATCH_V1
+    + "                    const mediaPrep = WPP.whatsapp?.MediaPrep;\n"
+    + "                    if (mediaPrep?.prepRawMedia && !mediaPrep.__winzappAudioTypePatched) {\n"
+    + "                        const prepRawMedia = mediaPrep.prepRawMedia.bind(mediaPrep);\n"
+    + "                        mediaPrep.prepRawMedia = (opaqueData, prepOptions = {}) => {\n"
+    + "                            const opaqueType = typeof opaqueData?.type === 'function'\n"
+    + "                                ? opaqueData.type()\n"
+    + "                                : opaqueData?.type;\n"
+    + "                            return prepRawMedia(opaqueData, String(opaqueType || '').startsWith('audio/')\n"
+    + "                                ? { ...prepOptions, isAudio: true }\n"
+    + "                                : prepOptions);\n"
+    + "                        };\n"
+    + "                        mediaPrep.__winzappAudioTypePatched = true;\n"
+    + "                    }\n"
+)
+
+
+_BROWSER_ATTACHMENT_LIMIT_PATCH_WITH_WAV_BYPASS = (
+    _BROWSER_ATTACHMENT_LIMIT_PATCH_V2
+    + "                    const mediaWorker = WPP.loader?.loadModule?.('WAWebSendMessageToMediaWorker');\n"
+    + "                    if (mediaWorker?.sendMessageToMediaWorker && !mediaWorker.__winzappWavPassthroughPatched) {\n"
+    + "                        const sendMessageToMediaWorker = mediaWorker.sendMessageToMediaWorker.bind(mediaWorker);\n"
+    + "                        mediaWorker.sendMessageToMediaWorker = async (message) => {\n"
+    + "                            const response = await sendMessageToMediaWorker(message);\n"
+    + "                            const file = message?.file;\n"
+    + "                            const wavMimes = ['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'];\n"
+    + "                            if (message?.type !== 'prep' || !wavMimes.includes(file?.type)\n"
+    + "                                || response?.type !== 'parsingError'\n"
+    + "                                || String(response?.error) !== 'File format unsupported') {\n"
+    + "                                return response;\n"
+    + "                            }\n"
+    + "                            const header = new Uint8Array(await file.slice(0, 12).arrayBuffer());\n"
+    + "                            const ascii = (offset) => String.fromCharCode(...header.subarray(offset, offset + 4));\n"
+    + "                            const riff = ascii(0);\n"
+    + "                            if (!['RIFF', 'RIFX', 'RF64'].includes(riff) || ascii(8) !== 'WAVE') {\n"
+    + "                                return response;\n"
+    + "                            }\n"
+    + "                            return {\n"
+    + "                                type: 'result',\n"
+    + "                                result: { type: 'audio/wav', file, isGif: false },\n"
+    + "                            };\n"
+    + "                        };\n"
+    + "                        mediaWorker.__winzappWavPassthroughPatched = true;\n"
+    + "                    }\n"
+)
+
+# WAV cannot be made into a valid WhatsApp audio message by bypassing the
+# browser's media worker: the upload completes, but WhatsApp rejects the
+# resulting message with ACK -1. Keep the old block above only to migrate
+# already-patched installations back to the supported MediaPrep path. WAV is
+# now converted to OGG/Opus before sendFile() is called.
+_BROWSER_ATTACHMENT_LIMIT_PATCH = _BROWSER_ATTACHMENT_LIMIT_PATCH_V2
+
+
 def _deepen(block: str) -> str:
     """The same block one nesting level further in (the chunked branch)."""
     return block.replace("                    ", "                        ")
+
+
+# Exact method briefly shipped with the native-WAV media-worker bypass. It is
+# a migration input only; patch_sender_layer_source() removes that bypass.
+LEGACY_PATCHED_SEND_FILE_V4 = LEGACY_PATCHED_SEND_FILE_V3.replace(
+    _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH),
+    _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH_WITH_WAV_BYPASS),
+).replace(
+    _BROWSER_DOCUMENT_LIMIT_PATCH,
+    _BROWSER_ATTACHMENT_LIMIT_PATCH_WITH_WAV_BYPASS,
+)
+
+
+# Build the current method from the last shipped version so the two copies of
+# the page-side override cannot drift apart.  The legacy snapshot above stays
+# byte-for-byte exact for migration of existing installations.
+PATCHED_SEND_FILE = LEGACY_PATCHED_SEND_FILE_V3.replace(
+    _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH),
+    _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH),
+).replace(
+    _BROWSER_DOCUMENT_LIMIT_PATCH,
+    _BROWSER_ATTACHMENT_LIMIT_PATCH,
+)
+
+
+ALL_PATCHES = (
+    (ORIGINAL_FILE_LOADING, PATCHED_FILE_LOADING),
+    (PATCHED_FILE_LOADING_V1, PATCHED_FILE_LOADING),
+    (ORIGINAL_SEND_FILE, PATCHED_SEND_FILE),
+    (LEGACY_PATCHED_SEND_FILE, PATCHED_SEND_FILE),
+    (LEGACY_PATCHED_SEND_FILE_V2, PATCHED_SEND_FILE),
+    (LEGACY_PATCHED_SEND_FILE_V3, PATCHED_SEND_FILE),
+    (LEGACY_PATCHED_SEND_FILE_V4, PATCHED_SEND_FILE),
+)
 
 
 def patch_sender_layer_source(source: str) -> str:
@@ -478,23 +576,58 @@ def patch_sender_layer_source(source: str) -> str:
     for original, patched in ALL_PATCHES:
         source = source.replace(original, patched)
 
-    # Unmarked -> marked, at both nesting depths the block appears at.
+    # Remove the failed native-WAV experiment even when it appears inside a
+    # source version that does not match the whole-method legacy snapshot.
     source = source.replace(
-        _deepen(_LEGACY_DOCUMENT_LIMIT_PATCH), _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH)
+        _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH_WITH_WAV_BYPASS),
+        _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH),
     )
     source = source.replace(
-        _LEGACY_DOCUMENT_LIMIT_PATCH, _BROWSER_DOCUMENT_LIMIT_PATCH
+        _BROWSER_ATTACHMENT_LIMIT_PATCH_WITH_WAV_BYPASS,
+        _BROWSER_ATTACHMENT_LIMIT_PATCH,
+    )
+
+    # Document-only -> every attachment type, including already-guarded
+    # installations, at both nesting depths the block appears at.
+    source = source.replace(
+        _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH),
+        _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH),
+    )
+    source = source.replace(
+        _BROWSER_DOCUMENT_LIMIT_PATCH,
+        _BROWSER_ATTACHMENT_LIMIT_PATCH,
+    )
+    # Generic 1 GB override shipped before WAV was explicitly marked as audio.
+    # The v2 block deliberately contains v1 as its prefix, so only run this
+    # migration when its own marker is absent; otherwise replacing that prefix
+    # would append the MediaPrep wrapper a second time on every startup.
+    if "__winzappAudioTypePatched" not in source:
+        source = source.replace(
+            _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH_V1),
+            _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH),
+        )
+        source = source.replace(
+            _BROWSER_ATTACHMENT_LIMIT_PATCH_V1,
+            _BROWSER_ATTACHMENT_LIMIT_PATCH,
+        )
+
+    # Unmarked document-only -> current guarded attachment override.
+    source = source.replace(
+        _deepen(_LEGACY_DOCUMENT_LIMIT_PATCH), _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH)
+    )
+    source = source.replace(
+        _LEGACY_DOCUMENT_LIMIT_PATCH, _BROWSER_ATTACHMENT_LIMIT_PATCH
     )
 
     if "WPP.whatsapp?.MediaGatingUtils" not in source:
         source = source.replace(
             "                    const result = await WPP.chat.sendFileMessage(to, file, {\n",
-            _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH)
+            _deepen(_BROWSER_ATTACHMENT_LIMIT_PATCH)
             + "                        const result = await WPP.chat.sendFileMessage(to, file, {\n",
         )
         source = source.replace(
             "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n",
-            _BROWSER_DOCUMENT_LIMIT_PATCH
+            _BROWSER_ATTACHMENT_LIMIT_PATCH
             + "                    const result = await WPP.chat.sendFileMessage(to, base64, {\n",
         )
 
