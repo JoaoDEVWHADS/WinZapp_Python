@@ -183,6 +183,11 @@ from core.wppconnect_host_layer_patch import (
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
 from core.wppconnect_sender_layer_patch import patch_sender_layer_source
 from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
+from core.wpp_dependency_setup import (
+    PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
+    merge_dependency_patches,
+    reset_dependency_state,
+)
 
 
 def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
@@ -359,51 +364,58 @@ def _patch_wppconnect_welcome_layer(client_api_dir: str = None) -> bool:
         return False
 
 
-def _apply_central_package_manifest():
-    """Apply the tracked package.json as the sole dependency manifest.
-
-    Preserve only the downloaded WPPConnect version because the updater uses it
-    to identify the installed server. Dependencies, development dependencies,
-    scripts, overrides and engine requirements all come from api_patches.
-    """
-    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
-    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
-    if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
+def _recover_upstream_package_json():
+    """Restore package.json from the checked-out WPPConnect revision."""
+    git_dir = os.path.join(CLIENT_API_DIR, ".git")
+    package_path = os.path.join(CLIENT_API_DIR, "package.json")
+    if not os.path.isdir(git_dir):
         return
-    try:
-        with open(pkg_path, encoding="utf-8") as f:
-            pkg = json.load(f)
-        with open(patch_path, encoding="utf-8") as f:
-            patch = json.load(f)
-    except Exception as e:
-        print(f"[WARNING] Failed to merge package.json dependency patches: {e}")
-        return
-    installed_version = pkg.get("version")
-    manifest = dict(patch)
-    if installed_version:
-        manifest["version"] = installed_version
-
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".package.", suffix=".tmp", dir=CLIENT_API_DIR
+    result = subprocess.run(
+        ["git", "show", "HEAD:package.json"],
+        cwd=CLIENT_API_DIR,
+        capture_output=True,
+        check=False,
     )
-    os.close(fd)
+    if result.returncode != 0 or not result.stdout:
+        raise RuntimeError("Could not read package.json from WPPConnect HEAD")
+
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".package.",
+        suffix=".tmp",
+        dir=CLIENT_API_DIR,
+    )
+    os.close(descriptor)
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, pkg_path)
+        with open(temporary_path, "wb") as stream:
+            stream.write(result.stdout)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, package_path)
     finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
-    print(
-        "[INFO] Applied central api_patches/package.json manifest "
-        f"(installed version kept at {manifest.get('version', '?')})"
-    )
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    print("[INFO] Restored upstream package.json from WPPConnect HEAD")
+
+
+def _merge_package_json_dependencies():
+    """Merge only WinZapp-owned dependencies into upstream's manifest."""
+    try:
+        applied = merge_dependency_patches(CLIENT_API_DIR, API_PATCHES_DIR)
+    except Exception as exc:
+        print(f"[WARNING] Failed to merge package.json dependency patches: {exc}")
+        return
+    print(f"[INFO] Applied {applied} WinZapp dependency patches to package.json")
+
+
+def _reset_dependency_state():
+    """Discard generated locks and modules before resolving Git dependencies."""
+    try:
+        removed = reset_dependency_state(CLIENT_API_DIR)
+    except Exception as exc:
+        print(f"[WARNING] Failed to reset dependency state: {exc}")
+        raise
+    if removed:
+        print(f"[INFO] Removed stale dependency state: {', '.join(removed)}")
 
 
 def main():
@@ -512,8 +524,9 @@ def main():
             f.write(content)
         print(f"[INFO] Synced custom patch: {rel_path}")
 
-    # package.json is the single source of dependency and script configuration.
-    _apply_central_package_manifest()
+    # Recover upstream's graph before adding only WinZapp-owned packages.
+    _recover_upstream_package_json()
+    _merge_package_json_dependencies()
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
@@ -556,6 +569,9 @@ def main():
             win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
             win_node_dir = os.path.join(ROOT_DIR, "client", "node")
             os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+
+        # Git dependencies and ignored lockfiles must never survive a repair.
+        _reset_dependency_state()
 
         # Run npm install
         print("[INFO] Running npm install...")

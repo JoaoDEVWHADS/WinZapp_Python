@@ -29,20 +29,16 @@
     "swagger:copy-assets": "shx cp -R ./node_modules/swagger-ui-dist ./swagger-docs",
     "swagger:copy-json": "shx cp ./src/swagger.json ./swagger-docs",
     "swagger:fix-url": "sed -i \"s|https://petstore.swagger.io/v2/swagger.json|./swagger.json|g\" ./swagger-docs/index.html",
-    "swagger:generate": "yarn swagger:copy-assets && yarn swagger:copy-json && yarn swagger:fix-url",
+    "swagger:generate": "npm run swagger:copy-assets && npm run swagger:copy-json && npm run swagger:fix-url",
     "test": "jest"
   },
   "engines": {
     "node": ">=22.22.2 <26"
   },
-  "packageManager": "yarn@4.14.1",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@puppeteer/browsers": "^3.2.0",
-    "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git",
-    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
-    "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git",
     "puppeteer": "^25.7.0",
     "archiver": "^7.0.1",
     "axios": "^1.14.0",
@@ -130,10 +126,6 @@
     "redis": "^4.7.1"
   },
   "overrides": {
-    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
     "puppeteer": "^25.7.0"
-  },
-  "resolutions": {
-    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git"
   }
 }

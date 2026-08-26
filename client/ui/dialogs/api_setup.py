@@ -53,6 +53,11 @@ import threading
 import zipfile
 
 import requests
+from core.wpp_dependency_setup import (
+    PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
+    merge_dependency_patches,
+    reset_dependency_state,
+)
 import wx
 
 from app_paths import resource_path
@@ -388,64 +393,17 @@ class ApiSetupDialog(wx.Dialog):
     # ── Extract helper ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _apply_central_package_manifest(api_dir: str, patches_dir: str) -> None:
-        """Apply api_patches/package.json as the sole dependency manifest.
-
-        Preserve only the downloaded WPPConnect version used by the updater.
-        Every install path otherwise receives the exact same dependencies,
-        scripts, overrides and engine requirements from the tracked manifest.
-        """
-        pkg_path = os.path.join(api_dir, "package.json")
-        patch_path = os.path.join(patches_dir, "package.json")
-        if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
-            logging.warning(
-                "[api_setup] Skipping package.json dependency merge — "
-                "pkg=%s patch=%s",
-                os.path.isfile(pkg_path), os.path.isfile(patch_path),
-            )
-            return
+    def _merge_package_json_dependencies(api_dir: str, patches_dir: str) -> None:
+        """Merge only WinZapp-owned dependencies into upstream's manifest."""
         try:
-            with open(pkg_path, encoding="utf-8") as fh:
-                pkg = json.load(fh)
-            with open(patch_path, encoding="utf-8") as fh:
-                patch = json.load(fh)
+            applied = merge_dependency_patches(api_dir, patches_dir)
         except Exception as exc:
-            logging.warning("[api_setup] Failed to read package.json for merge: %s", exc)
+            logging.warning("[api_setup] Failed to merge package.json: %s", exc)
             return
-
-        installed_version = pkg.get("version")
-        manifest = dict(patch)
-        if installed_version:
-            manifest["version"] = installed_version
-
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".package.", suffix=".tmp", dir=api_dir
-        )
-        os.close(fd)
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, indent=2)
-                fh.write("\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, pkg_path)
-        except Exception as exc:
-            logging.warning("[api_setup] Failed to apply package.json: %s", exc)
-            return
-        finally:
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except OSError:
-                pass
-        logging.info(
-            "[api_setup] Applied central package.json manifest "
-            "(WPPConnect version kept at %s)",
-            manifest.get("version", "?"),
-        )
+        logging.info("[api_setup] Applied %s WinZapp dependency patches", applied)
 
     # Compatibility for callers from older builds during an in-place update.
-    _merge_package_json_dependencies = _apply_central_package_manifest
+    _apply_central_package_manifest = _merge_package_json_dependencies
 
     @staticmethod
     def _apply_node_modules_patches(api_dir: str) -> None:
@@ -831,6 +789,7 @@ class ApiSetupDialog(wx.Dialog):
 
 
         api_dir  = resource_path("api")
+        patches_dir = resource_path("api_patches")
         puppeteer_cache = resource_path("api", ".cache", "puppeteer")
         npm_env  = {
             **os.environ,
@@ -966,11 +925,14 @@ class ApiSetupDialog(wx.Dialog):
                 if self._cancelled:
                     return
 
-            # Apply on both full setup and modules-only repair. package.json is
-            # the single source of dependency and script configuration.
-            self._apply_central_package_manifest(api_dir, patches_dir)
+            # Preserve upstream's dependency graph and add only WinZapp-owned packages.
+            self._merge_package_json_dependencies(api_dir, patches_dir)
 
             # ── Step 4: npm install ───────────────────────────────────────
+            removed = reset_dependency_state(api_dir)
+            if removed:
+                logging.info("[api_setup] Removed stale dependency state: %s", ", ".join(removed))
+
             self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])
             ok, err = self._run_subprocess(
                 npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
