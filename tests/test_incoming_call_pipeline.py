@@ -1,6 +1,10 @@
-"""Regression coverage for the native incoming-call pipeline."""
+"""Regression coverage for the native incoming-call pipeline.
 
-import json
+(This file used to also carry test_wa_js_dependency_is_pinned_to_an_exact_
+revision, which asserted the opposite of WinZapp's actual policy — see
+tests/test_wpp_dependency_not_pinned.py, which replaced it.)
+"""
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,17 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _source(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
-
-
-def test_wa_js_dependency_is_pinned_to_an_exact_revision():
-    package = json.loads(_source("client/api_patches/package.json"))
-    dependency = package.get("dependencies", {}).get("@wppconnect-team/wa-js")
-    if dependency:
-        revision = dependency.rsplit("#", 1)[-1]
-        assert len(revision) == 40
-        assert all(char in "0123456789abcdef" for char in revision)
-    else:
-        assert "@wppconnect/server" in package.get("name", "")
 
 
 def test_api_patch_forwards_native_call_events_to_socket_io():

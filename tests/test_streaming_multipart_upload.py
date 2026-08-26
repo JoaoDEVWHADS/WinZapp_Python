@@ -3,7 +3,7 @@
 import pytest
 
 from core.message_queue import MessageCancelled
-from core.multipart_stream import StreamingMultipartBody
+from core.multipart_stream import MultipartSourceChanged, StreamingMultipartBody
 
 
 def test_streaming_multipart_reports_monotonic_file_progress(tmp_path):
@@ -200,3 +200,71 @@ class TestSendMediaAttachmentPropagatesCancellation:
                 "5511999999999@s.whatsapp.net", str(media_file), "video",
                 progress_callback=_cancel_immediately,
             )
+
+
+class TestTheBodyMatchesTheLengthItAnnounced:
+    """Content-Length is computed in __init__ from os.path.getsize(), but the
+    bytes are read in __iter__. The body is deliberately replayable so
+    MessageQueue can retry a send, which means those two moments can be minutes
+    apart — long enough for the user to have re-recorded an audio, or for an
+    external program to have rewritten the file.
+
+    Streaming a body that no longer matches the announced length is the kind of
+    failure that surfaces nowhere near its cause: the server blocks waiting for
+    bytes that never arrive, or accepts a truncated multipart whose closing
+    boundary landed inside the file part. Both look like a flaky network."""
+
+    @staticmethod
+    def _body(path, **kw):
+        return StreamingMultipartBody(
+            file_path=str(path),
+            filename="a.bin",
+            mime_type="application/octet-stream",
+            fields={"phone": "x"},
+            **kw,
+        )
+
+    def test_a_file_that_grew_is_refused_instead_of_streamed(self, tmp_path):
+        path = tmp_path / "grew.bin"
+        path.write_bytes(b"x" * 1000)
+        body = self._body(path)
+        announced = len(body)
+
+        path.write_bytes(b"x" * 4000)
+
+        with pytest.raises(MultipartSourceChanged) as excinfo:
+            list(body)
+        assert "1000" in str(excinfo.value) and "4000" in str(excinfo.value)
+        # The length already in the headers is what the mismatch is measured
+        # against, so it must be named in the error.
+        assert str(announced) in str(excinfo.value)
+
+    def test_a_file_that_shrank_is_refused_instead_of_streamed(self, tmp_path):
+        path = tmp_path / "shrank.bin"
+        path.write_bytes(b"x" * 4000)
+        body = self._body(path)
+
+        path.write_bytes(b"x" * 10)
+
+        with pytest.raises(MultipartSourceChanged):
+            list(body)
+
+    def test_an_unchanged_file_still_streams_and_replays(self, tmp_path):
+        path = tmp_path / "stable.bin"
+        path.write_bytes(b"payload" * 500)
+        body = self._body(path)
+
+        first = b"".join(body)
+        second = b"".join(body)
+
+        assert first == second, "the body must stay replayable for retries"
+        assert len(first) == len(body) == body.content_length
+
+    def test_the_guard_does_not_fire_on_a_zero_byte_file(self, tmp_path):
+        """getsize() == 0 is a legitimate (if useless) upload, not a mismatch —
+        and 0 is exactly the value a sloppy `if not size` guard would trip on."""
+        path = tmp_path / "empty.bin"
+        path.write_bytes(b"")
+        body = self._body(path)
+
+        assert b"".join(body) == body._prefix + body._suffix

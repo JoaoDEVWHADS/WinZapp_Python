@@ -99,7 +99,32 @@ function forceKillByUserDataDir(userDataDir: string, logger?: any) {
     // Chrome process (holding the userDataDir profile lock) survives. That
     // silent 100%-failure is exactly what let a locked profile force a full
     // API/Node restart to clear on the next pairing attempt.
-    const psFilter = userDataDir.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    //
+    // Second half of the same gotcha: the pattern has to be separator- and
+    // shortname-agnostic. Both call sites below pass `userDataDir/<session>`
+    // with a FORWARD slash, but that value never reaches Chrome verbatim —
+    // createSessionUtil hands puppeteer the relative `./userDataDir/<session>`
+    // and ChromeLauncher resolves it (`path.resolve()`) before building the
+    // argument, so the process's real CommandLine reads
+    // `--user-data-dir=C:\<install path>\api\userDataDir\<session>`:
+    // backslashes, and possibly 8.3-shortened components anywhere in the
+    // install path (`PROGRA~1`-style) when it has spaces or long names.
+    // PowerShell's `-like` treats `\` and `/` as ordinary, non-interchangeable
+    // characters, so the forward-slash filter matched the real Chrome process
+    // exactly zero times — the only process it ever matched was the
+    // powershell.exe running the query itself, whose `-Command` argument does
+    // contain the forward-slash text verbatim. That is why the $PID exclusion
+    // above, on its own, only turns the self-kill into a silent no-op.
+    // Collapsing every run of separators into a `*` wildcard matches just the
+    // tail of the path, which is immune to both the separator flavour and to
+    // 8.3 shortening of the parent directories. The `-like` metacharacters are
+    // backtick-escaped first (a backtick survives a single-quoted PowerShell
+    // string literal and is exactly what `-like` reads as "literal next
+    // character"), so a session id is never mistaken for a wildcard.
+    const psFilter = userDataDir
+      .replace(/'/g, "''")
+      .replace(/[`*?[\]]/g, '`$&')
+      .replace(/[\\/]+/g, '*');
     const script =
       `$mypid = $PID; ` +
       `Get-CimInstance Win32_Process | ` +
@@ -533,16 +558,52 @@ export default class CreateSessionUtil {
                   client,
                   statusFind
                 );
+                const statusPayload = {
+                  status: statusFind,
+                  session: client.session,
+                };
+                // Deliberately NOT forwarded over Socket.IO as 'status-find'.
+                //
+                // WinZapp registers a listener for that event
+                // (websocket_client.py's on_wpp_status_find), and that handler
+                // treats a single `disconnectedMobile` or `notLogged` as a
+                // permanent logout: it calls _handle_logout() →
+                // _reset_credentials_and_show_pairing(), which wipes the
+                // WA_token, drops `paired`, and runs clear_local_data() over
+                // the whole local database. One event, no confirmation — none
+                // of the four safeguards main.py's _logout_confirmed() applies
+                // (startup grace, consecutive strikes, a 180s dwell, and
+                // _still_linked_on_server() proof) are on that path.
+                //
+                // But `disconnectedMobile` does not mean "unlinked". WPPConnect
+                // documents it as "Client has disconnected to the mobile
+                // device" — the phone became unreachable, which is routine
+                // (dead battery, no signal, the machine sleeping). `notLogged`
+                // is the one that means "scan the QR code again".
+                //
+                // Before this emit existed nothing published 'status-find' over
+                // Socket.IO (only the webhook below), so that handler was dead
+                // code and the mismatch was harmless. Adding the emit armed it,
+                // and forced re-pairings started being reported. The status
+                // still reaches WinZapp truthfully through `client.status`
+                // below, which routes it via the REST poll into the guarded
+                // path instead. Re-add this line only together with a fix for
+                // on_wpp_status_find()'s own classification.
+                if (
+                  statusFind === StatusFind.disconnectedMobile ||
+                  statusFind === StatusFind.notLogged
+                ) {
+                  (client as any)._markedConnected = false;
+                  client.status = statusFind;
+                  client.qrcode = null;
+                }
                 if (statusFind === StatusFind.autocloseCalled) {
                   client.status = 'CLOSED';
                   client.qrcode = null;
                   client.close();
                   clientsArray[session] = undefined;
                 }
-                callWebHook(client, req, 'status-find', {
-                  status: statusFind,
-                  session: client.session,
-                });
+                callWebHook(client, req, 'status-find', statusPayload);
                 req.logger.info(statusFind + '\n\n');
               } catch (error) {}
             },
@@ -1022,7 +1083,7 @@ export default class CreateSessionUtil {
       // harmless, the existing binding still works.
     }
 
-    const installListener = () => {
+    const installListener = (attempt = 0) => {
       // CallStore is hydrated from persisted WhatsApp Web state at startup.
       // Its `add` event therefore does not necessarily mean "a call started
       // now". Refresh the boundary on every page load and reject older calls.
@@ -1035,7 +1096,7 @@ export default class CreateSessionUtil {
             !WPP.on ||
             (window as any).__winzappIncomingCallInstalled
           ) {
-            return;
+            return (window as any).__winzappIncomingCallInstalled === true;
           }
           (window as any).__winzappIncomingCallInstalled = true;
 
@@ -1319,7 +1380,13 @@ export default class CreateSessionUtil {
               }
             }
           }, 500);
+          return true;
         }, listenerStartedAt)
+        .then((installed: boolean) => {
+          if (!installed && attempt < 120) {
+            setTimeout(() => installListener(attempt + 1), 500);
+          }
+        })
         .catch((e: any) =>
           req.logger.warn(
             `[onIncomingCallDirect] install failed: ${e?.message || e}`
@@ -1378,9 +1445,7 @@ export default class CreateSessionUtil {
         // Allow a later CONNECTED to re-finalize (e.g. re-pair) by clearing the
         // once-guard, and drop the CONNECTED status so REST reports the truth.
         (client as any)._markedConnected = false;
-        if (client.status === 'CONNECTED') {
-          client.status = state;
-        }
+        client.status = state;
       }
     });
   }

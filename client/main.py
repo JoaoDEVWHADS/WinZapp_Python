@@ -5686,18 +5686,25 @@ class MainWindow(wx.Frame):
 
     # ── First-run module installation ──────────────────────────────────────
 
-    # Must match start.js's HEADLESS_SHELL_NAMES — start.js searches
-    # client/api/.cache for exactly these and launches what it finds.
+    # Full Chrome is deliberately preferred on Windows: chrome-headless-shell
+    # is a console-subsystem binary and its renderer children can open visible
+    # console windows. Puppeteer's headless mode keeps full Chrome's GUI hidden.
     _HEADLESS_SHELL_NAMES = ("chrome-headless-shell.exe", "chrome-headless-shell")
+    _WINDOWS_CHROME_NAMES = ("chrome.exe",)
 
     def find_headless_shell(self):
         """Path to chrome-headless-shell inside client/api/.cache, or None."""
         cache_dir = resource_path("api", ".cache")
         if not os.path.isdir(cache_dir):
             return None
+        preferred_names = (
+            self._WINDOWS_CHROME_NAMES
+            if sys.platform == "win32"
+            else self._HEADLESS_SHELL_NAMES
+        )
         for root, _dirs, files in os.walk(cache_dir):
             for name in files:
-                if name in self._HEADLESS_SHELL_NAMES:
+                if name in preferred_names:
                     return os.path.join(root, name)
         return None
 
@@ -5727,9 +5734,10 @@ class MainWindow(wx.Frame):
             logging.info("[headless-shell] Already installed: %s", existing)
             return True
 
+        browser_product = "chrome" if sys.platform == "win32" else "chrome-headless-shell"
         logging.info(
-            "[headless-shell] chrome-headless-shell not found in api/.cache — "
-            "downloading it now (before the API startup timer begins)."
+            "[headless-shell] %s not found in api/.cache — downloading it now "
+            "(before the API startup timer begins).", browser_product
         )
         if sys.platform == "win32":
             node_exe = resource_path("node", "node.exe")
@@ -5760,7 +5768,7 @@ class MainWindow(wx.Frame):
             creation_flags = subprocess.CREATE_NO_WINDOW
         try:
             proc = subprocess.Popen(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", browser_product],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=creation_flags,
@@ -9855,18 +9863,62 @@ class MainWindow(wx.Frame):
         unblock_result = self.unblock_history_sync()
         if self._recent_history_needs_wait(unblock_result):
             if not self.wait_for_restarted_history_sync():
+                if getattr(self, "_history_wait_outcome", "") == "session_gone":
+                    logging.warning(
+                        "[start_sync] The session went away during the RECENT "
+                        "history wait; deferring the message phase — there is "
+                        "nothing left to query against."
+                    )
+                    self._sync_completed = False
+                    return
+                # Budget exhausted while the phone is still pushing history.
+                #
+                # This used to `return` here too, and that is the whole of the
+                # "it syncs nothing and keeps re-announcing Sincronizando"
+                # report: a first pairing on a large account does not finish
+                # its RECENT pass inside the wait, so every round waited the
+                # full budget, threw the round away, and the health check
+                # started another one — with sync_remote_chats() never running
+                # once. Nothing was fetched, and _resolve_missing_group_names()
+                # (which lives past the message phase) never ran either, so
+                # groups fetched with ignoreGroupMetadata stayed unnamed.
+                #
+                # Proceed instead, which is what this code did before the wait
+                # existed at all: get-messages returns whatever WhatsApp Web
+                # has decoded SO FAR, and _history_still_landing tells
+                # _note_backfill_state() those short answers are provisional,
+                # so each chat is re-queried as the rest of its history lands.
+                # A partial sync that fills in beats an empty one that repeats.
                 logging.warning(
-                    "[start_sync] RECENT history is still incomplete; deferring "
-                    "the message phase so it does not compete with the phone transfer."
+                    "[start_sync] RECENT history did not finish inside the wait — "
+                    "running the message phase anyway against what has landed so "
+                    "far; short chats will be re-queried as the rest arrives."
                 )
-                self._sync_completed = False
-                return
+                self._history_still_landing = True
             # list-chats was captured before the phone finished its transfer.
             # Refresh it now so chats delivered during the wait are part of
             # this same sync instead of waiting for a later health-check round.
-            self.get_remote_chats()
-            self.chats = self.normalize_chats(self.chats)
-            wx.CallAfter(self.set_chats)
+            #
+            # Reached on both outcomes that go on to sync — the RECENT pass
+            # completing, and the budget running out while it is still
+            # arriving — since chats can have landed during the wait either
+            # way.
+            #
+            # get_remote_chats() takes the dict to merge into and *returns*
+            # the merged result; it does not mutate self.chats. Calling it
+            # bare raised TypeError on every single run that got this far,
+            # which _run_sync()'s own `except Exception` then swallowed into
+            # one "[start_sync] Unhandled error during sync" line — back when
+            # this was the wait's only non-deferring exit, that meant
+            # sync_remote_chats() could not run at all on any account whose
+            # RECENT pass was still incomplete at sync time.
+            # None means "the chat list is unknown", never "there are no
+            # chats" — keep what we already had in that case.
+            refreshed = self.get_remote_chats(dict(self.chats), persist_full=False,
+                                              notify_errors=False)
+            if refreshed is not None:
+                self.chats = self.normalize_chats(refreshed)
+                wx.CallAfter(self.set_chats)
         self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
@@ -13527,6 +13579,34 @@ class MainWindow(wx.Frame):
         except (AttributeError, TypeError, ValueError):
             return 200
 
+    def _history_session_is_gone(self) -> bool:
+        """Whether an unreadable /history-sync-status means "stop", not "retry".
+
+        fetch_history_sync_status() answers None for two very different
+        things, and every caller has to tell them apart the same way:
+
+          * the session really is gone — WPPConnect reported "disconnected",
+            our own connection flag is down, or the user went offline. Nothing
+            more is coming; give up.
+          * a transient read failure — most commonly a 503
+            ``session_not_ready`` / "WAPI is not defined" from the
+            statusConnection middleware, which exists precisely to say "the
+            page is not ready *yet*" rather than "the session is dead" (see
+            api_patches/src/middleware/statusConnection.ts). WhatsApp Web
+            re-injects WAPI routinely while a big history transfer runs, so
+            this shows up mid-wait on exactly the accounts the wait matters
+            for. Also covers an HTTP timeout to the local API.
+
+        Shared so the two callers cannot drift: they did, and the one that
+        treated a transient failure as fatal took the whole message phase down
+        with it.
+        """
+        return bool(
+            getattr(self, "_history_status_disconnected", False)
+            or not getattr(self, "_wa_connected", False)
+            or getattr(self, "offline_mode", False)
+        )
+
     def refresh_history_still_landing(self, context: str = "") -> bool:
         """Note whether more history is still on its way into WhatsApp Web.
 
@@ -13551,11 +13631,7 @@ class MainWindow(wx.Frame):
         """
         status = self.fetch_history_sync_status()
         if status is None:
-            disconnected = (
-                getattr(self, "_history_status_disconnected", False)
-                or not getattr(self, "_wa_connected", False)
-                or getattr(self, "offline_mode", False)
-            )
+            disconnected = self._history_session_is_gone()
             if disconnected:
                 self._history_still_landing = False
                 logging.warning(
@@ -13584,15 +13660,57 @@ class MainWindow(wx.Frame):
         )
         return landing
 
+    #: How often the wait below reports what it is seeing. It polls every two
+    #: seconds for up to ten minutes and used to log NOTHING unless a read
+    #: failed, so "the phone is still transferring" and "this is wedged" looked
+    #: identical from log.log — the only observable was a wall of
+    #: `GET /history-sync-status -> 200`. That ambiguity is what made a normal
+    #: (if slow) first pairing get reported as a sync regression.
+    _HISTORY_WAIT_PROGRESS_SECONDS = 15
+
     def wait_for_restarted_history_sync(self, timeout: int = 600) -> bool:
-        """Wait until a manually restarted RECENT pass is actually complete."""
+        """Wait until a manually restarted RECENT pass is actually complete.
+
+        A read that merely *failed* must not be mistaken for a pass that will
+        not finish. A single 503 ``session_not_ready`` used to end the wait
+        outright: in the captured session it fired 5m20s into a 10-minute
+        budget and deferred a sync whose RECENT pass went on to complete 10
+        minutes later. Only a session that is actually gone
+        (_history_session_is_gone()) ends the wait early now; anything else
+        keeps polling until the deadline, which is what bounds this at all.
+
+        Sets ``self._history_wait_outcome`` to why it stopped, because the two
+        False cases are not the same thing to the caller:
+
+          * ``"completed"`` — the RECENT pass finished (returns True).
+          * ``"timeout"``   — the budget ran out while the transfer was still
+            making progress. The phone still has history to push; that is a
+            reason to expect short chats, NOT a reason to skip the message
+            phase (see _run_sync()).
+          * ``"session_gone"`` — offline, or the session is really gone. There
+            is nothing to query and the caller should stop.
+        """
+        self._history_wait_outcome = ""
         deadline = time.monotonic() + timeout
+        last_progress_log = 0.0
         while time.monotonic() < deadline:
             if self._should_abort_sync_for_offline():
+                self._history_wait_outcome = "session_gone"
                 return False
             status = self.fetch_history_sync_status(timeout=10)
             if not isinstance(status, dict):
-                return False
+                if self._history_session_is_gone():
+                    logging.warning(
+                        "[history-sync] Restarted RECENT wait: session is gone; "
+                        "stopping the wait.")
+                    self._history_wait_outcome = "session_gone"
+                    return False
+                logging.warning(
+                    "[history-sync] Restarted RECENT wait: status unreadable but "
+                    "the session is still up — treating it as transient, %.0fs of "
+                    "budget left.", max(0.0, deadline - time.monotonic()))
+                time.sleep(2)
+                continue
             counts = status.get("storeCounts") or {}
             message_count = counts.get("message")
             queue_empty = status.get("unprocessedChunks") == 0
@@ -13601,12 +13719,26 @@ class MainWindow(wx.Frame):
                     "[history-sync] Restarted RECENT history completed at %s messages.",
                     message_count,
                 )
+                self._history_wait_outcome = "completed"
                 return True
+            now = time.monotonic()
+            if now - last_progress_log >= self._HISTORY_WAIT_PROGRESS_SECONDS:
+                last_progress_log = now
+                logging.info(
+                    "[history-sync] Restarted RECENT wait: messages=%s chats=%s "
+                    "unprocessed=%s recent_complete=%s initial_complete=%s — "
+                    "%.0fs of budget left.",
+                    message_count, counts.get("chat"),
+                    status.get("unprocessedChunks"), status.get("recentCompleted"),
+                    status.get("initialSyncComplete"),
+                    max(0.0, deadline - time.monotonic()),
+                )
             time.sleep(2)
         logging.warning(
-            "[history-sync] Restarted RECENT history did not complete within %ds; "
-            "deferring the REST message sync.", timeout,
+            "[history-sync] Restarted RECENT history did not complete within %ds — "
+            "the phone is still pushing history.", timeout,
         )
+        self._history_wait_outcome = "timeout"
         return False
 
     @staticmethod

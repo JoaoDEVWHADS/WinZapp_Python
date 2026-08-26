@@ -57,6 +57,8 @@ class _Stub:
     unblock_history_sync = MainWindow.unblock_history_sync
     refresh_history_still_landing = MainWindow.refresh_history_still_landing
     wait_for_restarted_history_sync = MainWindow.wait_for_restarted_history_sync
+    _history_session_is_gone = MainWindow._history_session_is_gone
+    _HISTORY_WAIT_PROGRESS_SECONDS = MainWindow._HISTORY_WAIT_PROGRESS_SECONDS
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
 
     def __init__(self, connected=True):
@@ -343,6 +345,127 @@ class TestWaitForRestartedHistorySync:
             lambda self, timeout=10: next(statuses))
 
         assert stub.wait_for_restarted_history_sync(timeout=8) is True
+
+    def test_a_transient_unreadable_status_does_not_end_the_wait(self, monkeypatch):
+        """Reported live: one 503 ``session_not_ready`` / "WAPI is not
+        defined" 5m20s into the 10-minute budget ended the wait, which made
+        _run_sync() defer its whole message phase — on a session whose RECENT
+        pass went on to complete 10 minutes later. WhatsApp Web re-injects
+        WAPI routinely while a big history transfer runs, so an unreadable
+        status mid-wait is the expected case, not a failure.
+        """
+        self._clock(monkeypatch)
+        statuses = iter((
+            {"unprocessedChunks": 3, "recentCompleted": False,
+             "storeCounts": {"message": 10199}},
+            None,   # the 503: session still up, page just not ready yet
+            None,
+            {"unprocessedChunks": 0, "recentCompleted": True,
+             "storeCounts": {"message": 115761}},
+        ))
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status",
+            lambda self, timeout=10: next(statuses))
+
+        assert stub.wait_for_restarted_history_sync(timeout=60) is True
+
+    def test_an_unreadable_status_ends_the_wait_once_the_session_is_gone(
+        self, monkeypatch
+    ):
+        """The other half: tolerating a transient failure must not turn a real
+        disconnect into a ten-minute stall."""
+        self._clock(monkeypatch)
+        stub = _Stub()
+        stub._wa_connected = False
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: None)
+
+        assert stub.wait_for_restarted_history_sync(timeout=600) is False
+
+    def test_a_permanently_unreadable_status_still_stops_at_the_deadline(
+        self, monkeypatch
+    ):
+        """Tolerance is bounded by the timeout, not unbounded: a session that
+        stays up but never answers again gives up when the budget runs out."""
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: None)
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is False
+
+    def test_the_outcome_records_which_kind_of_false_this_was(self, monkeypatch):
+        """The caller has to tell the two False cases apart: a budget that ran
+        out while history was still arriving is a reason to expect short
+        chats, not a reason to skip the message phase — see _run_sync()."""
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: {
+                "unprocessedChunks": 4,
+                "recentCompleted": False,
+                "storeCounts": {"message": 1200},
+            })
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is False
+        assert stub._history_wait_outcome == "timeout"
+
+    def test_a_gone_session_is_recorded_as_such_and_not_as_a_timeout(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _Stub()
+        stub._wa_connected = False
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: None)
+
+        assert stub.wait_for_restarted_history_sync(timeout=600) is False
+        assert stub._history_wait_outcome == "session_gone"
+
+    def test_an_offline_abort_is_recorded_as_a_gone_session(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(_Stub, "_should_abort_sync_for_offline", lambda self: True)
+
+        assert stub.wait_for_restarted_history_sync(timeout=600) is False
+        assert stub._history_wait_outcome == "session_gone"
+
+    def test_completion_is_recorded_too(self, monkeypatch):
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: {
+                "unprocessedChunks": 0,
+                "recentCompleted": True,
+                "storeCounts": {"message": 39288},
+            })
+
+        assert stub.wait_for_restarted_history_sync(timeout=8) is True
+        assert stub._history_wait_outcome == "completed"
+
+    def test_the_wait_reports_progress_while_it_waits(self, monkeypatch, caplog):
+        """It polls every 2s for up to 10 minutes; logging nothing until it
+        fails made "the phone is still transferring" and "this is wedged"
+        indistinguishable in log.log."""
+        self._clock(monkeypatch)
+        stub = _Stub()
+        monkeypatch.setattr(
+            _Stub, "fetch_history_sync_status", lambda self, timeout=10: {
+                "unprocessedChunks": 7,
+                "recentCompleted": False,
+                "storeCounts": {"message": 4211, "chat": 130},
+            })
+
+        with caplog.at_level(logging.INFO):
+            stub.wait_for_restarted_history_sync(timeout=60)
+
+        progress = [r for r in caplog.records if "of budget left" in r.getMessage()]
+        assert progress, "the wait logged nothing at all while waiting"
+        first = progress[0].getMessage()
+        assert "messages=4211" in first
+        assert "chats=130" in first
+        assert "unprocessed=7" in first
+        # Throttled, not once per 2s poll: 60s of waiting at a 15s interval.
+        assert len(progress) <= 6, f"too chatty: {len(progress)} lines"
 
     def test_incomplete_recent_waits_even_when_queue_was_not_restarted(self):
         payload = {

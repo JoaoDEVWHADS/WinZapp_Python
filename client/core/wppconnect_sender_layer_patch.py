@@ -61,6 +61,17 @@ together since they touch the same method:
    'auto-detect') is what tells it that, identically on both paths — so
    PATCHED_FILE_LOADING widens the gate to image/video/audio too.
 
+3. Raising WhatsApp Web's own client-side document ceiling to 1 GB, by
+   wrapping MediaGatingUtils.getUploadLimit inside the page. This runs in a
+   per-send callback, so it MUST install itself only once: the guard that
+   decides whether to wrap cannot be "does getUploadLimit exist", because a
+   wrapper is itself a getUploadLimit and the answer is yes forever after.
+   The first version did exactly that and layered a new closure over the
+   previous one on every document sent, each call then walking the whole
+   chain, growing for as long as the page lived. `__winzappUploadLimitPatched`
+   on the object is the marker that makes it once-per-page instead; the
+   unmarked variant is migrated by patch_sender_layer_source() below.
+
 Both setup_api.py and ApiSetupDialog (client/ui/dialogs/api_setup.py) apply
 this patch to node_modules right after every `npm install` — see
 client/core/wppconnect_host_layer_patch.py's module docstring for why that
@@ -420,6 +431,31 @@ ALL_PATCHES = (
 )
 
 
+#: The same override as _BROWSER_DOCUMENT_LIMIT_PATCH below, but WITHOUT the
+#: one-time `__winzappUploadLimitPatched` guard — i.e. the leaking version that
+#: re-wrapped getUploadLimit() on every single document send. Kept only as the
+#: left-hand side of the migration in patch_sender_layer_source(), so a
+#: node_modules already patched with it is rewritten to the guarded form on the
+#: next setup_api.py run / app update instead of being left leaking forever.
+#:
+#: This constant went missing in a merge: the same leak was fixed twice in
+#: parallel (once on this branch, once on main), and the resolution kept the
+#: other side's definitions together with this side's patch_sender_layer_source()
+#: body — which references this name. The result was a NameError that both
+#: installers caught and logged as a warning, silently skipping the whole
+#: sender.layer.js patch (1 GB chunked upload and real send-error detail
+#: included). tests/test_large_file_patch.py covers the migration itself.
+_LEGACY_DOCUMENT_LIMIT_PATCH = (
+    "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
+    "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+    "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
+    "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
+    "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
+    "                            : getUploadLimit(type, origin, isVcard);\n"
+    "                    }\n"
+)
+
+
 _BROWSER_DOCUMENT_LIMIT_PATCH = (
     "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
     "                    if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
@@ -432,15 +468,28 @@ _BROWSER_DOCUMENT_LIMIT_PATCH = (
 )
 
 
+def _deepen(block: str) -> str:
+    """The same block one nesting level further in (the chunked branch)."""
+    return block.replace("                    ", "                        ")
+
+
 def patch_sender_layer_source(source: str) -> str:
-    """Apply the current patch and migrate the short-lived chunked variant."""
+    """Apply the current patch and migrate every earlier transitional state."""
     for original, patched in ALL_PATCHES:
         source = source.replace(original, patched)
+
+    # Unmarked -> marked, at both nesting depths the block appears at.
+    source = source.replace(
+        _deepen(_LEGACY_DOCUMENT_LIMIT_PATCH), _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH)
+    )
+    source = source.replace(
+        _LEGACY_DOCUMENT_LIMIT_PATCH, _BROWSER_DOCUMENT_LIMIT_PATCH
+    )
 
     if "WPP.whatsapp?.MediaGatingUtils" not in source:
         source = source.replace(
             "                    const result = await WPP.chat.sendFileMessage(to, file, {\n",
-            _BROWSER_DOCUMENT_LIMIT_PATCH.replace("                    ", "                        ")
+            _deepen(_BROWSER_DOCUMENT_LIMIT_PATCH)
             + "                        const result = await WPP.chat.sendFileMessage(to, file, {\n",
         )
         source = source.replace(

@@ -1,13 +1,13 @@
-"""WinZapp must launch chrome-headless-shell, and history sync must survive it.
+"""WinZapp must launch the browser it chose, and history sync must survive it.
 
 Two separate guarantees, because they failed in two different ways.
 
-1. The shell has to actually be the binary that gets launched.
+1. The intended binary has to actually be the one that gets launched.
 
-   start.js was switched to chrome-headless-shell (smaller, faster, and with no
-   windowing layer compiled in at all — nothing can ever flash a window at a
-   blind user). But the switch silently never took effect on any machine that
-   had run an older build, and the reason is worth keeping:
+   start.js originally switched to chrome-headless-shell unconditionally
+   (smaller, faster, and with no windowing layer compiled in at all). But the
+   switch silently never took effect on any machine that had run an older
+   build, and the reason is worth keeping:
 
      * The search walked client/api/.cache once, matching the shell's and full
        Chrome's filenames in the same loop, and returned whatever the directory
@@ -19,13 +19,25 @@ Two separate guarantees, because they failed in two different ways.
        "install chrome-headless-shell" branch never ran. Forever: the empty
        directory was never the thing being checked.
 
-   Measured on this repo before the fix: the only executable under .cache/ was
-   chrome.exe, and .cache/chrome-headless-shell/ was empty. WPPConnect was
-   being handed full Chrome on every launch.
+   The fix is a two-pass search — one candidate list at a time, so the winner
+   is decided by preference rather than by directory layout — plus keying the
+   installer off the preferred binary specifically rather than off "any
+   Chrome-ish binary".
 
-   The fix is a two-pass search — every shell name anywhere under the cache
-   first, full Chrome only as a fallback — plus keying the installer off the
-   shell specifically rather than off "any Chrome-ish binary".
+   The preference itself is now PLATFORM-DEPENDENT, and that inversion is
+   deliberate: chrome-headless-shell is a console-subsystem executable on
+   Windows, and its renderer/GPU children can each allocate a visible console
+   (seven windows were observed when opening the QR screen — the exact thing
+   the shell was adopted to avoid). Full Chrome uses the GUI subsystem and
+   stays windowless under Puppeteer's headless mode, so on Windows it is the
+   preferred binary and the shell is the fallback. Everywhere else the
+   original order stands.
+
+   What these tests pin down is that the ordering, the installer's trigger,
+   and the product each installer actually downloads all keep agreeing with
+   each other. They drifted apart once already: start.js's policy was inverted
+   while this file's assertions were softened into tautologies that could no
+   longer tell either policy from the other.
 
 2. The shell must not cost anything history sync depends on.
 
@@ -47,6 +59,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -54,17 +67,49 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 API = ROOT / "client" / "api"
 PATCHES = ROOT / "client" / "api_patches"
 CACHE = API / ".cache"
+# start.js's findFullChrome() searches the user-level puppeteer cache too, so a
+# test that wants to know whether the preferred binary is present has to look
+# in the same places the code does — otherwise it skips itself on exactly the
+# machines where it would have something to say.
+HOME_CACHE = pathlib.Path.home() / ".cache" / "puppeteer"
 
 SHELL_NAMES = ("chrome-headless-shell.exe", "chrome-headless-shell")
+FULL_CHROME_NAMES = ("chrome.exe", "chrome")
+
+ON_WINDOWS = sys.platform == "win32"
+# Mirrors start.js's findPreferredChrome(). See this module's docstring for
+# why Windows inverts the order.
+PREFERRED_NAMES = FULL_CHROME_NAMES if ON_WINDOWS else SHELL_NAMES
+PREFERRED_PRODUCT = "chrome" if ON_WINDOWS else "chrome-headless-shell"
 
 
-def _find(names):
-    if not CACHE.is_dir():
-        return None
-    for path in CACHE.rglob("*"):
-        if path.is_file() and path.name in names:
-            return path
+def _find(names, roots=(CACHE,)):
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.name in names:
+                return path
     return None
+
+
+def _find_preferred():
+    """The binary start.js would pick here, searched where start.js searches."""
+    if ON_WINDOWS:
+        return _find(FULL_CHROME_NAMES, (CACHE, HOME_CACHE))
+    return _find(SHELL_NAMES)
+
+
+def _start_js():
+    return (PATCHES / "start.js").read_text(encoding="utf-8")
+
+
+def _function_body(src, name):
+    """The source of `function <name>()`, up to its closing brace at column 0."""
+    marker = f"function {name}()"
+    start = src.index(marker)
+    end = src.index("\n}", start)
+    return src[start:end]
 
 
 def _node():
@@ -89,27 +134,62 @@ def _run_node(script, tmp_path, timeout=300):
     )
 
 
-class TestTheSelectionPrefersTheShell:
+class TestTheSelectionIsPlatformAware:
     """Source-level, so these run on a bare checkout too."""
 
-    def test_the_shell_is_searched_before_full_chrome(self):
-        src = (PATCHES / "start.js").read_text(encoding="utf-8")
+    def test_the_two_candidate_sets_stay_separate(self):
+        src = _start_js()
         assert "HEADLESS_SHELL_NAMES" in src and "FULL_CHROME_NAMES" in src, (
             "the two candidate sets must be separate lists, or the search "
             "collapses back into one pass whose winner is decided by directory "
             "layout rather than by preference — see this module's docstring"
         )
-        assert "findHeadlessShell() || findExecutable(puppeteerCacheDir, FULL_CHROME_NAMES" in src, (
-            "full Chrome must only ever be reached after the shell search fails"
+
+    def test_the_search_order_flips_on_windows_and_only_there(self):
+        """Both orderings must be present, each behind the right branch. An
+        assertion that accepts either one on its own (as a previous version of
+        this test did) cannot tell the current policy from its opposite."""
+        body = _function_body(_start_js(), "findAnyChrome")
+        assert "process.platform === 'win32'" in body, (
+            "findAnyChrome() must branch on the platform — the Windows console "
+            "problem and the non-Windows preference are different answers"
+        )
+        win_branch, _, other_branch = body.partition(":")
+        assert "findFullChrome() || findHeadlessShell()" in win_branch, (
+            "on Windows full Chrome must be tried first: the shell is a "
+            "console-subsystem binary whose children flash console windows"
+        )
+        assert "findHeadlessShell() || findFullChrome()" in other_branch, (
+            "off Windows the shell must still win — it is smaller, faster and "
+            "has no windowing layer compiled in at all"
         )
 
-    def test_the_installer_is_keyed_off_the_shell_not_off_any_chrome(self):
-        """`if (!hasChrome)` was the bug: a leftover full Chrome made it false
-        and the shell was never fetched."""
-        src = (PATCHES / "start.js").read_text(encoding="utf-8")
-        assert "if (!findHeadlessShell())" in src, (
-            "the auto-install must trigger when the *shell* is missing, not when "
-            "any Chrome-like binary is missing"
+    def test_the_preferred_binary_agrees_with_the_search_order(self):
+        """findPreferredChrome() decides what gets *installed*; findAnyChrome()
+        decides what gets *launched*. If they disagree, start.js downloads one
+        browser on every boot and then launches the other."""
+        src = _start_js()
+        preferred = _function_body(src, "findPreferredChrome")
+        any_chrome = _function_body(src, "findAnyChrome")
+        win_pref, _, other_pref = preferred.partition(":")
+        win_any, _, other_any = any_chrome.partition(":")
+        assert "findFullChrome()" in win_pref and "findFullChrome()" in win_any, (
+            "the Windows branches of findPreferredChrome() and findAnyChrome() "
+            "must name the same binary"
+        )
+        assert "findHeadlessShell()" in other_pref and "findHeadlessShell()" in other_any, (
+            "the non-Windows branches of findPreferredChrome() and "
+            "findAnyChrome() must name the same binary"
+        )
+
+    def test_the_installer_is_keyed_off_the_preferred_binary(self):
+        """`if (!hasChrome)` was the original bug: a leftover full Chrome made
+        it false and the intended binary was never fetched. The trigger has to
+        name the binary actually wanted here, not "anything Chrome-ish"."""
+        src = _start_js()
+        assert "if (!findPreferredChrome())" in src, (
+            "the auto-install must trigger when the *preferred* binary is "
+            "missing, not when any Chrome-like binary is missing"
         )
         # The old flag's name survives in the comment explaining the bug, so
         # only real code lines count.
@@ -121,21 +201,37 @@ class TestTheSelectionPrefersTheShell:
             "the old any-Chrome-will-do flag must be gone from the code"
         )
 
-    def test_only_the_shell_is_ever_installed(self):
-        src = (PATCHES / "start.js").read_text(encoding="utf-8")
-        assert "browsers install chrome-headless-shell" in src
-        assert "browsers install chrome'" not in src, "must never fetch GUI-capable Chrome"
-
-    def test_the_in_app_installer_downloads_the_shell_too(self):
-        """ApiSetupDialog is the flow every end user goes through just by
-        running WinZapp. It used to fetch full "chrome", which is precisely how
-        a machine ends up with a GUI-capable Chrome under .cache/ and no shell
-        — the state that made the old search hand WPPConnect full Chrome."""
-        src = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-        assert '"install", "chrome-headless-shell"' in src, (
-            "the in-app installer must download chrome-headless-shell, not full Chrome"
+    def test_the_product_installed_is_the_product_preferred(self):
+        """start.js must fetch whatever findPreferredChrome() looks for. A
+        hardcoded product here is how a machine ends up permanently
+        re-downloading a browser it will never launch."""
+        src = _start_js()
+        assert (
+            "const browserProduct = process.platform === 'win32' "
+            "? 'chrome' : 'chrome-headless-shell';"
+        ) in src, "the product to install must be derived from the platform"
+        assert "browsers install ${browserProduct}" in src, (
+            "the npx invocation must use browserProduct, not a literal product"
         )
-        assert '"install", "chrome"' not in src
+        assert "browsers install chrome-headless-shell" not in src
+        assert "browsers install chrome'" not in src
+
+    def test_the_in_app_installer_downloads_the_same_product(self):
+        """ApiSetupDialog is the flow every end user goes through just by
+        running WinZapp. If it fetches a different product than start.js
+        prefers, the first launch downloads a second browser on top of it."""
+        src = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
+        # Collapsed so the assertion survives reformatting of a line that is
+        # long enough to get wrapped.
+        flat = " ".join(src.split())
+        assert (
+            '"chrome" if sys.platform == "win32" else "chrome-headless-shell"'
+        ) in flat, "the in-app installer must pick the product per platform too"
+        assert '"browsers", "install", browser_product' in flat, (
+            "the install command must use browser_product, not a literal"
+        )
+        assert '"install", "chrome-headless-shell"' not in flat
+        assert '"install", "chrome"' not in flat
 
     def test_every_install_path_uses_the_cache_dir_start_js_searches(self):
         """start.js searches (and exports as PUPPETEER_CACHE_DIR)
@@ -202,20 +298,29 @@ console.log('__RESULT__' + JSON.stringify(out));
             pytest.skip("client/api/ not set up here")
         if not (API / "node_modules" / "@wppconnect-team" / "wppconnect").exists():
             pytest.skip("client/api/node_modules not installed here")
-        if _find(SHELL_NAMES) is None:
-            # Requiring start.js with no shell present triggers a ~90MB
-            # download; never do that from a test.
-            pytest.skip("chrome-headless-shell not installed in client/api/.cache")
+        if _find_preferred() is None:
+            # Requiring start.js with the preferred binary absent triggers a
+            # ~90-170MB download; never do that from a test.
+            pytest.skip(f"{PREFERRED_PRODUCT} not installed in a cache start.js searches")
         result = _run_node(cls.HARNESS, tmp_path_factory.mktemp("launch"))
         assert result["launch"] is not None, "start.js never called initServer()"
         return result["launch"]
 
-    def test_the_selected_binary_is_the_headless_shell(self, launch):
+    def test_the_selected_binary_matches_the_platform_preference(self, launch):
         exe = launch["executablePath"]
         assert exe, "no executablePath was pinned — puppeteer would pick its own browser"
-        assert pathlib.Path(exe).name in SHELL_NAMES, (
-            f"start.js selected {exe!r} instead of chrome-headless-shell. A leftover "
-            f"full Chrome under .cache/ must never win the search."
+        name = pathlib.Path(exe).name
+        why = (
+            "on Windows the shell is a console-subsystem binary whose renderer "
+            "and GPU children each allocate a visible console window"
+            if ON_WINDOWS else
+            "off Windows the shell has no windowing layer compiled in at all"
+        )
+        assert name in PREFERRED_NAMES, (
+            f"start.js selected {exe!r}, but this platform's preferred binary is "
+            f"{PREFERRED_PRODUCT} — {why}. Note the preferred binary IS present "
+            f"here ({_find_preferred()}), so this is a selection bug, not a "
+            f"missing download."
         )
 
     def test_headless_and_use_chrome_are_pinned(self, launch):

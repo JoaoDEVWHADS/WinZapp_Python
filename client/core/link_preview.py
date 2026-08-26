@@ -42,6 +42,14 @@ _REQUEST_HEADERS = {
 # pathological/never-closing markup, not the expected stopping point.
 _MAX_BYTES_READ = 3 * 1024 * 1024
 
+# Matched case-folded: `</HEAD>` is valid HTML and still turns up on older
+# pages. Missing it wouldn't corrupt the preview — the parser below finds the
+# tags either way — but it would drop the early exit and download the whole
+# 3MB ceiling before giving up, which is precisely the cost this stop
+# condition exists to avoid.
+_HEAD_CLOSE = b"</head>"
+_CHUNK_SIZE = 16384
+
 
 def find_first_url(text: str) -> str:
     """Return the first http(s) URL in *text*, or "" if there is none."""
@@ -93,9 +101,20 @@ def fetch_link_preview(url: str, timeout: float = 6.0) -> dict | None:
         if "html" not in content_type.lower():
             return None
         raw = b""
-        for chunk in response.iter_content(chunk_size=16384):
+        for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+            if not chunk:
+                continue
+            # Search only the freshly-arrived tail, plus the few bytes a
+            # `</head>` split across the chunk boundary could have left behind:
+            # everything before that was already searched on an earlier
+            # iteration. Re-scanning the whole buffer each time is quadratic in
+            # the ceiling above (~192 passes over up to 3MB), for no more
+            # information than this.
+            tail_start = max(0, len(raw) - (len(_HEAD_CLOSE) - 1))
             raw += chunk
-            if b"</head>" in raw or len(raw) >= _MAX_BYTES_READ:
+            if _HEAD_CLOSE in raw[tail_start:].lower():
+                break
+            if len(raw) >= _MAX_BYTES_READ:
                 break
         html_text = raw.decode(response.encoding or "utf-8", errors="ignore")
     except Exception as exc:
