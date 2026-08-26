@@ -33,8 +33,21 @@ jobs:
     # apagar: além de errado, o GITHUB_TOKEN de um `pull_request` vindo de
     # fork é só-leitura, então o guard transforma esse caso num no-op em vez
     # de numa falha.
+    #
+    # O destino tem que ser a branch padrão, e não só a origem é que importa:
+    # sem essa condição o job vale para PR mergeado em QUALQUER base, e a
+    # `main` passa por todas as exclusões de origem abaixo (não é 'joaopr4',
+    # não é 'evolution_legacy', não começa com 'release/'). Um PR de `main`
+    # para `release/x.x.x.x` — levar correções para uma branch de release,
+    # que é como o stable é cortado aqui — cairia direto num
+    # `DELETE refs/heads/main`. Hoje o servidor recusa, porque o ruleset
+    # "block force push & direct push" tem regra `deletion` sobre
+    # ~DEFAULT_BRANCH, mas isso deixa a única proteção da branch padrão do
+    # lado de fora deste arquivo, num ajuste que um admin pode afrouxar sem
+    # relação nenhuma com CI. Melhor o workflow não pedir a exclusão.
     if: >
       github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref != 'joaopr4' &&
       github.event.pull_request.head.ref != 'evolution_legacy' &&
