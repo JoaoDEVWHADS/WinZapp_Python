@@ -92,6 +92,7 @@ def test_tracked_patch_manifest_does_not_override_wppconnect():
 
     assert forbidden.isdisjoint(manifest.get("dependencies", {}))
     assert forbidden.isdisjoint(manifest.get("devDependencies", {}))
+    assert set(PATCHED_DEPENDENCY_KEYS) <= set(manifest.get("dependencies", {}))
     assert "packageManager" not in manifest
     assert "resolutions" not in manifest
 

@@ -61,7 +61,9 @@
     "swagger-autogen": "^2.23.7",
     "swagger-ui-express": "^5.0.1",
     "unzipper": "^0.12.3",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "prom-client": "^14.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@babel/cli": "^7.28.6",
@@ -108,7 +110,6 @@
     "nodemon": "^3.1.14",
     "prettier": "^2.8.8",
     "pretty-quick": "^4.2.2",
-    "prom-client": "^14.2.0",
     "redis": "^4.7.1",
     "release-it": "^21.0.2",
     "rimraf": "^6.1.3",
