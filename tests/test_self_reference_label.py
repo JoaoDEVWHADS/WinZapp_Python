@@ -83,7 +83,19 @@ class TestSelfReferenceLabelModes:
 LANG_DIR = os.path.join(os.path.dirname(__file__), "..", "client", "languages")
 
 
-@pytest.mark.parametrize("lang_file", ["pt-BR.json", "pt-PT.json", "en-US.json", "es-ES.json"])
+#: Every registered locale, from language_map.json — pl used to be left out
+#: of this list, and this is the only check that the two keys are *distinct*
+#: (the union check in test_language_files_in_sync.py catches a missing or
+#: blank value, never two identical ones).
+_LANG_FILES = [
+    f"{code}.json"
+    for code in sorted(
+        json.load(open(os.path.join(LANG_DIR, "language_map.json"), encoding="utf-8"))
+    )
+]
+
+
+@pytest.mark.parametrize("lang_file", _LANG_FILES)
 class TestSelfReferenceKeysDifferAcrossEveryLanguage:
     def test_eu_and_voce_keys_are_both_present_and_distinct(self, lang_file):
         with open(os.path.join(LANG_DIR, lang_file), encoding="utf-8") as f:

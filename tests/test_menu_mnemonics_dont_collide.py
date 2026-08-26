@@ -17,7 +17,13 @@ import re
 
 from app_paths import resource_path
 
-LOCALES = ["pt-BR", "pt-PT", "en-US", "es-ES", "pl"]
+#: Derived from language_map.json, not repeated here — the set of locales is
+#: data, not code (a locale is added by dropping in `<code>.json` plus an entry
+#: in that map, with no rebuild), so a list written out here goes stale the
+#: moment one is added and silently stops checking it.
+LOCALES = sorted(
+    json.load(open(resource_path("languages", "language_map.json"), encoding="utf-8"))
+)
 
 # Every label MainWindow._build_menubar() adds directly to the wx.MenuBar,
 # in i18n key form. acc_menu_title (Accounts) is intentionally excluded: it
