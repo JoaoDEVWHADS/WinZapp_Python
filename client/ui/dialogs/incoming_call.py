@@ -8,24 +8,25 @@ import wx
 
 
 class IncomingCallDialog(wx.Dialog):
-    """Show caller information and expose a native local-stop button.
+    """Show caller information and expose accessible Answer, Decline and Close buttons.
 
-    The dialog is deliberately modeless.  WhatsApp can send an ended/answered
+    The dialog is deliberately modeless. WhatsApp can send an ended/answered
     event while it is visible, and the main wx event loop must remain free to
     process that event and close this window automatically.
     """
 
-    def __init__(self, parent, message: str, on_stop, on_closed):
+    def __init__(self, parent, message: str, on_accept, on_reject, on_closed):
         i18n = parent.i18n
         super().__init__(
             parent,
             title=i18n.t("incoming_call_popup_title"),
-            # This behaviour is explicitly user-controlled in Settings.  When
+            # This behaviour is explicitly user-controlled in Settings. When
             # enabled, the alert must surface over the application currently
             # in use so a screen-reader user never has to hunt for it via Alt+Tab.
             style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP,
         )
-        self._on_stop_callback = on_stop
+        self._on_accept_callback = on_accept
+        self._on_reject_callback = on_reject
         self._on_closed_callback = on_closed
         self._closing = False
 
@@ -36,32 +37,38 @@ class IncomingCallDialog(wx.Dialog):
         self._message.SetName(message)
         content.Add(self._message, 0, wx.EXPAND | wx.ALL, 12)
 
-        buttons = wx.StdDialogButtonSizer()
-        self._stop_button = wx.Button(
-            panel, wx.ID_OK, label=i18n.t("incoming_call_stop_button")
+        buttons_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self._accept_button = wx.Button(
+            panel, wx.ID_OK, label=i18n.t("incoming_call_accept_button")
+        )
+        self._reject_button = wx.Button(
+            panel, wx.ID_CANCEL, label=i18n.t("incoming_call_reject_button")
         )
         self._close_button = wx.Button(
-            panel, wx.ID_CANCEL, label=i18n.t("incoming_call_close_button")
+            panel, wx.ID_CLOSE, label=i18n.t("incoming_call_close_button")
         )
-        buttons.AddButton(self._stop_button)
-        buttons.AddButton(self._close_button)
-        buttons.Realize()
-        content.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+
+        buttons_sizer.Add(self._accept_button, 0, wx.ALL, 6)
+        buttons_sizer.Add(self._reject_button, 0, wx.ALL, 6)
+        buttons_sizer.Add(self._close_button, 0, wx.ALL, 6)
+
+        content.Add(buttons_sizer, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         panel.SetSizer(content)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(panel, 1, wx.EXPAND)
         self.SetSizerAndFit(outer)
-        self.SetMinSize((360, -1))
+        self.SetMinSize((400, -1))
         self.CentreOnParent()
 
-        self._stop_button.SetDefault()
-        self._stop_button.Bind(wx.EVT_BUTTON, self._on_stop)
+        self._accept_button.SetDefault()
+        self._accept_button.Bind(wx.EVT_BUTTON, self._on_accept)
+        self._reject_button.Bind(wx.EVT_BUTTON, self._on_reject)
         self._close_button.Bind(wx.EVT_BUTTON, self._on_close)
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
     def show_accessibly(self):
-        """Display over the current app and focus the local-stop button."""
+        """Display over the current app and focus the answer button."""
         self.Show()
         self._force_foreground()
         # Windows can finish activating the previously focused application
@@ -117,12 +124,12 @@ class IncomingCallDialog(wx.Dialog):
                         user32.AttachThreadInput(
                             current_thread, foreground_thread, False
                         )
-            self._stop_button.SetFocus()
+            self._accept_button.SetFocus()
         except Exception:
             # STAY_ON_TOP and Raise remain the portable fallback.
             try:
                 self.Raise()
-                self._stop_button.SetFocus()
+                self._accept_button.SetFocus()
             except Exception:
                 pass
 
@@ -133,16 +140,26 @@ class IncomingCallDialog(wx.Dialog):
         self._closing = True
         self.Destroy()
 
-    def _on_stop(self, _event):
+    def _on_accept(self, _event):
         if self._closing:
             return
         self._closing = True
-        self._on_stop_callback()
+        if self._on_accept_callback:
+            self._on_accept_callback()
+        self.Destroy()
+
+    def _on_reject(self, _event):
+        if self._closing:
+            return
+        self._closing = True
+        if self._on_reject_callback:
+            self._on_reject_callback()
         self.Destroy()
 
     def _on_close(self, _event):
         if self._closing:
             return
         self._closing = True
-        self._on_closed_callback()
+        if self._on_closed_callback:
+            self._on_closed_callback()
         self.Destroy()
