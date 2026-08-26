@@ -41,7 +41,7 @@ def test_merge_replaces_upstream_registry_dependencies_with_github(tmp_path):
             "dependencies": {
                 "@ffmpeg-installer/ffmpeg": "^1.1.0",
                 "prom-client": "^14.2.0",
-                "zod": "^4.3.6",
+                "zod": "^3.25.76",
                 **GITHUB_DEPENDENCIES,
             },
         },
