@@ -1465,6 +1465,38 @@ export default class CreateSessionUtil {
     await client.onAnyMessage(async (message: any) => {
       message.session = client.session;
 
+      if (message.type === 'gp2' && message.subtype === 'subject') {
+        const serialized = (value: any) =>
+          value?._serialized || value?.id?._serialized || value || '';
+        const candidates = [message.chatId, message.from, message.to].map(serialized);
+        const groupId = candidates.find(
+          (value: any) => typeof value === 'string' && value.endsWith('@g.us')
+        );
+        if (groupId) {
+          let subject = message.body || message.subject || message.value || '';
+          if (!subject) {
+            try {
+              const chat: any = await client.getChatById(groupId);
+              subject =
+                chat?.groupMetadata?.subject ||
+                chat?.name ||
+                chat?.formattedTitle ||
+                '';
+            } catch (e: any) {
+              req.logger.warn(
+                `[group-subject] Failed to resolve ${groupId}: ${e?.message || e}`
+              );
+            }
+          }
+          if (subject) {
+            req.io.emit('groups.update', {
+              data: [{ id: groupId, subject }],
+              session: client.session,
+            });
+          }
+        }
+      }
+
       if (message.type === 'sticker') {
         download(message, client, req.logger);
       }

@@ -2917,6 +2917,9 @@ export async function sendMute(req: Request, res: Response) {
             return { wid: chatId, isMuted: false, expiration: 0 };
           }
           const result = await WPP.chat.mute(chatId, { duration });
+          if (!result?.isMuted) {
+            throw new Error('WhatsApp did not confirm the mute operation');
+          }
           // The Wid instance does not survive serialization to Node.
           return {
             wid: String(result?.wid?._serialized ?? chatId),
@@ -2972,36 +2975,36 @@ export async function sendSeen(req: Request, res: Response) {
       }
      }
    */
-  const { phone } = req.body;
+  const { phone, unread = false } = req.body;
   const session = req.session;
 
   try {
     const results: any = [];
     const phoneList = Array.isArray(phone) ? phone : [phone];
     for (const contato of phoneList) {
-      // req.client.sendSeen() → WPP.chat.markIsRead() calls
-      // assertGetChat(chatId) first, which throws "Chat not found" for any
-      // chat WA-JS's in-browser Store hasn't already loaded — unlike
-      // getMessages() above (which calls WPP.chat.find(chatId) before
-      // touching Store for exactly this reason), sendSeen never did, so a
-      // chat the user hadn't actually opened inside this Chrome session
-      // recently (e.g. WinZapp itself just synced it via the REST API,
-      // without WA-JS's own Store ever "finding" it) silently failed to be
-      // marked read — reported live as some conversations staying unread
-      // both in WinZapp and on the phone even right after opening them.
-      // WPP.chat.find() loads/registers the chat in Store first so the
-      // subsequent markIsRead() has something to resolve.
-      await req.client.page.evaluate(async (chatId: string) => {
-        try {
-          if ((window as any).WPP?.chat?.find) {
-            await (window as any).WPP.chat.find(chatId);
+      // Use WA-JS directly for both states. WPPConnect exposes sendSeen(), but
+      // has no matching mark-unread wrapper, and its return value can resolve
+      // without proving that the browser operation succeeded.
+      const changed = await req.client.page.evaluate(
+        async ({ chatId, markUnread }: { chatId: string; markUnread: boolean }) => {
+          const WPP = (window as any).WPP;
+          if (!WPP?.chat) throw new Error('WA-JS chat API is unavailable');
+          if (WPP.chat.find) await WPP.chat.find(chatId);
+          const operation = markUnread
+            ? WPP.chat.markIsUnread
+            : WPP.chat.markIsRead;
+          if (typeof operation !== 'function') {
+            throw new Error(
+              markUnread ? 'markIsUnread is unavailable' : 'markIsRead is unavailable'
+            );
           }
-        } catch (e) {
-          // Ignore — markIsRead below still tries, and surfaces its own
-          // "Chat not found" if this genuinely doesn't exist.
-        }
-      }, contato);
-      results.push(await req.client.sendSeen(contato));
+          const result = await operation(chatId);
+          if (!result) throw new Error('WhatsApp did not confirm the read-state change');
+          return true;
+        },
+        { chatId: contato, markUnread: Boolean(unread) }
+      );
+      results.push(changed);
     }
     returnSucess(res, session, phone, results);
   } catch (error) {

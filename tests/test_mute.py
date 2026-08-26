@@ -24,6 +24,7 @@ both build it from ConversationsPanel.MUTE_PRESETS.
 import pytest
 
 from core.utils import mute_response_accepted
+from main import MainWindow
 from ui.conversations import ConversationsPanel
 
 # The exact body observed in the field, trimmed to what matters.
@@ -94,3 +95,61 @@ class TestMutePresets:
             for key, _ in ConversationsPanel.MUTE_PRESETS:
                 assert strings.get(key), f"{locale} is missing {key}"
             assert strings.get("mute_chat_menu_title"), locale
+
+
+class _MuteAliasStub:
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _mute_state_jids = MainWindow._mute_state_jids
+    _apply_mute_state = MainWindow._apply_mute_state
+    is_chat_muted = MainWindow.is_chat_muted
+
+    def __init__(self):
+        self._muted_chats = {}
+        self._phone_to_lid = {
+            "5511999999999@s.whatsapp.net": "123456789@lid",
+        }
+        self._lid_to_phone = {
+            "123456789@lid": "5511999999999@s.whatsapp.net",
+        }
+        self.db = None
+        self.refreshes = 0
+
+    def _schedule_set_chats(self):
+        self.refreshes += 1
+
+
+def test_mute_state_is_shared_between_phone_and_lid_aliases():
+    stub = _MuteAliasStub()
+
+    stub._apply_mute_state("5511999999999@s.whatsapp.net", -1)
+
+    assert stub.is_chat_muted("5511999999999@s.whatsapp.net")
+    assert stub.is_chat_muted("123456789@lid")
+    assert set(stub._muted_chats) == {
+        "5511999999999@s.whatsapp.net",
+        "123456789@lid",
+    }
+
+
+def test_unmute_removes_both_phone_and_lid_aliases():
+    stub = _MuteAliasStub()
+    stub._muted_chats = {
+        "5511999999999@s.whatsapp.net": -1,
+        "123456789@lid": -1,
+    }
+
+    stub._apply_mute_state("123456789@lid", None)
+
+    assert stub._muted_chats == {}
+
+
+def test_node_controller_requires_whatsapp_to_confirm_the_mute():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "client/api_patches/src/controller/deviceController.ts"
+    ).read_text(encoding="utf-8")
+    send_mute = source[source.index("export async function sendMute"):source.index("export async function sendSeen")]
+
+    assert "WPP.chat.mute(chatId, { duration })" in send_mute
+    assert "WPP.chat.unmute(chatId)" in send_mute
+    assert "if (!result?.isMuted)" in send_mute
