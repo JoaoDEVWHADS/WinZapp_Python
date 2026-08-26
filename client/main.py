@@ -1198,6 +1198,16 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
+        # Guards _lid_to_phone/_phone_to_lid/_message_pushname_cache/
+        # _chats_without_alt_jid — the @lid<->phone bridging state.
+        # _extract_lid_mapping() mutates these directly on the Socket.IO
+        # callback thread (see its own docstring for why it bypasses the
+        # usual wx.CallAfter dispatch), while the wx main thread does the
+        # same through on_new_message()'s own call into it and through
+        # _build_lid_to_phone_cache()'s full rebuilds from the sync thread.
+        # Reentrant because _extract_lid_mapping() can, in principle, be
+        # re-entered by code it itself triggers while still holding the lock.
+        self._lid_mapping_lock = threading.RLock()
         # Reactions made by WinZapp are rendered optimistically. Keep their
         # target/emoji briefly so the WebSocket client suppresses only that
         # echo, not a fromMe reaction made on the phone or another device.
@@ -12778,7 +12788,13 @@ class MainWindow(wx.Frame):
         Both formats are handled here so the cache is populated regardless of
         which version of the API produced the stored messages.
         """
-        cache = getattr(self, "_lid_to_phone", {}).copy()
+        # Only the snapshot read and the final replace need the lock —
+        # _extract_lid_mapping() (Socket.IO thread) mutates the same dicts
+        # in place, and holding the lock across this whole scan (proportional
+        # to total message count, unlike that method's per-message work)
+        # would block it for far longer than necessary.
+        with self._lid_mapping_lock:
+            cache = getattr(self, "_lid_to_phone", {}).copy()
         for chat in list(self.chats.values()):
             for msg in list(chat.get("messages", {}).get("messages", {}).get("records", [])):
                 key    = msg.get("key", {})
@@ -12805,8 +12821,9 @@ class MainWindow(wx.Frame):
                     # NEW format (post-swap): remoteJid=phone, remoteJidAlt=lid
                     cache[alt] = remote
 
-        self._lid_to_phone  = cache
-        self._phone_to_lid  = {v: k for k, v in cache.items()}
+        with self._lid_mapping_lock:
+            self._lid_to_phone  = cache
+            self._phone_to_lid  = {v: k for k, v in cache.items()}
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
@@ -12841,17 +12858,6 @@ class MainWindow(wx.Frame):
         alt = key.get("remoteJidAlt", "")
         participant = key.get("participant", "")
 
-        # Invalidate the negative cache since a new message is added to this chat
-        if remote and hasattr(self, "_chats_without_alt_jid"):
-            self._chats_without_alt_jid.discard(remote)
-
-        # Cache pushName if present in the message
-        push_name = msg.get("pushName")
-        if push_name and remote and not remote.endswith("@g.us") and not is_phone_like(push_name):
-            if not hasattr(self, "_message_pushname_cache"):
-                self._message_pushname_cache = {}
-            self._message_pushname_cache[remote] = push_name
-
         # Guard against corrupt self-mappings: if any JID is ours, block cross-mapping with others
         if self._is_self_jid(remote) or self._is_self_jid(alt) or self._is_self_jid(participant):
             if alt and (self._is_self_jid(remote) != self._is_self_jid(alt)):
@@ -12867,56 +12873,82 @@ class MainWindow(wx.Frame):
         # LIDs did hundreds of synchronous writes on the wx main thread (this
         # runs off on_new_message, via wx.CallAfter) for one new pair.
         updated_pairs = []
-        # Initialize dictionary if not present
-        if not hasattr(self, "_lid_to_phone"):
-            self._lid_to_phone = {}
-        if not hasattr(self, "_phone_to_lid"):
-            self._phone_to_lid = {}
+        contacts_to_update = {}
 
-        if alt and alt.endswith("@s.whatsapp.net"):
-            if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
-                self._lid_to_phone[remote] = alt
-                self._phone_to_lid[alt] = remote
-                updated = True
-                updated_pairs.append((remote, alt))
-                logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
-        elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
-            if self._lid_to_phone.get(alt) != remote:
-                self._lid_to_phone[alt] = remote
-                self._phone_to_lid[remote] = alt
-                updated = True
-                updated_pairs.append((alt, remote))
-                logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
+        # Everything below that touches _lid_to_phone/_phone_to_lid/
+        # _message_pushname_cache/_chats_without_alt_jid is one critical
+        # section: this method runs unprotected on the Socket.IO callback
+        # thread (see the docstring above) while the wx main thread reaches
+        # the same dictionaries through on_new_message()'s own call into this
+        # method and through _build_lid_to_phone_cache()'s full rebuilds from
+        # the sync thread. Without a lock, two threads racing a
+        # check-then-set on the same key can lose one thread's update, and a
+        # concurrent discard()/rebuild during another thread's iteration can
+        # raise "set/dict changed size during iteration" outright.
+        with self._lid_mapping_lock:
+            # Invalidate the negative cache since a new message is added to this chat
+            if remote and hasattr(self, "_chats_without_alt_jid"):
+                self._chats_without_alt_jid.discard(remote)
 
-        # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
-        # ONLY if the message is NOT fromMe (if fromMe is True, participant is the user, and remote is the contact!)
-        if not key.get("fromMe", False):
-            if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
-                if self._lid_to_phone.get(remote) != participant:
-                    self._lid_to_phone[remote] = participant
-                    self._phone_to_lid[participant] = remote
+            # Cache pushName if present in the message
+            push_name = msg.get("pushName")
+            if push_name and remote and not remote.endswith("@g.us") and not is_phone_like(push_name):
+                if not hasattr(self, "_message_pushname_cache"):
+                    self._message_pushname_cache = {}
+                self._message_pushname_cache[remote] = push_name
+
+            # Initialize dictionary if not present
+            if not hasattr(self, "_lid_to_phone"):
+                self._lid_to_phone = {}
+            if not hasattr(self, "_phone_to_lid"):
+                self._phone_to_lid = {}
+
+            if alt and alt.endswith("@s.whatsapp.net"):
+                if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
+                    self._lid_to_phone[remote] = alt
+                    self._phone_to_lid[alt] = remote
                     updated = True
-                    updated_pairs.append((remote, participant))
-                    logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
-            elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
-                if self._lid_to_phone.get(participant) != remote:
-                    self._lid_to_phone[participant] = remote
-                    self._phone_to_lid[remote] = participant
+                    updated_pairs.append((remote, alt))
+                    logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
+            elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                if self._lid_to_phone.get(alt) != remote:
+                    self._lid_to_phone[alt] = remote
+                    self._phone_to_lid[remote] = alt
                     updated = True
-                    updated_pairs.append((participant, remote))
-                    logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
+                    updated_pairs.append((alt, remote))
+                    logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
+
+            # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
+            # ONLY if the message is NOT fromMe (if fromMe is True, participant is the user, and remote is the contact!)
+            if not key.get("fromMe", False):
+                if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
+                    if self._lid_to_phone.get(remote) != participant:
+                        self._lid_to_phone[remote] = participant
+                        self._phone_to_lid[participant] = remote
+                        updated = True
+                        updated_pairs.append((remote, participant))
+                        logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
+                elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
+                    if self._lid_to_phone.get(participant) != remote:
+                        self._lid_to_phone[participant] = remote
+                        self._phone_to_lid[remote] = participant
+                        updated = True
+                        updated_pairs.append((participant, remote))
+                        logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
+
+            if updated:
+                # Propagate contact details from phone contact to LID contact
+                # to make it immediately available — still under the lock
+                # since this iterates _lid_to_phone itself.
+                for lid, phone in list(self._lid_to_phone.items()):
+                    if phone in self.contacts and self.contacts[phone]:
+                        if lid not in self.contacts or self.contacts[lid].get("name") in (None, "", "Contato sem nome"):
+                            self.contacts[lid] = self.contacts[phone].copy()
+                            self.contacts[lid]["id"] = lid
+                            self.contacts[lid]["remoteJid"] = lid
+                            contacts_to_update[lid] = self.contacts[lid]
 
         if updated:
-            # Propagate contact details from phone contact to LID contact to make it immediately available
-            contacts_to_update = {}
-            for lid, phone in list(self._lid_to_phone.items()):
-                if phone in self.contacts and self.contacts[phone]:
-                    if lid not in self.contacts or self.contacts[lid].get("name") in (None, "", "Contato sem nome"):
-                        self.contacts[lid] = self.contacts[phone].copy()
-                        self.contacts[lid]["id"] = lid
-                        self.contacts[lid]["remoteJid"] = lid
-                        contacts_to_update[lid] = self.contacts[lid]
-
             # Save only the mapping(s) this call actually changed.
             try:
                 for lid, phone in updated_pairs:
