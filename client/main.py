@@ -16026,8 +16026,6 @@ class MainWindow(wx.Frame):
                 if response.status_code not in (200, 201) and quoted_id and not is_status_reply:
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote on %s...",
                                     response.status_code, active_dest)
-                    wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
-                    quote_stripped = True
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     payload = {
                         "phone": [active_dest],
@@ -16037,6 +16035,9 @@ class MainWindow(wx.Frame):
                         "options": link_preview_options
                     }
                     response = api_post(url, json=payload, headers=headers, timeout=25)
+                    if response.status_code in (200, 201):
+                        wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
+                        quote_stripped = True
 
                 # 3. Final error handling if all retries failed
                 if response.status_code not in (200, 201):
