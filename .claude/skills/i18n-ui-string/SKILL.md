@@ -75,8 +75,12 @@ Rarer, and the locale list is data rather than code: drop `<code>.json` into
 `language_map.json`. Dict order there is the order of the Settings combobox.
 No rebuild is needed.
 
-One thing that is *not* automatic: `tests/test_i18n_keys_exist.py` carries the
-locale list hardcoded in `_LOCALES`, while `test_language_files_in_sync.py`
-derives it from `language_map.json`. A new locale added without touching that
-tuple is checked against the other locales but never against what the code
-actually asks for. Update both.
+Every test that iterates locales derives the list from `language_map.json`,
+so a new locale is picked up on its own — `test_language_files_in_sync.py`,
+`test_i18n_keys_exist.py`, `test_menu_mnemonics_dont_collide.py`,
+`test_self_reference_label.py` and `test_mute.py`. Keep it that way: a list
+written out in a test file goes stale the moment a locale is added and
+silently stops checking it, which is exactly how `pl` ended up unchecked by
+`test_self_reference_label.py` — the only place that verifies
+`ui_self_reference_eu` and `ui_self_reference_voce` are *distinct*, since the
+union check catches a missing or blank value but never two identical ones.

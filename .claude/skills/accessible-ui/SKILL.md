@@ -61,13 +61,24 @@ it exists to cancel speech already in flight — typically the reader's own focu
 announcement on the Enviar button as recording starts — which is triggered *by*
 the very window that suppresses `output()`.
 
-If you cut off a focus announcement, fire it twice, as
-`_silence_for_recording()` does:
+If you cut off a focus announcement, gate it on the setting and fire it twice,
+as `_silence_send_voice_focus_if_enabled()` does
+(`client/ui/conversations.py`):
 
 ```python
+if not self.main_window.settings.get("speech_content", {}).get(
+    "silence_while_recording", False
+):
+    return
 self.main_window.speak_output.silence()
 wx.CallLater(60, self.main_window.speak_output.silence)
 ```
+
+The guard is not optional and the `_if_enabled` suffix in the name is carrying
+it: `silence_while_recording` defaults to **False**, so a site that silences
+unconditionally cancels NVDA's announcement for a user who never asked for it
+— the mirror image of speaking over a user who asked for silence, and there is
+no setting that turns it back on.
 
 Windows dispatches the focus WinEvent to the reader's hook synchronously, but
 NVDA speaks it asynchronously on its own thread — an immediate `silence()` can
