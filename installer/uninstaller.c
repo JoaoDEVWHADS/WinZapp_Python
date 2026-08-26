@@ -150,11 +150,26 @@ static void schedule_self_delete(const wchar_t *uninstall_exe,
     wchar_t bat_path[MAX_PATH];
     swprintf(bat_path, MAX_PATH, L"%swzuninstall.bat", temp_dir);
 
-    /* Convert paths to ANSI for the batch file */
+    /* Convert paths to the OEM code page, not ANSI: cmd.exe reads a .bat
+     * file back in the OEM code page (CP852 on a Polish Windows, CP850 on
+     * a Portuguese one, ...), which is not the same as CP_ACP for any
+     * non-ASCII character. Writing ANSI bytes here and having cmd decode
+     * them as OEM is exactly what turned a path like
+     * "C:\Users\Paweł\AppData\Local\WinZapp" into mojibake that does not
+     * exist on disk — updater.py hit the identical mismatch on the
+     * self-update path (see its _oem_encoding(), issue #83) and this side
+     * never got the matching fix. del/rmdir below then silently target a
+     * path that was never there: the :loop wait can spin forever waiting
+     * for a uninstall_a delete that already "succeeded" against the wrong
+     * name, and even when it doesn't, the success dialog still fires while
+     * every file and the install folder itself are left behind. */
     char uninstall_a[MAX_PATH], install_a[MAX_PATH], bat_a[MAX_PATH];
-    WideCharToMultiByte(CP_ACP, 0, uninstall_exe, -1, uninstall_a, MAX_PATH, NULL, NULL);
-    WideCharToMultiByte(CP_ACP, 0, install_dir,   -1, install_a,   MAX_PATH, NULL, NULL);
-    WideCharToMultiByte(CP_ACP, 0, bat_path,      -1, bat_a,       MAX_PATH, NULL, NULL);
+    int ok = WideCharToMultiByte(CP_OEMCP, 0, uninstall_exe, -1, uninstall_a, MAX_PATH, NULL, NULL)
+          && WideCharToMultiByte(CP_OEMCP, 0, install_dir,   -1, install_a,   MAX_PATH, NULL, NULL)
+          && WideCharToMultiByte(CP_OEMCP, 0, bat_path,      -1, bat_a,       MAX_PATH, NULL, NULL);
+    if (!ok) return;   /* a character with no OEM representation at all —
+                         * nothing safe to write, same as a failed conversion
+                         * on the updater.py side. */
 
     FILE *f = fopen(bat_a, "w");
     if (!f) return;
