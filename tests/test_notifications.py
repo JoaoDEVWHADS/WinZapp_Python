@@ -86,6 +86,10 @@ class _Stub:
     TOAST_GRP = NotificationManager.TOAST_GRP
     _TOAST_LIKELY_GONE_SECONDS = NotificationManager._TOAST_LIKELY_GONE_SECONDS
     _TOAST_REACTIONS = NotificationManager._TOAST_REACTIONS
+    # 0 by default so every existing test below (none of which care about the
+    # near-simultaneous-arrival settle window) stays instant; TestCoalesce
+    # SettleWindow overrides this per-instance to actually exercise it.
+    _COALESCE_SETTLE_SECONDS = 0
 
     _coalesce_pending     = NotificationManager._coalesce_pending
     _clear_active_toasts  = NotificationManager._clear_active_toasts
@@ -139,6 +143,87 @@ class TestCoalescePending:
         item, _ = mgr._coalesce_pending(("Bruno", "ola", "j@g.us"))
         assert item is None
         assert not mgr._queue.empty()
+
+
+class TestCoalesceSettleWindow:
+    """Reported live: two messages arriving within the same instant (e.g. two
+    chats each getting a message in the same live burst) raced past the old
+    _coalesce_pending(), which only ever looked at whatever was ALREADY
+    sitting in the queue at that exact moment — a window measured in
+    microseconds. The first one nearly always won that race, started its
+    (occasionally slow, several-second) WinRT round-trip, and the second sat
+    queued behind it for the whole duration instead of super­seding it. A
+    short, bounded settle window closes that race: _coalesce_pending() now
+    also waits briefly for an imminent arrival before committing.
+    """
+
+    def test_an_item_arriving_during_the_settle_window_supersedes_the_first(self):
+        mgr = _Stub()
+        mgr._COALESCE_SETTLE_SECONDS = 0.2
+
+        def _deliver_second_soon():
+            time.sleep(0.05)
+            mgr._queue.put(("Bruno", "quase junto", "j2@g.us"))
+
+        import threading
+        threading.Thread(target=_deliver_second_soon, daemon=True).start()
+
+        item, dropped = mgr._coalesce_pending(("Ana", "primeira", "j1@g.us"))
+
+        assert item == ("Bruno", "quase junto", "j2@g.us")
+        assert dropped == 1
+
+    def test_nothing_arriving_returns_the_original_item_after_the_window(self):
+        mgr = _Stub()
+        mgr._COALESCE_SETTLE_SECONDS = 0.05
+
+        started = time.monotonic()
+        item, dropped = mgr._coalesce_pending(("Ana", "sozinha", "j@g.us"))
+        elapsed = time.monotonic() - started
+
+        assert item == ("Ana", "sozinha", "j@g.us")
+        assert dropped == 0
+        assert elapsed >= 0.05
+
+    def test_a_shutdown_signal_during_the_settle_window_is_honoured(self):
+        mgr = _Stub()
+        mgr._COALESCE_SETTLE_SECONDS = 0.2
+
+        def _shutdown_soon():
+            time.sleep(0.05)
+            mgr._queue.put(None)
+
+        import threading
+        threading.Thread(target=_shutdown_soon, daemon=True).start()
+
+        item, _ = mgr._coalesce_pending(("Ana", "oi", "j@g.us"))
+        assert item is None
+
+    def test_total_wait_is_bounded_to_one_window_even_with_multiple_arrivals(self):
+        """Two messages several settle-windows apart in wall-clock terms must
+        not each restart the clock — otherwise a steady trickle could delay
+        the toast indefinitely."""
+        mgr = _Stub()
+        mgr._COALESCE_SETTLE_SECONDS = 0.15
+
+        def _deliver_two():
+            time.sleep(0.05)
+            mgr._queue.put(("Bruno", "segunda", "j2@g.us"))
+            time.sleep(0.05)
+            mgr._queue.put(("Carla", "terceira", "j3@g.us"))
+
+        import threading
+        threading.Thread(target=_deliver_two, daemon=True).start()
+
+        started = time.monotonic()
+        item, dropped = mgr._coalesce_pending(("Ana", "primeira", "j1@g.us"))
+        elapsed = time.monotonic() - started
+
+        assert item == ("Carla", "terceira", "j3@g.us")
+        assert dropped == 2
+        # Bounded by the single deadline set at call time, not extended by
+        # each arrival — well under 2x the settle window.
+        assert elapsed < 0.15 * 2
 
 
 class TestClearActiveToasts:

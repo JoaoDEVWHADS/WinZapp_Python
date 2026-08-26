@@ -971,6 +971,19 @@ class MainWindow(wx.Frame):
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
+        # Published as soon as i18n exists, not at the end of __init__: if
+        # anything further down this constructor raises (issue #104 — a
+        # missing constructor argument deep in a sub-panel's init_UI()), the
+        # `frame = MainWindow(...)` assignment in __main__ never completes,
+        # so __main__'s own except-block has no `frame` to read a language
+        # from — that's the reason its crash dialog was always hardcoded to
+        # Portuguese, even though the user may have picked another language.
+        # This partial (but already-i18n-ready) self is what lets that
+        # except-block translate the message anyway. See _write_crash_log()'s
+        # caller for how it's used, and the module-level docstring near
+        # _last_partial_frame's definition for why it can't just be `frame`.
+        global _last_partial_frame
+        _last_partial_frame = self
 
         # Apply the configured output/input audio devices (Settings > Audio
         # Devices). A device that fails to open here falls back to the
@@ -5673,25 +5686,18 @@ class MainWindow(wx.Frame):
 
     # ── First-run module installation ──────────────────────────────────────
 
-    # Full Chrome is deliberately preferred on Windows: chrome-headless-shell
-    # is a console-subsystem binary and its renderer children can open visible
-    # console windows. Puppeteer's headless mode keeps full Chrome's GUI hidden.
+    # Must match start.js's HEADLESS_SHELL_NAMES — start.js searches
+    # client/api/.cache for exactly these and launches what it finds.
     _HEADLESS_SHELL_NAMES = ("chrome-headless-shell.exe", "chrome-headless-shell")
-    _WINDOWS_CHROME_NAMES = ("chrome.exe",)
 
     def find_headless_shell(self):
         """Path to chrome-headless-shell inside client/api/.cache, or None."""
         cache_dir = resource_path("api", ".cache")
         if not os.path.isdir(cache_dir):
             return None
-        preferred_names = (
-            self._WINDOWS_CHROME_NAMES
-            if sys.platform == "win32"
-            else self._HEADLESS_SHELL_NAMES
-        )
         for root, _dirs, files in os.walk(cache_dir):
             for name in files:
-                if name in preferred_names:
+                if name in self._HEADLESS_SHELL_NAMES:
                     return os.path.join(root, name)
         return None
 
@@ -5721,10 +5727,9 @@ class MainWindow(wx.Frame):
             logging.info("[headless-shell] Already installed: %s", existing)
             return True
 
-        browser_product = "chrome" if sys.platform == "win32" else "chrome-headless-shell"
         logging.info(
-            "[headless-shell] %s not found in api/.cache — downloading it now "
-            "(before the API startup timer begins).", browser_product
+            "[headless-shell] chrome-headless-shell not found in api/.cache — "
+            "downloading it now (before the API startup timer begins)."
         )
         if sys.platform == "win32":
             node_exe = resource_path("node", "node.exe")
@@ -5755,7 +5760,7 @@ class MainWindow(wx.Frame):
             creation_flags = subprocess.CREATE_NO_WINDOW
         try:
             proc = subprocess.Popen(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", browser_product],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=creation_flags,
@@ -21958,6 +21963,44 @@ class MainWindow(wx.Frame):
             pass
 
 
+# Set by MainWindow.__init__ the moment self.i18n exists (see that call
+# site's own comment) — this module-level name, not the `frame` local in
+# __main__, is what survives a constructor crash: `frame = MainWindow(...)`
+# never completes assigning `frame` when the constructor itself raises, but
+# the partially-built instance already ran that assignment before failing
+# further down. Only ever read by _startup_critical_error_text() below, and
+# only for its title/message strings — never assumed fully initialized.
+_last_partial_frame = None
+
+
+def _startup_critical_error_text(crash_path: str, tb: str) -> tuple[str, str]:
+    """(title, message) for the native MessageBoxW shown when __main__'s
+    top-level except-block catches an error during startup — translated
+    into the user's selected language when possible.
+
+    Falls back to the original hardcoded Portuguese only when no usable
+    i18n is available at all (a crash before MainWindow even constructs
+    self.i18n, or i18n.t() itself raising) — this dialog is the one thing
+    standing between the user and a silent exit, so it must never crash
+    trying to be helpful.
+    """
+    frame = _last_partial_frame
+    if frame is not None and getattr(frame, "i18n", None) is not None:
+        try:
+            title = frame.i18n.t("startup_critical_title")
+            message = frame.i18n.t("startup_critical_message").format(
+                path=crash_path, details=tb[:800]
+            )
+            return title, message
+        except Exception:
+            pass
+    return (
+        "WinZapp — Erro de inicialização",
+        f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
+        f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
+    )
+
+
 def _write_crash_log(tb: str) -> str:
     """Write a traceback to crash.log next to the exe and return the path."""
     from app_paths import _outer_exe_dir
@@ -22194,11 +22237,11 @@ if __name__ == "__main__":
         crash_path = _write_crash_log(tb)
         # Try to show a native Windows error box (works even without wx).
         try:
+            title, message = _startup_critical_error_text(crash_path, tb)
             ctypes.windll.user32.MessageBoxW(
                 0,
-                f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
-                f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
-                "WinZapp — Erro de inicialização",
+                message,
+                title,
                 0x10,  # MB_ICONERROR
             )
         except Exception:

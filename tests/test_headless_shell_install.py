@@ -28,8 +28,6 @@ works.
 """
 
 import os
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -44,7 +42,6 @@ class _Stub:
     they touch."""
 
     _HEADLESS_SHELL_NAMES = MainWindow._HEADLESS_SHELL_NAMES
-    _WINDOWS_CHROME_NAMES = getattr(MainWindow, "_WINDOWS_CHROME_NAMES", ("chrome.exe",))
     find_headless_shell = MainWindow.find_headless_shell
     ensure_headless_shell_installed = MainWindow.ensure_headless_shell_installed
     ensure_api_modules_installed = MainWindow.ensure_api_modules_installed
@@ -68,15 +65,9 @@ def api_tree(tmp_path, monkeypatch):
 
 def _install_shell(api, version="win64-1.2.3"):
     """Mirror puppeteer's real nesting, so the walk is genuinely exercised."""
-    import sys
-    if sys.platform == "win32":
-        d = api / ".cache" / "puppeteer" / "chrome" / version / "chrome-win64"
-        d.mkdir(parents=True, exist_ok=True)
-        exe = d / "chrome.exe"
-    else:
-        d = api / ".cache" / "chrome-headless-shell" / version / "chrome-headless-shell-win64"
-        d.mkdir(parents=True, exist_ok=True)
-        exe = d / SHELL
+    d = api / ".cache" / "chrome-headless-shell" / version / "chrome-headless-shell-win64"
+    d.mkdir(parents=True)
+    exe = d / SHELL
     exe.write_text("binary", encoding="utf-8")
     return exe
 
@@ -89,11 +80,12 @@ class TestFindingTheShell:
     def test_an_empty_cache_reports_nothing(self, api_tree):
         assert _Stub().find_headless_shell() is None
 
-    def test_a_leftover_full_chrome_is_not_mistaken_for_the_shell(self, api_tree, monkeypatch):
-        """On non-Windows, a full Chrome in cache is not mistaken for headless shell."""
-        monkeypatch.setattr("sys.platform", "linux")
+    def test_a_leftover_full_chrome_is_not_mistaken_for_the_shell(self, api_tree):
+        """The exact state of a machine updating from an older WinZapp: a real
+        chrome.exe in the cache and no shell. Reporting it as "found" is what
+        made the shell never get installed."""
         d = api_tree / ".cache" / "puppeteer" / "chrome" / "win64-148" / "chrome-win64"
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(parents=True)
         (d / "chrome.exe").write_text("binary", encoding="utf-8")
         assert _Stub().find_headless_shell() is None
 
@@ -136,9 +128,8 @@ class TestInstallingTheShell:
         monkeypatch.setattr(main.subprocess, "Popen", fake_popen)
         assert _Stub().ensure_headless_shell_installed() is True
 
-        expected_product = "chrome" if sys.platform == "win32" else "chrome-headless-shell"
         assert calls["cmd"][-5:] == [
-            "exec", "puppeteer", "browsers", "install", expected_product,
+            "exec", "puppeteer", "browsers", "install", "chrome-headless-shell",
         ], calls["cmd"]
         assert calls["cwd"] == str(api_tree)
 

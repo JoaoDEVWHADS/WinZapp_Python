@@ -44,20 +44,22 @@ def test_sender_patch_migrates_intermediate_chunked_source():
 def test_sender_patch_migrates_the_previous_chunked_patch_to_1gb():
     previous = sender_patch.PATCHED_SEND_FILE.replace(
         "                        const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
-        "                        if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+        "                        if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
         "                            const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
         "                            mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
         "                                ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
         "                                : getUploadLimit(type, origin, isVcard);\n"
+        "                            mediaGating.__winzappUploadLimitPatched = true;\n"
         "                        }\n",
         "",
     ).replace(
         "                    const mediaGating = WPP.whatsapp?.MediaGatingUtils;\n"
-        "                    if (options.type === 'document' && mediaGating?.getUploadLimit) {\n"
+        "                    if (options.type === 'document' && mediaGating?.getUploadLimit && !mediaGating.__winzappUploadLimitPatched) {\n"
         "                        const getUploadLimit = mediaGating.getUploadLimit.bind(mediaGating);\n"
         "                        mediaGating.getUploadLimit = (type, origin, isVcard) => type === 'document'\n"
         "                            ? Math.max(getUploadLimit(type, origin, isVcard), 1 * 1024 * 1024 * 1024)\n"
         "                            : getUploadLimit(type, origin, isVcard);\n"
+        "                        mediaGating.__winzappUploadLimitPatched = true;\n"
         "                    }\n",
         "",
     )
@@ -66,6 +68,38 @@ def test_sender_patch_migrates_the_previous_chunked_patch_to_1gb():
 
     assert "WPP.whatsapp?.MediaGatingUtils" in migrated
     assert "1 * 1024 * 1024 * 1024" in migrated
+    assert "__winzappUploadLimitPatched" in migrated
+
+
+def test_sender_patch_migrates_the_leaking_unguarded_upload_limit_wrap():
+    """LEGACY_PATCHED_SEND_FILE_V2 is the exact text every existing install
+    already has on disk from before the __winzappUploadLimitPatched guard
+    existed. Without this migration, re-running setup_api.py on an
+    already-patched machine would leave the leak in place forever, since
+    none of the other ALL_PATCHES pairs match already-patched text."""
+    assert (
+        sender_patch.LEGACY_PATCHED_SEND_FILE_V2,
+        sender_patch.PATCHED_SEND_FILE,
+    ) in sender_patch.ALL_PATCHES
+    assert "__winzappUploadLimitPatched" not in sender_patch.LEGACY_PATCHED_SEND_FILE_V2
+
+    migrated = sender_patch.LEGACY_PATCHED_SEND_FILE_V2
+    for original, replacement in sender_patch.ALL_PATCHES:
+        migrated = migrated.replace(original, replacement)
+
+    assert migrated == sender_patch.PATCHED_SEND_FILE
+
+
+def test_sender_patch_guards_upload_limit_wrap_against_repeated_wrapping():
+    """The getUploadLimit() override must install at most once per page
+    load — re-wrapping it on every document send chains one more closure
+    onto a singleton (WPP.whatsapp.MediaGatingUtils) that lives for the
+    whole session, leaking memory in the browser process forever."""
+    patched = sender_patch.PATCHED_SEND_FILE
+
+    assert patched.count("__winzappUploadLimitPatched = true") == 2
+    assert patched.count("&& !mediaGating.__winzappUploadLimitPatched") == 2
+    assert "&& !mediaGating.__winzappUploadLimitPatched" in sender_patch._BROWSER_DOCUMENT_LIMIT_PATCH
 
 
 def test_large_documents_use_bounded_browser_transfers_and_a_1gb_browser_limit():

@@ -23,16 +23,7 @@ RESUMING = "resuming"             # unlinked, never connected yet — keep waiti
 RESUME_FAILED = "resume_failed"   # unlinked too long while resuming — pair, NO wipe
 LOGOUT = "logout"                 # confirmed logout after being connected — wipe
 
-# WPPConnect exposes the same permanent unlink through different channels:
-# statusFind uses disconnectedMobile/notLogged, while onStateChange and the
-# REST status endpoint use UNPAIRED variants. They are one semantic state.
-UNLINKED_STATES = (
-    "notLogged",
-    "QRCODE",
-    "disconnectedMobile",
-    "UNPAIRED",
-    "UNPAIRED_IDLE",
-)
+UNLINKED_STATES = ("notLogged", "QRCODE")
 
 # Minimum wall-clock gap between two counted unlinked strikes. The strike
 # thresholds (_LOGOUT_CONFIRM_STRIKES, _RESUME_FAIL_STRIKES) were tuned for the

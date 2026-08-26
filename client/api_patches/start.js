@@ -1,6 +1,5 @@
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 
 // Garante que o Puppeteer saiba onde encontrar o cache do Chrome
 const puppeteerCacheDir = path.join(__dirname, '.cache');
@@ -64,30 +63,8 @@ function findHeadlessShell() {
   return findExecutable(puppeteerCacheDir, HEADLESS_SHELL_NAMES, 0);
 }
 
-function findFullChrome() {
-  const roots = [
-    puppeteerCacheDir,
-    path.join(os.homedir(), '.cache', 'puppeteer')
-  ];
-  for (const root of roots) {
-    const found = findExecutable(root, FULL_CHROME_NAMES, 0);
-    if (found) return found;
-  }
-  return null;
-}
-
 function findAnyChrome() {
-  // chrome-headless-shell is a console-subsystem executable on Windows. Its
-  // renderer/GPU children can each allocate a visible console (seven windows
-  // were observed when opening the QR screen). Full Chrome uses the GUI
-  // subsystem and remains windowless under Puppeteer's headless mode.
-  return process.platform === 'win32'
-    ? findFullChrome() || findHeadlessShell()
-    : findHeadlessShell() || findFullChrome();
-}
-
-function findPreferredChrome() {
-  return process.platform === 'win32' ? findFullChrome() : findHeadlessShell();
+  return findHeadlessShell() || findExecutable(puppeteerCacheDir, FULL_CHROME_NAMES, 0);
 }
 
 // Locate a downloaded-but-maybe-unextracted chrome-headless-shell ZIP, so a
@@ -129,16 +106,15 @@ function extractZip(zipPath, destDir) {
     execSync(
       'powershell -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force"`,
-      { stdio: 'inherit', windowsHide: true }
+      { stdio: 'inherit' }
     );
   } else {
     execSync(`unzip -o "${zipPath}" -d "${destDir}"`, { stdio: 'inherit' });
   }
 }
 
-if (!findPreferredChrome()) {
-  const browserProduct = process.platform === 'win32' ? 'chrome' : 'chrome-headless-shell';
-  console.log(`[chrome-install] ${browserProduct} não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...`);
+if (!findHeadlessShell()) {
+  console.log('[chrome-install] chrome-headless-shell não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
     const { execSync } = require('child_process');
     const nodeDir = path.dirname(process.execPath);
@@ -158,13 +134,12 @@ if (!findPreferredChrome()) {
     // is no npx.cmd shim inside the portable extraction on every layout.
     const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
     const npxCmd = fs.existsSync(npxCli)
-      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install ${browserProduct}`
-      : `npx puppeteer browsers install ${browserProduct}`;
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome-headless-shell`
+      : 'npx puppeteer browsers install chrome-headless-shell';
     execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',
-      env: env,
-      windowsHide: true
+      env: env
     });
     console.log('[chrome-install] chrome-headless-shell instalado com sucesso!');
   } catch (err) {
@@ -356,21 +331,17 @@ const waVersion = (() => {
   }
 })();
 
-const PINNED_WHATSAPP_VERSION = '2.3000.1044967578-alpha';
-
 function resolveWhatsappVersion() {
   try {
     if (!waVersion) throw new Error('@wppconnect/wa-version could not be resolved');
     const available = waVersion.getAvailableVersions();
     if (!Array.isArray(available) || available.length === 0) return undefined;
-    // Keep the build used by the known-good 2026-08-11 dependency snapshot.
-    // getPageContent throws if the installed catalogue cannot serve it.
-    waVersion.getPageContent(PINNED_WHATSAPP_VERSION);
-    console.log(
-      `[WinZapp] Pinning WhatsApp Web to ${PINNED_WHATSAPP_VERSION} ` +
-      `(known-good 2026-08-11 build; ${available.length} versions available)`
-    );
-    return PINNED_WHATSAPP_VERSION;
+    const newest = available[available.length - 1];
+    // getPageContent throws when the version cannot be served, so only pin what
+    // is known to work: no pin at all beats silently landing in the fallback.
+    waVersion.getPageContent(newest);
+    console.log(`[WinZapp] Pinning WhatsApp Web to ${newest} (of ${available.length} available)`);
+    return newest;
   } catch (e) {
     console.error(
       '[WinZapp] Could not resolve a WhatsApp Web version via @wppconnect/wa-version ' +
