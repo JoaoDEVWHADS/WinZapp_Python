@@ -227,3 +227,9 @@ node-v*.zip
 # a cada aprovação de comando. O que vale para o time inteiro fica em
 # .claude/settings.json, esse sim versionado.
 .claude/settings.local.json
+
+# Logs de usuario enviados para diagnostico — nunca versionar
+logs.zip
+logs/
+log.log
+shutdown_audit.log
