@@ -11700,6 +11700,23 @@ class MainWindow(wx.Frame):
 
     def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
         """Handle a live group subject update emitted from a gp2 notification."""
+        # See _live_events_ready() — this is the third live funnel, gated for
+        # the same reasons as on_new_message()/on_historical_message().
+        #
+        # It went ungated for as long as nothing emitted 'groups.update' at
+        # all, which this method used to document about itself.  The gap
+        # stopped being theoretical once createSessionUtil.ts started emitting
+        # the event for gp2/subject notifications, which is why the gate lands
+        # together with that.
+        #
+        # A rename dropped here is recovered by the same gp2 notification
+        # arriving again through history backfill (on_historical_message →
+        # _apply_group_subject_change), not by the sync: nothing re-fetches
+        # /group-info for a group that already has a name, and list-chats
+        # serialises WhatsApp Web's own store, which can still be holding the
+        # old subject (see _apply_group_subject_change's docstring).
+        if not self._live_events_ready():
+            return
         if remote_jid not in self.chats:
             return
 

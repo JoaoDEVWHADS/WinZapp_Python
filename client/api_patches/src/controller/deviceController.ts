@@ -2989,6 +2989,22 @@ export async function sendSeen(req: Request, res: Response) {
         async ({ chatId, markUnread }: { chatId: string; markUnread: boolean }) => {
           const WPP = (window as any).WPP;
           if (!WPP?.chat) throw new Error('WA-JS chat API is unavailable');
+          // find() registers the chat in WA-JS's in-browser Store so the
+          // markIs*() call below has something to resolve: assertGetChat()
+          // throws "Chat not found" for any chat the Store hasn't loaded, and
+          // WinZapp routinely syncs chats over REST that this Chrome session
+          // never opened (reported as conversations staying unread on both the
+          // app and the phone right after being opened).
+          //
+          // This used to be wrapped in a try/catch that swallowed find()
+          // failures and let markIsRead() surface its own error. It is now
+          // deliberately unguarded: the caller needs a definite success or
+          // failure to decide whether to roll the local unread state back
+          // (_sync_conversation_read_state in client/main.py), and a find()
+          // that failed makes the following call's outcome untrustworthy
+          // rather than merely uninformative. A genuine transient failure
+          // surfaces as a normal error and is retried from the Python side —
+          // 3 attempts across both JID aliases, see _sync_conversation_read_state.
           if (WPP.chat.find) await WPP.chat.find(chatId);
           const operation = markUnread
             ? WPP.chat.markIsUnread
