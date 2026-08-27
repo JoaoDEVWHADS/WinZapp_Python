@@ -117,12 +117,39 @@ def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
     try:
         response = caller(url, headers=headers, timeout=timeout, **kwargs)
     except Exception as exc:
-        logging.warning(
-            "[api] rid=%s %s %s failed after %.0fms: %s",
-            request_id, method.upper(), label,
-            (time.monotonic() - started) * 1000, exc,
+        elapsed = time.monotonic() - started
+        # If the local socket was closed abruptly before any response
+        # (e.g. RemoteDisconnected / ConnectionReset / Connection aborted on stale keep-alive pool),
+        # retry once on a fresh connection immediately.
+        is_stale_socket = (
+            elapsed < 2.0
+            and any(err in str(exc) for err in (
+                "RemoteDisconnected", "Connection aborted", "ConnectionResetError",
+                "BadStatusLine", "Remote end closed connection"
+            ))
         )
-        raise
+        if is_stale_socket:
+            logging.info(
+                "[api] rid=%s %s %s stale socket reset after %.0fms (%s) — retrying once on fresh connection",
+                request_id, method.upper(), label, elapsed * 1000, exc,
+            )
+            try:
+                fresh_caller = getattr(requests, method.lower())
+                response = fresh_caller(url, headers=headers, timeout=timeout, **kwargs)
+            except Exception as retry_exc:
+                logging.warning(
+                    "[api] rid=%s %s %s retry failed after %.0fms: %s",
+                    request_id, method.upper(), label,
+                    (time.monotonic() - started) * 1000, retry_exc,
+                )
+                raise
+        else:
+            logging.warning(
+                "[api] rid=%s %s %s failed after %.0fms: %s",
+                request_id, method.upper(), label,
+                (time.monotonic() - started) * 1000, exc,
+            )
+            raise
     elapsed = time.monotonic() - started
     log = logging.warning if elapsed >= SLOW_REQUEST_SECONDS else logging.info
     log(

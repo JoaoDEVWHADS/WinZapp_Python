@@ -52,7 +52,14 @@ class AccessibleSpeechOutput:
         for output in self._auto.outputs:
             if not output.is_system_output() and output.is_active():
                 return output
-        return None
+    def _resolve_silence_output(self):
+        cfg = self._settings_getter().get("accessibility", {})
+        if cfg.get("sapi_fallback_enabled", True):
+            return self._auto.get_first_available_output()
+        for output in self._auto.outputs:
+            if not output.is_system_output() and output.is_active():
+                return output
+        return self._auto.get_first_available_output()
 
     def output(self, text, **options):
         if self._suppressed_getter is not None and self._suppressed_getter():
@@ -68,6 +75,9 @@ class AccessibleSpeechOutput:
         """Immediately cancel whatever the resolved output is currently
         saying or has queued. Used to cut off a screen reader's own focus
         announcement, not just future output() calls."""
-        output = self._resolve_output()
+        output = self._resolve_silence_output()
         if output and hasattr(output, "silence"):
-            output.silence()
+            try:
+                output.silence()
+            except Exception:
+                pass

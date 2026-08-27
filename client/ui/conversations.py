@@ -48,7 +48,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, is_voice_message, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
@@ -945,7 +945,7 @@ class ConversationsPanel(wx.Panel):
         self._pause_resume_btn = wx.Button(
             self._voice_panel, label=i18n.t("pause_recording")
         )
-        self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording())
+        self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording(self.main_window))
         self._pause_resume_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_recording)
         voice_sizer.Add(self._pause_resume_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -1905,6 +1905,8 @@ class ConversationsPanel(wx.Panel):
         if self._is_recording:
             self._send_voice_message(event)
         elif not self._recording_starting:
+            self._recording_start_timestamp = time.monotonic()
+            self._silence_send_voice_focus_if_enabled()
             self._start_voice_recording()
 
     # ── Text message sending ─────────────────────────────────────────────────
@@ -2402,12 +2404,20 @@ class ConversationsPanel(wx.Panel):
         the announcement whichever way the screen reader schedules it —
         silence() is idempotent, so calling it twice is harmless.
         """
-        if not self.main_window.settings.get("speech_content", {}).get(
-            "silence_while_recording", False
-        ):
+        is_silenced = (
+            not self.main_window.settings.get("accessibility", {}).get(
+                "extended_sr_compat_enabled", True
+            )
+            or self.main_window.settings.get("speech_content", {}).get(
+                "silence_while_recording", False
+            )
+        )
+        if not is_silenced:
             return
-        self.main_window.speak_output.silence()
-        wx.CallLater(60, self.main_window.speak_output.silence)
+        if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
+            self.main_window.speak_output.silence()
+            for delay in (10, 25, 50, 80, 120, 200, 350, 500):
+                wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _start_voice_recording(self):
         """
@@ -2676,6 +2686,7 @@ class ConversationsPanel(wx.Panel):
             )
             if voice_focus == "discard":
                 self._discard_voice_btn.SetFocus()
+                self._silence_send_voice_focus_if_enabled()
             else:
                 self._send_voice_btn.SetFocus()
                 self._silence_send_voice_focus_if_enabled()
@@ -2747,6 +2758,9 @@ class ConversationsPanel(wx.Panel):
         """Pause or resume the ongoing recording."""
         if not self._is_recording:
             return
+        import time
+        self._pause_toggle_timestamp = time.monotonic()
+        self._silence_send_voice_focus_if_enabled()
         self.main_window.voicemsg_pauserecording_sound.play()
         self._recording_paused = not self._recording_paused
         label_key = "resume_recording" if self._recording_paused else "pause_recording"
@@ -2759,6 +2773,7 @@ class ConversationsPanel(wx.Panel):
             self._stop_recorded_audio_preview()
             self._play_recorded_btn.Hide()
         self.conversation_panel.Layout()
+        self._silence_send_voice_focus_if_enabled()
 
     def _toggle_play_recorded_audio(self, event):
         """Play back everything recorded so far, or stop that playback if
@@ -5765,15 +5780,10 @@ class ConversationsPanel(wx.Panel):
                 self._open_file_safely(url)
             return
 
-        if msg_type == "imageMessage":
-            self._open_conversation_media_viewer(index)
-            return
-        # videoMessage deliberately does NOT open the in-app viewer here,
-        # regardless of _use_conversation_video_media_viewer_dialog(): this
-        # is the "Abrir"/Open action, which the user reaches specifically to
-        # get the file into their own OS-default video player — Enter/click
-        # already covers "play it right here". Falls through to the generic
-        # open-externally flow below (same as documentMessage).
+        # "Abrir" / Open button (next to "Salvar como...") is specifically
+        # intended to open media/files in the operating system's default viewer/app
+        # (photos, videos, documents, etc.). In-app viewing/playback is reached
+        # via Enter/Space directly on the message list item.
 
         if msg_type == "documentMessage":
             filename = (msg_obj.get("documentMessage") or {}).get(
@@ -6964,12 +6974,7 @@ class ConversationsPanel(wx.Panel):
 
     def _is_voice_message(self, msg: dict) -> bool:
         """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
-        if not isinstance(msg, dict) or msg.get("messageType") != "audioMessage":
-            return False
-        msg_obj = msg.get("message") or {}
-        inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
-        media_data = msg.get("mediaData") or {}
-        return bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+        return is_voice_message(msg)
 
 
     def on_audio_speed_btn(self, event):
@@ -7105,6 +7110,15 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
 
     def _hide_audio_controls(self):
+        focused = wx.Window.FindFocus()
+        audio_ctrls = (
+            getattr(self, "audio_speed_btn", None),
+            getattr(self, "audio_slider", None),
+            getattr(self, "audio_progress_label", None),
+        )
+        if focused is not None and any(focused == c for c in audio_ctrls if c is not None):
+            if hasattr(self, "messages_list") and self.messages_list.IsShown():
+                self.messages_list.SetFocus()
         self.audio_speed_btn.Hide()
         self.audio_progress_label.Hide()
         self.audio_slider.Hide()
@@ -7317,16 +7331,21 @@ class ConversationsPanel(wx.Panel):
             return link_preview_text(ext, text, self.main_window)
 
         # ── Audio ────────────────────────────────────────────────────────────
-        if msg_type == "audioMessage":
-            audio = msg_obj.get("audioMessage") or {}
+        if msg_type in ("audioMessage", "audio", "ptt"):
+            audio = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+            if not audio and isinstance(msg.get("audioMessage"), dict):
+                audio = msg.get("audioMessage") or {}
             dur   = self._format_duration(audio.get("seconds"))
+            is_ptt = is_voice_message(msg)
+            vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+            lbl = i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else i18n.t("message_type_audio")
             if not dur:
                 # Unknown duration (e.g. a non-.wav file sent via the
                 # attachment picker — see _probe_audio_duration()): omit the
                 # clause entirely rather than read "duração: " with nothing
                 # after the colon.
-                return i18n.t("message_type_audio")
-            return f"{i18n.t('message_type_audio')}, {i18n.t('duration')}: {dur}"
+                return lbl
+            return f"{lbl}, {i18n.t('duration')}: {dur}"
 
         # ── Document ─────────────────────────────────────────────────────────
         if msg_type == "documentMessage":
@@ -7956,11 +7975,13 @@ class ConversationsPanel(wx.Panel):
             return text
 
         # Support raw WPPConnect types and body/text keys
+        vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+        use_voice_msg = (vm_mode == "voice_message")
         msg_type_raw = quoted_msg.get("type")
         if msg_type_raw:
             _wpp_type_map = {
-                "audio": "message_type_audio",
-                "ptt": "message_type_audio",
+                "audio": "message_type_voice_message" if (use_voice_msg and is_voice_message(quoted_msg)) else "message_type_audio",
+                "ptt": "message_type_voice_message" if use_voice_msg else "message_type_audio",
                 "image": "photo",
                 "video": "video",
                 "document": "document",
@@ -7985,7 +8006,7 @@ class ConversationsPanel(wx.Panel):
 
         # Non-text types: return the localized type label (first letter upper)
         _type_map = [
-            ("audioMessage",    "message_type_audio"),
+            ("audioMessage",    "message_type_voice_message" if (use_voice_msg and is_voice_message(quoted_msg)) else "message_type_audio"),
             ("imageMessage",    "photo"),
             ("videoMessage",    "video"),
             ("documentMessage", "document"),
@@ -8196,7 +8217,24 @@ class ConversationsPanel(wx.Panel):
             return self.main_window.i18n.t("no_messages_in_conversation")
         # Unread separator sentinel
         if self._is_separator(msg):
-            return self._render_separator(msg.get("count", 1))
+            line = self._render_separator(msg.get("count", 1))
+            show_count = False
+            if hasattr(self, "main_window") and hasattr(self.main_window, "settings"):
+                show_count = self.main_window.settings.get("user_interface", {}).get(
+                    "show_listbox_item_count", False
+                )
+            if show_count and getattr(self, "_message_list_mode", "classic") == "listbox":
+                if index is None and hasattr(self, "_sorted_messages"):
+                    try:
+                        index = self._sorted_messages.index(msg)
+                    except ValueError:
+                        index = None
+                if total is None and hasattr(self, "_sorted_messages"):
+                    total = len(self._sorted_messages)
+                if index is not None and total is not None and total > 0:
+                    i18n = self.main_window.i18n
+                    line += f", {index + 1} {i18n.t('of')} {total}"
+            return line
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
         body     = (self._get_message_content(msg) or "")
@@ -11902,19 +11940,69 @@ class ConversationsPanel(wx.Panel):
 
         Tolerates the @lid/phone duality in both directions: a live event may
         arrive under either form regardless of which one the open conversation
-        was loaded under.
+        was loaded under. Also tolerates Brazilian 9th-digit variations and
+        unnormalized JIDs.
         """
-        if self.conversation is None:
+        if self.conversation is None or not remote_jid:
             return False
         conv_jid = self.conversation.get("remoteJid", "")
+        if not conv_jid:
+            return False
         if conv_jid == remote_jid:
             return True
-        mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
-        mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
-        return bool(
-            (mapped_lid and mapped_lid == remote_jid)
-            or (mapped_phone and mapped_phone == remote_jid)
-        )
+
+        mw = getattr(self, "main_window", None)
+        norm_conv = mw._normalize_jid(conv_jid) if mw and hasattr(mw, "_normalize_jid") else conv_jid
+        norm_remote = mw._normalize_jid(remote_jid) if mw and hasattr(mw, "_normalize_jid") else remote_jid
+        if norm_conv == norm_remote:
+            return True
+
+        c_digits, _, c_dom = norm_conv.partition("@")
+        r_digits, _, r_dom = norm_remote.partition("@")
+        if (
+            mw
+            and hasattr(mw, "_phone_digits_equivalent")
+            and c_dom
+            and c_dom == r_dom
+            and c_dom in ("s.whatsapp.net", "c.us")
+            and mw._phone_digits_equivalent(c_digits, r_digits)
+        ):
+            return True
+
+        phone_to_lid = getattr(mw, "_phone_to_lid", {}) if mw else {}
+        lid_to_phone = getattr(mw, "_lid_to_phone", {}) if mw else {}
+
+        candidates = {
+            conv_jid,
+            norm_conv,
+            phone_to_lid.get(conv_jid, ""),
+            phone_to_lid.get(norm_conv, ""),
+            lid_to_phone.get(conv_jid, ""),
+            lid_to_phone.get(norm_conv, ""),
+        }
+        targets = {
+            remote_jid,
+            norm_remote,
+            phone_to_lid.get(remote_jid, ""),
+            phone_to_lid.get(norm_remote, ""),
+            lid_to_phone.get(remote_jid, ""),
+            lid_to_phone.get(norm_remote, ""),
+        }
+        candidates.discard("")
+        targets.discard("")
+        if candidates & targets:
+            return True
+
+        if mw and hasattr(mw, "_phone_digits_equivalent"):
+            for c in candidates:
+                for t in targets:
+                    cd, _, cdom = c.partition("@")
+                    td, _, tdom = t.partition("@")
+                    if cdom and cdom == tdom and cdom in ("s.whatsapp.net", "c.us"):
+                        if mw._phone_digits_equivalent(cd, td):
+                            return True
+
+        return False
 
     def on_incoming_message(self, remote_jid: str, msg: dict):
         """
@@ -12000,7 +12088,7 @@ class ConversationsPanel(wx.Panel):
                     sep_pos = len(self._sorted_messages)
                     sep = {"_type": "unread_separator", "count": 1}
                     self._sorted_messages.insert(sep_pos, sep)
-                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self.messages_list.InsertItem(sep_pos, self._render_message_line(sep))
                     self._unread_sep_idx = sep_pos
                     self._sep_from_open = False
                 elif self._sep_from_open:
@@ -12013,7 +12101,7 @@ class ConversationsPanel(wx.Panel):
                     sep_pos = len(self._sorted_messages)
                     sep = {"_type": "unread_separator", "count": 1}
                     self._sorted_messages.insert(sep_pos, sep)
-                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self.messages_list.InsertItem(sep_pos, self._render_message_line(sep))
                     self._unread_sep_idx = sep_pos
                     self._sep_from_open = False
                 else:
@@ -12021,7 +12109,7 @@ class ConversationsPanel(wx.Panel):
                     sep = self._sorted_messages[self._unread_sep_idx]
                     sep["count"] = sep.get("count", 0) + 1
                     self.messages_list.SetItemText(
-                        self._unread_sep_idx, self._render_separator(sep["count"])
+                        self._unread_sep_idx, self._render_message_line(sep)
                     )
 
             # Append the real message (focus must NOT move)
