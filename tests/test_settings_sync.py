@@ -1,8 +1,47 @@
-"""Tests synchronization between core.utils.DEFAULT_SETTINGS and client/data/settings_default.json."""
-
 import json
 import os
 import sys
+import types
+from unittest.mock import MagicMock
+
+try:
+    import wx
+    import wx.adv
+except ImportError:
+    for _mod in ("wx", "wx.adv"):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+    class _FakeWxModule(types.ModuleType):
+        ACC_OK = 0
+        ACC_NOT_IMPLEMENTED = -1
+        def __getattr__(self, name):
+            if name == "__file__":
+                return "<fake_wx>"
+            if name == "CallAfter":
+                return lambda fn, *a, **k: fn(*a, **k)
+            if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
+                return 1000
+            if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Window", "Control", "Button", "StaticBox", "RadioButton", "CheckBox", "TextCtrl", "Choice", "ComboBox", "Notebook", "StaticText", "SpinCtrl"):
+                return object
+            return MagicMock
+    sys.modules["wx"].__class__ = _FakeWxModule
+    sys.modules["wx.adv"].__class__ = _FakeWxModule
+    wx = sys.modules["wx"]
+
+try:
+    import sound_lib
+except ImportError:
+    for _mod in ("sound_lib", "sound_lib.output", "sound_lib.stream", "sound_lib.main", "sound_lib.effects"):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+    sys.modules["sound_lib.main"].bass_call = lambda *a, **k: None
+    sys.modules["sound_lib.output"].Output = object
 
 from core.utils import DEFAULT_SETTINGS
 
@@ -27,3 +66,23 @@ def test_default_settings_matches_json_structure():
                 assert val[k] == json_data[section][k], (
                     f"Default value mismatch for {section}.{k}: {val[k]!r} != {json_data[section][k]!r}"
                 )
+
+
+def test_recreation_when_settings_file_deleted(tmp_path, monkeypatch):
+    from ui.dialogs.settings_dialog import ensure_default_settings_file
+    fake_settings_file = str(tmp_path / "settings.json")
+    fake_default_file = str(tmp_path / "data" / "settings_default.json")
+
+    monkeypatch.setattr("app_paths.data_path", lambda name: fake_settings_file)
+    monkeypatch.setattr("app_paths.resource_path", lambda *parts: fake_default_file)
+
+    ensure_default_settings_file()
+    assert os.path.isfile(fake_settings_file)
+    with open(fake_settings_file, "r", encoding="utf-8") as f:
+        recreated = json.load(f)
+
+    assert set(recreated.keys()) == set(DEFAULT_SETTINGS.keys())
+    for section, val in DEFAULT_SETTINGS.items():
+        if isinstance(val, dict):
+            for k in val:
+                assert recreated[section][k] == val[k]
