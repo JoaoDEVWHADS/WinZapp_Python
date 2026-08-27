@@ -945,7 +945,7 @@ class ConversationsPanel(wx.Panel):
         self._pause_resume_btn = wx.Button(
             self._voice_panel, label=i18n.t("pause_recording")
         )
-        self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording())
+        self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording(self.main_window))
         self._pause_resume_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_recording)
         voice_sizer.Add(self._pause_resume_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -2758,6 +2758,9 @@ class ConversationsPanel(wx.Panel):
         """Pause or resume the ongoing recording."""
         if not self._is_recording:
             return
+        import time
+        self._pause_toggle_timestamp = time.monotonic()
+        self._silence_send_voice_focus_if_enabled()
         self.main_window.voicemsg_pauserecording_sound.play()
         self._recording_paused = not self._recording_paused
         label_key = "resume_recording" if self._recording_paused else "pause_recording"
@@ -2770,6 +2773,7 @@ class ConversationsPanel(wx.Panel):
             self._stop_recorded_audio_preview()
             self._play_recorded_btn.Hide()
         self.conversation_panel.Layout()
+        self._silence_send_voice_focus_if_enabled()
 
     def _toggle_play_recorded_audio(self, event):
         """Play back everything recorded so far, or stop that playback if
