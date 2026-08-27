@@ -858,12 +858,16 @@ class WebSocketClient:
             for update in updates:
                 if not isinstance(update, dict):
                     continue
-                jid = update.get("id", "")
-                subject = update.get("subject")
+                jid = self._clean_jid(update.get("id") or update.get("remoteJid") or "")
+                subject = update.get("subject") or update.get("name") or ""
 
-                if jid and subject is not None:
-                    remote_jid = self.main_window._normalize_jid(self._clean_jid(jid))
-                    wx.CallAfter(self.main_window.on_group_subject_updated, remote_jid, subject)
+                if jid.endswith("@g.us") and isinstance(subject, str) and subject.strip():
+                    remote_jid = self.main_window._normalize_jid(jid)
+                    wx.CallAfter(
+                        self.main_window.on_group_subject_updated,
+                        remote_jid,
+                        subject.strip(),
+                    )
         except Exception:
             logging.exception("[WebSocketClient] on_groups_update error")
 
@@ -920,6 +924,10 @@ class WebSocketClient:
                     continue
                 unread = chat_update.get("unreadCount")
                 if unread is not None:
+                    try:
+                        unread = int(unread)
+                    except (TypeError, ValueError):
+                        continue
                     # What the chat held before this change, when the page was
                     # able to tell us (see createSessionUtil.ts's
                     # onUnreadCountChanged). It is what separates "the user
@@ -931,6 +939,15 @@ class WebSocketClient:
                         previous = int(previous) if previous is not None else None
                     except (TypeError, ValueError):
                         previous = None
+                    # WhatsApp uses -1 as a sentinel for a chat manually
+                    # marked unread. Downstream code works with badge counts,
+                    # where that state is one unread item. Normalize both the
+                    # new and previous values so a subsequent -1 -> 0 is also
+                    # recognized as a confirmed remote read.
+                    if unread < 0:
+                        unread = 1
+                    if previous is not None and previous < 0:
+                        previous = 1
                     # Logged on arrival, before any of MainWindow's guards can
                     # discard it: this is the only place that can tell "WhatsApp
                     # Web never emitted the event" apart from "it arrived and
@@ -943,7 +960,7 @@ class WebSocketClient:
                     )
                     wx.CallAfter(
                         self.main_window.on_chat_unread_update,
-                        jid, int(unread), previous,
+                        jid, unread, previous,
                     )
                 
                 archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
@@ -1793,8 +1810,15 @@ class WebSocketClient:
                 or media_data.get("size") or media_data.get("fileLength")
                 or 0
             )
+            # Like image/video, WPPConnect exposes the real caption in the
+            # top-level caption field. `body` may be binary thumbnail data and
+            # must not be used as a fallback.
+            doc_caption = wpp_msg.get("caption", "") or ""
+            if looks_like_binary_blob(doc_caption):
+                doc_caption = ""
             message_content = {
                 "documentMessage": {
+                    "caption": doc_caption,
                     "fileName": doc_file_name,
                     "fileLength": doc_file_length,
                     "url": wpp_msg.get("clientUrl", ""),

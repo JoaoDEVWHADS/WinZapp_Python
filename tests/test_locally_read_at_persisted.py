@@ -56,6 +56,7 @@ class _FakeDB:
 
 class _Stub:
     mark_conversation_as_read = MainWindow.mark_conversation_as_read
+    _sync_conversation_read_state = MainWindow._sync_conversation_read_state
     _persist_locally_read_at = MainWindow._persist_locally_read_at
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     # on_chat_unread_update looks the chat up through this rather than
