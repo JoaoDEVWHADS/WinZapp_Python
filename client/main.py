@@ -6531,6 +6531,28 @@ class MainWindow(wx.Frame):
         try:
             from app_paths import log_path
             self._wpp_log_path = log_path("wppconnect.log")
+            # Keep the PREVIOUS run's Node log as wppconnect.log.1 before
+            # truncating. Like log.log, this file was opened "w" and so only
+            # ever held the current run — which is the wrong run for the
+            # question people actually bring: a session that worked, was closed,
+            # and came back dead. The evidence of what WhatsApp Web was doing
+            # lives in the run that ended, and reopening the app to look
+            # destroyed it. That cost two separate investigations before anyone
+            # noticed the file could not answer.
+            #
+            # One generation only: these logs reach several MB on a busy
+            # account, and the run before last has never been the interesting
+            # one. shutdown_audit.log stays the append-only record of endings;
+            # this is the detail behind them.
+            try:
+                if os.path.exists(self._wpp_log_path):
+                    prev = self._wpp_log_path + ".1"
+                    if os.path.exists(prev):
+                        os.remove(prev)
+                    os.replace(self._wpp_log_path, prev)
+            except Exception as e:
+                # Never let log housekeeping stop the server from starting.
+                logging.info("[startup] could not rotate wppconnect.log: %s", e)
             log_fh = open(self._wpp_log_path, "w",
                           encoding="utf-8", errors="replace")
             # Use the short (8.3) path so PostgreSQL's initdb doesn't choke on
@@ -6914,6 +6936,34 @@ class MainWindow(wx.Frame):
                     "running under it) — the graceful close-session above didn't confirm "
                     "success, so its profile may not have finished flushing."
                 )
+            # Give Chrome time to finish writing its profile before the tree
+            # kill takes it down with the Node.
+            #
+            # The CLOSED poll above is a WPPConnect-level state, not a promise
+            # that the browser has flushed leveldb to disk — the same
+            # distinction that made status-session the wrong signal to gate
+            # /start-session on. `taskkill /F /T` then kills the whole tree,
+            # Chrome included, and /F gives it no chance to finish.
+            #
+            # This replaced a fixed sleep(2) precisely because the kill was
+            # landing mid-flush and corrupting leveldb ("Session Unpaired" on
+            # the next launch) — but swapping the sleep for a CLOSED poll fixed
+            # the timing only by accident. A user's shutdown_audit.log showed
+            # the whole clean sequence (pre_close_status='CONNECTED', flush poll
+            # #1 CLOSED in 0.2s, FLUSH OK, taskkill — all in the same second)
+            # and the session still came back dead, with the phone still
+            # listing the device under Linked Devices. Server-side the link was
+            # intact; it was the local profile that had not survived.
+            #
+            # Waiting on the process itself is the signal that actually means
+            # "nothing is writing to that profile any more".
+            if session_name:
+                if self.wait_for_profile_release(session_name, timeout=15.0):
+                    self._shutdown_audit("Chrome released the profile before the kill")
+                else:
+                    self._shutdown_audit(
+                        "Chrome STILL held the profile — killing anyway, its "
+                        "leveldb may be incomplete")
             self._shutdown_audit(f"taskkill /F /T node pid={pid} (flush done above)")
             try:
                 import sys
