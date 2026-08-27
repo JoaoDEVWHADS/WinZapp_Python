@@ -1,5 +1,5 @@
 """Tests for the pairing-code-rotation patch (GitHub issue #8) and its
-v1 -> v2 correction.
+later corrections.
 
 Timeline:
 
@@ -17,17 +17,24 @@ Timeline:
   10 minutes — because the latch never gets reset if a refresh is ever
   legitimately needed (or if the very first loginByCode() call failed).
 
-* v2 (current): a 60-second reuse cooldown instead of a permanent latch,
-  with the "issued" timestamp only recorded AFTER a code is actually
-  produced, so a failed attempt self-recovers on the next tick instead of
-  freezing forever.
+* v2: a 60-second reuse cooldown instead of a permanent latch, with the
+  "issued" timestamp only recorded AFTER a code is actually produced, so a
+  failed attempt self-recovers on the next tick instead of freezing forever.
+
+* v3 (current): v2 plus a catch around the loginByCode() call, and a
+  companion patch to loginByCode() itself. v2's try/finally had no catch, so
+  a rejected loginByCode() escaped checkQrCode() — which is called
+  fire-and-forget — as an unhandled rejection, and the underlying browser
+  error had already been flattened to the minified "t: t" by crossing the
+  CDP exception boundary. Observed live: pairing simply never produced a
+  code, the Python side sat out its full 90-second wait, and the only trace
+  anywhere was "Unhandled Rejection: t: t" in wppconnect.log.
 
 Both setup_api.py and ApiSetupDialog (client/ui/dialogs/api_setup.py) apply
-the same patch (see the "why two places" comment in api_setup.py) by
-importing the shared source-text constants from
+the same patch (see the "why two places" comment in api_setup.py). Since v3
+both delegate the actual search-and-replace to patch_host_layer_source() in
 client/core/wppconnect_host_layer_patch.py, so this file exercises that
-shared module plus the idempotency/upgrade logic in each of the two
-patch-applying entry points.
+shared module plus each of the two patch-applying entry points.
 """
 
 import importlib.util
@@ -36,7 +43,8 @@ import os
 import pytest
 
 from core.wppconnect_host_layer_patch import (
-    ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+    ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, V2_CHECK_QR_CODE,
+    PATCHED_CHECK_QR_CODE, ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,32 +70,32 @@ def fake_wppconnect_dist(tmp_path):
     return tmp_path, host_layer
 
 
-def _write(host_layer, checkqrcode_text):
-    """Wrap the (v0/v1/v2) checkQrCode() body in enough surrounding class
+def _write(host_layer, checkqrcode_text, loginbycode_text=ORIGINAL_LOGIN_BY_CODE):
+    """Wrap the (v0/v1/v2/v3) checkQrCode() body in enough surrounding class
     boilerplate to look like the real compiled file, without needing the
-    other unrelated methods."""
+    other unrelated methods.
+
+    loginByCode() comes from the shared constants verbatim rather than being
+    paraphrased here: the patcher rewrites that method too, so an
+    approximate copy would make every test in this file see a spurious
+    "DID NOT MATCH" for a file the real patcher handles fine."""
     host_layer.write_text(
         "class HostLayer {\n"
         "    urlCode = '';\n"
         "    attempt = 0;\n"
-        + checkqrcode_text +
-        "    async loginByCode(phone) {\n"
-        "        const code = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
-        "            return JSON.parse(JSON.stringify(await WPP.conn.genLinkDeviceCodeForPhoneNumber(phone)));\n"
-        "        }, { phone });\n"
-        "        this.catchLinkCode?.(code);\n"
-        "    }\n"
+        + checkqrcode_text
+        + loginbycode_text +
         "}\n",
         encoding="utf-8",
     )
 
 
 class TestSharedPatchTextsAreDistinct:
-    """Guards against a future accidental edit collapsing two of the three
+    """Guards against a future accidental edit collapsing two of the known
     variants back to identical text, which would silently break the
     idempotency/upgrade detection all the tests below rely on."""
 
-    def test_all_three_variants_are_different(self):
+    def test_the_known_variants_are_all_different(self):
         assert ORIGINAL_CHECK_QR_CODE != V1_CHECK_QR_CODE
         assert V1_CHECK_QR_CODE != PATCHED_CHECK_QR_CODE
         assert ORIGINAL_CHECK_QR_CODE != PATCHED_CHECK_QR_CODE
@@ -116,7 +124,7 @@ class TestSharedPatchTextsAreDistinct:
 class TestSetupApiPatch:
     """setup_api.py's _patch_wppconnect_host_layer(client_api_dir)."""
 
-    def test_patches_a_pristine_file_to_v2(self, fake_wppconnect_dist):
+    def test_patches_a_pristine_file_to_the_current_version(self, fake_wppconnect_dist):
         setup_api = _load_setup_api()
         api_dir, host_layer = fake_wppconnect_dist
         _write(host_layer, ORIGINAL_CHECK_QR_CODE)
@@ -126,10 +134,11 @@ class TestSetupApiPatch:
         assert ok is True
         assert PATCHED_CHECK_QR_CODE in host_layer.read_text(encoding="utf-8")
 
-    def test_upgrades_an_existing_v1_installation_to_v2(self, fake_wppconnect_dist):
+    def test_upgrades_an_existing_v1_installation(self, fake_wppconnect_dist):
         """The exact scenario from the live report: a machine that already
-        got the unsafe v1 patch must be automatically upgraded to v2 on
-        its next npm install / setup_api.py run, not left stuck."""
+        got the unsafe v1 patch must be automatically upgraded to the
+        current version on its next npm install / setup_api.py run, not
+        left stuck."""
         setup_api = _load_setup_api()
         api_dir, host_layer = fake_wppconnect_dist
         _write(host_layer, V1_CHECK_QR_CODE)
@@ -141,7 +150,7 @@ class TestSetupApiPatch:
         assert PATCHED_CHECK_QR_CODE in content
         assert "linkCodeGenerated" not in content
 
-    def test_is_idempotent_once_v2_is_applied(self, fake_wppconnect_dist):
+    def test_is_idempotent_once_applied(self, fake_wppconnect_dist):
         setup_api = _load_setup_api()
         api_dir, host_layer = fake_wppconnect_dist
         _write(host_layer, ORIGINAL_CHECK_QR_CODE)
@@ -180,7 +189,7 @@ class TestApiSetupDialogPatch:
     def _wppconnect_api_dir(self, api_dir):
         return str(api_dir / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api")
 
-    def test_patches_a_pristine_file_to_v2(self, fake_wppconnect_dist):
+    def test_patches_a_pristine_file_to_the_current_version(self, fake_wppconnect_dist):
         from ui.dialogs.api_setup import ApiSetupDialog
         api_dir, host_layer = fake_wppconnect_dist
         _write(host_layer, ORIGINAL_CHECK_QR_CODE)
@@ -190,7 +199,7 @@ class TestApiSetupDialogPatch:
         assert ok is True
         assert PATCHED_CHECK_QR_CODE in host_layer.read_text(encoding="utf-8")
 
-    def test_upgrades_an_existing_v1_installation_to_v2(self, fake_wppconnect_dist):
+    def test_upgrades_an_existing_v1_installation(self, fake_wppconnect_dist):
         from ui.dialogs.api_setup import ApiSetupDialog
         api_dir, host_layer = fake_wppconnect_dist
         _write(host_layer, V1_CHECK_QR_CODE)
@@ -202,7 +211,7 @@ class TestApiSetupDialogPatch:
         assert PATCHED_CHECK_QR_CODE in content
         assert "linkCodeGenerated" not in content
 
-    def test_is_idempotent_once_v2_is_applied(self, fake_wppconnect_dist):
+    def test_is_idempotent_once_applied(self, fake_wppconnect_dist):
         from ui.dialogs.api_setup import ApiSetupDialog
         api_dir, host_layer = fake_wppconnect_dist
         _write(host_layer, ORIGINAL_CHECK_QR_CODE)
@@ -266,3 +275,148 @@ class TestBothEntryPointsAgree:
         )
 
         assert host_layer_a.read_text(encoding="utf-8") == host_layer_b.read_text(encoding="utf-8")
+
+
+class TestV3CatchesPairingCodeFailures:
+    """v3's addition to v2: the `await this.loginByCode(...)` inside
+    checkQrCode() is wrapped in a catch.
+
+    Without it a rejected loginByCode() propagated straight out of
+    checkQrCode() — which host.layer.js calls fire-and-forget, both from its
+    own initialize path and from the exposed `conn.auth_code_change`
+    handler, with nobody awaiting or catching it. Observed live: a bare
+    "Unhandled Rejection: t: t" in wppconnect.log, that checkQrCode() tick
+    killed before it could do anything else, and the Python side left to sit
+    out its full 90-second _phone_code_event wait before reporting the
+    generic "no pairing code received" with nothing in log.log explaining
+    why.
+    """
+
+    def test_v3_catches_a_failing_login_by_code(self):
+        assert "catch (error) {" in PATCHED_CHECK_QR_CODE
+        assert "Could not generate the pairing code" in PATCHED_CHECK_QR_CODE
+
+    def test_v2_had_no_catch_at_all(self):
+        """Documents precisely what v3 fixes — v2 has the try/finally but no
+        catch, which is what let the rejection escape."""
+        assert "try {" in V2_CHECK_QR_CODE
+        assert "finally {" in V2_CHECK_QR_CODE
+        # Not a bare "catch": v2 legitimately contains catchQR?.() and the
+        # needsToScan(...).catch(() => null) chain — neither of which handles
+        # a rejected loginByCode().
+        assert "catch (" not in V2_CHECK_QR_CODE
+
+    def test_v3_still_never_permanently_latches(self):
+        """v3 must not regress v2's core self-recovery property: the
+        "issued" timestamp is still only written AFTER loginByCode()
+        succeeds, so a caught failure leaves it untouched and the next
+        auth_code_change tick retries."""
+        issued_at = PATCHED_CHECK_QR_CODE.index("this.linkCodeIssuedAt = Date.now();")
+        login_call = PATCHED_CHECK_QR_CODE.index("await this.loginByCode(this.options.phoneNumber);")
+        catch_block = PATCHED_CHECK_QR_CODE.index("catch (error) {")
+        assert login_call < issued_at < catch_block
+
+    def test_all_four_checkqrcode_generations_are_distinct(self):
+        variants = [
+            ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE,
+            V2_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+        ]
+        assert len(set(variants)) == 4
+
+
+class TestLoginByCodeErrorDetail:
+    """The pairing-code request itself must report the real browser-side
+    error instead of the minified "t: t" that a page-context exception
+    crossing the CDP boundary raw degrades into — same root cause and same
+    fix as the sendFile() error-detail patch in
+    wppconnect_sender_layer_patch.py."""
+
+    def test_patched_catches_inside_the_page_and_returns_plain_data(self):
+        """The fix only works if the error is caught INSIDE the page
+        callback and RETURNED (structured cloning preserves plain string
+        properties) rather than thrown across the CDP exception boundary."""
+        assert "__winzappError" in PATCHED_LOGIN_BY_CODE
+        page_callback_start = PATCHED_LOGIN_BY_CODE.index("async ({ phone }) => {")
+        page_callback_end = PATCHED_LOGIN_BY_CODE.index("}, { phone });")
+        page_body = PATCHED_LOGIN_BY_CODE[page_callback_start:page_callback_end]
+        assert "catch (error) {" in page_body
+        assert "return {" in page_body
+
+    def test_patched_rethrows_a_real_error_on_the_node_side(self):
+        assert "new Error(outcome.__winzappError.message)" in PATCHED_LOGIN_BY_CODE
+        assert "throw failure;" in PATCHED_LOGIN_BY_CODE
+
+    def test_original_had_no_error_handling_at_all(self):
+        # "catch (" rather than "catch": the unpatched method already ends in
+        # this.catchLinkCode?.(code), which is not error handling.
+        assert "catch (" not in ORIGINAL_LOGIN_BY_CODE
+        assert "__winzappError" not in ORIGINAL_LOGIN_BY_CODE
+
+    def test_patched_still_delivers_the_code_on_success(self):
+        """The happy path must be unchanged: catchLinkCode still receives
+        the generated code."""
+        assert "this.catchLinkCode?.(code);" in PATCHED_LOGIN_BY_CODE
+        assert "const code = outcome?.code;" in PATCHED_LOGIN_BY_CODE
+
+    def test_login_by_code_is_actually_patched_by_both_entry_points(self, tmp_path):
+        from ui.dialogs.api_setup import ApiSetupDialog
+        setup_api = _load_setup_api()
+
+        results = {}
+        for name, apply in (
+            ("setup_api", lambda d: setup_api._patch_wppconnect_host_layer(str(d))),
+            ("api_setup", lambda d: ApiSetupDialog._patch_wppconnect_host_layer(
+                str(d / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api"))),
+        ):
+            api_dir = tmp_path / name
+            layers = api_dir / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api" / "layers"
+            layers.mkdir(parents=True)
+            host_layer = layers / "host.layer.js"
+            _write(host_layer, ORIGINAL_CHECK_QR_CODE)
+
+            assert apply(api_dir) is True
+            content = host_layer.read_text(encoding="utf-8")
+            assert PATCHED_LOGIN_BY_CODE in content
+            assert ORIGINAL_LOGIN_BY_CODE not in content
+            results[name] = content
+
+        assert results["setup_api"] == results["api_setup"]
+
+
+class TestUpgradeFromAnAlreadyPatchedInstall:
+    """The realistic upgrade path: an existing user's machine already
+    carries v2 + an unpatched loginByCode (exactly what shipped before this
+    change), and the next setup run must migrate both halves."""
+
+    def test_v2_install_is_upgraded_to_v3_with_login_by_code_patched(self, fake_wppconnect_dist):
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        _write(host_layer, V2_CHECK_QR_CODE)
+
+        assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is True
+
+        content = host_layer.read_text(encoding="utf-8")
+        assert PATCHED_CHECK_QR_CODE in content
+        assert V2_CHECK_QR_CODE not in content
+        assert PATCHED_LOGIN_BY_CODE in content
+
+    def test_a_fully_patched_install_is_left_byte_identical(self, fake_wppconnect_dist):
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        _write(host_layer, ORIGINAL_CHECK_QR_CODE)
+
+        setup_api._patch_wppconnect_host_layer(str(api_dir))
+        first = host_layer.read_text(encoding="utf-8")
+        setup_api._patch_wppconnect_host_layer(str(api_dir))
+        assert host_layer.read_text(encoding="utf-8") == first
+
+    def test_an_unrecognised_file_is_reported_and_left_untouched(self, fake_wppconnect_dist):
+        """A future upstream release that rewrites these methods must not be
+        silently corrupted — the patcher returns False and writes nothing."""
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        host_layer.write_text("class HostLayer { /* upstream moved on */ }\n", encoding="utf-8")
+        before = host_layer.read_text(encoding="utf-8")
+
+        assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is False
+        assert host_layer.read_text(encoding="utf-8") == before

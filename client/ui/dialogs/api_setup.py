@@ -701,29 +701,27 @@ class ApiSetupDialog(wx.Dialog):
 
     @staticmethod
     def _patch_wppconnect_host_layer(wppconnect_api_dir: str) -> bool:
-        """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
-        phone-number pairing code stops regenerating on every QR-code
-        rotation, WITHOUT freezing forever if it should ever need a refresh
-        (WinZapp issue #8). Port of setup_api.py's function of the same
-        name — see the three module-level `_HOST_LAYER_*_CHECK_QR_CODE`
-        constants there for the v0 (upstream bug) / v1 (WinZapp's first,
-        unsafe attempt — could freeze the code forever if loginByCode()
-        ever failed, or once a code genuinely needed to be refreshed) / v2
-        (current: 60s reuse cooldown, self-recovering) history.
+        """Patch @wppconnect-team/wppconnect's compiled host.layer.js: the
+        phone-number pairing code must stop regenerating on every QR-code
+        rotation without freezing forever if it should ever need a refresh
+        (WinZapp issue #8), and a failed pairing-code request must report
+        the real browser-side error instead of the minified "t: t". Port of
+        setup_api.py's function of the same name — both delegate the actual
+        search-and-replace to patch_host_layer_source() so the two copies
+        can't drift apart. See client/core/wppconnect_host_layer_patch.py's
+        module docstring for the v0/v1/v2/v3 history.
 
-        Idempotent (a no-op if v2 is already applied — including
-        automatically upgrading a machine that still has v1 installed) and
-        best-effort: a logged warning, never a crash, if the installed
-        wppconnect version doesn't match either known source text.
+        Idempotent (a no-op once v3 is applied, and it upgrades a machine
+        still carrying v1 or v2 on the way) and best-effort: a logged
+        warning, never a crash, if the installed wppconnect version no
+        longer matches a known source text.
 
         *wppconnect_api_dir* is .../node_modules/@wppconnect-team/wppconnect/dist/api
         (i.e. the caller has already descended into node_modules — unlike
         setup_api.py's copy of this function, which is given the outer
         client/api/ directory instead).
         """
-        from core.wppconnect_host_layer_patch import (
-            ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
-        )
+        from core.wppconnect_host_layer_patch import patch_host_layer_source
         host_layer_path = os.path.join(wppconnect_api_dir, "layers", "host.layer.js")
         if not os.path.isfile(host_layer_path):
             logging.warning("[api_setup] host.layer.js not found — skipping pairing-code patch.")
@@ -732,31 +730,21 @@ class ApiSetupDialog(wx.Dialog):
         with open(host_layer_path, encoding="utf-8") as f:
             content = f.read()
 
-        if PATCHED_CHECK_QR_CODE in content:
-            logging.info("[api_setup] host.layer.js pairing-code patch (v2) already applied.")
-            return True
-
-        if V1_CHECK_QR_CODE in content:
-            content = content.replace(V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        patched, notes, ok = patch_host_layer_source(content)
+        if patched != content:
             with open(host_layer_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            logging.info("[api_setup] Upgraded host.layer.js pairing-code patch from v1 (unsafe) to v2 (60s cooldown, self-recovering).")
-            return True
+                f.write(patched)
 
-        if ORIGINAL_CHECK_QR_CODE not in content:
-            logging.warning(
-                "[api_setup] host.layer.js does not match the expected "
-                "upstream source — skipping pairing-code patch (the "
-                "installed @wppconnect-team/wppconnect version may have "
-                "changed this file)."
-            )
-            return False
-
-        content = content.replace(ORIGINAL_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
-        with open(host_layer_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        logging.info("[api_setup] Patched host.layer.js — pairing code by phone number no longer regenerates on every QR rotation (60s reuse cooldown).")
-        return True
+        for note in notes:
+            if "DID NOT MATCH" in note:
+                logging.warning(
+                    "[api_setup] host.layer.js — %s The installed "
+                    "@wppconnect-team/wppconnect version may have changed "
+                    "this file.", note,
+                )
+            else:
+                logging.info("[api_setup] host.layer.js — %s", note)
+        return ok
 
     def _extract_zip(self, zip_path: str, api_dir: str) -> bool:
         """
