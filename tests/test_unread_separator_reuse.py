@@ -76,7 +76,11 @@ class _Stub:
         self._current_audio_id = None
         self._reaction_map = {}
         self._render_separator = lambda count: f"__sep__{count}"
-        self._render_message_line = lambda msg, *a, **kw: msg["key"]["id"]
+        self._render_message_line = lambda msg, *a, **kw: (
+            self._render_separator(msg.get("count", 1))
+            if self._is_separator(msg)
+            else msg["key"]["id"]
+        )
 
 
 def _sep(stub):
