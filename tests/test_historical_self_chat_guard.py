@@ -254,3 +254,126 @@ class TestOnHistoricalMessageAppliesTheGuard:
         stub.on_historical_message(msg)
 
         assert "5521888888888@s.whatsapp.net" in stub.chats
+
+
+class _FakeDedupDB:
+    """Records the re-keys deduplicate_chats() asks the DB to persist."""
+
+    def __init__(self):
+        self.merges = []
+
+    def merge_or_rename_chat(self, old_jid, new_jid):
+        self.merges.append((old_jid, new_jid))
+
+
+class _DedupStub:
+    deduplicate_chats = MainWindow.deduplicate_chats
+    _phone_digits_equivalent = staticmethod(MainWindow._phone_digits_equivalent)
+    _is_self_jid = MainWindow._is_self_jid
+
+    def __init__(self, my_jid=""):
+        self.my_jid = my_jid
+        self._lid_to_phone = {}
+        self.db = _FakeDedupDB()
+
+    def _normalize_jid(self, jid):
+        return MainWindow._normalize_jid(jid)
+
+    def _find_alt_jid_from_messages(self, chat):
+        return ""
+
+
+def _stored_chat(remote_jid, participant, from_me):
+    """A chat as it sits in messages.db, with one record in it."""
+    return {
+        "remoteJid": remote_jid,
+        "messages": {"messages": {"records": [
+            {"key": {"remoteJid": remote_jid, "participant": participant,
+                     "fromMe": from_me, "id": "S1"},
+             "message": {"conversation": "oi"},
+             "messageTimestamp": 1,
+             "messageType": "conversation"},
+        ]}},
+    }
+
+
+class TestDeduplicateChatsAgreesWithTheGuard:
+    """Pass 0 restates _redirect_self_chat_artifact()'s condition instead of
+    calling it (it tests stored records, not an arriving message), so the two
+    can drift. They must not: the funnels stop new fake self-chats, but this
+    pass is the only thing that can remove one already in messages.db.
+
+    It used to demand fromMe on the record even for the @g.us shape, which
+    the helper's own docstring says arrives with fromMe=False — so exactly
+    the chats this feature exists to kill were the ones it could not touch.
+
+    The JID here is built from the *@lid* digits on purpose. A fake group
+    carrying our own phone digits is caught either way by is_self_phone_group,
+    so it proves nothing about this condition; the @lid-shaped one is the
+    case that fell through every branch.
+    """
+
+    def test_a_group_shaped_artifact_saved_with_from_me_false_is_cleaned(self):
+        lid_group = MY_LID.split("@", 1)[0] + "@g.us"
+        stub = _DedupStub(my_jid=MY_PHONE)
+        chats = {lid_group: _stored_chat(lid_group, MY_LID, from_me=False)}
+
+        out = stub.deduplicate_chats(chats)
+
+        assert lid_group not in out
+        assert MY_PHONE in out
+
+    def test_the_records_survive_the_move(self):
+        lid_group = MY_LID.split("@", 1)[0] + "@g.us"
+        stub = _DedupStub(my_jid=MY_PHONE)
+        chats = {lid_group: _stored_chat(lid_group, MY_LID, from_me=False)}
+
+        out = stub.deduplicate_chats(chats)
+
+        records = out[MY_PHONE]["messages"]["messages"]["records"]
+        assert [r["key"]["id"] for r in records] == ["S1"]
+
+    def test_the_phantom_is_removed_from_the_database_too(self):
+        """Filtering it out of the in-memory dict is not removing it:
+        _do_save() writes the chats table through upsert_chat and never
+        deletes, so without this the phantom's rows stayed in messages.db
+        and were filtered again from scratch on every launch, with its
+        messages never moving to the self-chat they belong to. Pass 1 and
+        Pass 2 already persist their own re-keys the same way."""
+        lid_group = MY_LID.split("@", 1)[0] + "@g.us"
+        stub = _DedupStub(my_jid=MY_PHONE)
+        chats = {lid_group: _stored_chat(lid_group, MY_LID, from_me=False)}
+
+        stub.deduplicate_chats(chats)
+
+        assert stub.db.merges == [(lid_group, MY_PHONE)]
+
+    def test_a_real_group_is_never_touched(self):
+        """The invariant that makes this safe: a real group's JID is
+        independently allocated and never equals a participant's."""
+        stub = _DedupStub(my_jid=MY_PHONE)
+        chats = {
+            "120363409931936700@g.us": _stored_chat(
+                "120363409931936700@g.us", "5521888888888@s.whatsapp.net",
+                from_me=False,
+            ),
+        }
+
+        out = stub.deduplicate_chats(chats)
+
+        assert "120363409931936700@g.us" in out
+        assert MY_PHONE not in out
+
+    def test_a_lid_chat_still_requires_from_me(self):
+        """Only the @g.us shape drops the fromMe requirement. A bare @lid
+        whose digits mirror the participant is not by itself an artifact."""
+        stub = _DedupStub(my_jid=MY_PHONE)
+        chats = {
+            "22222222222222@lid": _stored_chat(
+                "22222222222222@lid", "22222222222222@lid", from_me=False
+            ),
+        }
+
+        out = stub.deduplicate_chats(chats)
+
+        assert "22222222222222@lid" in out

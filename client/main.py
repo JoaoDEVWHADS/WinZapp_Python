@@ -4588,6 +4588,14 @@ class MainWindow(wx.Frame):
         either of these ran (e.g. a session resumed from a store that
         already had one saved) — all three must keep agreeing on what
         counts as a fake self-chat.
+
+        That third one doesn't call this method — it needs a verdict about a
+        whole chat's stored records, not about one arriving message — so it
+        restates the same condition instead. Keeping the two in step matters
+        in both directions: a shape that pass accepts but these funnels
+        don't is a chat wiped on every launch and recreated by live traffic
+        in between, and a shape these reject but that pass doesn't is one
+        already saved in messages.db that nothing ever cleans up.
         """
         participant_raw = key.get("participant") or ""
         remote_digits = remote_jid.split("@", 1)[0]
@@ -5316,7 +5324,6 @@ class MainWindow(wx.Frame):
         key        = msg.get("key", {})
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
-        from_me    = key.get("fromMe", False)
 
         if not remote_jid or not msg_id:
             return
@@ -5329,7 +5336,12 @@ class MainWindow(wx.Frame):
         # phantom "group"/duplicate of "Eu" that couldn't be cleanly
         # identified or deleted afterwards — until the next full
         # deduplicate_chats() pass happened to run.
-        remote_jid, from_me = self._redirect_self_chat_artifact(remote_jid, key, from_me)
+        #
+        # from_me is discarded on purpose: unlike on_new_message(), this funnel
+        # never reads it again — the history path files by JID alone.
+        remote_jid, _ = self._redirect_self_chat_artifact(
+            remote_jid, key, key.get("fromMe", False)
+        )
 
         # Statuses (stories) or channels ignored
         if remote_jid.endswith("@broadcast") or remote_jid.endswith("@newsletter"):
@@ -11263,10 +11275,28 @@ class MainWindow(wx.Frame):
                     continue
                 cand_digits = cand_jid.split("@", 1)[0]
                 records = cand_chat.get("messages", {}).get("messages", {}).get("records", [])
+                # Same shape as _redirect_self_chat_artifact()'s own test, and
+                # deliberately so — the two must agree or a chat one of them
+                # rejects is a chat the other keeps resurrecting. Note fromMe
+                # is required only for the non-@g.us case: the group-suffixed
+                # artifact can arrive with fromMe=False, so demanding it here
+                # left every such chat already saved in messages.db
+                # untouchable — the funnels only stop new ones from being
+                # created, and this pass is what deals with the old ones.
+                #
+                # Keeping the relaxation scoped to @g.us is what makes it
+                # safe, and candidate_jids also holds @lid: a @lid chat whose
+                # digits mirror its participant is the ordinary shape of a
+                # legitimate 1:1, where the sender IS the chat. Letting the
+                # relaxation reach those would swallow real conversations
+                # into "Eu" wholesale.
                 is_self_referential = any(
-                    r.get("key", {}).get("fromMe")
-                    and r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
-                    and (cand_jid.endswith("@g.us") or self._phone_digits_equivalent(cand_digits, my_jid_digits))
+                    r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
+                    and (
+                        cand_jid.endswith("@g.us")
+                        or (r.get("key", {}).get("fromMe")
+                            and self._phone_digits_equivalent(cand_digits, my_jid_digits))
+                    )
                     for r in records
                     if r.get("key", {}).get("participant")
                 )
@@ -11276,6 +11306,20 @@ class MainWindow(wx.Frame):
                 )
                 if not (is_self_referential or is_self_phone_group):
                     continue
+                # Persist it, like Pass 1 and Pass 2 already do for their own
+                # re-keys. Without this the pass only ever filtered in memory:
+                # _do_save() writes the chats table through upsert_chat and
+                # never deletes, so the phantom's rows — the chat and every
+                # message stored under its JID — survived in messages.db and
+                # were filtered out again from scratch on every single launch.
+                # The user stopped seeing it, which is why this went unnoticed,
+                # but nothing ever removed it and its messages never moved to
+                # the self-chat they belong to.
+                if hasattr(self, "db") and self.db is not None:
+                    try:
+                        self.db.merge_or_rename_chat(cand_jid, my_jid)
+                    except Exception as db_err:
+                        logging.error(f"[deduplicate_chats] Failed to merge/rename {cand_jid} to {my_jid} in DB: {db_err}")
                 if my_jid in chats:
                     dst_records = (
                         chats[my_jid]
