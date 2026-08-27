@@ -214,3 +214,43 @@ class TestQuotedAudioPreview:
             "audioMessage": {"ptt": False},
         }
         assert panel._get_quoted_preview(quoted) == "Áudio"
+
+
+class TestMainWindowLastMsgPreview:
+    def test_last_msg_preview_voice_message(self):
+        from main import MainWindow
+        win = types.SimpleNamespace()
+        win.i18n = _FakeI18n("pt-BR")
+        win._counts_as_last_message = MainWindow._counts_as_last_message
+        win._resolve_contact_name = lambda *a, **k: ""
+        win._preview_sender_from_jid = lambda *a, **k: ""
+        msg = {
+            "key": {"fromMe": False},
+            "messageType": "audioMessage",
+            "message": {"audioMessage": {"seconds": 72, "ptt": True}},
+            "messageTimestamp": 1000,
+        }
+        chat = {
+            "messages": {"messages": {"records": [msg]}}
+        }
+        preview = MainWindow._last_msg_preview(win, chat)
+        assert "mensagem de voz 1:12" in preview
+
+    def test_last_msg_preview_generic_audio(self):
+        from main import MainWindow
+        win = types.SimpleNamespace()
+        win.i18n = _FakeI18n("pt-BR")
+        win._counts_as_last_message = MainWindow._counts_as_last_message
+        win._resolve_contact_name = lambda *a, **k: ""
+        win._preview_sender_from_jid = lambda *a, **k: ""
+        msg = {
+            "key": {"fromMe": False},
+            "messageType": "audioMessage",
+            "message": {"audioMessage": {"seconds": 72, "ptt": False}},
+            "messageTimestamp": 1000,
+        }
+        chat = {
+            "messages": {"messages": {"records": [msg]}}
+        }
+        preview = MainWindow._last_msg_preview(win, chat)
+        assert "áudio 1:12" in preview
