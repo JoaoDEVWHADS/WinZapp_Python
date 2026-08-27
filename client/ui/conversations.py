@@ -1905,6 +1905,8 @@ class ConversationsPanel(wx.Panel):
         if self._is_recording:
             self._send_voice_message(event)
         elif not self._recording_starting:
+            self._recording_start_timestamp = time.monotonic()
+            self._silence_send_voice_focus_if_enabled()
             self._start_voice_recording()
 
     # ── Text message sending ─────────────────────────────────────────────────
@@ -2414,7 +2416,7 @@ class ConversationsPanel(wx.Panel):
             return
         if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
             self.main_window.speak_output.silence()
-            for delay in (20, 50, 100, 200):
+            for delay in (10, 25, 50, 80, 120, 200, 350, 500):
                 wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _start_voice_recording(self):

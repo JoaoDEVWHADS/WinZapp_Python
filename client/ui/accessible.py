@@ -149,28 +149,26 @@ class _SilenceableVoiceButtonAccessible(wx.Accessible):
         if self._mw is None:
             return False
         settings = getattr(self._mw, "settings", {}) or {}
-        if not settings.get("accessibility", {}).get("extended_sr_compat_enabled", True):
-            return True
         if settings.get("speech_content", {}).get("silence_while_recording", False):
             return True
+        if not settings.get("accessibility", {}).get("extended_sr_compat_enabled", True):
+            # When extended compatibility is off, we only silence the initial startup
+            # window when recording begins so the button switch does not announce.
+            # Afterwards, navigating with Tab/Shift+Tab to the button will read its real name and role.
+            import time
+            conv_panel = getattr(self._mw, "conversations_panel", None)
+            if conv_panel is not None:
+                start_time = getattr(conv_panel, "_recording_start_timestamp", 0.0)
+                if (time.monotonic() - start_time) < 1.0:
+                    return True
+            status_panel = getattr(self._mw, "status_panel", None)
+            if status_panel is not None:
+                start_time = getattr(status_panel, "_recording_start_timestamp", 0.0)
+                if (time.monotonic() - start_time) < 1.0:
+                    return True
         return False
 
     def GetName(self, childId):
-        if self._is_silenced():
-            return (wx.ACC_OK, "")
-        return (wx.ACC_NOT_IMPLEMENTED, "")
-
-    def GetRole(self, childId):
-        if self._is_silenced():
-            return (wx.ACC_OK, 0)
-        return (wx.ACC_NOT_IMPLEMENTED, 0)
-
-    def GetDescription(self, childId):
-        if self._is_silenced():
-            return (wx.ACC_OK, "")
-        return (wx.ACC_NOT_IMPLEMENTED, "")
-
-    def GetHelpText(self, childId):
         if self._is_silenced():
             return (wx.ACC_OK, "")
         return (wx.ACC_NOT_IMPLEMENTED, "")
