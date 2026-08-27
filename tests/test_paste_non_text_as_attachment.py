@@ -37,25 +37,29 @@ def _set_clipboard_files(paths):
         data = wx.FileDataObject()
         for p in paths:
             data.AddFile(p)
-        wx.TheClipboard.SetData(data)
+        res = wx.TheClipboard.SetData(data)
+        wx.TheClipboard.Flush()
+        return res
     finally:
         wx.TheClipboard.Close()
-    return True
 
 
 def _set_clipboard_bitmap():
-    bmp = wx.Bitmap(4, 4)
-    dc = wx.MemoryDC(bmp)
+    bmp = wx.Bitmap(16, 16)
+    dc = wx.MemoryDC()
+    dc.SelectObject(bmp)
     dc.SetBackground(wx.Brush(wx.Colour(255, 0, 0)))
     dc.Clear()
     dc.SelectObject(wx.NullBitmap)
+    del dc
     if not wx.TheClipboard.Open():
         return False
     try:
-        wx.TheClipboard.SetData(wx.BitmapDataObject(bmp))
+        res = wx.TheClipboard.SetData(wx.BitmapDataObject(bmp))
+        wx.TheClipboard.Flush()
+        return res
     finally:
         wx.TheClipboard.Close()
-    return True
 
 
 def _set_clipboard_text(text):
