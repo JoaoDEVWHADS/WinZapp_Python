@@ -2098,9 +2098,21 @@ class MainWindow(wx.Frame):
         stays open (accounts run in the background, choice 1b)."""
         try:
             from account_launcher import switch_to_account
-            activated = switch_to_account(self.global_dir, account_id)
-            logging.info("[accounts] switch to %s -> %s", account_id,
-                         "activated existing process" if activated else "spawned new process")
+            result = switch_to_account(self.global_dir, account_id)
+            logging.info("[accounts] switch to %s -> %s", account_id, result)
+            if result == "failed":
+                # Before this, a spawn that raised or crashed immediately
+                # (missing DLL, corrupted install, blocked by antivirus)
+                # was indistinguishable from a normal spawn — the button
+                # just did nothing, with the switch never having actually
+                # happened and no indication why. Stay open and visible
+                # instead of hiding into a switch that never completed.
+                wx.MessageBox(
+                    self.i18n.t("account_switch_failed"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                return
             switch_behavior = "single"
             if getattr(self, "app_settings", None):
                 switch_behavior = self.app_settings.get("switch_behavior")
@@ -2186,7 +2198,21 @@ class MainWindow(wx.Frame):
             if result == account_ui.UnpairedStartDialog.RESULT_SWITCH and dlg.chosen_account_id:
                 logging.info("[accounts] unpaired start: switching to %s", dlg.chosen_account_id)
                 from account_launcher import switch_to_account
-                switch_to_account(self.global_dir, dlg.chosen_account_id)
+                switch_result = switch_to_account(self.global_dir, dlg.chosen_account_id)
+                if switch_result == "failed":
+                    # This path used to exit unconditionally right after —
+                    # a failed spawn (missing DLL, corrupted install,
+                    # blocked by antivirus) left the user with no WinZapp
+                    # process running at all, since this one was about to
+                    # quit into a switch that never actually happened.
+                    # Fall through to this account's own pairing flow
+                    # instead of exiting into nothing.
+                    wx.MessageBox(
+                        self.i18n.t("account_switch_failed"),
+                        self.i18n.t("error").format(app_name=self.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                    return False
                 wx.CallAfter(self.real_exit)
                 return True
             if result == account_ui.UnpairedStartDialog.RESULT_QUIT:
