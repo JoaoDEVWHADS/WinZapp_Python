@@ -24,7 +24,16 @@ import pytest
 
 _CLIENT = pathlib.Path(__file__).resolve().parents[1] / "client"
 _LANGUAGES = _CLIENT / "languages"
-_LOCALES = ("pt-BR", "pt-PT", "en-US", "es-ES", "pl")
+
+#: Read from language_map.json — the same source tests/test_language_files_in_sync.py
+#: uses — rather than hardcoded here. The set of locales is data, not code: a
+#: locale is added by dropping in `<code>.json` plus an entry in that map, with
+#: no rebuild. A list repeated in this file would leave a locale added that way
+#: checked against the other locales but never against the keys the code
+#: actually asks for, which is the one gap this test exists to close.
+_LOCALES = tuple(
+    sorted(json.loads((_LANGUAGES / "language_map.json").read_text(encoding="utf-8")))
+)
 
 #: `i18n.t("key")`, `self.i18n.t("key")`, `mw.i18n.t("key")` — the literal
 #: forms. Deliberately anchored on `i18n.t(` so unrelated `.t(` calls and
@@ -54,6 +63,16 @@ def _used_keys() -> dict[str, set[str]]:
 
 def _locale(code: str) -> dict:
     return json.loads((_LANGUAGES / f"{code}.json").read_text(encoding="utf-8"))
+
+
+def test_the_locale_list_comes_from_the_language_map():
+    """Guards the derivation the same way the next test guards the regex: an
+    empty or truncated language_map.json would leave every parametrized test
+    below with zero cases, and a suite that checks nothing still passes. (An
+    unreadable one raises at import instead — loud, and caught by pytest as a
+    collection error.)"""
+    assert _LOCALES, "no locales registered in language_map.json"
+    assert "pt-BR" in _LOCALES, "the locale the app defaults to is not registered"
 
 
 def test_the_scan_finds_a_reasonable_number_of_keys():

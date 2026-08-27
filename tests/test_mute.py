@@ -90,7 +90,10 @@ class TestMutePresets:
         import pathlib
 
         langs = pathlib.Path(__file__).resolve().parents[1] / "client" / "languages"
-        for locale in ("pt-BR", "pt-PT", "en-US", "es-ES"):
+        # From language_map.json rather than written out: pl was missing from
+        # the list this replaces, so it was never checked at all.
+        locales = json.loads((langs / "language_map.json").read_text(encoding="utf-8"))
+        for locale in sorted(locales):
             strings = json.loads((langs / f"{locale}.json").read_text(encoding="utf-8"))
             for key, _ in ConversationsPanel.MUTE_PRESETS:
                 assert strings.get(key), f"{locale} is missing {key}"

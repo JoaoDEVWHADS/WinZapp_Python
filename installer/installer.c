@@ -62,7 +62,54 @@ typedef struct {
     uint32_t cd_off;
     uint16_t comment_len;
 } ZipEOCD;
+
+/* ZIP64 variants of the EOCD, used whenever the classic 16/32-bit fields
+ * above can't hold the real value (more than 65535 entries, or a central
+ * directory 4GiB or larger) — routine once client/api/'s node_modules
+ * (WPPConnect + Puppeteer's bundled Chromium) is packed into the payload.
+ * When that happens the classic EOCD's cd_entries_total/cd_off/cd_size are
+ * written as the sentinel 0xFFFF/0xFFFFFFFF, and the real values live here
+ * instead — a reader that only understands the classic record used to take
+ * those sentinels (or whatever they wrapped around to) at face value and
+ * silently stop after however many files that implied, while still
+ * reporting a successful install. */
+#define ZIP64_EOCD_LOCATOR_SIG 0x07064b50UL
+#define ZIP64_EOCD_SIG         0x06064b50UL
+
+typedef struct {
+    uint32_t sig;
+    uint32_t eocd_disk;
+    uint64_t zip64_eocd_offset;   /* unused — the record is located by
+                                      scanning instead, see find_zip_info() */
+    uint32_t total_disks;
+} Zip64EocdLocator;
+
+typedef struct {
+    uint32_t sig;
+    uint64_t record_size;         /* size of the rest of this record, i.e.
+                                      excluding this field and sig */
+    uint16_t ver_made;
+    uint16_t ver_needed;
+    uint32_t disk_num;
+    uint32_t cd_disk;
+    uint64_t cd_entries_disk;
+    uint64_t cd_entries_total;
+    uint64_t cd_size;
+    uint64_t cd_off;
+} Zip64Eocd;
 #pragma pack(pop)
+
+/* What extract_all() actually needs, resolved from either the classic EOCD
+ * or its ZIP64 counterpart — the rest of the extraction code never has to
+ * know which one the payload actually used. */
+typedef struct {
+    uint64_t zip_start;      /* physical file offset where the ZIP's own
+                                 byte 0 lives (payload is appended after the
+                                 installer stub, so this is never 0) */
+    uint64_t cd_off;         /* zip-relative */
+    uint64_t cd_size;
+    uint64_t total_entries;
+} ZipInfo;
 
 /* ── Localised UI strings ─────────────────────────────────────────────────
    The installer language follows the Windows display language:
@@ -175,7 +222,7 @@ static BOOL read_at(HANDLE hf, uint64_t offset, void *buf, DWORD len)
     return ReadFile(hf, buf, len, &did, NULL) && did == len;
 }
 
-static BOOL find_zip_start(HANDLE hf, ZipEOCD *out_eocd, uint64_t *out_zip_start)
+static BOOL find_zip_info(HANDLE hf, ZipInfo *out)
 {
     LARGE_INTEGER fs_li;
     if (!GetFileSizeEx(hf, &fs_li)) return FALSE;
@@ -190,19 +237,72 @@ static BOOL find_zip_start(HANDLE hf, ZipEOCD *out_eocd, uint64_t *out_zip_start
 
     if (!read_at(hf, scan_start, buf, (DWORD)scan_size)) { free(buf); return FALSE; }
 
+    ZipEOCD eocd = {0};
+    int64_t eocd_i = -1;
     for (int64_t i = (int64_t)(scan_size - sizeof(ZipEOCD)); i >= 0; i--) {
         uint32_t sig;
         memcpy(&sig, buf + i, 4);
         if (sig == ZIP_EOCD_SIG) {
-            memcpy(out_eocd, buf + i, sizeof(ZipEOCD));
-            uint64_t eocd_abs = scan_start + (uint64_t)i;
-            *out_zip_start = eocd_abs - out_eocd->cd_size - out_eocd->cd_off;
-            free(buf);
-            return TRUE;
+            memcpy(&eocd, buf + i, sizeof(ZipEOCD));
+            eocd_i = i;
+            break;
+        }
+    }
+    if (eocd_i < 0) { free(buf); return FALSE; }
+    uint64_t eocd_abs = scan_start + (uint64_t)eocd_i;
+
+    BOOL needs_zip64 = (eocd.cd_entries_total == 0xFFFF) ||
+                        (eocd.cd_off == 0xFFFFFFFFUL) ||
+                        (eocd.cd_size == 0xFFFFFFFFUL);
+
+    if (!needs_zip64) {
+        free(buf);
+        out->zip_start     = eocd_abs - (uint64_t)eocd.cd_size - (uint64_t)eocd.cd_off;
+        out->cd_off        = eocd.cd_off;
+        out->cd_size       = eocd.cd_size;
+        out->total_entries = eocd.cd_entries_total;
+        return TRUE;
+    }
+
+    /* ZIP64 end of central directory locator: a fixed 20 bytes, always
+     * immediately before the classic EOCD record — a spec-mandated
+     * position, not something to search for. */
+    int64_t locator_i = eocd_i - (int64_t)sizeof(Zip64EocdLocator);
+    if (locator_i < 0) { free(buf); return FALSE; }
+    Zip64EocdLocator loc = {0};
+    memcpy(&loc, buf + locator_i, sizeof(loc));
+    if (loc.sig != ZIP64_EOCD_LOCATOR_SIG) { free(buf); return FALSE; }
+
+    /* The ZIP64 end of central directory record itself precedes the
+     * locator. Its declared size can vary (an optional extensible data
+     * sector may follow the fixed fields read into Zip64Eocd), so its
+     * start is found by scanning for the signature rather than assuming
+     * every archive this installer is ever handed writes the fixed
+     * 56-byte minimum with none — which is what build.py's own call into
+     * Python's zipfile module happens to do, but nothing here should rely
+     * on that holding forever. */
+    int64_t z64_i = -1;
+    Zip64Eocd z64 = {0};
+    int64_t earliest = locator_i - (int64_t)sizeof(Zip64Eocd) - 65536;
+    if (earliest < 0) earliest = 0;
+    for (int64_t i = locator_i - (int64_t)sizeof(Zip64Eocd); i >= earliest; i--) {
+        uint32_t sig;
+        memcpy(&sig, buf + i, 4);
+        if (sig == ZIP64_EOCD_SIG) {
+            memcpy(&z64, buf + i, sizeof(z64));
+            z64_i = i;
+            break;
         }
     }
     free(buf);
-    return FALSE;
+    if (z64_i < 0) return FALSE;
+
+    uint64_t z64_abs = scan_start + (uint64_t)z64_i;
+    out->zip_start     = z64_abs - z64.cd_size - z64.cd_off;
+    out->cd_off        = z64.cd_off;
+    out->cd_size       = z64.cd_size;
+    out->total_entries = z64.cd_entries_total;
+    return TRUE;
 }
 
 /* Long-path buffer size. Node's node_modules/ trees routinely nest deep
@@ -249,6 +349,31 @@ static void ensure_dirs(const wchar_t *path)
     }
 }
 
+/* Reject a ZIP entry name that could resolve outside dest_dir once joined to
+ * it — an absolute path (drive letter, UNC, or a leading separator) or a
+ * ".." segment walking back out. Mirrors updater.py's _safe_extract_zip(),
+ * which already guards the same thing on the self-update path; this side
+ * never had the equivalent check. Defence in depth: build.py (the only
+ * source this installer is ever handed) is trusted, but there is no reason
+ * for the extractor itself to trust every byte of a payload wholesale.
+ * Called after separator normalisation, so only backslash needs checking. */
+static BOOL is_path_within_dest(const wchar_t *name)
+{
+    if (name[0] == L'\0') return FALSE;
+    if (name[0] == L'\\') return FALSE;
+    if (((name[0] >= L'A' && name[0] <= L'Z') || (name[0] >= L'a' && name[0] <= L'z'))
+        && name[1] == L':') return FALSE;
+
+    for (const wchar_t *p = name; *p; p++) {
+        if (p[0] == L'.' && p[1] == L'.' &&
+            (p == name || p[-1] == L'\\') &&
+            (p[2] == L'\0' || p[2] == L'\\')) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 /* ── Extract all files from ZIP payload ───────────────────────────────── */
 
 static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
@@ -261,14 +386,18 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
                             NULL, OPEN_EXISTING, 0, NULL);
     if (hf == INVALID_HANDLE_VALUE) return FALSE;
 
-    ZipEOCD eocd = {0};
-    uint64_t zip_start = 0;
-    if (!find_zip_start(hf, &eocd, &zip_start)) { CloseHandle(hf); return FALSE; }
+    ZipInfo info = {0};
+    if (!find_zip_info(hf, &info)) { CloseHandle(hf); return FALSE; }
 
-    int total = eocd.cd_entries_total;
-    uint64_t cd_pos = zip_start + eocd.cd_off;
+    /* Sanity cap, not a realistic limit: guards the malloc below against a
+     * corrupted/truncated EOCD rather than any build this project could
+     * ever actually produce. */
+    if (info.total_entries > 5000000) { CloseHandle(hf); return FALSE; }
+    int total = (int)info.total_entries;
+    uint64_t zip_start = info.zip_start;
+    uint64_t cd_pos = zip_start + info.cd_off;
 
-    wchar_t **files = (wchar_t **)malloc(total * sizeof(wchar_t *));
+    wchar_t **files = (wchar_t **)malloc((size_t)total * sizeof(wchar_t *));
     int file_count = 0;
     int failed_count = 0;
 
@@ -295,6 +424,8 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
         MultiByteToWideChar(CP_UTF8, 0, fname_utf8, -1, fname_w, 512);
         for (wchar_t *pw = fname_w; *pw; pw++)
             if (*pw == L'/') *pw = L'\\';
+
+        if (!is_path_within_dest(fname_w)) { failed_count++; continue; }
 
         wchar_t dest_path[WZ_MAX_PATH];
         swprintf(dest_path, WZ_MAX_PATH, L"%s\\%s", dest_dir, fname_w);
