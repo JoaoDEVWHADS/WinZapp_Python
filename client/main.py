@@ -49,7 +49,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -833,6 +833,99 @@ def history_gap_closed(fetched: list, local_records: list, hole_top_ts: int) -> 
     return bool(below & got)
 
 
+def participant_digits(jid) -> str:
+    """Bare digits of a participant/self JID, dropping both the @suffix and
+    any ":device" companion suffix ("5511999999999:60@s.whatsapp.net" ->
+    "5511999999999").
+
+    WPPConnect's group-participant ids routinely carry that device suffix, so
+    comparing a plain `split("@")[0]` against the current user's own JID never
+    matched and the "am I an admin here" check always answered False.
+    """
+    if not isinstance(jid, str):
+        return ""
+    return jid.rsplit("@", 1)[0].split(":")[0]
+
+
+def group_participant_admin_flag(participants, my_phone_digits, my_lid_digits,
+                                 digits_equivalent) -> "bool | None":
+    """Whether the current user is an admin of the group whose *participants*
+    list this is — None when the list simply doesn't say (empty, malformed,
+    or the user isn't in it at all).
+
+    `isSuperAdmin` is read alongside `admin`/`isAdmin` because WhatsApp Web
+    reports a group's own creator as `isAdmin=false, isSuperAdmin=true`:
+    reading `isAdmin` alone locked the creator out of their own announcement
+    group, which is the fail-*closed* direction. Upstream WPPConnect's own
+    getGroupInfo (groupController.ts) ORs the same three fields for exactly
+    this reason — it does not trust raw `isAdmin` either.
+
+    *digits_equivalent* is passed in rather than imported so this stays a
+    pure function (MainWindow._phone_digits_equivalent is what callers hand
+    it) — same shape as ui/dialogs/conversation_data_dialog.py's
+    _participant_is_me().
+    """
+    if not isinstance(participants, list) or not participants:
+        return None
+    for p in participants:
+        if not isinstance(p, dict):
+            continue
+        p_id = p.get("id") or ""
+        if isinstance(p_id, dict):
+            p_id = p_id.get("_serialized", "")
+        p_digits = participant_digits(p_id)
+        if not p_digits:
+            continue
+        is_me = (
+            (my_phone_digits and digits_equivalent(p_digits, my_phone_digits))
+            # @lid digits are an opaque device identifier, not a phone number,
+            # so no 8/9-digit tolerance applies to them.
+            or (my_lid_digits and p_digits == my_lid_digits)
+        )
+        if is_me:
+            return bool(p.get("admin") or p.get("isAdmin") or p.get("isSuperAdmin"))
+    return None
+
+
+def group_send_permission_from_metadata(chat, my_phone_digits, my_lid_digits,
+                                        digits_equivalent, known_am_admin=None):
+    """The "only admins can send" verdict for one group chat dict, as
+    ``{"announce": bool, "am_admin": bool}`` — or None when this snapshot
+    cannot decide it and the caller must fall back to the persisted verdict
+    (or fail open).
+
+    Two separate facts are needed and they do not always arrive together:
+    list-chats is called with `ignoreGroupMetadata`, so a group can serialise
+    with `announce` and no participants at all, and a live announce
+    notification carries neither. *known_am_admin* is the admin answer a
+    previous snapshot did give (the persisted verdict), used only when this
+    one doesn't — without it, a chat list that reports `announce: true` with
+    no participants would throw away the perfectly good admin answer stored
+    from the last full snapshot.
+
+    Returning None rather than guessing matters: `announce` on with an
+    unknown admin status is genuinely undecidable, and writing a guess into
+    the persisted verdict would make it authoritative on the next launch.
+    """
+    group_meta = chat.get("groupMetadata")
+    if not isinstance(group_meta, dict):
+        group_meta = {}
+    announce = _parse_bool_flag(group_meta.get("announce"))
+    if announce is None:
+        announce = _parse_bool_flag(chat.get("announce"))
+    if announce is None:
+        return None
+    participants = group_meta.get("participants") or chat.get("participants") or []
+    am_admin = group_participant_admin_flag(
+        participants, my_phone_digits, my_lid_digits, digits_equivalent
+    )
+    if am_admin is None:
+        am_admin = known_am_admin
+    if announce and am_admin is None:
+        return None
+    return {"announce": announce, "am_admin": bool(am_admin)}
+
+
 class MainWindow(wx.Frame):
     def __init__(self, account_id=None, account_name=None, startup_source="user",
                  resume_pending=False, registry=None, global_dir=None):
@@ -1317,6 +1410,12 @@ class MainWindow(wx.Frame):
                     except Exception:
                         logging.exception("[accounts] pending→paired transition failed")
 
+        # False until retrieve_token() has run its once-per-launch tail (the
+        # STARTUP audit line + the abandoned-session cleanup). Set here, on the
+        # main thread, strictly before the only other caller's thread is
+        # started — see retrieve_token() for why a plain bool is enough.
+        self._startup_token_tail_done = False
+
         logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
         if not self.token:
@@ -1372,67 +1471,6 @@ class MainWindow(wx.Frame):
         self._pending_lid_inserts: dict = {}
         # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
-        # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
-        def _connect_bg():
-            # Ensure session is active on WPPConnect Server before connecting WebSocket
-            self.check_wa_connection_http()
-            if reuse_existing_ws:
-                # self.ws is already the live connection from pairing —
-                # connect_websocket() itself unconditionally disconnects
-                # before reconnecting, which is exactly the premature
-                # disconnect this whole path exists to avoid (see the
-                # "Initialize websocket" comment above). Nothing else to do.
-                logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
-                return
-            try:
-                ws_connected = False
-                for _attempt in range(5):
-                    try:
-                        logging.info("MainWindow: Connecting WebSocket... attempt %d", _attempt + 1)
-                        self.connect_websocket()
-                        ws_connected = True
-                        break
-                    except Exception as _e:
-                        logging.warning("MainWindow: WebSocket connect attempt %d failed: %s", _attempt + 1, _e)
-                        time.sleep(2)
-                if not ws_connected:
-                    logging.warning("MainWindow: WebSocket could not connect during startup; background HTTP probe will auto-connect when ready.")
-                    raise RuntimeError("WebSocket could not connect after 5 attempts")
-            except Exception as e:
-                logging.exception("MainWindow: Exception during websocket connection")
-                self.error_sound.play()
-                error_str = str(e)
-                # If the instance does not exist on the server (e.g. database recreated/wiped),
-                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
-                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
-                    def _gui_logout():
-                        wx.MessageBox(
-                            self.i18n.t("device_logged_out"),
-                            self.i18n.t("error").format(self.app_name),
-                            wx.OK | wx.ICON_ERROR,
-                        )
-                        self._on_disconnect()
-                    wx.CallAfter(_gui_logout)
-                else:
-                    def _gui_failed():
-                        wx.MessageBox(
-                            self.i18n.t("websocket_failed_reconnect"),
-                            self.i18n.t("connection_error"),
-                            wx.OK | wx.ICON_WARNING,
-                        )
-                        self.connect.show_connection_dial()
-                    wx.CallAfter(_gui_failed)
-                self._just_paired = True
-                # Multi-account: re-pairing after a logout also promotes the
-                # account back to paired if it had fallen to pending (Zad 3.2).
-                if getattr(self, "account_id", None) and getattr(self, "registry", None):
-                    try:
-                        acc = self.registry.get(self.account_id)
-                        if acc and acc.get("state") == "pending":
-                            self.registry.set_state(self.account_id, "paired")
-                    except Exception:
-                        logging.exception("[accounts] re-pair pending→paired failed")
 
         logging.info("MainWindow: Initializing User Interface immediately...")
 
@@ -1458,6 +1496,12 @@ class MainWindow(wx.Frame):
                         logging.info("[post_ui_init] STEP 1b — pairing completed via dialog.")
                         self._just_paired = True
 
+                # STEP 1b above may have re-paired into a brand-new session, so
+                # the token has to be re-read here. __init__ already called
+                # retrieve_token() once; its once-per-launch tail (STARTUP audit
+                # line + abandoned-session cleanup) is skipped on this second
+                # call — see the guard in retrieve_token() for the doubled
+                # STARTUP evidence behind it.
                 logging.info("[post_ui_init] STEP 2 — retrieving token...")
                 self.retrieve_token()
                 logging.info("[post_ui_init] STEP 2 — token retrieved: %s", bool(self.token))
@@ -1493,6 +1537,12 @@ class MainWindow(wx.Frame):
                 logging.info("[post_ui_init] STEP 5 — check_wa_connection_http() done.")
 
                 if reuse_existing_ws:
+                    # self.ws is already the live connection from pairing —
+                    # connect_websocket() itself unconditionally disconnects
+                    # before reconnecting, which is exactly the premature
+                    # disconnect this whole path exists to avoid (see the
+                    # "Initialize websocket" comment in __init__). Nothing
+                    # else to do.
                     logging.info("[post_ui_init] STEP 6 — Skipping WebSocket reconnect — already connected from pairing.")
                     return
 
@@ -3509,6 +3559,37 @@ class MainWindow(wx.Frame):
             return
 
         self._wa_offline_strikes += 1
+
+        # A WPPConnect update is not an outage. _update_wpp_server() stops the
+        # server on purpose, so the socket drops and every probe fails until the
+        # reinstall finishes and it comes back — perhaps two or three minutes.
+        # Announcing "desconectado do WhatsApp" through that window is simply
+        # wrong, and it frightens people: two field reports describe the update
+        # as leaving the app "flipping between offline and normal", which is the
+        # message, not the mechanism. Show "conectando" instead, which is what is
+        # actually happening and a state users already understand.
+        #
+        # Guarded here rather than at the callers because there are two of them
+        # and only one was covered: the health checker already consulted
+        # _wpp_updating, but WebSocketClient's confirmed-socket-drop path did
+        # not, and that is the one that fired — observed at 17:48:26 during a
+        # real 2.10.6 -> 2.10.10 update, seconds after the server was stopped
+        # deliberately. One guard at the single place that decides the message
+        # cannot be half-applied like that again.
+        #
+        # Deliberately no sound, no speech and no _apply_offline_state(): this
+        # returns before all of it, exactly as the startup-grace branch below
+        # does. Nothing is being hidden — the update has its own progress
+        # dialog, and a genuine outage that outlives the update is caught by the
+        # next health check once the flag clears in _update_wpp_server's finally.
+        if getattr(self, "_wpp_updating", False):
+            logging.info(
+                "[connection] WPPConnect update in progress (%s) — showing "
+                "'connecting' instead of 'offline'.", reason or "checked",
+            )
+            wx.CallAfter(self._set_status, self.i18n.t("tray_connecting"))
+            return
+
         if not confirmed:
             never_connected_yet = not self._wa_connect_announced
             # Bounded by elapsed time alone, deliberately. This used to also
@@ -5034,6 +5115,10 @@ class MainWindow(wx.Frame):
         # does not — see _apply_group_subject_change).
         self._apply_group_subject_change(remote_jid, chat, msg, live=True)
         self._refresh_mention_cache_on_membership_change(remote_jid, msg)
+        # Live only: a settings change from the history backfill is by
+        # definition superseded by the current list-chats snapshot, and
+        # replaying it would flip the composer over a months-old event.
+        self._apply_group_settings_change(remote_jid, chat, msg)
 
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
@@ -5456,6 +5541,26 @@ class MainWindow(wx.Frame):
             if ppm.get(target) != push:
                 ppm[target] = push
                 changed = True
+        if changed:
+            # A pushName is a real name, so the "no name resolvable" verdict
+            # recorded for this sender was simply wrong — lift it in memory and
+            # on disk. Nothing removed a _unresolvable_names entry before, not
+            # even in memory, so a participant blacklisted once was never asked
+            # about again on this or any later launch and stayed "Contato sem
+            # nome" for good. The DB call blocks this thread (this runs per
+            # message on the Socket.IO thread), which is only acceptable
+            # because it can only fire for a JID still in the set, and the
+            # discard just above takes it out.
+            unresolvable = getattr(self, "_unresolvable_names", None)
+            for target in targets:
+                if not unresolvable or target not in unresolvable:
+                    continue
+                unresolvable.discard(target)
+                try:
+                    self.db.delete_unresolvable_name(target)
+                except Exception as exc:
+                    logging.warning("[_learn_sender_name] Failed to clear unresolvable name %s: %s",
+                                    target, exc)
         return changed
 
     def _needs_sender_resolution(self, jid: str) -> bool:
@@ -8319,6 +8424,39 @@ class MainWindow(wx.Frame):
                 store.ensure_from_legacy_token(self.token.split(":")[0], self.token)
         except Exception:
             logging.exception("[sessions] seeding session store failed (non-fatal)")
+        # ── once-per-launch tail ────────────────────────────────────────────
+        # Everything below this point must run EXACTLY ONCE per launch, and it
+        # did not: retrieve_token() has two unguarded call sites — MainWindow.
+        # __init__ (main thread; it must run there because self.token is passed
+        # straight into WebSocketClient() and prepare_sync() a few lines later)
+        # and _post_ui_init() STEP 2 (worker thread; it re-reads the token
+        # because its own STEP 1b can re-show the pairing dialog and pair into a
+        # NEW session). Evidence that both fire on every ordinary launch: one
+        # machine's shutdown_audit.log held 50 STARTUP lines across 25 launches
+        # — always exactly two per launch, 0-1 s apart, on every build over a
+        # week. The doubled audit line was only the visible half. The real
+        # hazard was _cleanup_abandoned_sessions() below, which unconditionally
+        # spawns a 'session-cleanup' daemon thread: two of them ran
+        # concurrently, both issuing logout POSTs and shutil.rmtree'ing Chrome
+        # profile dirs under api/userDataDir/ — the code path that has
+        # historically deleted the wrong profile. They serialize on
+        # sessions_lock(gd) with a protected set rebuilt fresh under it, so it
+        # is believed safe today, but that safety is incidental, not designed.
+        #
+        # The guard sits here rather than at the second call site because the
+        # token read/refresh above genuinely has to run twice — after a STEP 1b
+        # re-pair, self.token must reflect the session that was just paired.
+        # Do NOT "simplify" this by deleting either call.
+        #
+        # A plain bool needs no lock: the flag is set in __init__ on the main
+        # thread, and the only other caller is the _post_ui_init thread, which
+        # init_UI() starts long afterwards — the thread start is the barrier.
+        if self._startup_token_tail_done:
+            logging.info("[retrieve_token] Token refreshed; startup audit and "
+                         "session cleanup already done this launch — skipping.")
+            return
+        self._startup_token_tail_done = True
+
         # Persistent audit: which session are we starting with, and what does the
         # store think of it + every sibling. If a working session silently turned
         # 'abandoned' and a fresh (unpaired) one took over between quit and this
@@ -8646,6 +8784,21 @@ class MainWindow(wx.Frame):
         self._locally_read_at = {
             k: int(v or 0)
             for k, v in dict(self.db.get_metadata_json("locally_read_at", {})).items()
+        }
+
+        # 9. group_send_perms — {group jid: {"announce", "am_admin", "t"}}, the
+        # "only admins can send messages" verdict get_remote_chats() derives
+        # whenever a list-chats snapshot carries groupMetadata. The chats
+        # table stores no group metadata at all, so the groups get_chats()
+        # rehydrates a few lines below arrive with none of it and
+        # _is_group_send_restricted() had nothing to read: an announcement
+        # group presented a writable message field to a member who cannot
+        # post in it for the whole of startup — and permanently offline, or
+        # whenever the sync keeps failing.
+        self._group_send_perms = {
+            k: v
+            for k, v in dict(self.db.get_metadata_json("group_send_perms", {})).items()
+            if isinstance(v, dict)
         }
 
         if settings_dirty:
@@ -10578,6 +10731,87 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
         # _initial_sync_running is reset by start_sync()'s finally block.
 
+    def _probe_chats_and_start_sync(self) -> bool:
+        """One list-chats probe for wait_messages_set()'s fallback poll.
+
+        Returns True when that poll has nothing left to do — either a sync is
+        now running (or already was), or the API answered "Disconnected", which
+        no amount of further probing can change.  False means "ask again in
+        5 s": a timeout or a connection error is a server still warming up, not
+        a dead session, and must keep the poll going exactly as before.
+
+        Lives here as a method rather than inside wait_messages_set()'s
+        _fallback() closure so that split can be tested without a wx.App
+        (tests/test_wait_messages_set_probe.py).
+        """
+        def _already_syncing() -> bool:
+            if self.messages_set_completed:
+                return True
+            existing = getattr(self, "sync_thread", None)
+            if existing and existing.is_alive():
+                return True
+            return getattr(self, "_sync_completed", False)
+
+        if _already_syncing():
+            # Sync is already running or completed — clear "preparing" status
+            # if it was left visible because the sync finished before this
+            # fallback thread checked in.
+            if getattr(self, "_sync_completed", False):
+                wx.CallAfter(self._set_status, "")
+            return True
+        try:
+            url = (
+                f"{self.wpp_server}:{self.wpp_port}"
+                f"/api/{self.token}/list-chats"
+            )
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            }
+            # Same reason as in get_remote_chats(): without this flag the
+            # probe kicks off WPP.chat.list()'s serial per-group metadata
+            # fetch inside the page.  Our 5 s timeout doesn't cancel it,
+            # so a probe that "failed" still leaves that loop running and
+            # competing with the real chat-list fetch that follows.
+            r = api_post(
+                url,
+                json={"ignoreGroupMetadata": True},
+                headers=headers,
+                timeout=5,
+            )
+            if r.ok and isinstance(r.json(), list):
+                self.messages_set_completed = True
+                self._try_start_sync_thread()
+                return True
+            # HTTP 404 {"status": "Disconnected"} is statusConnection.ts
+            # answering for a session with no live WhatsApp client — the same
+            # signal get_remote_chats() and _run_sync() already bail out on at
+            # first sight.  This probe was the only list-chats consumer that
+            # didn't: a real user's log shows all 13 probes taking that 404,
+            # 5 s apart, and the poll then force-starting a full sync against
+            # the very session that had just refused thirteen times.  Stop
+            # here instead — _check_wa_connection_closed() has already flagged
+            # the connection down and scheduled check_wa_connection_http(), so
+            # recovery is covered without this thread: session-logged sets
+            # messages_set_completed and starts the sync when WhatsApp comes
+            # back, and failing that the health checker
+            # (_HEALTH_CHECK_INTERVAL, 30 s) calls trigger_sync_if_needed()
+            # for the rest of the session, which needs only _wa_connected and
+            # an incomplete sync.  Deliberately neither force-starting nor
+            # setting messages_set_completed: both assert that WhatsApp Web's
+            # chat store is loaded, which is exactly what this 404 disproves.
+            if self._check_wa_connection_closed(r):
+                logging.warning(
+                    "[wait_messages_set] list-chats answered Disconnected (HTTP %s) — "
+                    "ending the probe instead of syncing against a dead session; "
+                    "the health checker retries once WhatsApp is reachable.",
+                    r.status_code,
+                )
+                return True
+        except Exception:
+            pass
+        return False
+
     def wait_messages_set(self):
         # _set_wa_connected() is what sets "preparing_to_sync" now, exactly
         # when the connected sound plays — not here. This function runs
@@ -10591,63 +10825,21 @@ class MainWindow(wx.Frame):
         # responds.  If the API never responds within the window, start sync
         # unconditionally so the program never stays stuck on "preparing to sync".
         def _fallback():
-            def _already_syncing() -> bool:
-                if self.messages_set_completed:
-                    return True
-                existing = getattr(self, "sync_thread", None)
-                if existing and existing.is_alive():
-                    return True
-                return getattr(self, "_sync_completed", False)
-
-            def _probe_and_start() -> bool:
-                """Probe the API for existing chats; start sync and return True if found."""
-                if _already_syncing():
-                    # Sync is already running or completed — clear "preparing" status
-                    # if it was left visible because the sync finished before this
-                    # fallback thread checked in.
-                    if getattr(self, "_sync_completed", False):
-                        wx.CallAfter(self._set_status, "")
-                    return True
-                try:
-                    url = (
-                        f"{self.wpp_server}:{self.wpp_port}"
-                        f"/api/{self.token}/list-chats"
-                    )
-                    headers = {
-                        "Authorization": f"Bearer {self.token}",
-                        "Content-Type": "application/json",
-                    }
-                    # Same reason as in get_remote_chats(): without this flag the
-                    # probe kicks off WPP.chat.list()'s serial per-group metadata
-                    # fetch inside the page.  Our 5 s timeout doesn't cancel it,
-                    # so a probe that "failed" still leaves that loop running and
-                    # competing with the real chat-list fetch that follows.
-                    r = api_post(
-                        url,
-                        json={"ignoreGroupMetadata": True},
-                        headers=headers,
-                        timeout=5,
-                    )
-                    if r.ok and isinstance(r.json(), list):
-                        self.messages_set_completed = True
-                        self._try_start_sync_thread()
-                        return True
-                except Exception:
-                    pass
-                return False
-
             # Probe immediately — when the server is already connected (no
             # session-logged event fires), this avoids an unnecessary 5-second wait.
-            if _probe_and_start():
+            if self._probe_chats_and_start_sync():
                 return
 
             for _ in range(12):   # 12 × 5 s = 60 s maximum
                 time.sleep(5)
-                if _probe_and_start():
+                if self._probe_chats_and_start_sync():
                     return
 
             # 60 s elapsed and sync still hasn't started — start it unconditionally
             # so the program never stays stuck on "preparando para sincronizar".
+            # Only silence reaches here: a probe that got a definite
+            # "Disconnected" answer ended the poll above, precisely so this
+            # force-start never fires against a session known to be dead.
             self.messages_set_completed = True
             self._try_start_sync_thread()
         threading.Thread(target=_fallback, daemon=True).start()
@@ -11489,6 +11681,79 @@ class MainWindow(wx.Frame):
                 if archive_changed and hasattr(self, "db") and self.db is not None:
                     self.db.set_metadata_json("archived_chats", list(self._archived_chats))
 
+                # ── Group send permissions ("only admins can send") ──────────
+                # This is the only place the announce flag ever reaches Python:
+                # it rides on groupMetadata here and is stored nowhere else, so
+                # without recording the verdict the composer had no idea a
+                # group was restricted until the first successful list-chats
+                # merge of the session landed.
+                #
+                # The counters are a diagnostic, not bookkeeping: list-chats is
+                # called with `ignoreGroupMetadata` and WhatsApp Web hydrates
+                # group metadata lazily anyway, so it is genuinely unknown how
+                # often `groupMetadata`/`announce` arrive at all. Shape and
+                # counts only — never a JID, name or message — since this
+                # lands in a log file users attach to bug reports.
+                perms_changed = False
+                groups_total = groups_with_metadata = 0
+                groups_with_announce = groups_with_verdict = 0
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    jid = self._normalize_jid(chat.get("remoteJid", ""))
+                    if not jid.endswith("@g.us"):
+                        continue
+                    groups_total += 1
+                    group_meta = chat.get("groupMetadata")
+                    if isinstance(group_meta, dict) and group_meta:
+                        groups_with_metadata += 1
+                    else:
+                        group_meta = {}
+                    if (_parse_bool_flag(group_meta.get("announce")) is not None
+                            or _parse_bool_flag(chat.get("announce")) is not None):
+                        groups_with_announce += 1
+                    else:
+                        continue
+                    # Compared verdict-to-verdict rather than by re-running
+                    # _is_group_send_restricted() before and after: the merge
+                    # loop above has already copied this snapshot's
+                    # groupMetadata into chats[jid], so a "before" reading
+                    # taken here would already see the new value and the
+                    # change would never be detected.
+                    previous = dict(getattr(self, "_group_send_perms", {}).get(jid) or {})
+                    current = self._record_group_send_perms(jid, chat)
+                    if current is None:
+                        continue
+                    groups_with_verdict += 1
+                    if (previous.get("announce") == current["announce"]
+                            and previous.get("am_admin") == current["am_admin"]):
+                        continue
+                    perms_changed = True
+                    was_restricted = (bool(previous.get("announce"))
+                                      and not bool(previous.get("am_admin")))
+                    now_restricted = (bool(current.get("announce"))
+                                      and not bool(current.get("am_admin")))
+                    # The verdict moved. _apply_composer_permissions() only
+                    # ever runs when a conversation is opened, and opening the
+                    # one already on screen early-returns — so a group switched
+                    # to announcement-only while the user sat in it kept a
+                    # writable message field until they went elsewhere and came
+                    # back. The very first verdict for a group counts as a move
+                    # too: until it lands the composer is showing the fail-open
+                    # writable state.
+                    if now_restricted != was_restricted:
+                        cp = getattr(self, "conversations_panel", None)
+                        if cp is not None:
+                            wx.CallAfter(cp.refresh_composer_permissions, jid)
+                if perms_changed:
+                    self._persist_group_send_perms()
+                if groups_total:
+                    logging.info(
+                        "[get_remote_chats] group metadata shape: %d groups, %d with groupMetadata, "
+                        "%d stating announce, %d yielding a usable send-permission verdict",
+                        groups_total, groups_with_metadata, groups_with_announce, groups_with_verdict,
+                    )
+
                 # Retroactively prune 1:1 phantom chats that slipped into the
                 # local cache before this filter existed: no local messages,
                 # no server-reported activity, and not deliberately pinned or
@@ -11878,54 +12143,98 @@ class MainWindow(wx.Frame):
 
         Only ever reads group metadata local sync already has — this must
         stay synchronous and side-effect-free since it runs from
-        navigate_to_conversation() on the UI thread. If the data needed to
-        decide isn't available yet (participants not hydrated in local
-        metadata), this fails OPEN (returns False, message field stays
-        writable): WhatsApp Web itself is the actual source of truth and
-        would reject the send if this guess were wrong in that direction,
-        whereas guessing wrong the other way would silently lock a user out
-        of a group they can genuinely post in.
+        navigate_to_conversation() on the UI thread. If neither the live chat
+        dict nor the persisted verdict can decide, this fails OPEN (returns
+        False, message field stays writable): WhatsApp Web itself is the
+        actual source of truth and would reject the send if this guess were
+        wrong in that direction, whereas guessing wrong the other way would
+        silently lock a user out of a group they can genuinely post in.
+
+        The persisted verdict (`_group_send_perms`, filled by
+        get_remote_chats() and prepare_sync()) is what makes this work at
+        all before the first list-chats merge lands: the chats table stores
+        no group metadata whatsoever, so every group get_chats() rehydrates
+        arrives with none and this used to fail open for the whole of
+        startup — and permanently while offline or whenever the sync fails,
+        which is exactly when an announcement group showed a writable
+        message field to a member who cannot post in it.
         """
         jid = chat.get("remoteJid", "")
         if not jid.endswith("@g.us"):
             return False
-        group_meta = chat.get("groupMetadata")
-        if not isinstance(group_meta, dict):
-            group_meta = {}
-        announce = _parse_bool_flag(group_meta.get("announce"))
-        if announce is None:
-            announce = _parse_bool_flag(chat.get("announce"))
-        if not announce:
-            return False
+        stored = getattr(self, "_group_send_perms", {}).get(jid)
+        if not isinstance(stored, dict):
+            stored = {}
+        verdict = group_send_permission_from_metadata(
+            chat,
+            participant_digits(getattr(self, "my_jid", "")),
+            participant_digits(getattr(self, "my_lid", "")),
+            self._phone_digits_equivalent,
+            known_am_admin=stored.get("am_admin"),
+        )
+        if verdict is None:
+            verdict = stored
+        return bool(verdict.get("announce")) and not bool(verdict.get("am_admin"))
 
-        participants = group_meta.get("participants") or chat.get("participants") or []
-        if not isinstance(participants, list) or not participants:
-            return False  # can't verify admin status — fail open
+    def _record_group_send_perms(self, jid: str, chat: dict) -> "dict | None":
+        """Store the "only admins can send" verdict `chat`'s group metadata
+        gives for *jid*, and return it — or None when this chat dict could
+        not decide (see group_send_permission_from_metadata).
 
-        def _phone_part(j) -> str:
-            if not isinstance(j, str):
-                return ""
-            return j.rsplit("@", 1)[0].split(":")[0]
+        Callers keep their own copy of the previous verdict to tell whether
+        it moved; that is not returned here because "unchanged" still has to
+        answer "yes, this snapshot was decidable" for the diagnostic counter
+        in get_remote_chats().
 
-        my_phone_digits = _phone_part(getattr(self, "my_jid", ""))
-        my_lid_digits   = _phone_part(getattr(self, "my_lid", ""))
+        Kept as a verdict ({"announce", "am_admin", "t"}) rather than a copy
+        of groupMetadata on purpose: the chats table has no group-metadata
+        column and adding one would mean a schema migration to persist a
+        single boolean pair, while system_metadata (the same store
+        locally_read_at uses) already survives restarts.  "t" is when this
+        verdict last *changed* — re-observing the same answer rewrites
+        nothing, so the periodic 60 s list-chats refresh doesn't turn into a
+        DB write per group per minute.
+        """
+        if not hasattr(self, "_group_send_perms"):
+            self._group_send_perms = {}
+        previous = self._group_send_perms.get(jid)
+        if not isinstance(previous, dict):
+            previous = None
+        verdict = group_send_permission_from_metadata(
+            chat,
+            participant_digits(getattr(self, "my_jid", "")),
+            participant_digits(getattr(self, "my_lid", "")),
+            self._phone_digits_equivalent,
+            known_am_admin=(previous or {}).get("am_admin"),
+        )
+        if verdict is None:
+            return None
+        if (previous
+                and previous.get("announce") == verdict["announce"]
+                and previous.get("am_admin") == verdict["am_admin"]):
+            return previous
+        verdict["t"] = int(time.time())
+        self._group_send_perms[jid] = verdict
+        return verdict
 
-        for p in participants:
-            if not isinstance(p, dict):
-                continue
-            p_id = p.get("id") or ""
-            if isinstance(p_id, dict):
-                p_id = p_id.get("_serialized", "")
-            p_digits = _phone_part(p_id)
-            if not p_digits:
-                continue
-            is_me = (
-                (my_phone_digits and self._phone_digits_equivalent(p_digits, my_phone_digits))
-                or (my_lid_digits and p_digits == my_lid_digits)
+    def _persist_group_send_perms(self):
+        """Write the group send-permission verdicts to DB metadata.
+
+        Same reason locally_read_at is persisted rather than kept in memory:
+        this is the only copy that outlives the process, and the gap it
+        covers (a cold start with no successful list-chats yet) is precisely
+        a restart.
+        """
+        db = getattr(self, "db", None)
+        if db is None:
+            return
+        try:
+            db.set_metadata_json(
+                "group_send_perms", dict(getattr(self, "_group_send_perms", {}))
             )
-            if is_me:
-                return not bool(p.get("admin") or p.get("isAdmin"))
-        return False  # current user not found in participants — fail open
+        except Exception as exc:
+            logging.warning(
+                "[group_send_perms] failed to persist send permissions: %s", exc)
 
     def _fill_group_name(self, jid: str) -> str:
         """Fetch group info from API and cache the name.
@@ -12047,6 +12356,64 @@ class MainWindow(wx.Frame):
             args=(remote_jid,),
             daemon=True,
         ).start()
+
+    # Group-settings notification subtypes that change who may SEND
+    # (announce), as opposed to who may edit the group's info (restrict).
+    # Only the first group decides whether the composer is writable — the two
+    # sets mirror the branches _get_message_content() renders these under
+    # (ui/conversations.py), and conflating them would make the message field
+    # read-only over a change that has nothing to do with sending.
+    _GROUP_ANNOUNCE_NOTIF_SUBTYPES = frozenset({"announce", "announcement", "restrict_messages"})
+    _GROUP_RESTRICT_NOTIF_SUBTYPES = frozenset({"restrict", "locked", "settings"})
+
+    def _apply_group_settings_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
+        """Apply a live "only admins can send / edit" notification to local
+        state, instead of only rendering it as a line in the timeline.
+
+        Nothing but the timeline text reacted to this before: self.chats kept
+        whatever announce value the last list-chats snapshot carried, so a
+        group switched to announcement-only while the user had it open left
+        the message field writable — and re-selecting the chat did not help,
+        since navigate_to_conversation() early-returns for the conversation
+        already on screen. Writing the new value into the chat's own
+        groupMetadata keeps state and UI agreeing, and recording the verdict
+        carries it across the restart that has no group metadata at all.
+        """
+        if not remote_jid.endswith("@g.us"):
+            return
+        if msg.get("messageType") != "groupNotification":
+            return
+        notif = (msg.get("message") or {}).get("groupNotification") or {}
+        subtype = notif.get("subtype") or ""
+        is_announce = subtype in self._GROUP_ANNOUNCE_NOTIF_SUBTYPES
+        if not is_announce and subtype not in self._GROUP_RESTRICT_NOTIF_SUBTYPES:
+            return
+        value = group_setting_notif_value(notif)
+        if value is None:
+            # Never guess here. Assuming "on" makes the composer read-only off
+            # a notification that never said so (the fail-closed direction);
+            # assuming "off" re-opens the composer of a group an admin just
+            # restricted. Leaving the last known verdict alone is correct in
+            # both directions.
+            logging.info(
+                "[_apply_group_settings_change] %s notification stated no value "
+                "(keys: %s) — local state left untouched", subtype, sorted(notif.keys()))
+            return
+        group_meta = chat.get("groupMetadata")
+        if not isinstance(group_meta, dict):
+            group_meta = {}
+            chat["groupMetadata"] = group_meta
+        group_meta["announce" if is_announce else "restrict"] = value
+        if not is_announce:
+            return
+        # The notification carries no participants, so the admin half of the
+        # verdict comes from the last snapshot that did — see
+        # group_send_permission_from_metadata's known_am_admin.
+        if self._record_group_send_perms(remote_jid, chat) is not None:
+            self._persist_group_send_perms()
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None:
+            wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
 
     def _resolve_subject_change_async(self, jid: str, chat: dict, notif: dict) -> None:
         """Fetch the group's current subject after a rename notification that
@@ -12362,6 +12729,18 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[maintenance] VACUUM failed: %s", exc)
 
+    # How long a LID stays blacklisted before WinZapp is willing to ask about
+    # it again. The unresolvable_lids table only ever exists to stop a tight
+    # re-query loop after a resolution attempt came back empty (see
+    # resolve_lid_jids_via_api) — it is not a verdict. Nothing expired it
+    # before, so a contact recorded once as having no resolvable name kept
+    # reading as "Contato sem nome" on every future launch even after WhatsApp
+    # had learned the real name, and a screen reader announced that
+    # placeholder aloud every time they spoke in a group. A week means a
+    # genuinely unresolvable LID costs one query per week (during the sync's
+    # own throttled backfill batch), not one per render.
+    _UNRESOLVABLE_MAX_AGE_SECONDS = 7 * 24 * 3600
+
     def _load_local_lid_cache(self):
         try:
             # The DB read stays outside the lock — DatabaseBridge blocks this
@@ -12371,6 +12750,18 @@ class MainWindow(wx.Frame):
             with self._lid_mapping_lock:
                 self._lid_to_phone = mappings
                 self._phone_to_lid = {v: k for k, v in mappings.items()}
+            # Sweep before loading, so the in-memory sets below never carry an
+            # entry old enough to deserve another attempt. Isolated from the
+            # outer try: a failed sweep only means "no retries this launch",
+            # which must not cost us the mappings already read above.
+            try:
+                cutoff = int(time.time()) - self._UNRESOLVABLE_MAX_AGE_SECONDS
+                expired = self.db.delete_expired_unresolvable(cutoff)
+                if expired:
+                    logging.info("[LID Cache] %d expired unresolvable entr%s purged — they will be retried.",
+                                 expired, "y" if expired == 1 else "ies")
+            except Exception as exc:
+                logging.warning("[LID Cache] Failed to purge expired unresolvable entries: %s", exc)
             lids, names = self.db.get_unresolvable_lids()
             self._unresolvable_lids = lids
             self._unresolvable_names = names
@@ -19328,6 +19719,7 @@ class MainWindow(wx.Frame):
         # exactly what must not happen while the Socket.IO thread is waiting
         # for the lock.
         changed = False
+        was_unresolvable = False
         with self._lid_mapping_lock:
             if not hasattr(self, "_lid_to_phone"):
                 self._lid_to_phone = {}
@@ -19344,6 +19736,7 @@ class MainWindow(wx.Frame):
                 # If it was in the unresolvable set, remove it
                 if hasattr(self, "_unresolvable_lids") and lid_jid in self._unresolvable_lids:
                     self._unresolvable_lids.discard(lid_jid)
+                    was_unresolvable = True
 
                 # Update the contact name display mappings in contacts if possible
                 if phone_jid in self.contacts and self.contacts[phone_jid]:
@@ -19353,6 +19746,19 @@ class MainWindow(wx.Frame):
                         self.contacts[lid_jid]["remoteJid"] = lid_jid
 
         if changed:
+            if was_unresolvable:
+                # The discard above is in memory only, and the row it leaves
+                # behind outlives the session: _load_local_lid_cache() read it
+                # straight back on the next launch and the LID we had just
+                # bridged was blacklisted all over again. Deliberately outside
+                # `if save:` — the batch callers that pass save=False persist
+                # the mapping themselves right after, so the stale blacklist
+                # row has to go either way. Outside the lock too: self.db
+                # blocks this thread until the coroutine returns.
+                try:
+                    self.db.delete_unresolvable_lid(lid_jid)
+                except Exception as exc:
+                    logging.warning("[LID Mapping] Failed to clear unresolvable LID %s: %s", lid_jid, exc)
             if save:
                 # Save the mapping to SQLite incrementally
                 try:

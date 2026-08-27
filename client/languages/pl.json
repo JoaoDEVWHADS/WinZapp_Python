@@ -697,6 +697,7 @@
     "mention_all_label": "@wszyscy — Wspomnij o wszystkich",
     "channel_read_only": "Ten kanał jest tylko do odczytu",
     "group_admins_only": "Tylko &administratorzy mogą wysyłać wiadomości w tej grupie",
+    "group_send_restricted_now": "Teraz tylko administratorzy mogą wysyłać wiadomości w tej grupie. Pole wiadomości jest tylko do odczytu.",
     "interactive_reply": "odpowiedź interaktywna",
     "list_reply": "wybór z listy",
     "interactive_message": "wiadomość interaktywna",

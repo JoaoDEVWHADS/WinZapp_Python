@@ -864,6 +864,9 @@ class _EchoMainWindow(_MainWindow):
     def _refresh_mention_cache_on_membership_change(self, *args, **kwargs):
         pass
 
+    def _apply_group_settings_change(self, *args, **kwargs):
+        pass
+
     def _schedule_save(self, *args, **kwargs):
         pass
 

@@ -233,3 +233,6 @@ logs.zip
 logs/
 log.log
 shutdown_audit.log
+
+# Worktrees temporarios de agentes
+.claude/worktrees/

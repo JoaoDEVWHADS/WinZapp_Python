@@ -332,6 +332,15 @@ class DatabaseBridge:
     def add_unresolvable_name(self, jid: str) -> None:
         return self._call(self._db.add_unresolvable_name(jid))
 
+    def delete_unresolvable_lid(self, jid: str) -> None:
+        return self._call(self._db.delete_unresolvable_lid(jid))
+
+    def delete_unresolvable_name(self, jid: str) -> None:
+        return self._call(self._db.delete_unresolvable_name(jid))
+
+    def delete_expired_unresolvable(self, cutoff_ts: int) -> int:
+        return self._call(self._db.delete_expired_unresolvable(cutoff_ts))
+
     def upsert_status_update(self, participant: str, msg: dict) -> None:
         return self._call(
             self._db.upsert_status_update(participant, msg)

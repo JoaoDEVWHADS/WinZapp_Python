@@ -267,8 +267,21 @@ CLAUDE_DIR = ROOT / ".claude"
 CLAUDE_DOC_FLOOR = 5
 
 
+#: Agent worktrees are full clones of the repo living under .claude/worktrees/,
+#: created and destroyed by the harness while work is in flight. Their copies of
+#: these same docs are not a second thing to verify: they inflate the
+#: parametrized case count (54 extra cases with four worktrees open, enough to
+#: make "did my change add tests?" unanswerable), and a doc inside one is read
+#: relative to the real ROOT, so a worktree mid-edit can turn this red for a
+#: path that is perfectly fine.
+_EXCLUDED_DIRS = {"worktrees"}
+
+
 def _claude_docs():
-    return sorted(CLAUDE_DIR.rglob("*.md"))
+    return sorted(
+        p for p in CLAUDE_DIR.rglob("*.md")
+        if not _EXCLUDED_DIRS.intersection(p.relative_to(CLAUDE_DIR).parts)
+    )
 
 
 def test_the_claude_directory_docs_are_still_being_found():

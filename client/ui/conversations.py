@@ -1442,6 +1442,42 @@ class ConversationsPanel(wx.Panel):
             self._add_attachment_btn.Enable()
             self._emoji_btn.Enable()
 
+    def refresh_composer_permissions(self, jid: str):
+        """Re-apply the composer's writable/read-only state to the open
+        conversation, after its group permissions changed under it.
+
+        _apply_composer_permissions() has exactly one other call site —
+        navigate_to_conversation() — and that early-returns for the
+        conversation already on screen, so a group switched to
+        "only admins can send messages" while the user was sitting in it kept
+        a writable message field, and re-selecting the chat did not help
+        either. Called via wx.CallAfter from MainWindow's two funnels that
+        learn about the change (the list-chats merge and the live group
+        notification), so this runs on the UI thread. A no-op unless *jid* is
+        the open conversation — same shape as update_conversation_name().
+
+        The transition is spoken because it is the accessibility-critical
+        half of the bug: a message field that silently stops accepting text,
+        with no announcement, is exactly the failure that was reported.
+        """
+        if not self.conversation or self.conversation.get("remoteJid") != jid:
+            return
+
+        # The chat-list entry is the dict MainWindow just wrote the new
+        # groupMetadata into; self.conversation is usually the same object,
+        # but not guaranteed to be after a re-sync replaced the entry.
+        conversation = self.main_window.chats.get(jid) or self.conversation
+        was_editable = self.message_field.IsEditable()
+        self._apply_composer_permissions(jid, conversation)
+        self.message_label.SetLabel(
+            self._message_label_text(jid, conversation, self.conversation_name)
+        )
+        self.conversation_panel.Layout()
+        if was_editable and not self.message_field.IsEditable():
+            self.main_window.output(
+                self.main_window.i18n.t("group_send_restricted_now")
+            )
+
     def update_conversation_name(self, jid: str, new_name: str):
         """Apply a group rename to the conversation currently on screen.
 
