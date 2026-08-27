@@ -5610,7 +5610,10 @@ class MainWindow(wx.Frame):
                     return
                 if archived and not is_current_conv:
                     return
-                self.message_foreground_sound.play()
+                if is_current_conv:
+                    self.message_current_sound.play()
+                else:
+                    self.message_foreground_sound.play()
                 self.output(f"{title}: {body}")
                 return
 
