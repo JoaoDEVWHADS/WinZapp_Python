@@ -14,15 +14,23 @@
         "alpha_updates_enabled": false,
         "noise_reduction_enabled": false,
         "first_run": true,
+        "api_type_first_run_asked": false,
+        "hotkey_first_run_asked": false,
         "autostart": false,
         "show_tray_icon": true,
         "terms_alert_displayed": false,
         "quick_tip_shown": false,
+        "global_hotkey": null,
+        "switch_behavior": "single",
         "announce_sync_events": true,
         "search_normalization": "off"
     },
     "status": {
         "messages_set_completed": false
+    },
+    "status_panel": {
+        "liked_status_ids": [],
+        "viewed_status_ids": []
     },
     "calls": {
         "alerts_enabled": true,
@@ -44,6 +52,10 @@
         "auto_focus_next_audio": true,
         "selected_announcement_position": "end",
         "show_yesterday_label": true,
+        "show_link_previews": true,
+        "forwarded_prefix_enabled": false,
+        "conversation_video_media_viewer_dialog": true,
+        "status_media_viewer_dialog": true,
         "voice_message_mode": "audio"
     },
     "audio_playback": {
@@ -51,8 +63,8 @@
     },
     "audio_devices": {
         "output_device_name": "",
-        "input_device_name": "",
-        "effects_output_device_name": ""
+        "effects_output_device_name": "",
+        "input_device_name": ""
     },
     "accessibility": {
         "extended_sr_compat_enabled": true,
@@ -62,14 +74,21 @@
         "announce_typing": true,
         "announce_recording": true,
         "speak_active_conv_messages": true,
-        "speak_other_conv_messages": true
+        "speak_other_conv_messages": true,
+        "silence_while_recording": false
     },
     "active_sound_pack": "default",
+    "sound_events": {},
     "alert_tones": {
         "private": "default",
         "private_custom_path": "",
         "group": "default",
         "group_custom_path": ""
+    },
+    "conversation_sounds": {},
+    "cleared_chats": {},
+    "privateinfo": {
+        "paired": false
     },
     "storage": {
         "auto_download_media": true,
