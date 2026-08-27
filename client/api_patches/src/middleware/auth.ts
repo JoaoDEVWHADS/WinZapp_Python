@@ -14,12 +14,30 @@
  * limitations under the License.
  */
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import { NextFunction, Request, Response } from 'express';
 
 import { clientsArray } from '../util/sessionUtil';
 
 function formatSession(session: string) {
   return session.split(':')[0];
+}
+
+// Plain `===` on a secret leaks how many leading bytes matched through how
+// long the comparison takes — the same class of bug the bcrypt.compare()
+// call a few lines down already avoids. The multi-account API only listens
+// on 127.0.0.1, so the practical exposure here is low, but there is no
+// reason the two token-comparison paths in this file should behave
+// differently. crypto.timingSafeEqual() requires equal-length buffers, so a
+// length mismatch is checked (and short-circuited) before it — which does
+// leak length, but not equality of content, the same trade-off timing-safe
+// comparisons everywhere else make.
+function timingSafeEqualStr(a: unknown, b: unknown): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 const verifyToken = (req: Request, res: Response, next: NextFunction): any => {
@@ -43,7 +61,10 @@ const verifyToken = (req: Request, res: Response, next: NextFunction): any => {
       try {
         if (token && token !== '' && token.split(' ').length > 0) {
           const token_value = token.split(' ')[1];
-          if (token_value === secureToken || token === secureToken) {
+          if (
+            timingSafeEqualStr(token_value, secureToken) ||
+            timingSafeEqualStr(token, secureToken)
+          ) {
             req.session = formatSession(req.params.session);
             req.token = token_value || token;
             req.client = clientsArray[req.session];
@@ -55,7 +76,7 @@ const verifyToken = (req: Request, res: Response, next: NextFunction): any => {
             return res.status(401).json({
               message: 'Token is not present. Check your header and try again',
             });
-        } else if (token === secureToken) {
+        } else if (timingSafeEqualStr(token, secureToken)) {
           req.session = formatSession(req.params.session);
           req.token = token;
           req.client = clientsArray[req.session];
