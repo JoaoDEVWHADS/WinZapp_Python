@@ -234,3 +234,5 @@ client/lib/*.dll
 
 # Local debug & forensics scripts
 fast_forensics.sh
+fast_forensics.py
+
