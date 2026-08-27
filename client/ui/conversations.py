@@ -5765,15 +5765,10 @@ class ConversationsPanel(wx.Panel):
                 self._open_file_safely(url)
             return
 
-        if msg_type == "imageMessage":
-            self._open_conversation_media_viewer(index)
-            return
-        # videoMessage deliberately does NOT open the in-app viewer here,
-        # regardless of _use_conversation_video_media_viewer_dialog(): this
-        # is the "Abrir"/Open action, which the user reaches specifically to
-        # get the file into their own OS-default video player — Enter/click
-        # already covers "play it right here". Falls through to the generic
-        # open-externally flow below (same as documentMessage).
+        # "Abrir" / Open button (next to "Salvar como...") is specifically
+        # intended to open media/files in the operating system's default viewer/app
+        # (photos, videos, documents, etc.). In-app viewing/playback is reached
+        # via Enter/Space directly on the message list item.
 
         if msg_type == "documentMessage":
             filename = (msg_obj.get("documentMessage") or {}).get(
@@ -11902,19 +11897,69 @@ class ConversationsPanel(wx.Panel):
 
         Tolerates the @lid/phone duality in both directions: a live event may
         arrive under either form regardless of which one the open conversation
-        was loaded under.
+        was loaded under. Also tolerates Brazilian 9th-digit variations and
+        unnormalized JIDs.
         """
-        if self.conversation is None:
+        if self.conversation is None or not remote_jid:
             return False
         conv_jid = self.conversation.get("remoteJid", "")
+        if not conv_jid:
+            return False
         if conv_jid == remote_jid:
             return True
-        mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
-        mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
-        return bool(
-            (mapped_lid and mapped_lid == remote_jid)
-            or (mapped_phone and mapped_phone == remote_jid)
-        )
+
+        mw = getattr(self, "main_window", None)
+        norm_conv = mw._normalize_jid(conv_jid) if mw and hasattr(mw, "_normalize_jid") else conv_jid
+        norm_remote = mw._normalize_jid(remote_jid) if mw and hasattr(mw, "_normalize_jid") else remote_jid
+        if norm_conv == norm_remote:
+            return True
+
+        c_digits, _, c_dom = norm_conv.partition("@")
+        r_digits, _, r_dom = norm_remote.partition("@")
+        if (
+            mw
+            and hasattr(mw, "_phone_digits_equivalent")
+            and c_dom
+            and c_dom == r_dom
+            and c_dom in ("s.whatsapp.net", "c.us")
+            and mw._phone_digits_equivalent(c_digits, r_digits)
+        ):
+            return True
+
+        phone_to_lid = getattr(mw, "_phone_to_lid", {}) if mw else {}
+        lid_to_phone = getattr(mw, "_lid_to_phone", {}) if mw else {}
+
+        candidates = {
+            conv_jid,
+            norm_conv,
+            phone_to_lid.get(conv_jid, ""),
+            phone_to_lid.get(norm_conv, ""),
+            lid_to_phone.get(conv_jid, ""),
+            lid_to_phone.get(norm_conv, ""),
+        }
+        targets = {
+            remote_jid,
+            norm_remote,
+            phone_to_lid.get(remote_jid, ""),
+            phone_to_lid.get(norm_remote, ""),
+            lid_to_phone.get(remote_jid, ""),
+            lid_to_phone.get(norm_remote, ""),
+        }
+        candidates.discard("")
+        targets.discard("")
+        if candidates & targets:
+            return True
+
+        if mw and hasattr(mw, "_phone_digits_equivalent"):
+            for c in candidates:
+                for t in targets:
+                    cd, _, cdom = c.partition("@")
+                    td, _, tdom = t.partition("@")
+                    if cdom and cdom == tdom and cdom in ("s.whatsapp.net", "c.us"):
+                        if mw._phone_digits_equivalent(cd, td):
+                            return True
+
+        return False
 
     def on_incoming_message(self, remote_jid: str, msg: dict):
         """
