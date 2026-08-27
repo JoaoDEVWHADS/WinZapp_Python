@@ -758,7 +758,7 @@ class StatusPanel(wx.Panel):
         voice_btn_sizer.Add(self._voice_start_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording"))
-        self._voice_pause_btn.SetAccessible(AccessiblePauseResumeRecording())
+        self._voice_pause_btn.SetAccessible(AccessiblePauseResumeRecording(self.main_window))
         self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
         self._voice_pause_btn.Hide()
         voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
@@ -2455,8 +2455,24 @@ class StatusPanel(wx.Panel):
             self._voice_send_btn.Show()
             self.Layout()
             self._voice_send_btn.SetFocus()
+            self._silence_send_voice_focus_if_enabled()
 
         threading.Thread(target=_bg_open_stream, daemon=True).start()
+
+    def _silence_send_voice_focus_if_enabled(self):
+        is_silenced = (
+            not self.main_window.settings.get("accessibility", {}).get(
+                "extended_sr_compat_enabled", True
+            )
+            or self.main_window.settings.get("speech_content", {}).get(
+                "silence_while_recording", False
+            )
+        )
+        if not is_silenced:
+            return
+        if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
+            self.main_window.speak_output.silence()
+            wx.CallLater(60, self.main_window.speak_output.silence)
 
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:

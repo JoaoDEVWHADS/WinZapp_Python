@@ -124,9 +124,10 @@ class AccessibleEmojiButton(wx.Accessible):
 
 
 class _SilenceableVoiceButtonAccessible(wx.Accessible):
-    """Base for a voice-recording-panel button whose accessible *name* is
-    blanked out while Settings > Conteúdo Falado's "silence while
-    recording" toggle is on.
+    """Base for a voice-recording-panel button whose accessible *name* and
+    *shortcut* are blanked out while Settings > Conteúdo Falado's "silence while
+    recording" toggle is on OR Settings > Acessibilidade's "extended_sr_compat_enabled"
+    is off.
 
     The screen reader queries the newly-focused object's name synchronously
     while handling the focus WinEvent, so returning an empty name here stops
@@ -144,8 +145,18 @@ class _SilenceableVoiceButtonAccessible(wx.Accessible):
         super().__init__()
         self._mw = main_window
 
+    def _is_silenced(self):
+        if self._mw is None:
+            return False
+        settings = getattr(self._mw, "settings", {}) or {}
+        if not settings.get("accessibility", {}).get("extended_sr_compat_enabled", True):
+            return True
+        if settings.get("speech_content", {}).get("silence_while_recording", False):
+            return True
+        return False
+
     def GetName(self, childId):
-        if self._mw.settings.get("speech_content", {}).get("silence_while_recording", False):
+        if self._is_silenced():
             return (wx.ACC_OK, "")
         return (wx.ACC_NOT_IMPLEMENTED, "")
 
@@ -154,13 +165,20 @@ class AccessibleDiscardVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
 
     def GetKeyboardShortcut(self, childId):
+        if self._is_silenced():
+            return (wx.ACC_OK, "")
         return (wx.ACC_OK, "Ctrl+Shift+D")
 
 
-class AccessiblePauseResumeRecording(wx.Accessible):
+class AccessiblePauseResumeRecording(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+Shift+P as the keyboard shortcut for the Pause/Resume button."""
 
+    def __init__(self, main_window=None):
+        super().__init__(main_window)
+
     def GetKeyboardShortcut(self, childId):
+        if self._is_silenced():
+            return (wx.ACC_OK, "")
         return (wx.ACC_OK, "Ctrl+Shift+P")
 
 
@@ -168,6 +186,8 @@ class AccessibleSendVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
 
     def GetKeyboardShortcut(self, childId):
+        if self._is_silenced():
+            return (wx.ACC_OK, "")
         return (wx.ACC_OK, "Ctrl+R")
 
 

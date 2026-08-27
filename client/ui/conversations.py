@@ -2402,9 +2402,15 @@ class ConversationsPanel(wx.Panel):
         the announcement whichever way the screen reader schedules it —
         silence() is idempotent, so calling it twice is harmless.
         """
-        if not self.main_window.settings.get("speech_content", {}).get(
-            "silence_while_recording", False
-        ):
+        is_silenced = (
+            not self.main_window.settings.get("accessibility", {}).get(
+                "extended_sr_compat_enabled", True
+            )
+            or self.main_window.settings.get("speech_content", {}).get(
+                "silence_while_recording", False
+            )
+        )
+        if not is_silenced:
             return
         self.main_window.speak_output.silence()
         wx.CallLater(60, self.main_window.speak_output.silence)
@@ -2676,6 +2682,7 @@ class ConversationsPanel(wx.Panel):
             )
             if voice_focus == "discard":
                 self._discard_voice_btn.SetFocus()
+                self._silence_send_voice_focus_if_enabled()
             else:
                 self._send_voice_btn.SetFocus()
                 self._silence_send_voice_focus_if_enabled()
