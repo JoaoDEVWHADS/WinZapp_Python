@@ -34,10 +34,12 @@ def _set_clipboard_files(paths):
     if not wx.TheClipboard.Open():
         return False
     try:
+        wx.TheClipboard.Clear()
         data = wx.FileDataObject()
         for p in paths:
             data.AddFile(p)
         wx.TheClipboard.SetData(data)
+        wx.TheClipboard.Flush()
     finally:
         wx.TheClipboard.Close()
     return True
@@ -52,7 +54,9 @@ def _set_clipboard_bitmap():
     if not wx.TheClipboard.Open():
         return False
     try:
+        wx.TheClipboard.Clear()
         wx.TheClipboard.SetData(wx.BitmapDataObject(bmp))
+        wx.TheClipboard.Flush()
     finally:
         wx.TheClipboard.Close()
     return True
@@ -62,7 +66,9 @@ def _set_clipboard_text(text):
     if not wx.TheClipboard.Open():
         return False
     try:
+        wx.TheClipboard.Clear()
         wx.TheClipboard.SetData(wx.TextDataObject(text))
+        wx.TheClipboard.Flush()
     finally:
         wx.TheClipboard.Close()
     return True
