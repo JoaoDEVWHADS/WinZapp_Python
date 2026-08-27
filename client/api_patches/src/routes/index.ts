@@ -116,14 +116,31 @@ routes.post(
   verifyToken,
   SessionController.closeSession
 );
+// statusConnection on both presence routes: neither had it. Both controllers
+// call `req.client.<something>()` unconditionally, and req.client is undefined
+// whenever there is no live session — so without the middleware the call
+// throws a TypeError that the controller's blanket catch reports as an
+// HTTP 500. That is how a perfectly
+// ordinary "not paired yet" turned into a server error: WinZapp's presence
+// keep-alive fires every 20 s while the window has focus, so an unpaired or
+// dropped session produced an endless train of 500s that said nothing about
+// the actual cause. statusConnection answers the same 404 {status:
+// 'Disconnected'} the rest of the API uses.
+//
+// Safe for these two specifically: the middleware's contact-validation pass
+// reads req.body.phone, and neither route sends one, so contactToArray()
+// returns an empty list and the loop is a no-op. Only the connection probe
+// applies.
 routes.post(
   '/api/:session/subscribe-presence',
   verifyToken,
+  statusConnection,
   SessionController.subscribePresence
 );
 routes.post(
   '/api/:session/set-online-presence',
   verifyToken,
+  statusConnection,
   SessionController.setOnlinePresence
 );
 routes.post(

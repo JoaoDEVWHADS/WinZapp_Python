@@ -1418,6 +1418,22 @@ class WebSocketClient:
                 logging.warning(
                     "[WebSocketClient] pairing-code request failed: %s", detail
                 )
+            # CompanionHelloError comes from WhatsApp Web's own bundle, not
+            # from any code shipped here — its class name is the whole of what
+            # used to survive. The page-context stack names the module that
+            # threw, and `details` carries every other own property the error
+            # had (a refusal code, if there is one, can only be in there).
+            # Both go to log.log because there is nowhere else to read them.
+            stack = data.get("stack")
+            if stack:
+                logging.warning(
+                    "[WebSocketClient] pairing-code failure stack: %s", stack
+                )
+            details = data.get("details")
+            if details:
+                logging.warning(
+                    "[WebSocketClient] pairing-code failure details: %r", details
+                )
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_phone_code_error error")
 

@@ -36,11 +36,13 @@ History:
   before), and a separate `linkCodeInFlight` flag (not a timestamp) guards
   against overlapping concurrent calls — so a rejected attempt simply leaves
   `linkCodeIssuedAt` at its old value and the very next `auth_code_change`
-  tick retries, with no permanent stuck state either way. Upstream still has
-  no proper fix for this (it needs an explicit expiry/refresh signal from
-  wa-js that doesn't exist yet — see
-  https://github.com/wppconnect-team/wa-js/pull/3554), so this is a
-  WinZapp-local stopgap, not a port of an upstream patch.
+  tick retries, with no permanent stuck state either way. This was written as
+  a WinZapp-local stopgap because wa-js had no explicit expiry/refresh signal
+  at the time (https://github.com/wppconnect-team/wa-js/pull/3554). That PR
+  has since landed — see the loginByCode migration further down — so the
+  cooldown is now belt-and-braces over a library that dedupes properly. Kept
+  for now only because changing one thing at a time is what keeps a
+  regression attributable; retiring it is a reasonable follow-up.
 
 * v3 — a `catch` around the loginByCode() call. v2's try/finally had none, so
   a rejection escaped checkQrCode() (called fire-and-forget) as an unhandled
@@ -371,6 +373,8 @@ PATCHED_CHECK_QR_CODE = (
     "                    session: this.session,\n"
     "                    attempt: this.linkCodeFailures,\n"
     "                    retryInSeconds: retryInSeconds,\n"
+    "                    stack: String(error?.stack || ''),\n"
+    "                    details: error?.winzappDetails || {},\n"
     "                });\n"
     "            }\n"
     "            finally {\n"
@@ -431,18 +435,34 @@ ORIGINAL_LOGIN_BY_CODE = (
     "    }\n"
 )
 
-PATCHED_LOGIN_BY_CODE = (
+LEGACY_LOGIN_BY_CODE_RAW = (
     "    async loginByCode(phone) {\n"
     "        const outcome = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
     "            try {\n"
     "                return { code: JSON.parse(JSON.stringify(await WPP.conn.genLinkDeviceCodeForPhoneNumber(phone))) };\n"
     "            }\n"
     "            catch (error) {\n"
+    "                const details = {};\n"
+    "                try {\n"
+    "                    for (const key of Object.getOwnPropertyNames(Object(error))) {\n"
+    "                        if (key === 'stack') { continue; }\n"
+    "                        const value = error[key];\n"
+    "                        const kind = typeof value;\n"
+    "                        if (value === null || kind === 'string' || kind === 'number' || kind === 'boolean') {\n"
+    "                            details[key] = String(value);\n"
+    "                        }\n"
+    "                        else if (kind !== 'function') {\n"
+    "                            try { details[key] = JSON.stringify(value); } catch (e) { details[key] = '[unserializable]'; }\n"
+    "                        }\n"
+    "                    }\n"
+    "                }\n"
+    "                catch (e) { }\n"
     "                return {\n"
     "                    __winzappError: {\n"
     "                        name: String(error?.name || 'Error'),\n"
-    "                        message: String(error?.message ?? error?.reason ?? error?.text ?? error),\n"
+    "                        message: String(error?.message || error?.reason || error?.text || error),\n"
     "                        stack: String(error?.stack || ''),\n"
+    "                        details: details,\n"
     "                    },\n"
     "                };\n"
     "            }\n"
@@ -453,9 +473,97 @@ PATCHED_LOGIN_BY_CODE = (
     "            if (outcome.__winzappError.stack) {\n"
     "                failure.stack = outcome.__winzappError.stack;\n"
     "            }\n"
+    "            failure.winzappDetails = outcome.__winzappError.details || {};\n"
     "            throw failure;\n"
     "        }\n"
     "        const code = outcome?.code;\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for Login By Code (Code: ${code})\\n`);\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for Login By Code`);\n"
+    "        }\n"
+    "        this.catchLinkCode?.(code);\n"
+    "    }\n"
+)
+
+
+# ── loginByCode: use wa-js's managed linking lifecycle ───────────────────────
+#
+# wppconnect calls the low-level `WPP.conn.genLinkDeviceCodeForPhoneNumber()`
+# directly. wa-js 4.6.0 also ships a managed flow — `startLinkDeviceCodeForPhoneNumber`
+# / `refreshLinkDeviceCode` / `cancelLinkDeviceCode`, plus the events
+# `conn.link_code_change` and `conn.link_code_error` — whose own documentation
+# describes exactly the behaviour every generation of the checkQrCode patch above
+# has been hand-rolling since issue #8:
+#
+#   "Unlike genLinkDeviceCodeForPhoneNumber, repeated calls for the same phone
+#    number reuse the active code. New codes are emitted through
+#    conn.link_code_change only when WhatsApp requests a refresh or the current
+#    code expires."
+#
+# That is the "explicit expiry/refresh signal from wa-js" this module's own
+# docstring records as not existing yet (wa-js PR #3554). It exists now.
+#
+# The immediate reason for switching, though, is a failure seen live: on a fresh
+# Chrome profile the raw call threw `Invariant Violation: Minified invariant
+# #56367` with `messageParams: [""]`. An invariant is an internal assertion, not
+# a server refusal — it fires when a function is reached in a state it did not
+# expect. The managed entry point is what installs the listeners and state the
+# linking flow needs, and calling the low-level function around it is a plausible
+# way to land in exactly that state.
+#
+# Falls back to the raw call when the managed API is absent, so an older
+# @wppconnect/wa-js keeps working, and reports which path ran so a log can say
+# which one produced a given code or failure.
+PATCHED_LOGIN_BY_CODE = (
+    "    async loginByCode(phone) {\n"
+    "        const outcome = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
+    "            try {\n"
+    "                const managed = typeof WPP.conn.startLinkDeviceCodeForPhoneNumber === 'function';\n"
+    "                const value = managed\n"
+    "                    ? await WPP.conn.startLinkDeviceCodeForPhoneNumber(phone)\n"
+    "                    : JSON.parse(JSON.stringify(await WPP.conn.genLinkDeviceCodeForPhoneNumber(phone)));\n"
+    "                return { code: String(value), managed: managed };\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                const details = {};\n"
+    "                try {\n"
+    "                    for (const key of Object.getOwnPropertyNames(Object(error))) {\n"
+    "                        if (key === 'stack') { continue; }\n"
+    "                        const value = error[key];\n"
+    "                        const kind = typeof value;\n"
+    "                        if (value === null || kind === 'string' || kind === 'number' || kind === 'boolean') {\n"
+    "                            details[key] = String(value);\n"
+    "                        }\n"
+    "                        else if (kind !== 'function') {\n"
+    "                            try { details[key] = JSON.stringify(value); } catch (e) { details[key] = '[unserializable]'; }\n"
+    "                        }\n"
+    "                    }\n"
+    "                    details.__winzappManagedApi = String(typeof WPP.conn.startLinkDeviceCodeForPhoneNumber === 'function');\n"
+    "                }\n"
+    "                catch (e) { }\n"
+    "                return {\n"
+    "                    __winzappError: {\n"
+    "                        name: String(error?.name || 'Error'),\n"
+    "                        message: String(error?.message || error?.reason || error?.text || error),\n"
+    "                        stack: String(error?.stack || ''),\n"
+    "                        details: details,\n"
+    "                    },\n"
+    "                };\n"
+    "            }\n"
+    "        }, { phone });\n"
+    "        if (outcome?.__winzappError) {\n"
+    "            const failure = new Error(outcome.__winzappError.message);\n"
+    "            failure.name = outcome.__winzappError.name;\n"
+    "            if (outcome.__winzappError.stack) {\n"
+    "                failure.stack = outcome.__winzappError.stack;\n"
+    "            }\n"
+    "            failure.winzappDetails = outcome.__winzappError.details || {};\n"
+    "            throw failure;\n"
+    "        }\n"
+    "        const code = outcome?.code;\n"
+    "        this.log('info', `Link code obtained via the ${outcome?.managed ? 'managed' : 'legacy raw'} wa-js API.`);\n"
     "        if (this.options.logQR) {\n"
     "            this.log('info', `Waiting for Login By Code (Code: ${code})\\n`);\n"
     "        }\n"
@@ -524,12 +632,18 @@ def patch_host_layer_source(content: str):
 
     # loginByCode: real browser-side error detail instead of minified "t: t".
     if PATCHED_LOGIN_BY_CODE in content:
-        notes.append("loginByCode: error-detail patch already applied.")
+        notes.append("loginByCode: already on the managed wa-js linking API.")
+    elif LEGACY_LOGIN_BY_CODE_RAW in content:
+        content = content.replace(LEGACY_LOGIN_BY_CODE_RAW, PATCHED_LOGIN_BY_CODE, 1)
+        notes.append(
+            "loginByCode: switched from the raw genLinkDeviceCodeForPhoneNumber "
+            "call to wa-js's managed linking lifecycle."
+        )
     elif ORIGINAL_LOGIN_BY_CODE in content:
         content = content.replace(ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE, 1)
         notes.append(
-            "loginByCode: patched — a failed pairing-code request now reports "
-            "the real browser-side error instead of the minified 't: t'."
+            "loginByCode: patched — uses wa-js's managed linking lifecycle and "
+            "reports the real browser-side error instead of the minified 't: t'."
         )
     else:
         notes.append("loginByCode: DID NOT MATCH the known source text — left untouched.")

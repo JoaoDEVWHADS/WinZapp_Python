@@ -2995,9 +2995,96 @@ class MainWindow(wx.Frame):
             logging.info("[_raw_session_status] probe failed: %s", e)
         return ""
 
-    def _kill_orphaned_chrome_for_session(self):
-        """Kill a suspended chrome.exe still holding this account's userDataDir
+    def _chrome_pids_owning_session(self, session_name: str) -> list:
+        """PIDs of chrome.exe processes whose --user-data-dir is this session's
+        profile. Empty list when nothing holds it (or off Windows).
+
+        Matching goes through connection_state.chrome_cmdline_owns_session, so
+        it can never match the user's own Chrome or another account's browser.
+        """
+        import sys
+        if sys.platform != "win32" or not session_name:
+            return []
+        import connection_state as cs
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+                 "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+                creationflags=no_window, text=True, stderr=subprocess.DEVNULL, timeout=15,
+            )
+        except Exception as e:
+            logging.info("[profile-lock] could not list chrome processes: %s", e)
+            return []
+        pids = []
+        for line in out.splitlines():
+            pid, _, cmdline = line.partition("\t")
+            if pid.strip() and cs.chrome_cmdline_owns_session(cmdline, session_name):
+                pids.append(pid.strip())
+        return pids
+
+    def wait_for_profile_release(self, session_name: str, timeout: float = 20.0) -> bool:
+        """Block until no chrome.exe holds *session_name*'s profile.
+
+        Returns True once the profile is free, False if it is still held when
+        *timeout* elapses. Kills whatever is left in that case, then gives it a
+        short grace period, because a profile nothing can release is worse than
+        one process lost.
+
+        This exists because `status-session` reporting CLOSED is NOT the same
+        claim. Measured on a real run: close-session answered, the CLOSED poll
+        confirmed in 0.1 s, /start-session went out 118 ms later, and Chrome —
+        still exiting — refused it with
+
+            The browser is already running for ...\\userDataDir\\<session>
+            Auto Close Called
+
+        The session died there, so no pairing code was ever produced and the
+        Python side sat out its full 90-second wait. Session status and browser
+        process lifetime are different things; only the second one owns the
+        lock, so only the second one is worth waiting on.
+        """
+        import sys
+        if sys.platform != "win32" or not session_name:
+            return True
+        deadline = time.monotonic() + timeout
+        polls = 0
+        while time.monotonic() < deadline:
+            polls += 1
+            holders = self._chrome_pids_owning_session(session_name)
+            if not holders:
+                if polls > 1:
+                    logging.info(
+                        "[profile-lock] %s released after %d poll(s)",
+                        session_name[:12], polls,
+                    )
+                return True
+            time.sleep(0.5)
+        logging.warning(
+            "[profile-lock] %s still held after %.0fs — killing the holder(s)",
+            session_name[:12], timeout,
+        )
+        self._kill_orphaned_chrome_for_session(session_name)
+        # The kill is asynchronous from Chrome's point of view; give it a
+        # moment rather than handing a still-dying profile to start-session.
+        for _ in range(10):
+            if not self._chrome_pids_owning_session(session_name):
+                return True
+            time.sleep(0.5)
+        logging.warning(
+            "[profile-lock] %s is STILL held after the kill — starting the "
+            "session anyway; it will likely be refused.", session_name[:12],
+        )
+        return False
+
+    def _kill_orphaned_chrome_for_session(self, session_name: str = None):
+        """Kill a suspended chrome.exe still holding a session's userDataDir
         lock, then drop its stale lockfile, so WPPConnect can relaunch.
+
+        *session_name* defaults to this account's current session; callers that
+        need to release a session other than the live one (the pairing flow
+        closing the previous session, for instance) pass it explicitly.
 
         After hibernation the WhatsApp Web chrome.exe is suspended, not killed:
         it keeps the lock on ./userDataDir/<session>, so the post-wake
@@ -3012,7 +3099,7 @@ class MainWindow(wx.Frame):
         if sys.platform != "win32":
             return
         import connection_state as cs
-        session_name = (getattr(self, "token", "") or "").split(":")[0]
+        session_name = session_name or (getattr(self, "token", "") or "").split(":")[0]
         if not session_name:
             return
         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -3044,9 +3131,15 @@ class MainWindow(wx.Frame):
         # Drop the stale lockfile so a relaunch is not refused even if the
         # process was already gone but left the file behind.
         try:
-            from app_paths import data_path
-            udd = os.path.join(os.path.dirname(data_path("settings.json")),
-                               "..", "..", "api", "userDataDir", session_name)
+            # resource_path("api", ...) is how every other api/ path in this
+            # file is built (the Node dir, dist/server.js, start.js, .cache).
+            # This used to hand-roll the walk from data_path("settings.json")
+            # with two "..", which lands on <data>/api/userDataDir — a
+            # directory that does not exist, since data_path() already returns
+            # <data>/accounts/<account_id>/. Nothing here reported that: the
+            # loop below only removes files that exist, so a wrong root was
+            # indistinguishable from "no stale lockfiles to clean".
+            udd = resource_path("api", "userDataDir", session_name)
             for name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"):
                 p = os.path.join(udd, name)
                 if os.path.exists(p):
@@ -3728,6 +3821,31 @@ class MainWindow(wx.Frame):
             self._stop_wpp_server()
             self.wpp_process = None
 
+            # Make sure nothing is still holding this session's Chrome profile
+            # before the server comes back up.
+            #
+            # _stop_wpp_server() force-kills the Node process tree, but a
+            # chrome.exe can outlive that — the same way a hibernation-suspended
+            # one does, which is what _kill_orphaned_chrome_for_session() was
+            # written for. If one survives, the restarted server's
+            # /start-session hits "The browser is already running for
+            # ...\\userDataDir\\<session>", the session dies on the spot, the
+            # health check starts another, and the app alternates between
+            # offline and connecting indefinitely. Reported twice from the field
+            # as "after accepting the WPP update it just keeps syncing forever,
+            # flipping between offline and normal", with the workaround being to
+            # wipe the account's data folder — which works only because it forces
+            # a NEW session name, and therefore a profile nothing holds a lock
+            # on. The update itself preserves userDataDir/ and tokens/ (see
+            # ApiSetupDialog._KEEP_RUNTIME), so the install was never the
+            # problem; the abandoned lock was.
+            #
+            # Safe to call unconditionally: it only touches a chrome.exe whose
+            # --user-data-dir carries THIS session name
+            # (connection_state.chrome_cmdline_owns_session), and it also drops
+            # the stale lockfile the dead process left behind.
+            self._kill_orphaned_chrome_for_session()
+
             from ui.dialogs.api_setup import ApiSetupDialog
             dlg = ApiSetupDialog(
                 self,
@@ -3888,9 +4006,30 @@ class MainWindow(wx.Frame):
         Body: {"isOnline": true | false}
 
         Always runs on a background thread — never blocks the UI.
+
+        Gated on the connection, not just on having a token. self.token is set
+        at startup from the stored WA_token, long before — and independently
+        of — the WhatsApp session actually being usable, so the 20-second
+        keep-alive happily hammered a session that was CLOSED on the Node side.
+        Observed as an endless train of HTTP 500s in a real run, with the
+        response discarded and nothing logged, for a session that could not
+        possibly accept presence.
+
+        The failed call is not free either: wa-js's markAvailable() pins
+        Stream.available through Object.defineProperty for the page's lifetime,
+        so a successful markAvailable(false) followed by a failing
+        markAvailable(true) can leave the page stuck advertising "offline"
+        while messaging still works.
         """
         token = getattr(self, "token", None)
         if not token:
+            return
+        if not getattr(self, "_wa_connected", False):
+            # Nothing to advertise presence on. Not an error worth a warning —
+            # this is the normal state while pairing or between reconnects.
+            logging.debug(
+                "[presence] skipping '%s' — no live WhatsApp connection", presence
+            )
             return
         url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/set-online-presence"
         is_online = presence == "available"
@@ -3899,9 +4038,21 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            api_post(url, json={"isOnline": is_online}, headers=headers, timeout=5)
+            resp = api_post(
+                url, json={"isOnline": is_online}, headers=headers, timeout=5
+            )
+            # The response used to be discarded outright, so a presence that
+            # never once succeeded looked exactly like one that always did.
+            status = getattr(resp, "status_code", None)
+            if status is not None and status >= 400:
+                logging.warning(
+                    "[presence] set-online-presence('%s') returned HTTP %s",
+                    presence, status,
+                )
         except Exception:
-            pass
+            logging.debug(
+                "[presence] set-online-presence('%s') failed", presence, exc_info=True
+            )
 
     def _init_tray(self):
         """Create the system-tray icon if the setting is enabled."""
@@ -7945,8 +8096,15 @@ class MainWindow(wx.Frame):
                     for s in store.list():
                         if s.get("status") == "active" and s.get("name") != new_name:
                             store.set_status(s["name"], "abandoned")
-                    store.register(new_name, token=token.replace("/", "_").replace("+", "-"),
-                                   status="active")
+                    # Store the token verbatim. The "/"->"_" "+"->"-" pass this
+                    # used to apply is a no-op: WPPConnect's encryptSession
+                    # already URL-safes the bcrypt hash before returning it
+                    # (see its `hash.replace(/\//g, '_')`), so the token never
+                    # contains either character by the time it reaches here.
+                    # Dropping it is a simplification, not a fix. The stored
+                    # copy exists to authenticate this session's later
+                    # logout-session call; nothing else reads this field.
+                    store.register(new_name, token=token, status="active")
                 if gd:
                     try:
                         with sessions_lock(gd):
@@ -7959,6 +8117,79 @@ class MainWindow(wx.Frame):
                     _commit()
         except Exception:
             logging.exception("[sessions] registering active session failed (non-fatal)")
+
+    def _register_abandoned_session(self, token: str) -> None:
+        """Record a failed pairing attempt's session as 'abandoned'.
+
+        A pairing attempt mints a fresh session name and calls /start-session,
+        which makes WPPConnect create a Chrome profile under api/userDataDir/.
+        When the attempt then fails, connect.py clears the token via
+        _set_wa_token("") — and that path returns before the store block above,
+        so the name was never written to the SessionStore at all. Never
+        registered means it can never be marked abandoned, and
+        sessions_to_close() only ever returns abandoned entries: the profile
+        became unreachable by every cleanup path, permanently. A single
+        afternoon of failed pairing left 12 such directories and 754 MB behind
+        against a store that listed one session.
+
+        Deliberately does NOT abandon a name the store still holds as 'active'.
+        _can_reuse_existing_session() lets an attempt reuse the token of an
+        already-paired session, so a failed attempt's token can BE the live
+        one — and abandoning it would hand the working profile to the cleanup
+        to delete. A reused session that merely failed to produce a code is not
+        known to be dead; leaving it alone is the recoverable choice.
+        """
+        if not token:
+            return
+        try:
+            store = self._get_session_store()
+            if store is None:
+                return
+            name = token.replace("/", "_").replace("+", "-").split(":")[0]
+            if not name:
+                return
+            existing = store.get(name)
+            if existing is not None and existing.get("status") == "active":
+                logging.info(
+                    "[sessions] not abandoning %s — the store still holds it as "
+                    "active (a reused, possibly live session)", name[:12],
+                )
+                return
+
+            from coord_locks import sessions_lock, LockTimeout
+            gd = getattr(self, "global_dir", None)
+
+            def _commit():
+                # Keep the token: it is the only credential WPPConnect will
+                # accept for this session's logout-session call, which is what
+                # deregisters the companion device at WhatsApp. Registering it
+                # without one leaves a row the cleanup can delete locally but
+                # never actually unlink — see _logout_abandoned_session().
+                store.register(name, token=token, status="abandoned")
+                logging.info(
+                    "[sessions] registered failed pairing session %s as abandoned "
+                    "so it can be deregistered and its userDataDir reclaimed",
+                    name[:12],
+                )
+
+            # Same locking rule as _set_wa_token above: never write outside the
+            # lock, and a busy lock is survivable (the entry is re-derivable on
+            # a later attempt) rather than worth blocking a failure path on.
+            if gd:
+                try:
+                    with sessions_lock(gd):
+                        _commit()
+                except LockTimeout:
+                    logging.warning(
+                        "[sessions] sessions_lock busy — could not record "
+                        "abandoned session %s", name[:12],
+                    )
+            else:
+                _commit()
+        except Exception:
+            logging.exception(
+                "[sessions] recording an abandoned session failed (non-fatal)"
+            )
 
     def _session_crypto(self):
         """Adapter exposing .encrypt/.decrypt over token_vault + this account's
@@ -8123,9 +8354,19 @@ class MainWindow(wx.Frame):
             gd = getattr(self, "global_dir", None)
             if not gd:
                 return
-            udd_root = os.path.abspath(os.path.join(
-                os.path.dirname(data_path("settings.json")),
-                "..", "..", "api", "userDataDir"))
+            # Same fix as _kill_orphaned_chrome_for_session above: this used to
+            # walk up from data_path("settings.json") with two "..", which
+            # resolves to <data>/api/userDataDir — a directory that does not
+            # exist, since data_path() already returns
+            # <data>/accounts/<account_id>/. The consequence was worse
+            # here than a silent no-op: safe_session_dir_to_delete() is purely
+            # lexical and never checks existence, so os.path.isdir(target) was
+            # False (nothing deleted), os.path.exists(target) was also False
+            # (read as "confirmed gone"), and store.remove(name) then dropped
+            # the row while logging "cleaned abandoned session". Every profile
+            # it claimed to remove is still on disk — 12 directories and 754 MB
+            # of them when this was found.
+            udd_root = os.path.abspath(resource_path("api", "userDataDir"))
             node_down = False  # circuit breaker: stop retrying logout once refused
             # Whole scan -> validate -> rmtree runs under the shared sessions_lock
             # so no other account can register/activate a name mid-cleanup, and
@@ -8156,7 +8397,11 @@ class MainWindow(wx.Frame):
                             logging.warning("[sessions] refusing unsafe session name for cleanup")
                             continue
                         try:
-                            node_down = not self._logout_abandoned_session(name, skip=node_down)
+                            # s is a decorated store entry, so it already
+                            # carries this session's own decrypted token —
+                            # the only one WPPConnect will accept for it.
+                            node_down = not self._logout_abandoned_session(
+                                name, token=s.get("token"), skip=node_down)
                             # Delete then CONFIRM gone before dropping the store row.
                             # No ignore_errors: a failed delete (e.g. a lock) leaves
                             # the 'abandoned' record so we retry next start (GPT r1 #2/#c).
@@ -8176,19 +8421,51 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[sessions] _cleanup_abandoned_sessions failed (non-fatal)")
 
-    def _logout_abandoned_session(self, name: str, skip: bool = False) -> bool:
+    def _logout_abandoned_session(self, name: str, token: str = None,
+                                  skip: bool = False) -> bool:
         """Best-effort logout by SESSION NAME (never the token — a token in the
         URL can be mis-parsed and leak to logs; the token goes in Bearer only,
         GPT r1 #1). Returns True if Node is reachable (so the caller's circuit
         breaker keeps trying), False on connection-refused (Node down — skip the
-        rest). ``skip`` short-circuits once Node is known down."""
+        rest). ``skip`` short-circuits once Node is known down.
+
+        *token* must be the abandoned session's OWN token, from the
+        SessionStore. This used to send `self._get_wa_token()` — the CURRENT
+        account's token — for a logout addressed to a different session, and
+        WPPConnect's verifyToken middleware checks the token against the
+        session named in the URL, so it could only ever answer 401. Seen in a
+        real run: `POST /logout-session -> 401 in 2ms`, immediately followed
+        by the store row being dropped as though the session had been
+        deregistered. It never was: `close-session` only kills the browser,
+        and `logout-session` is the sole call that deregisters the companion
+        device at WhatsApp. Every superseded WinZapp session therefore stayed
+        a linked device on the account indefinitely.
+        """
         if skip or not name:
             return not skip
+        if not token:
+            # Without the session's own token there is no authenticated way to
+            # deregister it. Say so rather than firing a request that can only
+            # 401, and let the caller still reclaim the local profile.
+            logging.info(
+                "[sessions] no stored token for %s — cannot deregister it at "
+                "WhatsApp; removing its local profile only", name[:12],
+            )
+            return True
+        # Send ONLY the bcrypt signature, not the whole "<session>:<signature>"
+        # token. WPPConnect's verifyToken reads the signature out of the URL's
+        # session parameter first and only falls back to the Authorization
+        # header when the URL has no ":<signature>" — which is exactly this
+        # call, since the name alone goes in the path. That fallback ends in
+        # `bcrypt.compare(session + secretKey, headerValue)`, so a header
+        # carrying "<session>:<signature>" can never match. Passing the whole
+        # token is what produced `POST /logout-session -> 401 in 3ms` on every
+        # cleanup run.
+        signature = token.split(":", 1)[1] if ":" in token else token
         try:
-            token = self._get_wa_token() or name
             api_post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{name}/logout-session",
-                headers={"Authorization": f"Bearer {token}"}, timeout=5,
+                headers={"Authorization": f"Bearer {signature}"}, timeout=5,
             )
             return True
         except requests.exceptions.ConnectionError:
@@ -10716,11 +10993,22 @@ class MainWindow(wx.Frame):
 
                     self._lift_contact_identity(chat)
 
-                # Diagnostic log to inspect chat keys
+                # Diagnostic: what SHAPE does an @lid chat arrive in? Key names
+                # and value types answer that; the values themselves do not.
+                #
+                # This used to also log the whole first @lid chat object, which
+                # meant contact names, pushnames, LIDs and profile-photo URLs
+                # went into log.log — 42 chat objects in one ordinary session.
+                # CLAUDE.md tells anyone diagnosing a problem to ask the user
+                # for that exact file, so every such request was also asking
+                # them to hand over a slice of their address book. The shape is
+                # the part that was ever actually useful for debugging LID
+                # handling; a specific value can be logged deliberately, and
+                # narrowly, when a specific question needs it.
                 lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
                 if lid_chats:
-                    logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
-                    logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
+                    shape = {k: type(v).__name__ for k, v in lid_chats[0].items()}
+                    logging.info("[get_remote_chats] @lid chat shape: %s", shape)
 
                 # The deleted-chat list lives in DB metadata (self._deleted_chats)
                 # since 0.17 — prepare_sync() pops it out of settings.json on

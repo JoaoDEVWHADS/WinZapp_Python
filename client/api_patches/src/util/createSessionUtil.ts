@@ -534,6 +534,8 @@ export default class CreateSessionUtil {
               session?: string;
               attempt?: number;
               retryInSeconds?: number;
+              stack?: string;
+              details?: Record<string, string>;
             }) => {
               if ((client as any).shouldClose) return;
               this.exportPhoneCodeError(
@@ -779,6 +781,8 @@ export default class CreateSessionUtil {
       message?: string;
       attempt?: number;
       retryInSeconds?: number;
+      stack?: string;
+      details?: Record<string, string>;
     },
     client: WhatsAppServer
   ) {
@@ -798,6 +802,24 @@ export default class CreateSessionUtil {
         (attempt ? ` (attempt ${attempt}, next retry in ${retryInSeconds}s)` : '')
     );
 
+    // WhatsApp Web's own bundle throws this from inside the page, and its class
+    // name ("CompanionHelloError") is all that survived to here before. The
+    // page-context stack is the only thing that names the Meta module that
+    // threw, and any extra own property on the error is the only place a
+    // server refusal code could be hiding — both are logged in full because
+    // there is nowhere else to get them from.
+    if (failure?.stack) {
+      req.logger?.warn(
+        `[${client.session}] pairing code failure stack: ${failure.stack}`
+      );
+    }
+    if (failure?.details && Object.keys(failure.details).length) {
+      req.logger?.warn(
+        `[${client.session}] pairing code failure details: ` +
+          JSON.stringify(failure.details)
+      );
+    }
+
     const payload = {
       name: name,
       message: message,
@@ -805,6 +827,8 @@ export default class CreateSessionUtil {
       session: client.session,
       attempt: attempt,
       retryInSeconds: retryInSeconds,
+      stack: failure?.stack || '',
+      details: failure?.details || {},
     };
 
     req.io.emit('phoneCodeError', payload);

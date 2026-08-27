@@ -271,3 +271,94 @@ class TestBackoffMetadataIsCarried:
             ws.on_wpp_phone_code_error({"session": SESSION, "name": "SomeError"})
         assert "SomeError" in caplog.text
         assert ws._phone_code_error == "SomeError"
+
+
+class TestFullErrorDetailIsCaptured:
+    """CompanionHelloError is thrown by WhatsApp Web's own bundle — no code we
+    ship contains that string. Its class name was all that survived to the log,
+    which is why three separate hypotheses about its cause could be neither
+    confirmed nor ruled out. The page-context stack and every other own
+    property of the error are the only remaining places an answer could be."""
+
+    def test_stack_is_logged_when_present(self, caplog):
+        ws = _WsStub()
+        with caplog.at_level("WARNING"):
+            ws.on_wpp_phone_code_error(
+                {
+                    "session": SESSION,
+                    "name": "CompanionHelloError",
+                    "stack": "Error\n    at n (https://web.whatsapp.com/x.js:1:2)",
+                }
+            )
+        assert "web.whatsapp.com/x.js" in caplog.text
+
+    def test_details_are_logged_when_present(self, caplog):
+        ws = _WsStub()
+        with caplog.at_level("WARNING"):
+            ws.on_wpp_phone_code_error(
+                {
+                    "session": SESSION,
+                    "name": "CompanionHelloError",
+                    "details": {"code": "429", "reason": "rate_limited"},
+                }
+            )
+        assert "429" in caplog.text
+        assert "rate_limited" in caplog.text
+
+    def test_absent_diagnostics_are_not_logged_as_empty(self, caplog):
+        ws = _WsStub()
+        with caplog.at_level("WARNING"):
+            ws.on_wpp_phone_code_error({"session": SESSION, "name": "SomeError"})
+        assert "failure stack" not in caplog.text
+        assert "failure details" not in caplog.text
+
+    def test_diagnostics_never_reach_the_user_facing_reason(self):
+        ws = _WsStub()
+        ws.on_wpp_phone_code_error(
+            {
+                "session": SESSION,
+                "name": "CompanionHelloError",
+                "stack": "Error\n    at n (x.js:1:2)",
+                "details": {"code": "429"},
+            }
+        )
+        assert ws._phone_code_error == "CompanionHelloError"
+
+
+class TestPatchSerializesTheWholeError:
+    """The in-page serializer is what decides how much survives the CDP
+    boundary. It hand-picked three fields; anything else the error carried was
+    dropped before it could ever be read."""
+
+    def test_all_own_properties_are_collected(self):
+        from core.wppconnect_host_layer_patch import PATCHED_LOGIN_BY_CODE
+
+        assert "Object.getOwnPropertyNames(Object(error))" in PATCHED_LOGIN_BY_CODE
+        assert "details: details," in PATCHED_LOGIN_BY_CODE
+
+    def test_message_fallbacks_use_or_not_nullish_coalescing(self):
+        """`??` only falls through on null/undefined, and an Error with an
+        empty message is not nullish — so the reason/text fallbacks could never
+        fire, and an empty message was indistinguishable from a message equal
+        to the class name."""
+        from core.wppconnect_host_layer_patch import PATCHED_LOGIN_BY_CODE
+
+        assert (
+            "String(error?.message || error?.reason || error?.text || error)"
+            in PATCHED_LOGIN_BY_CODE
+        )
+        assert "error?.message ??" not in PATCHED_LOGIN_BY_CODE
+
+    def test_serialization_failure_cannot_break_the_report(self):
+        """A getter that throws, or a circular value, must not turn a
+        diagnostic into a second error that loses the first one."""
+        from core.wppconnect_host_layer_patch import PATCHED_LOGIN_BY_CODE
+
+        assert "'[unserializable]'" in PATCHED_LOGIN_BY_CODE
+        assert PATCHED_LOGIN_BY_CODE.count("catch (e)") >= 2
+
+    def test_the_hook_forwards_stack_and_details(self):
+        from core.wppconnect_host_layer_patch import PATCHED_CHECK_QR_CODE
+
+        assert "stack: String(error?.stack || '')," in PATCHED_CHECK_QR_CODE
+        assert "details: error?.winzappDetails || {}," in PATCHED_CHECK_QR_CODE

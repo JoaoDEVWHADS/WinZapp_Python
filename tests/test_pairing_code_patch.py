@@ -56,7 +56,7 @@ import pytest
 from core.wppconnect_host_layer_patch import (
     ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, V2_CHECK_QR_CODE,
     V3_CHECK_QR_CODE, V4_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
-    ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE,
+    ORIGINAL_LOGIN_BY_CODE, LEGACY_LOGIN_BY_CODE_RAW, PATCHED_LOGIN_BY_CODE,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -597,3 +597,96 @@ class TestV5BacksOffBetweenFailures:
         content = host_layer.read_text(encoding="utf-8")
         assert PATCHED_CHECK_QR_CODE in content
         assert V4_CHECK_QR_CODE not in content
+
+
+class TestManagedLinkingApiMigration:
+    """wppconnect calls the low-level WPP.conn.genLinkDeviceCodeForPhoneNumber().
+    wa-js 4.6.0 also ships a managed flow whose documented behaviour — repeated
+    calls for the same number reuse the active code, refreshes arrive via
+    conn.link_code_change — is what every generation of the checkQrCode patch
+    above has been hand-rolling since issue #8. This module's own docstring
+    records that signal as not existing yet (wa-js PR #3554); it does now.
+
+    The immediate trigger was a live failure: on a *fresh* Chrome profile the
+    raw call threw `Invariant Violation: Minified invariant #56367` with
+    `messageParams: [""]`. An invariant is an internal assertion, not a server
+    refusal — it fires when a function is reached in a state it did not expect.
+    """
+
+    def test_the_managed_entry_point_is_preferred(self):
+        assert "WPP.conn.startLinkDeviceCodeForPhoneNumber(phone)" in PATCHED_LOGIN_BY_CODE
+
+    def test_it_falls_back_to_the_raw_call(self):
+        """An older @wppconnect/wa-js has no managed API; the patch must not
+        turn that into a TypeError."""
+        assert (
+            "typeof WPP.conn.startLinkDeviceCodeForPhoneNumber === 'function'"
+            in PATCHED_LOGIN_BY_CODE
+        )
+        assert "WPP.conn.genLinkDeviceCodeForPhoneNumber(phone)" in PATCHED_LOGIN_BY_CODE
+
+    def test_which_path_ran_is_recorded(self):
+        """Both paths can produce a code and both can fail — a log that cannot
+        say which one ran cannot tell you whether the migration helped."""
+        assert "return { code: String(value), managed: managed };" in PATCHED_LOGIN_BY_CODE
+        assert "'managed' : 'legacy raw'" in PATCHED_LOGIN_BY_CODE
+        assert "__winzappManagedApi" in PATCHED_LOGIN_BY_CODE
+
+    def test_the_legacy_raw_patch_is_still_a_distinct_rung(self):
+        """Anyone already carrying the error-detail patch must be migrated
+        forward, not left unrecognised."""
+        assert LEGACY_LOGIN_BY_CODE_RAW != PATCHED_LOGIN_BY_CODE
+        assert LEGACY_LOGIN_BY_CODE_RAW != ORIGINAL_LOGIN_BY_CODE
+        assert "startLinkDeviceCodeForPhoneNumber" not in LEGACY_LOGIN_BY_CODE_RAW
+
+    def test_error_capture_survives_the_migration(self):
+        """The diagnostics that made this failure legible in the first place
+        must not be lost while swapping the call underneath them."""
+        assert "Object.getOwnPropertyNames(Object(error))" in PATCHED_LOGIN_BY_CODE
+        assert "details: details," in PATCHED_LOGIN_BY_CODE
+        assert "failure.winzappDetails" in PATCHED_LOGIN_BY_CODE
+        assert (
+            "String(error?.message || error?.reason || error?.text || error)"
+            in PATCHED_LOGIN_BY_CODE
+        )
+
+    def test_an_install_on_the_raw_patch_is_migrated(self, fake_wppconnect_dist):
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        _write(host_layer, PATCHED_CHECK_QR_CODE, LEGACY_LOGIN_BY_CODE_RAW)
+
+        assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is True
+
+        content = host_layer.read_text(encoding="utf-8")
+        assert PATCHED_LOGIN_BY_CODE in content
+        assert LEGACY_LOGIN_BY_CODE_RAW not in content
+
+    def test_a_pristine_install_goes_straight_to_the_managed_api(self, fake_wppconnect_dist):
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        _write(host_layer, ORIGINAL_CHECK_QR_CODE, ORIGINAL_LOGIN_BY_CODE)
+
+        assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is True
+        assert PATCHED_LOGIN_BY_CODE in host_layer.read_text(encoding="utf-8")
+
+    def test_both_entry_points_agree_after_the_migration(self, tmp_path):
+        from ui.dialogs.api_setup import ApiSetupDialog
+        setup_api = _load_setup_api()
+
+        outputs = []
+        for name in ("setup_api", "api_setup"):
+            api_dir = tmp_path / name
+            layers = api_dir / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api" / "layers"
+            layers.mkdir(parents=True)
+            host_layer = layers / "host.layer.js"
+            _write(host_layer, PATCHED_CHECK_QR_CODE, LEGACY_LOGIN_BY_CODE_RAW)
+
+            if name == "setup_api":
+                setup_api._patch_wppconnect_host_layer(str(api_dir))
+            else:
+                ApiSetupDialog._patch_wppconnect_host_layer(
+                    str(api_dir / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api")
+                )
+            outputs.append(host_layer.read_text(encoding="utf-8"))
+
+        assert outputs[0] == outputs[1]
