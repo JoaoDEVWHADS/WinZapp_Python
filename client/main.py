@@ -7505,6 +7505,26 @@ class MainWindow(wx.Frame):
                 self.error_sound.play()
             if not self.background_mode:
                 wx.CallAfter(wx.MessageBox, f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_WARNING)
+
+        # Backfill any missing default keys/sections so settings are always complete
+        def _backfill(target, defaults):
+            modified = False
+            for k, v in defaults.items():
+                if k not in target:
+                    target[k] = json.loads(json.dumps(v))
+                    modified = True
+                elif isinstance(v, dict) and isinstance(target[k], dict):
+                    if _backfill(target[k], v):
+                        modified = True
+            return modified
+
+        if isinstance(self.settings, dict) and _backfill(self.settings, fallback_dict):
+            try:
+                with open(settings_file, "w", encoding="utf-8") as f:
+                    json.dump(self.settings, f, indent=4)
+            except Exception:
+                pass
+
         self._migrate_settings()
         self._apply_global_settings()
 
