@@ -120,6 +120,7 @@ class _FakeMainWindow:
         self.output_calls = []
         self._convert_result = convert_result
         self.convert_calls = []
+        self.settings = {}
 
     def output(self, text, interrupt=False):
         self.output_calls.append(text)
@@ -142,6 +143,7 @@ class _Stub:
     _send_status_voice_bg     = StatusPanel._send_status_voice_bg
     _stop_recorded_audio_preview = StatusPanel._stop_recorded_audio_preview
     _cleanup_recorded_audio_temp_file = StatusPanel._cleanup_recorded_audio_temp_file
+    _silence_send_voice_focus_if_enabled = StatusPanel._silence_send_voice_focus_if_enabled
 
     def __init__(self, convert_result="converted.ogg"):
         self.main_window = _FakeMainWindow(convert_result=convert_result)
