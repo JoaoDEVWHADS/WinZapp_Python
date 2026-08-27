@@ -231,3 +231,6 @@ node-v*.zip
 # Local native DLLs
 client/lib/*.dll
 *.dll
+
+# Local debug & forensics scripts
+fast_forensics.sh
