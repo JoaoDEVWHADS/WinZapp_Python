@@ -3638,11 +3638,51 @@ class MainWindow(wx.Frame):
     # and letting WinZapp reinstall from scratch. This checks the actual
     # wppconnect-team/wppconnect-server GitHub releases directly.
 
+    def wpp_update_may_run_now(self) -> bool:
+        """False while the user is pairing — accepting a WPPConnect update
+        stops the running API session, which pulls the server out from under
+        the pairing flow in progress.
+
+        The only thing that used to stand between those two was the fixed
+        `wx.CallLater(90000, self._start_wpp_update_checker)` in __init__, and
+        90 seconds of wall clock is not the same claim as "pairing is done".
+        Seen live: a first run spent 42 s of startup downloading the headless
+        Chrome shell, so the checker's T+90s landed squarely on an open
+        pairing dialog; accepting the update called _stop_wpp_server() and
+        every subsequent request failed with connection-refused until the
+        reinstall finished, with the pairing attempt abandoned in the middle.
+
+        Checks the same two signals check_wa_connection_http() does — the
+        on-screen dialog AND _pairing_in_progress, which covers the window
+        where the flow is running before/after the dialog itself is up. See
+        that method for why _pairing_in_progress is the authoritative
+        "do not touch the session" signal.
+        """
+        try:
+            if self._is_pairing_dialog_active():
+                return False
+        except Exception:
+            # Called from a background thread during teardown, when
+            # self.connect may already be gone — treat "can't tell" as
+            # "don't touch the session".
+            return False
+        return not getattr(self, "_pairing_in_progress", False)
+
     def _start_wpp_update_checker(self, force: bool = False):
         if self.background_mode:
             return
         updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
         if not updates_enabled and not force:
+            return
+        # A forced check is a deliberate user action from the Help menu, so it
+        # runs regardless; the periodic one waits until pairing is out of the
+        # way rather than interrupting it.
+        if not force and not self.wpp_update_may_run_now():
+            logging.info(
+                "[wpp_update] Pairing in progress — deferring the WPPConnect "
+                "update check by 5 minutes."
+            )
+            wx.CallLater(300000, self._start_wpp_update_checker)
             return
         from updater import WppUpdateChecker
         self._wpp_update_checker = WppUpdateChecker(self)
