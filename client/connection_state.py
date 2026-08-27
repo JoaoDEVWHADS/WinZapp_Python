@@ -33,10 +33,11 @@ LOGOUT = "logout"                 # confirmed logout after being connected — w
 # asleep) and is not the same thing as the user unlinking the device;
 # `notLogged` is the one that means "scan the QR code again". Listing it in
 # this tuple is defensible only because every consumer of it goes through
-# MainWindow._logout_confirmed(), which demands four independent things before
-# anything is wiped: the startup grace has passed, _LOGOUT_CONFIRM_STRIKES
-# consecutive readings at least STRIKE_MIN_INTERVAL_SECONDS apart, the state
-# has held for _LOGOUT_CONFIRM_SECONDS, and _still_linked_on_server() cannot
+# MainWindow._act_on_unlink_decision(), which demands several independent
+# things before anything is wiped: never before the session has actually
+# connected THIS run (classify_unlink_candidate()'s ever_connected split),
+# _LOGOUT_CONFIRM_STRIKES consecutive readings at least
+# STRIKE_MIN_INTERVAL_SECONDS apart, and _still_linked_on_server() cannot
 # prove the device is in fact still linked.
 #
 # It is NOT safe on an unguarded path. websocket_client.on_wpp_status_find()
@@ -186,8 +187,7 @@ def reset_state_for_resume(obj, now: float) -> None:
 
 
 
-def classify_unlinked(
-    status: str,
+def classify_unlink_candidate(
     *,
     ever_connected: bool,
     logout_strikes: int,
@@ -195,24 +195,21 @@ def classify_unlinked(
     logout_confirm_strikes: int,
     resume_fail_strikes: int,
 ) -> str:
-    """Classify an unlinked status reading into an action.
+    """The strike/timing decision shared by every "this might be an unlink"
+    signal, once the caller has already decided the signal itself counts
+    (a WPPConnect unlinked status string, or a local HTTP 401/403 — see
+    classify_unlinked() and MainWindow.check_wa_connection_http()).
 
     Args mirror MainWindow state at the time of the reading:
-      status            — the WPPConnect status string just read.
       ever_connected    — have we announced a live connection THIS run?
-      logout_strikes    — consecutive unlinked readings AFTER being connected.
-      resume_strikes    — consecutive unlinked readings while never connected.
+      logout_strikes    — consecutive unlink-candidate readings AFTER being connected.
+      resume_strikes    — consecutive unlink-candidate readings while never connected.
       *_strikes thresholds — the confirm limits.
 
-    Returns one of ONLINE / RESUMING / RESUME_FAILED / LOGOUT. Callers pass the
-    strike counts they will have AFTER incrementing for this reading, so the
+    Returns one of RESUMING / RESUME_FAILED / LOGOUT. Callers pass the strike
+    counts they will have AFTER incrementing for this reading, so the
     thresholds are simple >= comparisons.
-
-    Only unlinked states are meaningful here; a non-unlinked status is ONLINE
-    (the caller resets both strike counters).
     """
-    if status not in UNLINKED_STATES:
-        return ONLINE
     if not ever_connected:
         # Session still restoring from its saved profile — a failed resume is
         # NOT proof of an unlink, so we never wipe. Only after a long timeout do
@@ -225,6 +222,33 @@ def classify_unlinked(
     if logout_strikes >= logout_confirm_strikes:
         return LOGOUT
     return RESUMING  # connected before, brief blip — keep waiting (no wipe)
+
+
+def classify_unlinked(
+    status: str,
+    *,
+    ever_connected: bool,
+    logout_strikes: int,
+    resume_strikes: int,
+    logout_confirm_strikes: int,
+    resume_fail_strikes: int,
+) -> str:
+    """Classify a WPPConnect status reading into an action.
+
+    status — the WPPConnect status string just read. Only an unlinked state
+    (UNLINKED_STATES) is meaningful here; anything else is ONLINE (the caller
+    resets both strike counters). See classify_unlink_candidate() for what
+    happens once a reading counts.
+    """
+    if status not in UNLINKED_STATES:
+        return ONLINE
+    return classify_unlink_candidate(
+        ever_connected=ever_connected,
+        logout_strikes=logout_strikes,
+        resume_strikes=resume_strikes,
+        logout_confirm_strikes=logout_confirm_strikes,
+        resume_fail_strikes=resume_fail_strikes,
+    )
 
 
 def try_begin_resume_recovery(obj, lock) -> bool:
