@@ -10,9 +10,9 @@ from typing import Callable, Optional
 
 import wx
 
-from core.utils import get_downloads_folder
+from core.utils import get_downloads_folder, is_voice_message
 from core.video_player import VideoPlayer
-from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs, AccessibleMediaViewerSeekBack, AccessibleMediaViewerSeekForward
+from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs, AccessibleMediaViewerSeekBack, AccessibleMediaViewerSeekForward, AccessibleMediaBitmapPanel
 
 
 class CenteredBitmapPanel(wx.Panel):
@@ -175,8 +175,10 @@ class MediaViewerDialog(wx.Dialog):
         root.Add(self._header, 0, wx.EXPAND | wx.ALL, 8)
 
         self._content_panel = wx.Panel(self)
+        self._content_panel.SetAccessible(AccessibleMediaBitmapPanel(self._get_current_media_label))
         content_sizer = wx.BoxSizer(wx.VERTICAL)
         self._bitmap_panel = CenteredBitmapPanel(self._content_panel)
+        self._bitmap_panel.SetAccessible(AccessibleMediaBitmapPanel(self._get_current_media_label))
         content_sizer.Add(self._bitmap_panel, 1, wx.EXPAND)
 
         self._text_ctrl = wx.TextCtrl(
@@ -350,6 +352,29 @@ class MediaViewerDialog(wx.Dialog):
 
     # ── Item lifecycle ───────────────────────────────────────────────────
 
+    def _get_current_media_label(self) -> str:
+        kind = getattr(self, "_current_kind", "")
+        if kind == "image":
+            label = self.i18n.t("photo")
+        elif kind == "video":
+            label = self.i18n.t("video")
+        elif kind == "audio":
+            item = self._current_item()
+            is_ptt = is_voice_message(item)
+            label = self.i18n.t("message_type_voice_message") if is_ptt else self.i18n.t("message_type_audio")
+        elif kind == "text":
+            label = self.i18n.t("media_viewer_text_status")
+        else:
+            label = ""
+        return label[0].upper() + label[1:] if label else ""
+
+    def _update_media_labels(self):
+        label = self._get_current_media_label()
+        if hasattr(self, "_bitmap_panel") and self._bitmap_panel:
+            self._bitmap_panel.SetName(label)
+        if hasattr(self, "_content_panel") and self._content_panel:
+            self._content_panel.SetName(label)
+
     def _current_item(self) -> dict:
         if not self.items:
             return {}
@@ -365,6 +390,7 @@ class MediaViewerDialog(wx.Dialog):
 
         self._stop_current_media()
         self._current_kind = str(item.get("kind") or "text")
+        self._update_media_labels()
         self._current_path = ""
         self._bitmap_panel.Clear()
         self._text_ctrl.SetValue("")
@@ -454,6 +480,7 @@ class MediaViewerDialog(wx.Dialog):
 
     def _display_loaded_path(self, item: dict, path: str):
         self._current_path = path
+        self._update_media_labels()
         kind = self._current_kind
         if kind == "image":
             img = wx.Image(path)

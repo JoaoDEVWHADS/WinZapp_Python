@@ -15,7 +15,7 @@ from ui.accessible import (
     AccessibleSendVoiceMessage, AccessiblePlayRecordedAudio,
 )
 from core.api_client import api_get, api_post, redact_api_url
-from core.utils import format_number, get_downloads_folder, normalize_line_separators
+from core.utils import format_number, get_downloads_folder, normalize_line_separators, is_voice_message
 from core.video_player import VideoPlayer
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
@@ -86,8 +86,9 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
     if msg_type == "videoMessage":
         caption = ((msg_obj.get("videoMessage") or {}).get("caption") or "").strip()
         return f"{i18n.t('video')}: {caption}" if caption else i18n.t("video")
-    if msg_type == "audioMessage":
-        return i18n.t("message_type_audio")
+    if msg_type in ("audioMessage", "audio", "ptt"):
+        is_ptt = is_voice_message(msg_obj) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
+        return i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
     if msg_type == "documentMessage":
         doc = msg_obj.get("documentMessage") or {}
         filename = doc.get("fileName") or doc.get("title") or ""

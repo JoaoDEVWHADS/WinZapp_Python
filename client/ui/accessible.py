@@ -232,6 +232,25 @@ class AccessibleMediaViewerSeekForward(wx.Accessible):
         return (wx.ACC_OK, "Alt+A")
 
 
+class AccessibleMediaBitmapPanel(wx.Accessible):
+    """Reports the current media type (e.g. "Foto", "Vídeo", "Áudio") as the accessible
+    name for the MediaViewerDialog's display panel (ui/media_viewer.py)."""
+
+    def __init__(self, get_label_cb=None):
+        super().__init__()
+        self._get_label_cb = get_label_cb
+
+    def GetName(self, childId):
+        if childId == 0 and callable(self._get_label_cb):
+            try:
+                lbl = self._get_label_cb()
+                if lbl:
+                    return (wx.ACC_OK, str(lbl))
+            except Exception:
+                pass
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
 class AccessiblePlayRecordedAudio(wx.Accessible):
     """Reports Ctrl+P as the keyboard shortcut for the Play/Stop
     recorded-audio-preview button — same shortcut whether the button is
