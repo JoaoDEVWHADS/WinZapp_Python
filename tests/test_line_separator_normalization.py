@@ -117,6 +117,7 @@ class TestPasteNormalization:
             stub = _Stub(frame)
             if wx.TheClipboard.Open():
                 wx.TheClipboard.SetData(wx.TextDataObject("A\u2029B\u2029C"))
+                wx.TheClipboard.Flush()
                 wx.TheClipboard.Close()
             else:
                 pytest.skip("clipboard unavailable")
@@ -134,6 +135,7 @@ class TestPasteNormalization:
             stub = _Stub(frame)
             if wx.TheClipboard.Open():
                 wx.TheClipboard.SetData(wx.TextDataObject("hello\nworld"))
+                wx.TheClipboard.Flush()
                 wx.TheClipboard.Close()
             else:
                 pytest.skip("clipboard unavailable")
@@ -199,6 +201,7 @@ class TestPasteHandlerIsGeneric:
             stub = _Stub(frame)
             if wx.TheClipboard.Open():
                 wx.TheClipboard.SetData(wx.TextDataObject("A\u2029B"))
+                wx.TheClipboard.Flush()
                 wx.TheClipboard.Close()
             else:
                 pytest.skip("clipboard unavailable")

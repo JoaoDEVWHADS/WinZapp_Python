@@ -5,6 +5,7 @@ same shortcut the official WhatsApp client offers.
 
 import os
 import tempfile
+import time
 
 import pytest
 import wx
@@ -30,17 +31,40 @@ class _Stub:
         self.panel_shown_calls += 1
 
 
+def _set_clipboard_data(make_data_object, attempts=10, delay=0.05):
+    """Open the clipboard and write `make_data_object()` to it, retrying on
+    failure.
+
+    wx.TheClipboard.SetData() wraps Windows' OLE clipboard, which can
+    transiently refuse a write (returns False, clipboard content unchanged)
+    right after a previous Open/Close cycle elsewhere in the same process --
+    reproduced by running this file after enough other wx-using tests earlier
+    in a full suite run. SetData()'s return value must be checked: unlike
+    Open(), a failed SetData() still leaves the clipboard "open"-able, so the
+    old content (e.g. leftover text from another test) silently stays put
+    and looks like a successful write to a caller that only checks Open().
+    """
+    for _ in range(attempts):
+        if not wx.TheClipboard.Open():
+            time.sleep(delay)
+            continue
+        try:
+            if wx.TheClipboard.SetData(make_data_object()):
+                return True
+        finally:
+            wx.TheClipboard.Close()
+        time.sleep(delay)
+    return False
+
+
 def _set_clipboard_files(paths):
-    if not wx.TheClipboard.Open():
-        return False
-    try:
+    def make():
         data = wx.FileDataObject()
         for p in paths:
             data.AddFile(p)
-        wx.TheClipboard.SetData(data)
-    finally:
-        wx.TheClipboard.Close()
-    return True
+        return data
+
+    return _set_clipboard_data(make)
 
 
 def _set_clipboard_bitmap():
@@ -49,13 +73,8 @@ def _set_clipboard_bitmap():
     dc.SetBackground(wx.Brush(wx.Colour(255, 0, 0)))
     dc.Clear()
     dc.SelectObject(wx.NullBitmap)
-    if not wx.TheClipboard.Open():
-        return False
-    try:
-        wx.TheClipboard.SetData(wx.BitmapDataObject(bmp))
-    finally:
-        wx.TheClipboard.Close()
-    return True
+
+    return _set_clipboard_data(lambda: wx.BitmapDataObject(bmp))
 
 
 def _set_clipboard_text(text):
