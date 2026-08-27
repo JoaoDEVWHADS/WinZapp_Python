@@ -66,7 +66,7 @@ def _download_status_media(main_window, status: dict, attempts: int = 4) -> byte
     raise ValueError(str(last_error or "empty media response"))
 
 
-def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
+def _status_content_label(msg_type: str, msg_obj: dict, i18n, settings: dict = None) -> str:
     """Human-readable content label for one status update.
 
     Shared by MyStatusDialog, StatusPanel's list-row preview, and
@@ -87,8 +87,11 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
         caption = ((msg_obj.get("videoMessage") or {}).get("caption") or "").strip()
         return f"{i18n.t('video')}: {caption}" if caption else i18n.t("video")
     if msg_type in ("audioMessage", "audio", "ptt"):
-        is_ptt = is_voice_message(msg_obj) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
-        return i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
+        vm_mode = (settings.get("user_interface", {}) if isinstance(settings, dict) else {}).get("voice_message_mode", "audio")
+        if vm_mode == "voice_message":
+            is_ptt = is_voice_message(msg_obj) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
+            return i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
+        return i18n.t("message_type_audio")
     if msg_type == "documentMessage":
         doc = msg_obj.get("documentMessage") or {}
         filename = doc.get("fileName") or doc.get("title") or ""
@@ -361,7 +364,7 @@ class MyStatusDialog(wx.Dialog):
 
         msg_type = status.get("messageType", "")
         msg_obj  = status.get("message") or {}
-        content  = _status_content_label(msg_type, msg_obj, i18n)
+        content  = _status_content_label(msg_type, msg_obj, i18n, getattr(self._mw, "settings", None))
 
         nav_info = i18n.t("status_of").format(current=self._current + 1, total=total)
         label    = f"{nav_info}: {content}"
@@ -1189,7 +1192,7 @@ class StatusPanel(wx.Panel):
         """Return a short human-readable preview of a single status item."""
         msg_type = status.get("messageType", "")
         msg_obj  = status.get("message") or {}
-        return _status_content_label(msg_type, msg_obj, i18n)
+        return _status_content_label(msg_type, msg_obj, i18n, getattr(self.main_window, "settings", None))
 
     def _populate_list(self, my_statuses: list, contacts: list):
         i18n = self.main_window.i18n
@@ -1520,10 +1523,13 @@ class StatusPanel(wx.Panel):
             item.update(kind="text", text=text)
             return item
 
+        vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+        is_ptt = is_voice_message(msg_obj) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
+        audio_label_key = "message_type_voice_message" if (vm_mode == "voice_message" and is_ptt) else "message_type_audio"
         type_map = {
             "imageMessage": ("image", ".jpg", "photo"),
             "videoMessage": ("video", ".mp4", "video"),
-            "audioMessage": ("audio", ".ogg", "message_type_audio"),
+            "audioMessage": ("audio", ".ogg", audio_label_key),
         }
         if msg_type in type_map:
             kind, default_ext, label_key = type_map[msg_type]
@@ -1541,13 +1547,14 @@ class StatusPanel(wx.Panel):
                 filename=f"status{ext}",
                 caption=caption,
                 media_label=i18n.t(label_key),
+                is_ptt=is_ptt,
             )
             return item
 
         # Documents, stickers, contacts and any future status type still open
         # in the same modal window as accessible read-only text rather than
         # silently doing nothing.
-        item.update(kind="text", text=_status_content_label(msg_type, msg_obj, i18n))
+        item.update(kind="text", text=_status_content_label(msg_type, msg_obj, i18n, getattr(self.main_window, "settings", None)))
         return item
 
     def _on_viewer_status_opened(self, item: dict, index: int):
@@ -1650,7 +1657,7 @@ class StatusPanel(wx.Panel):
 
         msg_type = status.get("messageType", "")
         msg_obj  = status.get("message") or {}
-        content  = _status_content_label(msg_type, msg_obj, i18n)
+        content  = _status_content_label(msg_type, msg_obj, i18n, getattr(self.main_window, "settings", None))
 
         nav_info = i18n.t("status_of").format(current=current + 1, total=total)
         label    = f"{entry.get('name', '')} — {nav_info}: {content}"

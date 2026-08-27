@@ -43,7 +43,8 @@
         "bulk_action_shortcuts": true,
         "auto_focus_next_audio": true,
         "selected_announcement_position": "end",
-        "show_yesterday_label": true
+        "show_yesterday_label": true,
+        "voice_message_mode": "audio"
     },
     "audio_playback": {
         "audio_default_speed": 1.0

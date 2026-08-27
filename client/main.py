@@ -21168,7 +21168,8 @@ class MainWindow(wx.Frame):
                             orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
                         elif orig_type in ("audioMessage", "audio", "ptt"):
                             is_ptt = is_voice_message(m) or bool(isinstance(orig_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": orig_obj}))
-                            orig_text = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
+                            vm_mode = self.settings.get("user_interface", {}).get("voice_message_mode", "audio")
+                            orig_text = i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else i18n.t("message_type_audio")
                         elif orig_type == "videoMessage":
                             orig_text = i18n.t("video")
                         elif orig_type == "imageMessage":
@@ -21287,7 +21288,8 @@ class MainWindow(wx.Frame):
             audio_inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
             dur = _dur(audio_inner.get("seconds"))
             is_ptt = is_voice_message(last) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
-            lbl = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
+            vm_mode = self.settings.get("user_interface", {}).get("voice_message_mode", "audio")
+            lbl = i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else i18n.t("message_type_audio")
             content = f"{lbl} {dur}".strip()
         elif msg_type == "videoMessage":
             video = msg_obj.get("videoMessage") or {}

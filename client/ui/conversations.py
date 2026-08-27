@@ -7337,7 +7337,8 @@ class ConversationsPanel(wx.Panel):
                 audio = msg.get("audioMessage") or {}
             dur   = self._format_duration(audio.get("seconds"))
             is_ptt = is_voice_message(msg)
-            lbl = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
+            vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+            lbl = i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else i18n.t("message_type_audio")
             if not dur:
                 # Unknown duration (e.g. a non-.wav file sent via the
                 # attachment picker — see _probe_audio_duration()): omit the
@@ -7974,11 +7975,13 @@ class ConversationsPanel(wx.Panel):
             return text
 
         # Support raw WPPConnect types and body/text keys
+        vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+        use_voice_msg = (vm_mode == "voice_message")
         msg_type_raw = quoted_msg.get("type")
         if msg_type_raw:
             _wpp_type_map = {
-                "audio": "message_type_voice_message" if is_voice_message(quoted_msg) else "message_type_audio",
-                "ptt": "message_type_voice_message",
+                "audio": "message_type_voice_message" if (use_voice_msg and is_voice_message(quoted_msg)) else "message_type_audio",
+                "ptt": "message_type_voice_message" if use_voice_msg else "message_type_audio",
                 "image": "photo",
                 "video": "video",
                 "document": "document",
@@ -8003,7 +8006,7 @@ class ConversationsPanel(wx.Panel):
 
         # Non-text types: return the localized type label (first letter upper)
         _type_map = [
-            ("audioMessage",    "message_type_voice_message" if is_voice_message(quoted_msg) else "message_type_audio"),
+            ("audioMessage",    "message_type_voice_message" if (use_voice_msg and is_voice_message(quoted_msg)) else "message_type_audio"),
             ("imageMessage",    "photo"),
             ("videoMessage",    "video"),
             ("documentMessage", "document"),

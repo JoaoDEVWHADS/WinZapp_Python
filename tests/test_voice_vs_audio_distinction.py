@@ -117,10 +117,14 @@ class _FakeConvPanel:
     _get_quoted_preview = ConversationsPanel._get_quoted_preview
     _resolve_mentions_in_text = ConversationsPanel._resolve_mentions_in_text
 
-    def __init__(self, lang="pt-BR"):
+class _FakeConvPanel(ConversationsPanel):
+    def __init__(self, lang="pt-BR", vm_mode="voice_message"):
         self.main_window = types.SimpleNamespace(
             i18n=_FakeI18n(lang),
-            settings={"accessibility": {"show_link_previews": True}},
+            settings={
+                "accessibility": {"show_link_previews": True},
+                "user_interface": {"voice_message_mode": vm_mode},
+            },
         )
         self.contact_names = {}
         self._download_progress = {}
@@ -165,16 +169,24 @@ class TestIsVoiceMessageHelper:
 
 
 class TestConversationGetMessageContent:
-    def test_ptt_voice_message_content_pt_br(self):
-        panel = _FakeConvPanel("pt-BR")
+    def test_ptt_voice_message_content_pt_br_distinct_mode(self):
+        panel = _FakeConvPanel("pt-BR", vm_mode="voice_message")
         msg = {
             "messageType": "audioMessage",
             "message": {"audioMessage": {"seconds": 72, "ptt": True}},
         }
         assert panel._get_message_content(msg) == "mensagem de voz, duração: 1 minuto e 12 segundos"
 
+    def test_ptt_voice_message_content_pt_br_classic_audio_mode(self):
+        panel = _FakeConvPanel("pt-BR", vm_mode="audio")
+        msg = {
+            "messageType": "audioMessage",
+            "message": {"audioMessage": {"seconds": 72, "ptt": True}},
+        }
+        assert panel._get_message_content(msg) == "áudio, duração: 1 minuto e 12 segundos"
+
     def test_generic_audio_message_content_pt_br(self):
-        panel = _FakeConvPanel("pt-BR")
+        panel = _FakeConvPanel("pt-BR", vm_mode="voice_message")
         msg = {
             "messageType": "audioMessage",
             "message": {"audioMessage": {"seconds": 72, "ptt": False}},
@@ -182,7 +194,7 @@ class TestConversationGetMessageContent:
         assert panel._get_message_content(msg) == "áudio, duração: 1 minuto e 12 segundos"
 
     def test_ptt_voice_message_content_en_us(self):
-        panel = _FakeConvPanel("en-US")
+        panel = _FakeConvPanel("en-US", vm_mode="voice_message")
         msg = {
             "messageType": "audioMessage",
             "message": {"audioMessage": {"seconds": 72, "ptt": True}},
@@ -190,7 +202,7 @@ class TestConversationGetMessageContent:
         assert panel._get_message_content(msg) == "voice message, duration: 1 minute and 12 seconds"
 
     def test_generic_audio_message_content_en_us(self):
-        panel = _FakeConvPanel("en-US")
+        panel = _FakeConvPanel("en-US", vm_mode="voice_message")
         msg = {
             "messageType": "audioMessage",
             "message": {"audioMessage": {"seconds": 72, "ptt": False}},
@@ -199,16 +211,24 @@ class TestConversationGetMessageContent:
 
 
 class TestQuotedAudioPreview:
-    def test_quoted_ptt_preview(self):
-        panel = _FakeConvPanel("pt-BR")
+    def test_quoted_ptt_preview_distinct_mode(self):
+        panel = _FakeConvPanel("pt-BR", vm_mode="voice_message")
         quoted = {
             "messageType": "audioMessage",
             "audioMessage": {"ptt": True},
         }
         assert panel._get_quoted_preview(quoted) == "Mensagem de voz"
 
+    def test_quoted_ptt_preview_classic_mode(self):
+        panel = _FakeConvPanel("pt-BR", vm_mode="audio")
+        quoted = {
+            "messageType": "audioMessage",
+            "audioMessage": {"ptt": True},
+        }
+        assert panel._get_quoted_preview(quoted) == "Áudio"
+
     def test_quoted_generic_audio_preview(self):
-        panel = _FakeConvPanel("pt-BR")
+        panel = _FakeConvPanel("pt-BR", vm_mode="voice_message")
         quoted = {
             "messageType": "audioMessage",
             "audioMessage": {"ptt": False},
@@ -217,10 +237,11 @@ class TestQuotedAudioPreview:
 
 
 class TestMainWindowLastMsgPreview:
-    def test_last_msg_preview_voice_message(self):
+    def test_last_msg_preview_voice_message_distinct_mode(self):
         from main import MainWindow
         win = types.SimpleNamespace()
         win.i18n = _FakeI18n("pt-BR")
+        win.settings = {"user_interface": {"voice_message_mode": "voice_message"}}
         win._counts_as_last_message = MainWindow._counts_as_last_message
         win._resolve_contact_name = lambda *a, **k: ""
         win._preview_sender_from_jid = lambda *a, **k: ""
@@ -236,10 +257,31 @@ class TestMainWindowLastMsgPreview:
         preview = MainWindow._last_msg_preview(win, chat)
         assert "mensagem de voz 1:12" in preview
 
+    def test_last_msg_preview_voice_message_classic_audio_mode(self):
+        from main import MainWindow
+        win = types.SimpleNamespace()
+        win.i18n = _FakeI18n("pt-BR")
+        win.settings = {"user_interface": {"voice_message_mode": "audio"}}
+        win._counts_as_last_message = MainWindow._counts_as_last_message
+        win._resolve_contact_name = lambda *a, **k: ""
+        win._preview_sender_from_jid = lambda *a, **k: ""
+        msg = {
+            "key": {"fromMe": False},
+            "messageType": "audioMessage",
+            "message": {"audioMessage": {"seconds": 72, "ptt": True}},
+            "messageTimestamp": 1000,
+        }
+        chat = {
+            "messages": {"messages": {"records": [msg]}}
+        }
+        preview = MainWindow._last_msg_preview(win, chat)
+        assert "áudio 1:12" in preview
+
     def test_last_msg_preview_generic_audio(self):
         from main import MainWindow
         win = types.SimpleNamespace()
         win.i18n = _FakeI18n("pt-BR")
+        win.settings = {"user_interface": {"voice_message_mode": "voice_message"}}
         win._counts_as_last_message = MainWindow._counts_as_last_message
         win._resolve_contact_name = lambda *a, **k: ""
         win._preview_sender_from_jid = lambda *a, **k: ""
@@ -254,3 +296,23 @@ class TestMainWindowLastMsgPreview:
         }
         preview = MainWindow._last_msg_preview(win, chat)
         assert "áudio 1:12" in preview
+
+
+class TestStatusAudioDistinction:
+    def test_status_content_label_distinct_mode(self):
+        from status_panel import _status_content_label
+        i18n = _FakeI18n("pt-BR")
+        settings = {"user_interface": {"voice_message_mode": "voice_message"}}
+        ptt_obj = {"audioMessage": {"ptt": True}}
+        audio_obj = {"audioMessage": {"ptt": False}}
+        assert _status_content_label("audioMessage", ptt_obj, i18n, settings) == "mensagem de voz"
+        assert _status_content_label("audioMessage", audio_obj, i18n, settings) == "áudio"
+
+    def test_status_content_label_classic_audio_mode(self):
+        from status_panel import _status_content_label
+        i18n = _FakeI18n("pt-BR")
+        settings = {"user_interface": {"voice_message_mode": "audio"}}
+        ptt_obj = {"audioMessage": {"ptt": True}}
+        audio_obj = {"audioMessage": {"ptt": False}}
+        assert _status_content_label("audioMessage", ptt_obj, i18n, settings) == "áudio"
+        assert _status_content_label("audioMessage", audio_obj, i18n, settings) == "áudio"
