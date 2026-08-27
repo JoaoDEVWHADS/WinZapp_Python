@@ -185,6 +185,7 @@ from core.wppconnect_sender_layer_patch import patch_sender_layer_source
 from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
 from core.wpp_dependency_setup import (
     PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
+    check_github_dependencies_updates as _check_github_dependencies_updates,
     merge_dependency_patches,
     reset_dependency_state,
 )
@@ -419,26 +420,42 @@ def _reset_dependency_state():
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="WinZapp WPPConnect Server setup and update script.")
+    parser.add_argument("--clean", "--force", "--reinstall", action="store_true", dest="clean",
+                        help="Force full clean reinstallation (removes node_modules and reinstalls from scratch).")
+    parser.add_argument("--update", action="store_true", dest="update",
+                        help="Perform fast incremental update (git fetch, SHA compare, git pull, npm update and build).")
+    args, _ = parser.parse_known_args()
+
     ensure_portable_git()
     env = _load_env()
     tag = env.get("WPPCONNECT_TAG_VERSION", "").strip()
 
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
     already_cloned = os.path.isdir(git_dir)
+    has_node_modules = os.path.isdir(os.path.join(CLIENT_API_DIR, "node_modules"))
 
-    # Gather the content to restore for every patched file, preferring
-    # client/api_patches/ (permanent, always-tracked) over whatever
-    # happens to still be sitting in client/api/ right now — the latter
-    # is worthless as a source the moment client/api/ has already been
-    # deleted, which is exactly when this restore matters most.
-    #
-    # Loaded up front, before the clone branch, because BOTH consumers need it:
-    # the post-clone restore below and the post-`git checkout <tag>` restore
-    # further down. It used to be populated only on the clone path, so checking
-    # out a tag against an existing client/api/ raised NameError — and had that
-    # line been reached with an empty dict instead, it would have been worse:
-    # `git checkout -f` overwrites the patched files with upstream's, and
-    # nothing would have put ours back.
+    # Determine execution mode
+    is_incremental_update = already_cloned and has_node_modules and not args.clean
+
+    # Platform-specific configurations
+    is_windows = sys.platform == "win32"
+    node_bin = "node"
+    npm_bin = "npm"
+    if is_windows:
+        win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
+        if os.path.isfile(win_node):
+            node_bin = win_node
+            win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
+            if os.path.isfile(win_npm):
+                npm_bin = win_npm
+
+        win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
+        win_node_dir = os.path.join(ROOT_DIR, "client", "node")
+        os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+
+    # Gather custom patches
     custom_contents = {}
     for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
         patches_path = os.path.join(API_PATCHES_DIR, rel_path)
@@ -452,81 +469,143 @@ def main():
                 custom_contents[rel_path] = f.read()
             print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
 
-    if already_cloned:
-        print(f"[INFO] client/api/ already exists — skipping clone.")
-    else:
-        print(f"[INFO] Cloning WPPConnect Server …")
-        temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
-        node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
-        has_node_modules = os.path.isdir(node_modules_path)
-        if has_node_modules:
-            try:
-                if os.path.exists(temp_node_modules):
-                    shutil.rmtree(temp_node_modules)
-                shutil.move(node_modules_path, temp_node_modules)
-                print("[INFO] Temporarily moved node_modules to preserve cache.")
-            except Exception as e:
-                print(f"[WARNING] Failed to move node_modules: {e}")
-                has_node_modules = False
+    has_git = shutil.which("git") is not None
 
-        if os.path.isdir(CLIENT_API_DIR):
+    if is_incremental_update:
+        print("[INFO] Existing installation detected — performing fast incremental update...")
+        if has_git and already_cloned:
             try:
-                shutil.rmtree(CLIENT_API_DIR)
-            except Exception as e:
-                print(f"[WARNING] Failed to remove client/api: {e}")
-        os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
+                # 1. Obter SHA atual
+                res_old = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+                old_sha = res_old.stdout.strip() if res_old.returncode == 0 else "unknown"
 
-        has_git = shutil.which("git") is not None
-        if has_git:
-            _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+                # 2. Executar git fetch --all
+                print(f"[INFO] Running git fetch --all in client/api (current SHA: {old_sha})...")
+                _run(["git", "fetch", "--all", "--prune"], cwd=CLIENT_API_DIR)
+
+                # 3. Obter SHA remoto da branch upstream
+                res_remote = subprocess.run(["git", "rev-parse", "--short", "@{u}"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+                if res_remote.returncode != 0:
+                    res_remote = subprocess.run(["git", "rev-parse", "--short", "origin/main"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+                remote_sha = res_remote.stdout.strip() if res_remote.returncode == 0 else old_sha
+
+                # 4. Comparar SHAs e fazer pull se houver novidades
+                if old_sha != remote_sha and remote_sha:
+                    print(f"[INFO] New commit available on upstream wppconnect-server: {old_sha} -> {remote_sha}")
+                    print("[INFO] Resetting local patched state and pulling updates from upstream...")
+                    _run(["git", "reset", "--hard", "HEAD"], cwd=CLIENT_API_DIR)
+                    _run(["git", "pull", "--ff-only"], cwd=CLIENT_API_DIR)
+                else:
+                    print(f"[INFO] Upstream wppconnect-server is already up to date ({old_sha}).")
+            except Exception as e:
+                print(f"[WARNING] Could not update wppconnect-server via git: {e}")
+
+        # Sincronizar patches
+        for rel_path, content in custom_contents.items():
+            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(content)
+            print(f"[INFO] Synced custom patch: {rel_path}")
+
+        _recover_upstream_package_json()
+        _merge_package_json_dependencies()
+
+        # Comparar e atualizar dependências do GitHub
+        packages_to_update = _check_github_dependencies_updates(CLIENT_API_DIR)
+        if packages_to_update:
+            print(f"[INFO] Updating packages: {', '.join(packages_to_update)}...")
+            npm_cmd = [node_bin, npm_bin] if npm_bin.endswith("npm-cli.js") else [npm_bin]
+            try:
+                _run(npm_cmd + ["update"] + packages_to_update + ["--no-audit", "--no-fund"], cwd=CLIENT_API_DIR)
+            except Exception as e:
+                print(f"[WARNING] npm update failed ({e}) — falling back to npm install...")
+                _run(npm_cmd + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
         else:
-            print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
-            import urllib.request
-            import zipfile
-            zip_url = "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
-            zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
-            extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
-            try:
-                print(f"  Downloading {zip_url} ...")
-                urllib.request.urlretrieve(zip_url, zip_tmp)
-                print("  Extracting ZIP archive...")
-                with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
-                    zip_ref.extractall(extract_tmp)
-                
-                # Find extracted root folder (e.g. wppconnect-server-main)
-                extracted_subdirs = [os.path.join(extract_tmp, d) for d in os.listdir(extract_tmp) if os.path.isdir(os.path.join(extract_tmp, d))]
-                source_folder = extracted_subdirs[0] if extracted_subdirs else extract_tmp
-                shutil.move(source_folder, CLIENT_API_DIR)
-                print("[INFO] WPPConnect Server ZIP extracted to client/api successfully.")
-            except Exception as zip_err:
-                print(f"[ERROR] Failed to download or extract WPPConnect Server ZIP: {zip_err}")
-                sys.exit(1)
-            finally:
-                if os.path.exists(zip_tmp):
-                    try: os.remove(zip_tmp)
-                    except: pass
-                if os.path.exists(extract_tmp):
-                    try: shutil.rmtree(extract_tmp)
-                    except: pass
+            print("[INFO] All 3 GitHub dependencies are already up to date!")
 
-        if has_node_modules:
-            try:
-                shutil.move(temp_node_modules, os.path.join(CLIENT_API_DIR, "node_modules"))
-                print("[INFO] Restored node_modules cache successfully.")
-            except Exception as e:
-                print(f"[WARNING] Failed to restore node_modules: {e}")
+    else:
+        # Modo de instalação limpa (primeira vez ou --clean/--force)
+        if already_cloned:
+            print(f"[INFO] Full clean install requested — reconfiguring client/api/...")
+        else:
+            print(f"[INFO] Cloning WPPConnect Server …")
+            temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
+            node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
+            has_nm = os.path.isdir(node_modules_path)
+            if has_nm and not args.clean:
+                try:
+                    if os.path.exists(temp_node_modules):
+                        shutil.rmtree(temp_node_modules)
+                    shutil.move(node_modules_path, temp_node_modules)
+                    print("[INFO] Temporarily moved node_modules to preserve cache.")
+                except Exception as e:
+                    print(f"[WARNING] Failed to move node_modules: {e}")
+                    has_nm = False
 
-    # Always restore every patched file from client/api_patches/ on every run
-    for rel_path, content in custom_contents.items():
-        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        with open(dest_path, "wb") as f:
-            f.write(content)
-        print(f"[INFO] Synced custom patch: {rel_path}")
+            if os.path.isdir(CLIENT_API_DIR):
+                try:
+                    shutil.rmtree(CLIENT_API_DIR)
+                except Exception as e:
+                    print(f"[WARNING] Failed to remove client/api: {e}")
+            os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
 
-    # Recover upstream's graph before adding only WinZapp-owned packages.
-    _recover_upstream_package_json()
-    _merge_package_json_dependencies()
+            if has_git:
+                _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+            else:
+                print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
+                import urllib.request
+                import zipfile
+                zip_url = "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
+                zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
+                extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
+                try:
+                    print(f"  Downloading {zip_url} ...")
+                    urllib.request.urlretrieve(zip_url, zip_tmp)
+                    print("  Extracting ZIP archive...")
+                    with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+                        zip_ref.extractall(extract_tmp)
+                    
+                    extracted_subdirs = [os.path.join(extract_tmp, d) for d in os.listdir(extract_tmp) if os.path.isdir(os.path.join(extract_tmp, d))]
+                    source_folder = extracted_subdirs[0] if extracted_subdirs else extract_tmp
+                    shutil.move(source_folder, CLIENT_API_DIR)
+                    print("[INFO] WPPConnect Server ZIP extracted to client/api successfully.")
+                except Exception as zip_err:
+                    print(f"[ERROR] Failed to download or extract WPPConnect Server ZIP: {zip_err}")
+                    sys.exit(1)
+                finally:
+                    if os.path.exists(zip_tmp):
+                        try: os.remove(zip_tmp)
+                        except: pass
+                    if os.path.exists(extract_tmp):
+                        try: shutil.rmtree(extract_tmp)
+                        except: pass
+
+            if has_nm and not args.clean:
+                try:
+                    shutil.move(temp_node_modules, os.path.join(CLIENT_API_DIR, "node_modules"))
+                    print("[INFO] Restored node_modules cache successfully.")
+                except Exception as e:
+                    print(f"[WARNING] Failed to restore node_modules: {e}")
+
+        # Always restore every patched file from client/api_patches/ on every run
+        for rel_path, content in custom_contents.items():
+            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(content)
+            print(f"[INFO] Synced custom patch: {rel_path}")
+
+        _recover_upstream_package_json()
+        _merge_package_json_dependencies()
+
+        print("[INFO] Automating Node.js dependency installation from scratch...")
+        _reset_dependency_state()
+        print("[INFO] Running npm install...")
+        if npm_bin.endswith("npm-cli.js"):
+            _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+        else:
+            _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
@@ -548,45 +627,14 @@ def main():
     print("[OK] WPPConnect Server ready at client/api/")
     print()
 
-    # Platform-specific installations
-    is_windows = sys.platform == "win32"
-
-    # 1. Automating Node dependency installation and build
-    print("[INFO] Automating Node.js dependency installation and compilation...")
+    # Aplicação de Patches das camadas e Compilação
     try:
-        # Determine node/npm command
-        # On Windows, check if portable node exists in client/node/node.exe
-        node_bin = "node"
-        npm_bin = "npm"
-        if is_windows:
-            win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
-            if os.path.isfile(win_node):
-                node_bin = win_node
-                win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
-                if os.path.isfile(win_npm):
-                    npm_bin = win_npm
-
-            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
-            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
-            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
-
-        # Git dependencies and ignored lockfiles must never survive a repair.
-        _reset_dependency_state()
-
-        # Run npm install
-        print("[INFO] Running npm install...")
-        if npm_bin.endswith("npm-cli.js"):
-            _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
-        else:
-            _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
-
-        # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
+        # Apply the RangeError/memory-leak patch to decrypt.js
         try:
             custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
             decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
             if os.path.isfile(custom_decrypt):
                 print("[INFO] Copying custom decrypt.js patch to node_modules...")
-                # Ensure the destination directory exists (should exist due to npm install)
                 os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
                 shutil.copy2(custom_decrypt, decrypt_js_path)
                 print("[OK] Copied decrypt.js patch successfully.")
@@ -595,43 +643,35 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
-        # Slow down phone-number pairing-code rotation (WinZapp issue #8) —
-        # see _patch_wppconnect_host_layer()'s docstring for the upstream bug.
+        # Patch layers
         try:
             _patch_wppconnect_host_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch host.layer.js pairing-code rotation: {e}")
 
-        # Status posting always reported success regardless of whether it
-        # actually worked — see _patch_wppconnect_status_layer()'s docstring.
         try:
             _patch_wppconnect_status_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch status.layer.js posting-result reporting: {e}")
 
-        # Failed video sends only ever logged opaque minified junk — see
-        # _patch_wppconnect_sender_layer()'s docstring.
         try:
             _patch_wppconnect_sender_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch sender.layer.js sendFile error detail: {e}")
 
-        # A CommonJS require() of the ESM-only `latest-version` package
-        # crashes the whole server at startup on Node 20+ — see
-        # _patch_wppconnect_welcome_layer()'s docstring.
         try:
             _patch_wppconnect_welcome_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch welcome.js latest-version ESM require: {e}")
 
-        # Download Chromium (Puppeteer postinstall)
-        print("[INFO] Downloading Chromium (Puppeteer)...")
-        install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
-        if os.path.isfile(install_js):
-            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
-        else:
-            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
-            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+        # Download Chromium if not installed
+        if not is_incremental_update:
+            print("[INFO] Checking Chromium (Puppeteer)...")
+            install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
+            if os.path.isfile(install_js):
+                _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+            else:
+                _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
@@ -639,7 +679,7 @@ def main():
             _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
-        print("[OK] WPPConnect Server dependencies installed and built successfully.")
+        print("[OK] WPPConnect Server built successfully.")
 
     except Exception as e:
         print(f"[ERROR] Node.js dependencies installation/build failed: {e}")
@@ -647,13 +687,6 @@ def main():
         print(f"  cd {CLIENT_API_DIR}")
         print("  npm install")
         print("  npm run build")
-        # This used to only print the error and fall through: setup_api.py
-        # exited 0 either way, so a failed/partial `npm run build` silently
-        # left whatever dist/server.js already happened to be on disk (stale,
-        # or from a much older checkout) in place. build.py only checks that
-        # dist/server.js *exists*, not that it matches the current src/patches
-        # — so that stale build got shipped in a release without any warning.
-        # Failing loudly here is what actually surfaces the problem.
         sys.exit(1)
 
     # 2. Linux OS dependencies installation (Debian/Ubuntu)
