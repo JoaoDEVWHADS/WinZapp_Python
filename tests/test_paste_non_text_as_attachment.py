@@ -30,29 +30,49 @@ class _Stub:
         self.panel_shown_calls += 1
 
 
+@pytest.fixture(autouse=True)
+def _clear_clipboard_after_test():
+    yield
+    if wx.TheClipboard.Open():
+        try:
+            wx.TheClipboard.Clear()
+            wx.TheClipboard.Flush()
+        finally:
+            wx.TheClipboard.Close()
+
+
 def _set_clipboard_files(paths):
     if not wx.TheClipboard.Open():
         return False
     try:
+        wx.TheClipboard.Clear()
         data = wx.FileDataObject()
         for p in paths:
             data.AddFile(p)
         wx.TheClipboard.SetData(data)
+        wx.TheClipboard.Flush()
     finally:
         wx.TheClipboard.Close()
     return True
 
 
 def _set_clipboard_bitmap():
-    bmp = wx.Bitmap(4, 4)
+    try:
+        wx.InitAllImageHandlers()
+    except Exception:
+        pass
+    bmp = wx.Bitmap(16, 16)
     dc = wx.MemoryDC(bmp)
     dc.SetBackground(wx.Brush(wx.Colour(255, 0, 0)))
     dc.Clear()
     dc.SelectObject(wx.NullBitmap)
+    del dc
     if not wx.TheClipboard.Open():
         return False
     try:
+        wx.TheClipboard.Clear()
         wx.TheClipboard.SetData(wx.BitmapDataObject(bmp))
+        wx.TheClipboard.Flush()
     finally:
         wx.TheClipboard.Close()
     return True
@@ -62,7 +82,9 @@ def _set_clipboard_text(text):
     if not wx.TheClipboard.Open():
         return False
     try:
+        wx.TheClipboard.Clear()
         wx.TheClipboard.SetData(wx.TextDataObject(text))
+        wx.TheClipboard.Flush()
     finally:
         wx.TheClipboard.Close()
     return True
