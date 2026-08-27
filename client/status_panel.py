@@ -260,7 +260,7 @@ class MyStatusDialog(wx.Dialog):
     wx.ID_CANCEL   – user closed the dialog without requesting an action.
     """
 
-    RC_ADD_STATUS = wx.ID_HIGHEST + 100
+    RC_ADD_STATUS = (getattr(wx, "ID_HIGHEST", 5000) if isinstance(getattr(wx, "ID_HIGHEST", None), int) else 5000) + 100
 
     def __init__(self, main_window, my_statuses: list):
         i18n = main_window.i18n

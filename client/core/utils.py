@@ -375,25 +375,28 @@ DEFAULT_SETTINGS = {
     "general": {
         "language": "",
         "notifications_enabled": True,
+        "keep_muted_chats_silent_when_open": True,
         "updates_enabled": True,
-        # Alpha channel (one build per commit on main) — opt-in, see
-        # client/updater.py's select_release().
         "alpha_updates_enabled": False,
         "noise_reduction_enabled": False,
         "first_run": True,
+        "api_type_first_run_asked": False,
+        "hotkey_first_run_asked": False,
         "autostart": False,
         "show_tray_icon": True,
         "terms_alert_displayed": False,
         "quick_tip_shown": False,
         "global_hotkey": None,
         "switch_behavior": "single",
-        # Master mute (Settings > Geral) for the spoken+sound announcements of
-        # sync progress/completion, media downloads and the automatic offline
-        # transition. On by default; unchecked = those warnings stay silent.
-        "announce_sync_events": True
+        "announce_sync_events": True,
+        "search_normalization": "off"
     },
     "status": {
         "messages_set_completed": False
+    },
+    "status_panel": {
+        "liked_status_ids": [],
+        "viewed_status_ids": []
     },
     "calls": {
         "alerts_enabled": True,
@@ -409,8 +412,15 @@ DEFAULT_SETTINGS = {
         "page_up_down_step": 10,
         "self_reference_mode": "eu",
         "self_reference_custom_word": "",
+        "show_delivery_status_in_chat_list": True,
+        "preserve_typed_text_as_attachment_caption": True,
+        "bulk_action_shortcuts": True,
+        "auto_focus_next_audio": True,
+        "selected_announcement_position": "end",
         "show_yesterday_label": True,
         "show_link_previews": True,
+        "forwarded_prefix_enabled": False,
+        "conversation_video_media_viewer_dialog": True,
         "status_media_viewer_dialog": True,
         "voice_message_mode": "audio"
     },
@@ -442,10 +452,15 @@ DEFAULT_SETTINGS = {
         "group_custom_path": ""
     },
     "conversation_sounds": {},
+    "cleared_chats": {},
+    "privateinfo": {
+        "paired": False
+    },
     "storage": {
         "auto_download_media": True,
         "media_max_days": 30,
-        "media_max_mb": 100
+        "media_max_mb": 100,
+        "probe_video_duration_on_download": False
     }
 }
 
