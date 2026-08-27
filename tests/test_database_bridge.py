@@ -10,6 +10,8 @@ background-thread bridge (not mocked) against a temporary on-disk database.
 """
 
 import asyncio
+import inspect
+import threading
 import time
 
 import pytest
@@ -109,3 +111,103 @@ class TestClose:
 
         assert result.get("value") == 42
         assert "error" not in result
+
+
+class TestTimeoutCancelsThePendingCoroutine:
+    """A timed-out call now cancels its future — see DatabaseBridgeTimeout's
+    own docstring. A coroutine still queued behind other work on the loop
+    (as opposed to one already running) must never get a chance to run at
+    all once its caller has given up on it, or a caller that retried the
+    same write after the timeout could race its own retry."""
+
+    def test_a_still_queued_coroutine_never_runs_after_its_timeout(self, bridge):
+        ran = threading.Event()
+
+        async def hog():
+            # Genuinely blocks the loop thread, unlike asyncio.sleep (which
+            # cooperatively yields and would let "second" run interleaved,
+            # defeating the point of this test — verified empirically
+            # before writing this).
+            time.sleep(0.4)
+
+        async def second():
+            ran.set()
+
+        t = threading.Thread(target=lambda: bridge._call(hog(), timeout=5))
+        t.start()
+        time.sleep(0.05)  # let hog actually start running on the loop
+
+        with pytest.raises(DatabaseBridgeTimeout):
+            bridge._call(second(), timeout=0.1)
+
+        t.join(timeout=5)
+        time.sleep(0.1)  # a beat for a cancelled-but-otherwise-runnable task
+        assert not ran.is_set()
+
+    def test_bridge_stays_usable_afterward(self, bridge):
+        async def hog():
+            time.sleep(0.3)
+
+        t = threading.Thread(target=lambda: bridge._call(hog(), timeout=5))
+        t.start()
+        time.sleep(0.05)
+
+        with pytest.raises(DatabaseBridgeTimeout):
+            bridge._call(asyncio.sleep(0, result="never"), timeout=0.05)
+
+        t.join(timeout=5)
+        bridge.upsert_chat("jid@w", {"remoteJid": "jid@w", "pushName": "StillWorks"})
+        assert bridge.get_chats()["jid@w"]["pushName"] == "StillWorks"
+
+
+class TestCloseDoesNotRaceANewCall:
+    """Regression: _closing and _inflight used to be checked/updated under
+    two separate locks — a caller could pass the _closing check in _call(),
+    and before it incremented _inflight, close() could see _inflight == 0
+    (nothing counted yet), consider everything already drained, and stop
+    the loop out from under that caller — which then failed with
+    DatabaseBridgeTimeout for a reason that had nothing to do with a slow
+    query. One lock around both makes "still open, and now counted" a
+    single atomic step close() cannot slip through."""
+
+    def test_the_shared_lock_is_actually_used(self):
+        """Structural pin: all three call sites this race depends on must
+        agree on one lock — same style as test_lid_merge_keeps_messages.py's
+        own structural test for something not practical to force
+        deterministically end to end."""
+        for method in (DatabaseBridge._call, DatabaseBridge._call_unchecked, DatabaseBridge.close):
+            assert "self._state_lock" in inspect.getsource(method), method.__name__
+
+    def test_no_call_times_out_due_to_the_loop_stopping_under_it(self, tmp_path):
+        """Hammers _call()/close() concurrently, with no artificial delay,
+        to maximise the chance of hitting the race window if it still
+        existed. A trivially-fast coroutine timing out here (rather than
+        succeeding or being cleanly rejected as closed) would mean the loop
+        was pulled out from under a call close() should have counted."""
+        db_path = str(tmp_path / "race.db")
+        b = DatabaseBridge(db_path, Fernet.generate_key())
+        results: list[tuple[str, object]] = []
+        results_lock = threading.Lock()
+
+        def caller():
+            try:
+                value = b._call(asyncio.sleep(0, result="ok"), timeout=2)
+                with results_lock:
+                    results.append(("ok", value))
+            except DatabaseBridgeClosed:
+                with results_lock:
+                    results.append(("closed", None))
+            except Exception as exc:  # pragma: no cover - failure path only
+                with results_lock:
+                    results.append(("error", exc))
+
+        threads = [threading.Thread(target=caller) for _ in range(30)]
+        for t in threads:
+            t.start()
+        b.close()
+        for t in threads:
+            t.join(timeout=5)
+
+        outcomes = {kind for kind, _ in results}
+        assert outcomes <= {"ok", "closed"}, f"unexpected outcomes: {results}"
+        assert len(results) == 30

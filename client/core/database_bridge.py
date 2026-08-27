@@ -60,9 +60,17 @@ class DatabaseBridgeClosed(RuntimeError):
 class DatabaseBridgeTimeout(RuntimeError):
     """Raised when a database call does not complete within its timeout.
 
-    This does NOT mean the underlying operation failed or was rolled back —
-    only that the calling thread stopped waiting for it. The operation may
-    still complete on the event-loop thread afterwards.
+    This does NOT mean the underlying operation failed or was rolled back.
+    _call() cancels the coroutine's future the moment the timeout fires,
+    which asyncio delivers at the coroutine's next await point: a call still
+    queued behind other work never gets to start at all, and one already
+    suspended waiting on something (a lock, an I/O op) is interrupted right
+    there — in both cases no stale write lands later for a caller that
+    already timed out and moved on (e.g. retried the same write). The one
+    case cancellation cannot reach is a coroutine actively executing
+    synchronous code with no await in between (e.g. mid-way through
+    encrypting a large payload) — Python cannot preempt that, so it keeps
+    running and may still complete in the background.
     """
 
 
@@ -81,12 +89,22 @@ class DatabaseBridge:
         self._db_path = Path(db_path)
         self._key = key
         self._closing = False
-        self._close_lock = threading.Lock()
+        # Guards _closing and _inflight together. They used to be checked/
+        # updated under two separate locks (a plain read of _closing in
+        # _call(), then a *different* lock around incrementing _inflight in
+        # _call_unchecked()) — a caller could read _closing as False, and
+        # before it got as far as incrementing _inflight, close() could set
+        # _closing, see _inflight still at 0 (nothing counted yet) and treat
+        # everything as already drained, stop the loop, and then have that
+        # caller's coroutine scheduled onto a loop that no longer runs —
+        # timing out for a reason that has nothing to do with a slow query.
+        # One lock around both makes "still open, and now counted as
+        # in-flight" a single atomic step close() cannot slip through.
+        self._state_lock = threading.Lock()
         # Tracks calls currently waiting on the event loop, so close() can
         # give them a moment to finish instead of yanking the loop out from
         # under them (which would otherwise strand their future forever).
         self._inflight = 0
-        self._inflight_lock = threading.Lock()
         self._inflight_drained = threading.Event()
         self._inflight_drained.set()
 
@@ -118,10 +136,24 @@ class DatabaseBridge:
         within *timeout* seconds — either of which the caller can catch,
         instead of the whole app (often the wx UI thread) hanging forever.
         """
-        if self._closing:
-            coro.close()  # avoid a "coroutine was never awaited" warning
-            raise DatabaseBridgeClosed("DatabaseBridge is closing")
-        return self._call_unchecked(coro, timeout)
+        with self._state_lock:
+            if self._closing:
+                coro.close()  # avoid a "coroutine was never awaited" warning
+                raise DatabaseBridgeClosed("DatabaseBridge is closing")
+            if not self._thread.is_alive():
+                coro.close()
+                raise DatabaseBridgeTimeout(
+                    "db-asyncio thread is not running; cannot execute query"
+                )
+            self._inflight += 1
+            self._inflight_drained.clear()
+        try:
+            return self._run_scheduled(coro, timeout)
+        finally:
+            with self._state_lock:
+                self._inflight -= 1
+                if self._inflight <= 0:
+                    self._inflight_drained.set()
 
     def _call_unchecked(self, coro, timeout: float = _DEFAULT_CALL_TIMEOUT) -> Any:
         """Like ``_call`` but skips the ``_closing`` gate.
@@ -134,28 +166,41 @@ class DatabaseBridge:
             raise DatabaseBridgeTimeout(
                 "db-asyncio thread is not running; cannot execute query"
             )
-
-        with self._inflight_lock:
+        with self._state_lock:
             self._inflight += 1
             self._inflight_drained.clear()
         try:
-            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-            try:
-                return future.result(timeout=timeout)
-            except asyncio.TimeoutError as exc:
-                log.error(
-                    "[DatabaseBridge] Call timed out after %.0fs (coroutine may "
-                    "still complete in the background): %s",
-                    timeout, coro,
-                )
-                raise DatabaseBridgeTimeout(
-                    f"Database call timed out after {timeout:.0f}s"
-                ) from exc
+            return self._run_scheduled(coro, timeout)
         finally:
-            with self._inflight_lock:
+            with self._state_lock:
                 self._inflight -= 1
                 if self._inflight <= 0:
                     self._inflight_drained.set()
+
+    def _run_scheduled(self, coro, timeout: float) -> Any:
+        """Schedule *coro* on the loop and block for the result, or timeout.
+
+        Shared tail end of ``_call``/``_call_unchecked`` — everything about
+        whether this coroutine was even allowed to be scheduled (the
+        ``_closing``/``_inflight`` bookkeeping) already happened in the
+        caller; this only runs it and translates a timeout.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            # See DatabaseBridgeTimeout's own docstring for exactly what
+            # this does and does not stop: a call still queued, or blocked
+            # on I/O, is genuinely interrupted; one running synchronous code
+            # with no await in between cannot be preempted and keeps going.
+            cancelled = future.cancel()
+            log.error(
+                "[DatabaseBridge] Call timed out after %.0fs (cancel %s): %s",
+                timeout, "succeeded" if cancelled else "had no effect — already running", coro,
+            )
+            raise DatabaseBridgeTimeout(
+                f"Database call timed out after {timeout:.0f}s"
+            ) from exc
 
     async def _create_db(self) -> DatabaseManager:
         """Factory: connect a new DatabaseManager on the event loop."""
@@ -166,14 +211,16 @@ class DatabaseBridge:
     def close(self) -> None:
         """Shut down the event loop and release the database.
 
-        Rejects any new call the moment this starts (``_closing`` is checked
-        before ``_call`` ever touches the loop), then waits briefly for calls
-        already in flight to finish on their own before stopping the loop —
-        stopping it out from under a pending call would otherwise leave that
-        caller's ``future.result()`` blocked forever with nothing left to ever
+        Rejects any new call the moment this starts (``_closing`` is checked,
+        and ``_inflight`` incremented, atomically under ``_state_lock`` — see
+        that attribute's own comment for the race two separate locks used to
+        leave open), then waits briefly for calls already in flight to
+        finish on their own before stopping the loop — stopping it out from
+        under a pending call would otherwise leave that caller's
+        ``future.result()`` blocked forever with nothing left to ever
         resolve it.
         """
-        with self._close_lock:
+        with self._state_lock:
             if self._closing:
                 return
             self._closing = True
