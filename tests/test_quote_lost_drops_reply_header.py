@@ -125,8 +125,14 @@ class TestOnMessageSentForwardsQuoteLost:
         def _mark_message_sent(self, local_id, real_id=None, quote_lost=False):
             self.calls.append((local_id, real_id, quote_lost))
 
+        def _is_cancelled_pending(self, local_id):
+            # _on_message_sent() asks this first, to route a send that outran
+            # the user's own cancellation (see tests/test_message_cancel_race.py).
+            return False
+
     class _Stub:
         _on_message_sent = MainWindow._on_message_sent
+        _is_cancelled_send = MainWindow._is_cancelled_send
 
         def __init__(self):
             self.conversations_panel = TestOnMessageSentForwardsQuoteLost._FakeConversationsPanel()

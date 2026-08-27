@@ -4,17 +4,31 @@ import pathlib
 import sys
 import threading
 import time
-import types
+
+import pytest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "client"))
 
-wx = types.ModuleType("wx")
-wx.CallAfter = lambda callback, *args: callback(*args)
-sys.modules.setdefault("wx", wx)
-
+import core.message_queue as message_queue
 from core.message_queue import MessageQueue, PendingMessage
+
+
+@pytest.fixture(autouse=True)
+def direct_call_after(monkeypatch):
+    """Dispatch wx.CallAfter straight to its callback — there is no wx.App here.
+
+    Patched on the module rather than installed as a fake `wx` in sys.modules:
+    the old `sys.modules.setdefault("wx", ...)` only won when this file happened
+    to be the first to import wx, so any test importing main/wx before it left
+    the workers calling the real CallAfter, which asserts "No wx.App created
+    yet" on a background thread.
+    """
+    monkeypatch.setattr(
+        message_queue.wx, "CallAfter",
+        lambda callback, *args: callback(*args), raising=False,
+    )
 
 
 class _MainWindow:
@@ -44,6 +58,9 @@ class _MainWindow:
         pass
 
     def _on_message_unconfirmed(self, *_args):
+        pass
+
+    def _on_cancelled_message_dropped(self, *_args):
         pass
 
 
@@ -115,6 +132,9 @@ def test_cancel_interrupts_an_inflight_attachment_without_failure_callback():
         def _on_message_failed(self, *_args):
             failed.set()
 
+        def _on_cancelled_message_dropped(self, *_args):
+            cancelled.set()
+
     main_window = _CancelableMainWindow()
     queue = MessageQueue(main_window)
     try:
@@ -123,15 +143,17 @@ def test_cancel_interrupts_an_inflight_attachment_without_failure_callback():
             media_type="document", progress_callback=lambda _value: None,
         ))
         assert main_window.media_started.wait(timeout=1)
-        assert queue.cancel("cancel-me") is True
-        deadline = time.time() + 1
-        while time.time() < deadline:
-            with queue._lock:
-                if "cancel-me" not in queue._pending:
-                    cancelled.set()
-                    break
-            time.sleep(0.01)
-        assert cancelled.is_set()
+        # False: the upload is already running, so cancel() cannot promise it was
+        # stopped — the worker owns it and reports the outcome (see
+        # tests/test_message_cancel_race.py). The flag is set either way, which
+        # is what the progress callback below raises MessageCancelled on.
+        assert queue.cancel("cancel-me") is False
+        # Waiting for the report, not just for the queue to drop it: the report
+        # is the worker's last act on this message, so this is also what keeps a
+        # straggling wx.CallAfter from outliving the test.
+        assert cancelled.wait(timeout=2)
+        with queue._lock:
+            assert "cancel-me" not in queue._pending
         assert not sent.is_set()
         assert not failed.is_set()
     finally:
