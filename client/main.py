@@ -49,7 +49,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, is_voice_message, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -21167,15 +21167,7 @@ class MainWindow(wx.Frame):
                         elif orig_type == "extendedTextMessage":
                             orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
                         elif orig_type in ("audioMessage", "audio", "ptt"):
-                            audio_inner = (orig_obj.get("audioMessage") or {}) if isinstance(orig_obj, dict) else {}
-                            is_ptt = (
-                                m.get("_is_voice_recording")
-                                or m.get("type") == "ptt"
-                                or m.get("isPtt")
-                                or m.get("ptt")
-                                or audio_inner.get("ptt", False)
-                                or audio_inner.get("isPtt", False)
-                            )
+                            is_ptt = is_voice_message(m) or bool(isinstance(orig_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": orig_obj}))
                             orig_text = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
                         elif orig_type == "videoMessage":
                             orig_text = i18n.t("video")
@@ -21294,14 +21286,7 @@ class MainWindow(wx.Frame):
         elif msg_type in ("audioMessage", "audio", "ptt"):
             audio_inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
             dur = _dur(audio_inner.get("seconds"))
-            is_ptt = (
-                last_msg.get("_is_voice_recording")
-                or last_msg.get("type") == "ptt"
-                or last_msg.get("isPtt")
-                or last_msg.get("ptt")
-                or audio_inner.get("ptt", False)
-                or audio_inner.get("isPtt", False)
-            )
+            is_ptt = is_voice_message(last) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
             lbl = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
             content = f"{lbl} {dur}".strip()
         elif msg_type == "videoMessage":
