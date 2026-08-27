@@ -97,6 +97,7 @@ class _FakeMainWindow:
         self.i18n = _FakeI18n()
         self.pause_sound_plays = 0
         self.pinned = set()
+        self.settings = {}
 
     def is_chat_pinned(self, jid):
         return jid in self.pinned
@@ -109,6 +110,7 @@ class _Panel:
     _stop_recorded_audio_preview = ConversationsPanel._stop_recorded_audio_preview
     _cleanup_recorded_audio_temp_file = ConversationsPanel._cleanup_recorded_audio_temp_file
     _on_accel_pin_list = ConversationsPanel._on_accel_pin_list
+    _silence_send_voice_focus_if_enabled = ConversationsPanel._silence_send_voice_focus_if_enabled
 
     def __init__(self):
         self.main_window = _FakeMainWindow()
