@@ -73,6 +73,7 @@
     "connection_lost": "Conexión a internet perdida.",
     "close_conversation": "&Cerrar conversación",
     "message_type_audio": "audio",
+    "message_type_voice_message": "mensaje de voz",
     "duration": "duración",
     "second": "segundo",
     "seconds": "segundos",

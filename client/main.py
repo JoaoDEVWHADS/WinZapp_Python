@@ -21166,8 +21166,17 @@ class MainWindow(wx.Frame):
                             orig_text = (orig_obj.get("conversation") or "")
                         elif orig_type == "extendedTextMessage":
                             orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
-                        elif orig_type == "audioMessage":
-                            orig_text = i18n.t("message_type_audio")
+                        elif orig_type in ("audioMessage", "audio", "ptt"):
+                            audio_inner = (orig_obj.get("audioMessage") or {}) if isinstance(orig_obj, dict) else {}
+                            is_ptt = (
+                                m.get("_is_voice_recording")
+                                or m.get("type") == "ptt"
+                                or m.get("isPtt")
+                                or m.get("ptt")
+                                or audio_inner.get("ptt", False)
+                                or audio_inner.get("isPtt", False)
+                            )
+                            orig_text = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
                         elif orig_type == "videoMessage":
                             orig_text = i18n.t("video")
                         elif orig_type == "imageMessage":
@@ -21282,9 +21291,19 @@ class MainWindow(wx.Frame):
                         
                     if name and name != placeholder and name != jid:
                         content = content.replace(f"@{placeholder}", f"@{name}")
-        elif msg_type == "audioMessage":
-            dur     = _dur((msg_obj.get("audioMessage") or {}).get("seconds"))
-            content = f"{i18n.t('message_type_audio')} {dur}"
+        elif msg_type in ("audioMessage", "audio", "ptt"):
+            audio_inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+            dur = _dur(audio_inner.get("seconds"))
+            is_ptt = (
+                last_msg.get("_is_voice_recording")
+                or last_msg.get("type") == "ptt"
+                or last_msg.get("isPtt")
+                or last_msg.get("ptt")
+                or audio_inner.get("ptt", False)
+                or audio_inner.get("isPtt", False)
+            )
+            lbl = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
+            content = f"{lbl} {dur}".strip()
         elif msg_type == "videoMessage":
             video = msg_obj.get("videoMessage") or {}
             dur   = _dur(video.get("seconds"))

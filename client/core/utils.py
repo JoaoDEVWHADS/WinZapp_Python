@@ -235,6 +235,30 @@ def is_message_forwarded(msg) -> bool:
     return False
 
 
+def is_voice_message(msg) -> bool:
+    """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("_is_voice_recording") or msg.get("type") == "ptt":
+        return True
+    if msg.get("isPtt") or msg.get("ptt"):
+        return True
+    msg_type = msg.get("messageType") or msg.get("type")
+    if msg_type not in ("audioMessage", "audio", "ptt"):
+        return False
+    msg_obj = msg.get("message")
+    inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+    if not inner and isinstance(msg.get("audioMessage"), dict):
+        inner = msg.get("audioMessage") or {}
+    media_data = msg.get("mediaData") if isinstance(msg.get("mediaData"), dict) else {}
+    return bool(
+        inner.get("ptt", False)
+        or inner.get("isPtt", False)
+        or media_data.get("ptt", False)
+        or media_data.get("isPtt", False)
+    )
+
+
 def append_selected_marker(text: str, word: str, position: str, is_selected: bool) -> str:
     """Add the localized "selected" marker word to a list-row string when
     *is_selected*, at the configured *position* ("start" or anything else,
