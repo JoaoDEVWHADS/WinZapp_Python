@@ -288,7 +288,12 @@ class TestHideAudioControlsFocus:
             ConversationsPanel._hide_audio_controls, panel
         )
 
-        monkeypatch.setattr(conversations_module.wx.Window, "FindFocus", lambda: speed_btn)
+        class _Window:
+            @staticmethod
+            def FindFocus():
+                return speed_btn
+
+        monkeypatch.setattr(conversations_module.wx, "Window", _Window)
 
         panel._hide_audio_controls()
 
@@ -313,7 +318,12 @@ class TestHideAudioControlsFocus:
             ConversationsPanel._hide_audio_controls, panel
         )
 
-        monkeypatch.setattr(conversations_module.wx.Window, "FindFocus", lambda: other_ctrl)
+        class _Window:
+            @staticmethod
+            def FindFocus():
+                return other_ctrl
+
+        monkeypatch.setattr(conversations_module.wx, "Window", _Window)
 
         panel._hide_audio_controls()
 

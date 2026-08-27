@@ -73,6 +73,7 @@
     "connection_lost": "Internet connection lost.",
     "close_conversation": "&Close chat",
     "message_type_audio": "audio",
+    "message_type_voice_message": "voice message",
     "duration": "duration",
     "second": "second",
     "seconds": "seconds",

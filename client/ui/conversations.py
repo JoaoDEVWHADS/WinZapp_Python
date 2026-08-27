@@ -48,7 +48,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
-from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
+from core.utils import reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, is_voice_message, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
@@ -6974,12 +6974,7 @@ class ConversationsPanel(wx.Panel):
 
     def _is_voice_message(self, msg: dict) -> bool:
         """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
-        if not isinstance(msg, dict) or msg.get("messageType") != "audioMessage":
-            return False
-        msg_obj = msg.get("message") or {}
-        inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
-        media_data = msg.get("mediaData") or {}
-        return bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+        return is_voice_message(msg)
 
 
     def on_audio_speed_btn(self, event):
@@ -7336,16 +7331,20 @@ class ConversationsPanel(wx.Panel):
             return link_preview_text(ext, text, self.main_window)
 
         # ── Audio ────────────────────────────────────────────────────────────
-        if msg_type == "audioMessage":
-            audio = msg_obj.get("audioMessage") or {}
+        if msg_type in ("audioMessage", "audio", "ptt"):
+            audio = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+            if not audio and isinstance(msg.get("audioMessage"), dict):
+                audio = msg.get("audioMessage") or {}
             dur   = self._format_duration(audio.get("seconds"))
+            is_ptt = is_voice_message(msg)
+            lbl = i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
             if not dur:
                 # Unknown duration (e.g. a non-.wav file sent via the
                 # attachment picker — see _probe_audio_duration()): omit the
                 # clause entirely rather than read "duração: " with nothing
                 # after the colon.
-                return i18n.t("message_type_audio")
-            return f"{i18n.t('message_type_audio')}, {i18n.t('duration')}: {dur}"
+                return lbl
+            return f"{lbl}, {i18n.t('duration')}: {dur}"
 
         # ── Document ─────────────────────────────────────────────────────────
         if msg_type == "documentMessage":
@@ -7978,8 +7977,8 @@ class ConversationsPanel(wx.Panel):
         msg_type_raw = quoted_msg.get("type")
         if msg_type_raw:
             _wpp_type_map = {
-                "audio": "message_type_audio",
-                "ptt": "message_type_audio",
+                "audio": "message_type_voice_message" if is_voice_message(quoted_msg) else "message_type_audio",
+                "ptt": "message_type_voice_message",
                 "image": "photo",
                 "video": "video",
                 "document": "document",
@@ -8004,7 +8003,7 @@ class ConversationsPanel(wx.Panel):
 
         # Non-text types: return the localized type label (first letter upper)
         _type_map = [
-            ("audioMessage",    "message_type_audio"),
+            ("audioMessage",    "message_type_voice_message" if is_voice_message(quoted_msg) else "message_type_audio"),
             ("imageMessage",    "photo"),
             ("videoMessage",    "video"),
             ("documentMessage", "document"),
