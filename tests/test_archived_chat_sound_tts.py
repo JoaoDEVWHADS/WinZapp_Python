@@ -7,44 +7,66 @@ import types
 import unittest
 from unittest.mock import MagicMock
 
-# Stub dependencies if not present in headless environment
-for _mod in (
-    "wx",
-    "wx.adv",
-    "accessible_output2",
-    "accessible_output2.outputs",
-    "sound_lib",
-    "sound_lib.output",
-    "sound_lib.stream",
-    "sound_lib.main",
-    "sound_lib.effects",
-):
-    if _mod not in sys.modules:
-        mod = types.ModuleType(_mod)
-        if "." not in _mod:
-            mod.__path__ = []
-        sys.modules[_mod] = mod
+# Conditionally stub GUI/audio dependencies only if not installed (headless environments)
+try:
+    import wx
+    import wx.adv
+except ImportError:
+    for _mod in (
+        "wx",
+        "wx.adv",
+    ):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
 
+    class _FakeWxModule(types.ModuleType):
+        def __getattr__(self, name):
+            if name == "__file__":
+                return "<fake_wx>"
+            if name == "CallAfter":
+                return lambda fn, *a, **k: fn(*a, **k)
+            if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
+                return 1000
+            if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Window", "Control"):
+                return object
+            return MagicMock
 
-class _FakeWxModule(types.ModuleType):
-    def __getattr__(self, name):
-        if name == "CallAfter":
-            return lambda fn, *a, **k: fn(*a, **k)
-        if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
-            return 1000
-        if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Window", "Control"):
-            return object
-        return MagicMock
+    sys.modules["wx"].__class__ = _FakeWxModule
+    sys.modules["wx.adv"].__class__ = _FakeWxModule
 
+try:
+    import accessible_output2
+    from accessible_output2 import outputs
+except ImportError:
+    if "accessible_output2" not in sys.modules:
+        sys.modules["accessible_output2"] = types.ModuleType("accessible_output2")
+    sys.modules["accessible_output2.outputs"] = types.ModuleType("accessible_output2.outputs")
+    sys.modules["accessible_output2"].outputs = sys.modules["accessible_output2.outputs"]
 
-sys.modules["wx"].__class__ = _FakeWxModule
-sys.modules["wx.adv"].__class__ = _FakeWxModule
-sys.modules["sound_lib.main"].bass_call = lambda *a, **k: None
-sys.modules["sound_lib.stream"].FileStream = object
-sys.modules["sound_lib.output"].Output = object
-sys.modules["sound_lib.effects"].Tempo = object
-sys.modules["accessible_output2.outputs"] = types.ModuleType("accessible_output2.outputs")
-sys.modules["accessible_output2"].outputs = sys.modules["accessible_output2.outputs"]
+try:
+    import sound_lib
+    from sound_lib import stream, output, main, effects
+except ImportError:
+    for _mod in (
+        "sound_lib",
+        "sound_lib.output",
+        "sound_lib.stream",
+        "sound_lib.main",
+        "sound_lib.effects",
+    ):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+
+    sys.modules["sound_lib.main"].bass_call = lambda *a, **k: None
+    sys.modules["sound_lib.stream"].FileStream = object
+    sys.modules["sound_lib.output"].Output = object
+    sys.modules["sound_lib.effects"].Tempo = object
 
 from main import MainWindow
 
