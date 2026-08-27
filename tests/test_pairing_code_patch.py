@@ -21,14 +21,20 @@ Timeline:
   "issued" timestamp only recorded AFTER a code is actually produced, so a
   failed attempt self-recovers on the next tick instead of freezing forever.
 
-* v3 (current): v2 plus a catch around the loginByCode() call, and a
-  companion patch to loginByCode() itself. v2's try/finally had no catch, so
-  a rejected loginByCode() escaped checkQrCode() — which is called
-  fire-and-forget — as an unhandled rejection, and the underlying browser
-  error had already been flattened to the minified "t: t" by crossing the
-  CDP exception boundary. Observed live: pairing simply never produced a
-  code, the Python side sat out its full 90-second wait, and the only trace
-  anywhere was "Unhandled Rejection: t: t" in wppconnect.log.
+* v3: v2 plus a catch around the loginByCode() call, and a companion patch to
+  loginByCode() itself. v2's try/finally had no catch, so a rejected
+  loginByCode() escaped checkQrCode() — which is called fire-and-forget — as
+  an unhandled rejection, and the underlying browser error had already been
+  flattened to the minified "t: t" by crossing the CDP exception boundary.
+  Observed live: pairing simply never produced a code, the Python side sat
+  out its full 90-second wait, and the only trace anywhere was "Unhandled
+  Rejection: t: t" in wppconnect.log.
+
+* v4 (current): v3 plus a `catchLinkCodeError` hook, so the caught error
+  actually reaches the person trying to pair. v3 made the failure real and
+  non-fatal, but it still only ever landed in wppconnect.log — the user was
+  left with the same generic "no pairing code received" after 90 seconds.
+  The end-to-end path is covered by tests/test_pairing_code_error_reporting.py.
 
 Both setup_api.py and ApiSetupDialog (client/ui/dialogs/api_setup.py) apply
 the same patch (see the "why two places" comment in api_setup.py). Since v3
@@ -44,7 +50,8 @@ import pytest
 
 from core.wppconnect_host_layer_patch import (
     ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, V2_CHECK_QR_CODE,
-    PATCHED_CHECK_QR_CODE, ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE,
+    V3_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+    ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -316,12 +323,91 @@ class TestV3CatchesPairingCodeFailures:
         catch_block = PATCHED_CHECK_QR_CODE.index("catch (error) {")
         assert login_call < issued_at < catch_block
 
-    def test_all_four_checkqrcode_generations_are_distinct(self):
+    def test_every_checkqrcode_generation_is_distinct(self):
+        """Each generation is a rung on the migration ladder — two of them
+        collapsing to identical text would silently break the upgrade
+        detection every test here relies on."""
         variants = [
             ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE,
-            V2_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+            V2_CHECK_QR_CODE, V3_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
         ]
-        assert len(set(variants)) == 4
+        assert len(set(variants)) == 5
+
+
+class TestV4ReportsTheFailureToTheClient:
+    """v4's addition to v3: the caught error is also handed to a
+    `catchLinkCodeError` callback, so it can reach the person trying to pair
+    instead of dying in wppconnect.log."""
+
+    def test_v4_calls_the_hook_with_the_real_error(self):
+        assert "this.options.catchLinkCodeError?.(" in PATCHED_CHECK_QR_CODE
+        assert "name: String(error?.name || 'Error')," in PATCHED_CHECK_QR_CODE
+        assert "message: String(error?.message || error)," in PATCHED_CHECK_QR_CODE
+
+    def test_v3_had_no_hook(self):
+        assert "catchLinkCodeError" not in V3_CHECK_QR_CODE
+
+    def test_the_hook_is_optional(self):
+        """Read through `?.` off this.options: WPPConnect knows nothing about
+        this key, so anything not passing it (an older createSessionUtil, or a
+        direct wppconnect user) must be an ordinary no-op, never a TypeError
+        inside the catch block that is itself handling an error."""
+        hook = PATCHED_CHECK_QR_CODE[
+            PATCHED_CHECK_QR_CODE.index("catchLinkCodeError")
+            - len("this.options.") :
+        ]
+        assert hook.startswith("this.options.catchLinkCodeError?.(")
+
+    def test_v4_still_logs_as_well_as_reports(self):
+        """The log line is the record that survives a closed dialog — the hook
+        does not replace it."""
+        assert "Could not generate the pairing code" in PATCHED_CHECK_QR_CODE
+
+    def test_v4_still_never_permanently_latches(self):
+        issued_at = PATCHED_CHECK_QR_CODE.index("this.linkCodeIssuedAt = Date.now();")
+        login_call = PATCHED_CHECK_QR_CODE.index("await this.loginByCode(this.options.phoneNumber);")
+        catch_block = PATCHED_CHECK_QR_CODE.index("catch (error) {")
+        assert login_call < issued_at < catch_block
+
+
+class TestUpgradeFromV3:
+    """The realistic upgrade path for anyone who ran the build that shipped
+    v3: checkQrCode must move v3 -> v4 while loginByCode, already patched, is
+    left exactly as it is."""
+
+    def test_v3_install_is_upgraded_to_v4(self, fake_wppconnect_dist):
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        _write(host_layer, V3_CHECK_QR_CODE, PATCHED_LOGIN_BY_CODE)
+
+        assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is True
+
+        content = host_layer.read_text(encoding="utf-8")
+        assert PATCHED_CHECK_QR_CODE in content
+        assert V3_CHECK_QR_CODE not in content
+        assert PATCHED_LOGIN_BY_CODE in content
+
+    def test_both_entry_points_agree_on_the_v3_upgrade(self, tmp_path):
+        from ui.dialogs.api_setup import ApiSetupDialog
+        setup_api = _load_setup_api()
+
+        outputs = []
+        for name in ("setup_api", "api_setup"):
+            api_dir = tmp_path / name
+            layers = api_dir / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api" / "layers"
+            layers.mkdir(parents=True)
+            host_layer = layers / "host.layer.js"
+            _write(host_layer, V3_CHECK_QR_CODE, PATCHED_LOGIN_BY_CODE)
+
+            if name == "setup_api":
+                setup_api._patch_wppconnect_host_layer(str(api_dir))
+            else:
+                ApiSetupDialog._patch_wppconnect_host_layer(
+                    str(api_dir / "node_modules" / "@wppconnect-team" / "wppconnect" / "dist" / "api")
+                )
+            outputs.append(host_layer.read_text(encoding="utf-8"))
+
+        assert outputs[0] == outputs[1]
 
 
 class TestLoginByCodeErrorDetail:

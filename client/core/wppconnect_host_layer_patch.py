@@ -171,6 +171,70 @@ V2_CHECK_QR_CODE = (
 # Catching it keeps v2's self-recovery intact (linkCodeIssuedAt is still only set
 # on success, so the next auth_code_change tick retries) while making the failure
 # visible and non-fatal.
+V3_CHECK_QR_CODE = (
+    "    async checkQrCode() {\n"
+    "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
+    "        this.isLogged = !needScan;\n"
+    "        if (!needScan) {\n"
+    "            this.attempt = 0;\n"
+    "            this.linkCodeIssuedAt = 0;\n"
+    "            return;\n"
+    "        }\n"
+    "        if (typeof this.options.phoneNumber === 'string') {\n"
+    "            if (this.linkCodeInFlight) {\n"
+    "                return;\n"
+    "            }\n"
+    "            const now = Date.now();\n"
+    "            if (this.linkCodeIssuedAt && (now - this.linkCodeIssuedAt) < 60000) {\n"
+    "                return;\n"
+    "            }\n"
+    "            this.linkCodeInFlight = true;\n"
+    "            try {\n"
+    "                await this.loginByCode(this.options.phoneNumber);\n"
+    "                this.linkCodeIssuedAt = Date.now();\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                this.log('error', `Could not generate the pairing code: ${error?.name || 'Error'}: ${error?.message || error}`);\n"
+    "            }\n"
+    "            finally {\n"
+    "                this.linkCodeInFlight = false;\n"
+    "            }\n"
+    "            return;\n"
+    "        }\n"
+    "        const result = await this.getQrCode();\n"
+    "        if (!result?.urlCode || this.urlCode === result.urlCode) {\n"
+    "            return;\n"
+    "        }\n"
+    "        this.urlCode = result.urlCode;\n"
+    "        this.attempt++;\n"
+    "        let qr = '';\n"
+    "        if (this.options.logQR || this.catchQR) {\n"
+    "            qr = await (0, auth_1.asciiQr)(this.urlCode);\n"
+    "        }\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for QRCode Scan (Attempt ${this.attempt})...:\\n${qr}`, { code: this.urlCode });\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for QRCode Scan: Attempt ${this.attempt}`);\n"
+    "        }\n"
+    "        this.catchQR?.(result.base64Image, qr, this.attempt, result.urlCode);\n"
+    "    }\n"
+)
+
+
+# v4 — v3 plus a `catchLinkCodeError` hook, so the failure reaches the user
+# instead of only wppconnect.log. v3 made the error real and non-fatal, but the
+# person actually trying to pair still saw nothing but the generic "no pairing
+# code received" after a 90-second wait — the whole point of knowing the error
+# is being able to say what it was.
+#
+# The hook is read off `this.options` rather than a dedicated instance field
+# because that needs no change to initializer.js: `create()` builds the client as
+# `new Whatsapp(page, session, mergedOptions)` with
+# `mergedOptions = { ...defaultOptions, ...options }`, a plain spread, so an
+# option key WPPConnect itself knows nothing about survives untouched into
+# `this.options`. createSessionUtil.ts passes it in (see that file's own patch);
+# the `?.` chain keeps this a silent no-op wherever it isn't.
 PATCHED_CHECK_QR_CODE = (
     "    async checkQrCode() {\n"
     "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
@@ -195,6 +259,11 @@ PATCHED_CHECK_QR_CODE = (
     "            }\n"
     "            catch (error) {\n"
     "                this.log('error', `Could not generate the pairing code: ${error?.name || 'Error'}: ${error?.message || error}`);\n"
+    "                this.options.catchLinkCodeError?.({\n"
+    "                    name: String(error?.name || 'Error'),\n"
+    "                    message: String(error?.message || error),\n"
+    "                    session: this.session,\n"
+    "                });\n"
     "            }\n"
     "            finally {\n"
     "                this.linkCodeInFlight = false;\n"
@@ -313,21 +382,28 @@ def patch_host_layer_source(content: str):
 
     # checkQrCode: migrate whichever generation is installed up to v3.
     if PATCHED_CHECK_QR_CODE in content:
-        notes.append("checkQrCode: already at v3.")
+        notes.append("checkQrCode: already at v4.")
+    elif V3_CHECK_QR_CODE in content:
+        content = content.replace(V3_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append(
+            "checkQrCode: upgraded v3 -> v4 — a pairing-code failure is now "
+            "reported to the client, not just written to wppconnect.log."
+        )
     elif V2_CHECK_QR_CODE in content:
         content = content.replace(V2_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
         notes.append(
-            "checkQrCode: upgraded v2 -> v3 — a failing loginByCode() is now "
-            "caught and logged instead of escaping as an unhandled rejection."
+            "checkQrCode: upgraded v2 -> v4 — a failing loginByCode() is now "
+            "caught, reported and logged instead of escaping as an unhandled "
+            "rejection."
         )
     elif V1_CHECK_QR_CODE in content:
         content = content.replace(V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
-        notes.append("checkQrCode: upgraded v1 (unsafe, could freeze forever) -> v3.")
+        notes.append("checkQrCode: upgraded v1 (unsafe, could freeze forever) -> v4.")
     elif ORIGINAL_CHECK_QR_CODE in content:
         content = content.replace(ORIGINAL_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
         notes.append(
-            "checkQrCode: patched (v3) — pairing code no longer regenerates on "
-            "every QR rotation (60s reuse cooldown), failures are logged."
+            "checkQrCode: patched (v4) — pairing code no longer regenerates on "
+            "every QR rotation (60s reuse cooldown), failures are reported."
         )
     else:
         notes.append("checkQrCode: DID NOT MATCH any known source text — left untouched.")

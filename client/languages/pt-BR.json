@@ -57,6 +57,7 @@
     "media_too_large": "O arquivo excede o tamanho máximo permitido de {max_mb} MB e não pode ser enviado.",
     "remove_mention": "Remover menção a @{name}",
     "no_pairing_code_received": "Não foi possível conectar ao {app_name}. Nenhum código de pareamento foi recebido.",
+    "no_pairing_code_received_reason": "Não foi possível conectar ao {app_name}. O WhatsApp recusou o pedido de código de pareamento: {reason}.",
     "no_QRcode_received": "Não foi possível conectar ao {app_name}. Nenhum QR-CODE foi recebido.",
     "settings_load_failed": "Falha ao carregar o arquivo de configuração:",
     "settings_save_failed": "Ocorreu um erro ao salvar as configurações:",

@@ -1062,7 +1062,11 @@ class Connect:
                     # launch shows the connection dialog instead of acting connected.
                     self.main_window._set_wa_token("")
                     self.main_window.save_settings()
-                    wx.CallAfter(self._on_pairing_code_error)
+                    # If WhatsApp actually refused the request (rather than the
+                    # code simply never arriving), the reason is waiting here —
+                    # report that instead of the generic "no code received".
+                    reason = getattr(self.main_window.ws, "_phone_code_error", "")
+                    wx.CallAfter(self._on_pairing_code_error, reason)
 
             except Exception as exc:
                 # On any unexpected error, clear the token so next launch works correctly.
@@ -1084,7 +1088,7 @@ class Connect:
         self.continue_btn.SetLabel(self.i18n.t("continue"))
         self.show_pairing_dial(pairing_code)
 
-    def _on_pairing_code_error(self):
+    def _on_pairing_code_error(self, reason: str = ""):
         try:
             if not self or not self.continue_btn:
                 return
@@ -1092,8 +1096,16 @@ class Connect:
             return
         self.continue_btn.Enable()
         self.continue_btn.SetLabel(self.i18n.t("continue"))
+        if reason:
+            message = self.i18n.t("no_pairing_code_received_reason").format(
+                app_name=self.main_window.app_name, reason=reason,
+            )
+        else:
+            message = self.i18n.t("no_pairing_code_received").format(
+                app_name=self.main_window.app_name,
+            )
         wx.MessageBox(
-            self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name),
+            message,
             self.i18n.t("connection_error"),
             wx.OK | wx.ICON_ERROR,
         )

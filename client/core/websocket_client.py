@@ -112,6 +112,7 @@ class WebSocketClient:
         self.sio.on("received-message", self.on_wpp_message_received)
         self.sio.on("onack", self.on_wpp_ack)
         self.sio.on("phoneCode", self.on_wpp_phone_code)
+        self.sio.on("phoneCodeError", self.on_wpp_phone_code_error)
         self.sio.on("status-find", self.on_wpp_status_find)
         self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
         self.sio.on("chats-update", self.on_chats_update)
@@ -134,6 +135,16 @@ class WebSocketClient:
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
+
+        # Why the last pairing-code request failed, if one did — set by
+        # on_wpp_phone_code_error() and read by connect.py's _bg_pairing_flow()
+        # only after its wait has actually timed out. Deliberately NOT paired
+        # with a _phone_code_event.set(): host.layer.js retries on its own 60s
+        # cooldown, so a first failure inside the 90s window may still be
+        # followed by a code that works. Recording it without cutting the wait
+        # short keeps that retry alive and still lets the timeout report the
+        # real reason instead of the generic "no pairing code received".
+        self._phone_code_error: str = ""
 
         # Debounce timer for on_disconnect() — see that method.
         self._disconnect_timer = None
@@ -1369,6 +1380,34 @@ class WebSocketClient:
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
+    def on_wpp_phone_code_error(self, data):
+        """Handle the 'phoneCodeError' Socket.IO event.
+
+        Emitted by WinZapp's own createSessionUtil.ts patch when WhatsApp
+        refuses to issue a link-by-code — CompanionHelloError is the one seen
+        in practice. The session itself is usually fine and goes on rotating
+        auth codes, so this is recorded rather than acted on: _bg_pairing_flow()
+        reads it only if its wait times out with no code, turning the generic
+        "no pairing code received" into something the user can actually act on.
+
+        See _phone_code_error's own comment for why this must not set
+        _phone_code_event.
+        """
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            name = str(data.get("name") or "Error")
+            message = str(data.get("message") or "")
+            # WhatsApp's own errors are frequently name-only (the message is
+            # the class name again) — don't render "CompanionHelloError:
+            # CompanionHelloError" at the user.
+            detail = name if (not message or message == name) else f"{name}: {message}"
+            self._phone_code_error = detail
+            logging.warning(
+                "[WebSocketClient] pairing-code request failed: %s", detail
+            )
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_phone_code_error error")
 
     def _belongs_to_this_session(self, info) -> bool:
         if not isinstance(info, dict):

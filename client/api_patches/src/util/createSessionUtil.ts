@@ -524,6 +524,23 @@ export default class CreateSessionUtil {
               }
               this.exportPhoneCode(req, client.config.phone, code, client, res);
             },
+            // Not a WPPConnect option — WinZapp's own host.layer.js patch reads
+            // it off `this.options` (create() spreads the caller's options into
+            // the Whatsapp instance verbatim, so an unknown key survives). See
+            // client/core/wppconnect_host_layer_patch.py, checkQrCode v4.
+            catchLinkCodeError: (failure: {
+              name?: string;
+              message?: string;
+              session?: string;
+            }) => {
+              if ((client as any).shouldClose) return;
+              this.exportPhoneCodeError(
+                req,
+                client.config.phone,
+                failure,
+                client
+              );
+            },
             catchQR: (
               base64Qr: any,
               asciiQR: any,
@@ -734,6 +751,48 @@ export default class CreateSessionUtil {
         phoneCode: phoneCode,
         session: client.session,
       });
+  }
+
+  /**
+   * Report a failed pairing-code request to the client.
+   *
+   * WhatsApp can refuse to issue a link-by-code — CompanionHelloError is the
+   * one seen in practice — while the session itself stays perfectly healthy
+   * and goes on rotating auth codes. Before this the failure never left the
+   * Node process: host.layer.js logged it and the browser quietly retried,
+   * while the Python side sat out its full 90-second phoneCode timeout and
+   * then reported the generic "no pairing code received", leaving the person
+   * trying to pair with nothing to act on.
+   *
+   * Deliberately does NOT touch client.status, close the session, or answer
+   * `res`: checkQrCode()'s retry is still live and a later attempt may well
+   * succeed, and /start-session has long since responded. This is a
+   * notification, not a terminal state.
+   */
+  exportPhoneCodeError(
+    req: any,
+    phone: any,
+    failure: { name?: string; message?: string },
+    client: WhatsAppServer
+  ) {
+    if ((client as any).shouldClose) return;
+
+    const name = failure?.name || 'Error';
+    const message = failure?.message || '';
+
+    req.logger?.warn(
+      `[${client.session}] pairing code request failed: ${name}: ${message}`
+    );
+
+    const payload = {
+      name: name,
+      message: message,
+      phone: phone,
+      session: client.session,
+    };
+
+    req.io.emit('phoneCodeError', payload);
+    callWebHook(client, req, 'phoneCodeError', payload);
   }
 
   exportQR(
