@@ -16479,6 +16479,17 @@ class MainWindow(wx.Frame):
         went out as a plain send instead (see send_text_message's fallback) — the
         UI must then drop the reply contextInfo so the row stops reading as a reply.
         """
+        # The user deleted this message while it was still pending, but by then
+        # the worker had already taken it off the queue (message_queue.cancel()
+        # returned False, so it never even got the cancel flag) and the send went
+        # out anyway — its real ID only arrives here, after the row is gone.
+        # Marking a message the user just deleted as sent is not an option; the
+        # cancellation is completed instead.
+        if self._is_cancelled_send(local_id):
+            self._on_cancelled_message_delivered(
+                local_id, real_id, remote_jid, audio_path, quote_lost
+            )
+            return
         import time as _time
         logging.info("[VOICE_TIMING] _on_message_sent — message LEFT pending state. local_id=%s real_id=%s",
                      local_id, real_id)
@@ -16527,6 +16538,82 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_sent(local_id, real_id=real_id, quote_lost=quote_lost)
 
+    def _on_cancelled_message_delivered(self, local_id: str, real_id: str = None,
+                                        remote_jid: str = None, audio_path: str = None,
+                                        quote_lost: bool = False,
+                                        ambiguous: bool = False):
+        """Called on the main thread when a message the user cancelled turned out
+        to have reached WhatsApp anyway.
+
+        Cancelling an in-flight send is best-effort by nature: none of the send_*
+        calls can be interrupted once the request is on the wire, so the queue
+        can learn "delivered" for a message whose row the UI already removed.
+        Silently dropping it is the one outcome that is a lie — the message IS on
+        the recipient's phone. So the cancellation is completed the only way it
+        still can be, by revoking it for everyone, and if that revoke fails the
+        row comes back rather than the app claiming a deletion that never
+        happened (see ConversationsPanel.complete_cancelled_message_delivery()).
+        """
+        logging.warning(
+            "[_on_cancelled_message_delivered] local_id=%s real_id=%s jid=%s ambiguous=%s",
+            local_id, real_id, remote_jid, ambiguous,
+        )
+        # Same temporary WAV cleanup _on_message_sent() does — the recording's
+        # permanent copy is voice_messages/<local_id>.msv, which the panel
+        # renames or deletes depending on how the revoke goes.
+        self._discard_temp_recording(audio_path)
+        if not hasattr(self, "conversations_panel"):
+            # Nothing else can revoke it: the panel owns both the record this
+            # message is still held by and the API call. Loud, because it means
+            # a message the user cancelled stays on the recipient's phone.
+            logging.error(
+                "[_on_cancelled_message_delivered] no conversations panel — %s "
+                "(id=%s) stays delivered and unrevoked", local_id, real_id,
+            )
+            return
+        self.conversations_panel.complete_cancelled_message_delivery(
+            local_id, real_id, remote_jid, quote_lost, ambiguous
+        )
+
+    def _on_cancelled_message_dropped(self, local_id: str, audio_path: str = None):
+        """Called on the main thread when a cancelled message is confirmed to
+        have never reached WhatsApp.
+
+        The queue answers every message it had already claimed when the cancel
+        arrived (cancel() returned False), because the panel deliberately keeps
+        that message's record around as the anchor the WebSocket echo binds to.
+        This is what releases it when there will be no echo.
+        """
+        logging.info("[_on_cancelled_message_dropped] local_id=%s", local_id)
+        self._discard_temp_recording(audio_path)
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel.discard_cancelled_message(local_id)
+
+    def _is_cancelled_send(self, local_id: str) -> bool:
+        """True while a message the user deleted mid-send is still being resolved.
+
+        Every one of the queue's three ordinary outcome callbacks has to ask,
+        and each of them completes the cancellation instead of doing its usual
+        job. Two reasons, and the second is the one that bites: they report on a
+        row that is already gone (a send-failed dialog for an upload abandoned
+        on purpose, "envio não confirmado" spoken for a deleted message), and
+        they are the ONLY thing that still runs for a cancel that landed after
+        their own branch took the message off the queue — from that moment
+        cancel() answers False and the panel is holding this message's record,
+        waiting for a report that no worker will make.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        return panel is not None and panel._is_cancelled_pending(local_id)
+
+    @staticmethod
+    def _discard_temp_recording(audio_path: str):
+        """Delete the temporary WAV a voice recording was sent from."""
+        if audio_path and os.path.isfile(audio_path):
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
+
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
 
@@ -16538,6 +16625,14 @@ class MainWindow(wx.Frame):
         reads as sent, and that is exactly how a message that never left the
         browser passed for delivered.
         """
+        if self._is_cancelled_send(local_id):
+            # Deleted mid-send, and the outcome is unknown — which is neither
+            # "it never went out" (that is why this branch does not retry) nor
+            # "it did". ambiguous=True carries that third state through: the row
+            # goes back marked unconfirmed rather than sending, so it stops
+            # being a pending anchor the next message's echo would match first.
+            self._on_cancelled_message_delivered(local_id, ambiguous=True)
+            return
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_unconfirmed(local_id)
         if not self.background_mode:
@@ -16549,6 +16644,12 @@ class MainWindow(wx.Frame):
         Marks the virtual message as failed in the UI and, for media attachments,
         shows an error dialog so the user knows the file was not delivered.
         """
+        if self._is_cancelled_send(local_id):
+            # Deleted mid-send, and the send then definitively failed: no error
+            # dialog for an upload the user abandoned on purpose, and the record
+            # the panel is holding for the echo is released — no echo is coming.
+            self._on_cancelled_message_dropped(local_id)
+            return
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_failed(local_id)
         # _mark_message_failed() only updates the row inside the open
@@ -20892,6 +20993,14 @@ class MainWindow(wx.Frame):
         # records — so it "fixed itself" there for an unrelated reason, not
         # because this case was actually handled).
         if m.get("_send_failed"):
+            return False
+        # Same reasoning for a message the user deleted while it was still
+        # sending: its record is kept for a moment longer only so the WebSocket
+        # echo has something of the right type to bind to (see
+        # ConversationsPanel._cancel_pending_message()). The row is already gone
+        # from the conversation, so showing it as the chat's last message would
+        # put a message the user just deleted back in the list.
+        if m.get("_cancelled_awaiting_id"):
             return False
         m_type = m.get("messageType", "")
         if m_type not in cls._PREVIEW_MESSAGE_TYPES:

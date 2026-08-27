@@ -14,7 +14,6 @@ Behaviour
 """
 
 import logging
-import os
 import threading
 import time
 import wx
@@ -74,6 +73,10 @@ class MessageQueue:
     def __init__(self, main_window):
         self.main_window = main_window
         self._pending: dict = {}          # local_id → PendingMessage
+        # local_ids a worker has picked up and not yet reported an outcome for.
+        # Guarded by _lock together with _pending, which is what lets cancel()
+        # answer "is this stopped for good?" without racing the worker.
+        self._in_flight: set = set()
         self._lock   = threading.Lock()
         self._stop   = threading.Event()
         self._quick_event = threading.Event()
@@ -108,15 +111,39 @@ class MessageQueue:
         self._media_event.set()
 
     def cancel(self, local_id: str) -> bool:
-        """Cancel a queued or in-flight message by its local UI identifier."""
+        """Cancel a queued or in-flight message by its local UI identifier.
+
+        Returns True only when the message was still waiting in the queue and no
+        worker had picked it up yet — the one case where cancelling is a
+        guarantee that nothing was, or will be, sent. That case is reported here
+        (a drop, which the panel has nothing left to undo but which disposes of
+        the temporary WAV, known nowhere else), so that every cancellation
+        produces exactly one report no matter which answer this gives.
+
+        False means a worker already owns this message: it is inside the send
+        call, or has finished it and is about to report the outcome. The cancel
+        flag is set either way, but nothing can recall a request already on the
+        wire, so the caller must be ready for the message to arrive at the
+        recipient anyway — the worker reports every such message through
+        MainWindow._on_cancelled_message_delivered()/_on_cancelled_message_
+        dropped(), and ConversationsPanel._cancel_pending_message() keeps what
+        it needs to finish the cancellation once it knows which one happened.
+        """
         with self._lock:
             msg = self._pending.pop(local_id, None)
             if msg is None:
+                # Already off the queue: a worker took it and will report back.
                 return False
             msg.cancel_event.set()
+            stopped = local_id not in self._in_flight
         # Wake the owning worker so a queued cancellation is observed now.
         self._event_for(msg).set()
-        return True
+        if stopped:
+            # No worker will ever touch this message again, so this is the only
+            # place its outcome can be reported — and the temporary WAV a voice
+            # recording was sent from is only known here.
+            self._report_cancelled_drop(msg)
+        return stopped
 
     def stop(self):
         """Signal the worker to exit cleanly (call at app shutdown)."""
@@ -131,6 +158,80 @@ class MessageQueue:
 
     def _event_for(self, msg: PendingMessage) -> threading.Event:
         return self._media_event if self._is_media(msg) else self._quick_event
+
+    def _remember_own_sent_id(self, real_id):
+        """Register a real WhatsApp message ID as "sent by this instance".
+
+        The WebSocket echo (messages.upsert with fromMe=True) carries no
+        correlation ID, so this set is the only thing telling the echo of our
+        own send apart from a message the user sent on another device.  It has
+        to be filled here, on the worker thread, before the UI is notified —
+        the echo routinely arrives first.
+        """
+        if not isinstance(real_id, str):
+            return
+        with self.main_window._own_sent_ids_lock:
+            self.main_window._own_sent_ids.add(real_id)
+            # Prevent unbounded growth — keep at most 500 IDs.
+            if len(self.main_window._own_sent_ids) > 500:
+                self.main_window._own_sent_ids.discard(
+                    next(iter(self.main_window._own_sent_ids))
+                )
+
+    def _report_cancelled_outcome(self, msg: PendingMessage, real_id,
+                                  ambiguous: bool, quote_lost: bool):
+        """Hand a cancelled message's outcome to the UI, exactly once.
+
+        `real_id` being falsy is NOT the same as "it never went out": it also
+        covers the ambiguous outcome — a timeout or dropped connection, where
+        WhatsApp Web may well have taken the message into its own outbox and
+        will flush it on reconnect (that is why the ambiguous branch never
+        retries). Treating that as "dropped" would release the record the panel
+        is holding, and a message that then does go out arrives as an echo with
+        no anchor left, taking the identity of the next pending send of its
+        type. So the unknown outcome is reported the same way a delivery with no
+        ID is: the row goes back, still pending, for the echo to claim.
+        """
+        if not real_id and not ambiguous:
+            logging.info(
+                "[MessageQueue] cancelled %s never reached WhatsApp", msg.local_id
+            )
+            self._report_cancelled_drop(msg)
+            return
+        # Register the real ID: the echo carries no correlation ID, so this is
+        # what stops it from being handled as a message from another device.
+        self._remember_own_sent_id(real_id)
+        logging.warning(
+            "[MessageQueue] cancelled %s was not stopped in time (id=%s, "
+            "ambiguous=%s) — handing it over to be revoked if it is known to "
+            "have gone out, or marked unconfirmed if that is not knowable",
+            msg.local_id, real_id, ambiguous,
+        )
+        wx.CallAfter(
+            self.main_window._on_cancelled_message_delivered,
+            msg.local_id,
+            real_id if isinstance(real_id, str) else None,
+            msg.jid,
+            msg.audio_path,
+            quote_lost,
+            # Passed on rather than folded into "no ID": the UI restores an
+            # unknown outcome differently from a confirmed one.
+            bool(ambiguous),
+        )
+
+    def _report_cancelled_drop(self, msg: PendingMessage):
+        """Tell the UI a cancelled message is definitively not going out.
+
+        Releases the record ConversationsPanel holds as the anchor for an echo
+        that will never arrive (when a worker had already claimed the message),
+        and disposes of the temporary WAV a voice recording was sent from, whose
+        path is known here and nowhere else.
+        """
+        wx.CallAfter(
+            self.main_window._on_cancelled_message_dropped,
+            msg.local_id,
+            msg.audio_path,
+        )
 
     def _run(self, media_only: bool):
         wake_event = self._media_event if media_only else self._quick_event
@@ -161,8 +262,23 @@ class MessageQueue:
                     break
                 if not getattr(self.main_window, "_wa_connected", True):
                     break
-                if msg.cancel_event.is_set():
-                    continue
+                # Claiming the message and re-checking the cancel flag under the
+                # same lock cancel() takes is what makes cancel()'s answer
+                # trustworthy: without it, a cancel landing between the check and
+                # the send would be told "stopped for good" while this thread
+                # went on to send the message anyway.
+                with self._lock:
+                    if msg.cancel_event.is_set():
+                        continue
+                    self._in_flight.add(msg.local_id)
+                # Re-initialised per message: the finally below reads them to
+                # decide what an unreported cancellation actually was, and a
+                # value left over from the previous message would answer for the
+                # wrong send.
+                real_id    = None
+                ambiguous  = False
+                quote_lost = False
+                reported   = False
                 try:
                     if msg.audio_path:
                         real_id = self.main_window.send_audio_message(
@@ -193,8 +309,6 @@ class MessageQueue:
                         )
                     retryable_failure = False
                     disconnected      = False
-                    ambiguous         = False
-                    quote_lost        = False
                     if isinstance(real_id, dict):
                         if real_id.get("ok"):
                             quote_lost = bool(real_id.get("quote_lost", False))
@@ -205,6 +319,26 @@ class MessageQueue:
                             disconnected      = bool(real_id.get("disconnected"))
                             ambiguous         = bool(real_id.get("ambiguous"))
                             real_id = False
+
+                    if msg.cancel_event.is_set():
+                        # The user cancelled while this send was in flight.  None
+                        # of the send_* calls above can be interrupted once the
+                        # request is on the wire, so by the time the flag becomes
+                        # visible here the outcome is already decided.
+                        #
+                        # This is checked BEFORE the outcome branches below
+                        # because every one of them reports on a row the cancel
+                        # already removed: the ambiguous branch has NVDA speak
+                        # "send not confirmed" for a message the user just
+                        # deleted, and the failure branch pops a modal error
+                        # dialog for an upload that was abandoned on purpose.
+                        with self._lock:
+                            self._pending.pop(msg.local_id, None)
+                        self._report_cancelled_outcome(
+                            msg, real_id, ambiguous, quote_lost
+                        )
+                        reported = True
+                        continue
 
                     if not real_id and disconnected:
                         # WhatsApp is down and told us so explicitly (HTTP 404
@@ -233,50 +367,21 @@ class MessageQueue:
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
                         wx.CallAfter(self.main_window._on_message_unconfirmed, msg.local_id)
+                        # From that pop on, cancel() answers False and the panel
+                        # holds this message's record. _on_message_unconfirmed()
+                        # routes a cancelled message into the cancelled path
+                        # itself, so this counts as its one report.
+                        reported = True
                         continue
 
                     if real_id:
                         msg.fail_count = 0
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
-                        if msg.cancel_event.is_set():
-                            # The cancel button only ever checked this flag
-                            # before the network call started — never during
-                            # it, since none of the send_* calls above can be
-                            # interrupted mid-flight. So a message could reach
-                            # WhatsApp anyway after the user "cancelled" it,
-                            # and the row it would have updated is already
-                            # gone (the UI removes it as soon as cancel() is
-                            # called, see conversations.py's delete-while-
-                            # pending path). Registering real_id in
-                            # _own_sent_ids here would suppress the WebSocket
-                            # echo for a message that genuinely went out —
-                            # quietly hiding from the user that it was
-                            # actually delivered. Skip that and let the echo
-                            # arrive normally instead: it inserts as an
-                            # ordinary message, which is the truth.
-                            logging.warning(
-                                "[MessageQueue] %s reached WhatsApp (id=%s) after being "
-                                "cancelled — letting the echo re-add it instead of hiding it",
-                                msg.local_id, real_id,
-                            )
-                            if msg.audio_path:
-                                try:
-                                    os.unlink(msg.audio_path)
-                                except OSError:
-                                    pass
-                            continue
                         # Register the real ID immediately so the WebSocket echo
                         # (messages.upsert with fromMe=True) is recognised as
                         # "sent by this instance" and not shown as a new message.
-                        if isinstance(real_id, str):
-                            with self.main_window._own_sent_ids_lock:
-                                self.main_window._own_sent_ids.add(real_id)
-                                # Prevent unbounded growth — keep at most 500 IDs.
-                                if len(self.main_window._own_sent_ids) > 500:
-                                    self.main_window._own_sent_ids.discard(
-                                        next(iter(self.main_window._own_sent_ids))
-                                    )
+                        self._remember_own_sent_id(real_id)
                         wx.CallAfter(
                             self.main_window._on_message_sent,
                             msg.local_id,
@@ -285,6 +390,10 @@ class MessageQueue:
                             msg.jid,
                             quote_lost,
                         )
+                        # _on_message_sent() routes a message cancelled after this
+                        # point into the cancelled path itself, so this counts as
+                        # the one report the finally below must not duplicate.
+                        reported = True
                     else:
                         msg.fail_count += 1
                         if not msg.last_error:
@@ -302,10 +411,15 @@ class MessageQueue:
                                 msg.last_error,
                                 bool(msg.media_path),  # show dialog for media failures
                             )
+                            # Same as the ambiguous branch: _on_message_failed()
+                            # is cancel-aware, so this is this message's report.
+                            reported = True
                 except MessageCancelled:
                     with self._lock:
                         self._pending.pop(msg.local_id, None)
                     logging.info("[MessageQueue] cancelled by user: %s", msg.local_id)
+                    self._report_cancelled_drop(msg)
+                    reported = True
                     continue
                 except Exception as exc:
                     # requests/urllib3 may wrap MessageCancelled raised by the
@@ -316,6 +430,8 @@ class MessageQueue:
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
                         logging.info("[MessageQueue] cancelled during transport: %s", msg.local_id)
+                        self._report_cancelled_drop(msg)
+                        reported = True
                         continue
                     # Only unexpected programming errors reach here — transport
                     # failures are classified inside the send_* methods.
@@ -333,3 +449,41 @@ class MessageQueue:
                             str(exc),
                             bool(msg.media_path),
                         )
+                        reported = True
+                finally:
+                    # Released only once this message's outcome has been decided
+                    # (delivered, dropped, or put back for a retry), so a cancel
+                    # arriving anywhere in between is answered with "a worker
+                    # owns this, wait for its report" rather than "stopped".
+                    with self._lock:
+                        self._in_flight.discard(msg.local_id)
+                        # Every branch above passes through here, which is what
+                        # makes "a cancel answered False always gets exactly one
+                        # report" a property of the code rather than of having
+                        # remembered each branch. It has to be: the cancel can
+                        # land in the gap between a branch's own _pending.pop()
+                        # and its wx.CallAfter reaching the main thread — after
+                        # the pop, cancel() answers False and the panel starts
+                        # holding this message's record, and only a report
+                        # releases it. Enumerating the branches missed the
+                        # ambiguous and give-up ones twice.
+                        orphaned = (
+                            msg.cancel_event.is_set()
+                            and msg.local_id not in self._pending
+                            and not reported
+                        )
+                    if orphaned:
+                        # Outside the try/except above, so it needs its own:
+                        # an exception raised here is on the worker thread with
+                        # nothing left to catch it, and the thread dying takes
+                        # the whole queue with it — nothing would ever be sent
+                        # again, silently.
+                        try:
+                            self._report_cancelled_outcome(
+                                msg, real_id, ambiguous, quote_lost
+                            )
+                        except Exception:
+                            logging.exception(
+                                "[MessageQueue] could not report the cancellation "
+                                "of %s", msg.local_id,
+                            )
