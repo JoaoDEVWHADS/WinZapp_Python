@@ -212,11 +212,11 @@ class TestSilenceSendVoiceFocusIfEnabled:
 
         # Immediate call covers a screen reader that speaks synchronously.
         assert stub.main_window.speak_output.silence_calls == 1
-        assert len(call_later_calls) == 1
-        delay, func = call_later_calls[0]
-        assert delay > 0
-        func()
-        assert stub.main_window.speak_output.silence_calls == 2
+        assert len(call_later_calls) == 4
+        for delay, func in call_later_calls:
+            assert delay > 0
+            func()
+        assert stub.main_window.speak_output.silence_calls == 5
 
     def test_fires_when_extended_sr_compat_disabled(self, monkeypatch):
         call_later_calls = []
@@ -228,16 +228,16 @@ class TestSilenceSendVoiceFocusIfEnabled:
         stub._silence_send_voice_focus_if_enabled()
 
         assert stub.main_window.speak_output.silence_calls == 1
-        assert len(call_later_calls) == 1
-        delay, func = call_later_calls[0]
-        assert delay > 0
-        func()
-        assert stub.main_window.speak_output.silence_calls == 2
+        assert len(call_later_calls) == 4
+        for delay, func in call_later_calls:
+            assert delay > 0
+            func()
+        assert stub.main_window.speak_output.silence_calls == 5
 
 
 class TestSilenceableVoiceButtonAccessibleName:
     """AccessibleSendVoiceMessage / AccessibleDiscardVoiceMessage blank out
-    their MSAA name and shortcut while silence_while_recording is on or
+    their MSAA name, role, and shortcut while silence_while_recording is on or
     extended_sr_compat_enabled is off, so the screen reader has nothing
     to announce for the focus event in the first place."""
 
@@ -248,21 +248,25 @@ class TestSilenceableVoiceButtonAccessibleName:
                 "accessibility": {"extended_sr_compat_enabled": extended_enabled},
             }
 
-    def test_name_blanked_when_silence_while_recording_enabled(self):
+    def test_name_and_role_blanked_when_silence_while_recording_enabled(self):
         import wx
 
         for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
             acc = cls(self._FakeMainWindow(silence_enabled=True, extended_enabled=True))
             assert acc.GetName(0) == (wx.ACC_OK, "")
             assert acc.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
+            assert acc.GetRole(0) == (wx.ACC_OK, 0)
+            assert acc.GetDescription(0) == (wx.ACC_OK, "")
 
-    def test_name_blanked_when_extended_sr_compat_disabled(self):
+    def test_name_and_role_blanked_when_extended_sr_compat_disabled(self):
         import wx
 
         for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
             acc = cls(self._FakeMainWindow(silence_enabled=False, extended_enabled=False))
             assert acc.GetName(0) == (wx.ACC_OK, "")
             assert acc.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
+            assert acc.GetRole(0) == (wx.ACC_OK, 0)
+            assert acc.GetDescription(0) == (wx.ACC_OK, "")
 
     def test_name_and_shortcut_reported_when_both_enabled(self):
         import wx
@@ -271,5 +275,6 @@ class TestSilenceableVoiceButtonAccessibleName:
         discard = AccessibleDiscardVoiceMessage(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
         assert send.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
         assert discard.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
+        assert send.GetRole(0) == (wx.ACC_NOT_IMPLEMENTED, 0)
         assert send.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+R")
         assert discard.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+D")

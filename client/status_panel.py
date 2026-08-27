@@ -2472,7 +2472,8 @@ class StatusPanel(wx.Panel):
             return
         if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
             self.main_window.speak_output.silence()
-            wx.CallLater(60, self.main_window.speak_output.silence)
+            for delay in (20, 50, 100, 200):
+                wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:
