@@ -8202,7 +8202,24 @@ class ConversationsPanel(wx.Panel):
             return self.main_window.i18n.t("no_messages_in_conversation")
         # Unread separator sentinel
         if self._is_separator(msg):
-            return self._render_separator(msg.get("count", 1))
+            line = self._render_separator(msg.get("count", 1))
+            show_count = False
+            if hasattr(self, "main_window") and hasattr(self.main_window, "settings"):
+                show_count = self.main_window.settings.get("user_interface", {}).get(
+                    "show_listbox_item_count", False
+                )
+            if show_count and getattr(self, "_message_list_mode", "classic") == "listbox":
+                if index is None and hasattr(self, "_sorted_messages"):
+                    try:
+                        index = self._sorted_messages.index(msg)
+                    except ValueError:
+                        index = None
+                if total is None and hasattr(self, "_sorted_messages"):
+                    total = len(self._sorted_messages)
+                if index is not None and total is not None and total > 0:
+                    i18n = self.main_window.i18n
+                    line += f", {index + 1} {i18n.t('of')} {total}"
+            return line
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
         body     = (self._get_message_content(msg) or "")
@@ -12056,7 +12073,7 @@ class ConversationsPanel(wx.Panel):
                     sep_pos = len(self._sorted_messages)
                     sep = {"_type": "unread_separator", "count": 1}
                     self._sorted_messages.insert(sep_pos, sep)
-                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self.messages_list.InsertItem(sep_pos, self._render_message_line(sep))
                     self._unread_sep_idx = sep_pos
                     self._sep_from_open = False
                 elif self._sep_from_open:
@@ -12069,7 +12086,7 @@ class ConversationsPanel(wx.Panel):
                     sep_pos = len(self._sorted_messages)
                     sep = {"_type": "unread_separator", "count": 1}
                     self._sorted_messages.insert(sep_pos, sep)
-                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self.messages_list.InsertItem(sep_pos, self._render_message_line(sep))
                     self._unread_sep_idx = sep_pos
                     self._sep_from_open = False
                 else:
@@ -12077,7 +12094,7 @@ class ConversationsPanel(wx.Panel):
                     sep = self._sorted_messages[self._unread_sep_idx]
                     sep["count"] = sep.get("count", 0) + 1
                     self.messages_list.SetItemText(
-                        self._unread_sep_idx, self._render_separator(sep["count"])
+                        self._unread_sep_idx, self._render_message_line(sep)
                     )
 
             # Append the real message (focus must NOT move)
