@@ -244,3 +244,55 @@ def test_every_path_claude_md_names_exists():
         f"CLAUDE.md points at paths that do not exist. If they were renamed, "
         f"update the doc; if they were deleted, delete the claim: {missing}"
     )
+
+
+# ── the same claims, restated under .claude/ ─────────────────────────────────
+
+# CLAUDE.md is not the only prose steering work in this repo any more: the
+# skills and agents under .claude/ restate a good deal of the same
+# architecture, and they name the same paths. Nothing watched them, so the
+# guarantee this file provides stopped at one file while the surface it
+# describes grew past it — the identical hazard CLAUDE.md's own "one document,
+# one place to update it" note exists for.
+#
+# Only path existence is checked here, not counts or prose: a path is a claim
+# with exactly one right answer, and a dangling one turns "go read
+# client/foo.py" into a dead end for whichever agent loads that skill. The
+# looser claims stay CLAUDE.md's alone, which is where they belong.
+CLAUDE_DIR = ROOT / ".claude"
+
+#: Low deliberately. This is a floor against the glob silently finding nothing
+#: (a directory rename, a layout change), not a count of the docs that happen
+#: to exist today — a skill being retired must not turn this red.
+CLAUDE_DOC_FLOOR = 5
+
+
+def _claude_docs():
+    return sorted(CLAUDE_DIR.rglob("*.md"))
+
+
+def test_the_claude_directory_docs_are_still_being_found():
+    """Guards the glob the way PATH_FLOOR guards the regex above: with no
+    files matched, the parametrized test below runs zero cases and passes."""
+    found = _claude_docs()
+    assert len(found) >= CLAUDE_DOC_FLOOR, (
+        f"only {len(found)} Markdown file(s) found under {CLAUDE_DIR} (floor "
+        f"{CLAUDE_DOC_FLOOR}) — the skills/agents layout probably moved and "
+        f"their paths stopped being checked. Found: {[str(p) for p in found]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "doc", _claude_docs(), ids=lambda p: str(p.relative_to(ROOT)).replace("\\", "/")
+)
+def test_every_path_a_claude_doc_names_exists(doc):
+    documented = {
+        p for p in _DOC_PATH.findall(doc.read_text(encoding="utf-8"))
+        if not p.startswith(UNCHECKABLE_PREFIXES)
+    }
+    missing = sorted(p for p in documented if not (ROOT / p).exists())
+    assert missing == [], (
+        f"{doc.relative_to(ROOT)} points at paths that do not exist. A skill or "
+        f"agent that sends the reader to a deleted file is worse than one that "
+        f"says nothing: {missing}"
+    )

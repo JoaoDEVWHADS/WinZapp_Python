@@ -27,6 +27,8 @@ import pytest
 
 from main import MainWindow
 
+from tests.locales import registered_locale_files
+
 
 class _FakeI18n:
     _STRINGS = {
@@ -86,13 +88,10 @@ LANG_DIR = os.path.join(os.path.dirname(__file__), "..", "client", "languages")
 #: Every registered locale, from language_map.json — pl used to be left out
 #: of this list, and this is the only check that the two keys are *distinct*
 #: (the union check in test_language_files_in_sync.py catches a missing or
-#: blank value, never two identical ones).
-_LANG_FILES = [
-    f"{code}.json"
-    for code in sorted(
-        json.load(open(os.path.join(LANG_DIR, "language_map.json"), encoding="utf-8"))
-    )
-]
+#: blank value, never two identical ones). Through the shared helper so an
+#: empty derivation cannot quietly turn the parametrize below into zero cases
+#: — see tests/locales.py.
+_LANG_FILES = list(registered_locale_files())
 
 
 @pytest.mark.parametrize("lang_file", _LANG_FILES)
