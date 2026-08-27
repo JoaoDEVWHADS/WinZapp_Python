@@ -2086,10 +2086,27 @@ class WebSocketClient:
             if not is_forwarded:
                 is_forwarded = bool(ctx_info.get("isForwarded"))
 
-        # Debug quotes
-        body_text = str(wpp_msg.get('body') or '').strip().lower()
-        if body_text in ('..', 'oi'):
-            logging.info(f"[Raw Message Debug] Message {wpp_msg.get('id')} body: {body_text}. Full payload: {wpp_msg}")
+        # A leftover debug hook used to sit here: it logged the ENTIRE raw
+        # WPPConnect payload at INFO whenever the message body was literally
+        # ".." or "oi". Removed, not downgraded to DEBUG, because the problem
+        # was never the level.
+        #
+        # "oi" is the commonest Portuguese greeting, so this fired constantly
+        # on real installs — 61 times in a single afternoon on one account. Each
+        # line carried the message text, both parties' @lid and @c.us JIDs, the
+        # sender's real name, and messageSecret: the per-message 32-byte key,
+        # printed as a decimal array.
+        #
+        # message_json is Fernet-encrypted at rest precisely because message
+        # content is sensitive (see CLAUDE.md). This wrote the same content in
+        # the clear, into log.log, in the same folder — and log.log is the file
+        # CLAUDE.md tells anyone diagnosing a problem to ask the user for. Being
+        # triggered by message content, it was invisible in testing and
+        # unbounded in production.
+        #
+        # If a raw payload is ever needed again, log the SHAPE (keys and value
+        # types, as get_remote_chats does for @lid chats) or a specific field
+        # chosen deliberately — never the whole dict.
 
         # Determine if there is any quoted context
         has_quote = False
