@@ -153,18 +153,26 @@ class _SilenceableVoiceButtonAccessible(wx.Accessible):
             return True
         if not settings.get("accessibility", {}).get("extended_sr_compat_enabled", True):
             # When extended compatibility is off, we only silence the initial startup
-            # window when recording begins so the button switch does not announce.
+            # window when recording begins and transient toggle events (pause/resume)
+            # so state changes do not announce.
             # Afterwards, navigating with Tab/Shift+Tab to the button will read its real name and role.
             import time
+            now = time.monotonic()
             conv_panel = getattr(self._mw, "conversations_panel", None)
             if conv_panel is not None:
                 start_time = getattr(conv_panel, "_recording_start_timestamp", 0.0)
-                if (time.monotonic() - start_time) < 1.0:
+                if (now - start_time) < 1.0:
+                    return True
+                pause_time = getattr(conv_panel, "_pause_toggle_timestamp", 0.0)
+                if (now - pause_time) < 1.0:
                     return True
             status_panel = getattr(self._mw, "status_panel", None)
             if status_panel is not None:
                 start_time = getattr(status_panel, "_recording_start_timestamp", 0.0)
-                if (time.monotonic() - start_time) < 1.0:
+                if (now - start_time) < 1.0:
+                    return True
+                pause_time = getattr(status_panel, "_pause_toggle_timestamp", 0.0)
+                if (now - pause_time) < 1.0:
                     return True
         return False
 

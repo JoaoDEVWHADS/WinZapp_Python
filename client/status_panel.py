@@ -2481,6 +2481,9 @@ class StatusPanel(wx.Panel):
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:
             return
+        import time
+        self._pause_toggle_timestamp = time.monotonic()
+        self._silence_send_voice_focus_if_enabled()
         self._recording_paused = not self._recording_paused
         if hasattr(self.main_window, "voicemsg_pauserecording_sound"):
             try:
@@ -2498,6 +2501,7 @@ class StatusPanel(wx.Panel):
             self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
             self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
         self.Layout()
+        self._silence_send_voice_focus_if_enabled()
 
     def _toggle_play_recorded_audio(self, event):
         """Play or stop the stable snapshot captured before the pause."""

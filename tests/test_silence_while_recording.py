@@ -63,7 +63,11 @@ except ImportError:
 
 import ui.conversations as conversations_module
 from core.accessible_speech import AccessibleSpeechOutput
-from ui.accessible import AccessibleDiscardVoiceMessage, AccessibleSendVoiceMessage
+from ui.accessible import (
+    AccessibleDiscardVoiceMessage,
+    AccessiblePauseResumeRecording,
+    AccessibleSendVoiceMessage,
+)
 from ui.conversations import ConversationsPanel
 
 
@@ -236,24 +240,37 @@ class TestSilenceSendVoiceFocusIfEnabled:
 
 
 class TestSilenceableVoiceButtonAccessibleName:
-    """AccessibleSendVoiceMessage / AccessibleDiscardVoiceMessage blank out
-    their MSAA name and shortcut while silence_while_recording is on or
-    during the transient startup window when extended_sr_compat_enabled is off,
-    so the screen reader has nothing to announce for the initial focus event,
+    """AccessibleSendVoiceMessage / AccessibleDiscardVoiceMessage / AccessiblePauseResumeRecording
+    blank out their MSAA name and shortcut while silence_while_recording is on or
+    during transient startup/pause toggle windows when extended_sr_compat_enabled is off,
+    so the screen reader has nothing to announce for the initial focus/toggle event,
     while keeping the real name/role intact afterwards."""
 
     class _FakeMainWindow:
-        def __init__(self, silence_enabled=False, extended_enabled=True, start_timestamp=0.0):
+        def __init__(
+            self,
+            silence_enabled=False,
+            extended_enabled=True,
+            start_timestamp=0.0,
+            pause_timestamp=0.0,
+        ):
             self.settings = {
                 "speech_content": {"silence_while_recording": silence_enabled},
                 "accessibility": {"extended_sr_compat_enabled": extended_enabled},
             }
-            self.conversations_panel = types.SimpleNamespace(_recording_start_timestamp=start_timestamp)
+            self.conversations_panel = types.SimpleNamespace(
+                _recording_start_timestamp=start_timestamp,
+                _pause_toggle_timestamp=pause_timestamp,
+            )
 
     def test_name_blanked_when_silence_while_recording_enabled(self):
         import wx
 
-        for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
+        for cls in (
+            AccessibleSendVoiceMessage,
+            AccessibleDiscardVoiceMessage,
+            AccessiblePauseResumeRecording,
+        ):
             acc = cls(self._FakeMainWindow(silence_enabled=True, extended_enabled=True))
             assert acc.GetName(0) == (wx.ACC_OK, "")
             assert acc.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
@@ -263,14 +280,42 @@ class TestSilenceableVoiceButtonAccessibleName:
         import time
 
         now = time.monotonic()
-        for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
+        for cls in (
+            AccessibleSendVoiceMessage,
+            AccessibleDiscardVoiceMessage,
+            AccessiblePauseResumeRecording,
+        ):
             # Recent recording start: silenced (transient window)
-            acc_recent = cls(self._FakeMainWindow(silence_enabled=False, extended_enabled=False, start_timestamp=now))
+            acc_recent = cls(
+                self._FakeMainWindow(
+                    silence_enabled=False,
+                    extended_enabled=False,
+                    start_timestamp=now,
+                )
+            )
             assert acc_recent.GetName(0) == (wx.ACC_OK, "")
             assert acc_recent.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
 
+            # Recent pause toggle: silenced (transient window)
+            acc_paused = cls(
+                self._FakeMainWindow(
+                    silence_enabled=False,
+                    extended_enabled=False,
+                    pause_timestamp=now,
+                )
+            )
+            assert acc_paused.GetName(0) == (wx.ACC_OK, "")
+            assert acc_paused.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
+
             # After transient window: full name and shortcut restored
-            acc_old = cls(self._FakeMainWindow(silence_enabled=False, extended_enabled=False, start_timestamp=now - 2.0))
+            acc_old = cls(
+                self._FakeMainWindow(
+                    silence_enabled=False,
+                    extended_enabled=False,
+                    start_timestamp=now - 2.0,
+                    pause_timestamp=now - 2.0,
+                )
+            )
             assert acc_old.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
 
     def test_name_and_shortcut_reported_when_both_enabled(self):
@@ -278,7 +323,10 @@ class TestSilenceableVoiceButtonAccessibleName:
 
         send = AccessibleSendVoiceMessage(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
         discard = AccessibleDiscardVoiceMessage(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
+        pause = AccessiblePauseResumeRecording(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
         assert send.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
         assert discard.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
+        assert pause.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
         assert send.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+R")
         assert discard.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+D")
+        assert pause.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+P")
