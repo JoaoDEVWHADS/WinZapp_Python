@@ -6210,6 +6210,66 @@ class MainWindow(wx.Frame):
             logging.exception("[node-port] peer port enumeration failed (non-fatal)")
         return ports
 
+    @staticmethod
+    def _is_port_free(port: int) -> bool:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+                return True
+        except OSError:
+            return False
+
+    def _ensure_wpp_port_still_free(self):
+        """Re-verify self.wpp_port right before Node actually spawns, and
+        re-resolve if something already grabbed it.
+
+        _resolve_wpp_port() checks/reserves the port during __init__, but
+        the real Node spawn (_start_wpp_background(), this method's only
+        caller) happens much later in startup — settings/UI/sync all run in
+        between, a real gap of actual wall-clock time, not a single atomic
+        step. Anything can take that exact port in that window: another
+        program, or even this same account's own previous Node still
+        winding down. Node would then simply fail to bind it, surfaced only
+        as a generic "API failed to start in time" with an EADDRINUSE
+        buried in wppconnect.log. Only re-checks in the same case
+        _resolve_wpp_port() itself allocates a port for — a custom/remote
+        API's port, or single-account/legacy mode, is left untouched.
+        """
+        conn = self.settings.get("connection", {})
+        if conn.get("wpp_custom_api"):
+            return
+        if getattr(self, "registry", None) is None or getattr(self, "account_id", None) is None:
+            return
+        if self._is_port_free(self.wpp_port):
+            return
+
+        import node_ports
+        from coord_locks import node_port_lock
+        logging.warning(
+            "[node-port] port %s no longer free right before starting Node "
+            "— re-resolving", self.wpp_port,
+        )
+        with node_port_lock(self.global_dir):
+            # allocate_port_for_account(), not resolve_account_port(): the
+            # latter deliberately keeps a valid saved port even when
+            # is_free() is momentarily False (see its own docstring) — the
+            # right call for a quick restart racing our own still-dying
+            # Node, but here we already know the port is genuinely taken
+            # and need a real, different one.
+            new_port = node_ports.allocate_port_for_account(
+                self.account_id, self._peer_node_ports(), is_free=self._is_port_free,
+            )
+            self.settings.setdefault("connection", {})["wpp_port"] = new_port
+            try:
+                self.save_settings()
+            except Exception:
+                logging.exception(
+                    "[node-port] persisting re-resolved port failed (non-fatal)"
+                )
+        logging.info("[node-port] account %s → re-resolved WPPConnect port %s",
+                     self.account_id, new_port)
+        self.wpp_port = new_port
+
     def _resolve_wpp_port(self, conn: dict) -> int:
         """Resolve THIS account's stable WPPConnect Node port.
 
@@ -6226,14 +6286,6 @@ class MainWindow(wx.Frame):
         if getattr(self, "registry", None) is None or getattr(self, "account_id", None) is None:
             return node_ports.sanitize_saved_port(conn.get("wpp_port")) or node_ports.BASE_PORT
 
-        def _is_free(port: int) -> bool:
-            try:
-                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                    s.bind(("127.0.0.1", port))
-                    return True
-            except OSError:
-                return False
-
         # Two accounts can start simultaneously. Keep peer discovery, free-port
         # selection and persistence in one cross-process critical section so
         # they cannot both claim the same port.
@@ -6243,7 +6295,7 @@ class MainWindow(wx.Frame):
                 self.account_id,
                 conn.get("wpp_port"),
                 self._peer_node_ports(),
-                is_free=_is_free,
+                is_free=self._is_port_free,
             )
             # Persist so the choice is stable next launch.
             if conn.get("wpp_port") != port:
@@ -6281,6 +6333,7 @@ class MainWindow(wx.Frame):
         is spawned using the non-elevated linked token via CreateProcessWithTokenW
         so that PostgreSQL's initdb can start (it refuses to run as root/admin).
         """
+        self._ensure_wpp_port_still_free()
         import sys
         import shutil
 
