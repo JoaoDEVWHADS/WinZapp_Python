@@ -142,6 +142,40 @@ static void remove_registry_entry(void)
 
 /* ── Schedule self-delete via temp batch file ─────────────────────────── */
 
+static BOOL is_ascii_path(const wchar_t *s)
+{
+    for (; *s; s++)
+        if (*s > 127) return FALSE;
+    return TRUE;
+}
+
+/* Copy *in* into *out* in a form a batch script can carry safely: its 8.3
+ * short alias whenever the long form leaves ASCII.
+ *
+ * This mirrors _console_safe_path() in client/updater.py (issue #83), and it
+ * is the *primary* mechanism, not a nicety: the 8.3 alias is pure ASCII, so
+ * the script stops depending on which code page cmd.exe decodes it with at
+ * all, instead of merely being right about that code page. GetShortPathNameW
+ * only answers for a path that already exists on disk and a volume with 8.3
+ * generation still enabled — when either isn't true it leaves the long path
+ * in place and the caller falls back to the OEM code page below. Both paths
+ * passed here do exist at this point: delete_installed_files() empties the
+ * install directory but never removes it, and uninstall.exe is this very
+ * running process. */
+static void console_safe_path(wchar_t *out, size_t out_cap, const wchar_t *in)
+{
+    wcsncpy(out, in, out_cap - 1);
+    out[out_cap - 1] = L'\0';
+    if (is_ascii_path(out)) return;
+
+    wchar_t short_path[MAX_PATH];
+    DWORD len = GetShortPathNameW(in, short_path, MAX_PATH);
+    if (len > 0 && len < MAX_PATH && is_ascii_path(short_path)) {
+        wcsncpy(out, short_path, out_cap - 1);
+        out[out_cap - 1] = L'\0';
+    }
+}
+
 static void schedule_self_delete(const wchar_t *uninstall_exe,
                                   const wchar_t *install_dir)
 {
@@ -150,23 +184,89 @@ static void schedule_self_delete(const wchar_t *uninstall_exe,
     wchar_t bat_path[MAX_PATH];
     swprintf(bat_path, MAX_PATH, L"%swzuninstall.bat", temp_dir);
 
-    /* Convert paths to ANSI for the batch file */
-    char uninstall_a[MAX_PATH], install_a[MAX_PATH], bat_a[MAX_PATH];
-    WideCharToMultiByte(CP_ACP, 0, uninstall_exe, -1, uninstall_a, MAX_PATH, NULL, NULL);
-    WideCharToMultiByte(CP_ACP, 0, install_dir,   -1, install_a,   MAX_PATH, NULL, NULL);
-    WideCharToMultiByte(CP_ACP, 0, bat_path,      -1, bat_a,       MAX_PATH, NULL, NULL);
+    /* Only the script's CONTENT needs a code page; its NAME stays wide.
+     * cmd.exe reads a .bat back in the OEM code page (CP852 on a Polish
+     * Windows, CP850 on a Portuguese one, ...), which is not CP_ACP for any
+     * non-ASCII character — writing ANSI bytes and having cmd decode them as
+     * OEM is what turned a path like "C:\Users\Paweł\AppData\Local\WinZapp"
+     * into mojibake that does not exist on disk (updater.py hit the identical
+     * mismatch on the self-update path, see its _oem_encoding(), issue #83).
+     * But bat_path itself comes from GetTempPathW, i.e.
+     * C:\Users\<account>\AppData\Local\Temp\ — it carries the very same
+     * non-ASCII account name — so handing an OEM-encoded copy of it to a
+     * narrow fopen() would have the UCRT decode those bytes back in CP_ACP
+     * and open (fail to open) a directory that never existed, skipping the
+     * self-delete entirely while the dialog still reports success. Hence
+     * CreateFileW here, which is also what every other file open across both
+     * stubs uses (see installer.c's write_file_list()); it writes raw bytes,
+     * so the \r\n below stay \r\n instead of the \r\r\n that fopen(..,"w")
+     * used to produce. */
+    wchar_t uninstall_safe[MAX_PATH], install_safe[MAX_PATH];
+    console_safe_path(uninstall_safe, MAX_PATH, uninstall_exe);
+    console_safe_path(install_safe,   MAX_PATH, install_dir);
 
-    FILE *f = fopen(bat_a, "w");
-    if (!f) return;
+    /* Twice MAX_PATH because a DBCS OEM code page (CP932 on a Japanese
+     * Windows, CP936 on a Chinese one) spends up to two bytes per character. */
+    char uninstall_a[MAX_PATH * 2], install_a[MAX_PATH * 2];
+    BOOL lossy = FALSE;
 
-    fprintf(f, "@echo off\r\n");
-    fprintf(f, "ping -n 2 127.0.0.1 >nul\r\n");
-    fprintf(f, ":loop\r\n");
-    fprintf(f, "del /f /q \"%s\"\r\n",          uninstall_a);
-    fprintf(f, "if exist \"%s\" goto loop\r\n", uninstall_a);
-    fprintf(f, "rmdir /s /q \"%s\"\r\n",        install_a);
-    fprintf(f, "del \"%%~f0\"\r\n");
-    fclose(f);
+    /* lpUsedDefaultChar is the only honest "cannot represent this" signal:
+     * with dwFlags 0, WideCharToMultiByte substitutes '?' for an unmappable
+     * character and still returns a non-zero length, so the return value
+     * alone catches nothing but a too-small buffer (WC_ERR_INVALID_CHARS
+     * doesn't help — it applies to CP_UTF8/CP_GB18030 and to malformed
+     * input, not to unmappable input). Letting a '?' through would not delete
+     * anything dangerous — cmd rejects a wildcard in a directory component
+     * (`del`) or anywhere at all (`rmdir`) with ERROR_INVALID_NAME — but it
+     * reproduces this bug instead of fixing it: every line silently targets a
+     * path that is not the install, the :loop spins, and the success dialog
+     * fires over an install still fully on disk. Refusing is the same strict
+     * stance _write_installer_script() takes on the Python side.
+     *
+     * The two calls must stay separate: lpUsedDefaultChar is *overwritten* by
+     * each call rather than accumulated, so one shared `lossy` tested after an
+     * && chain would forget a lossy first conversion whenever the second came
+     * back clean — precisely the non-ASCII-username case this exists for.
+     *
+     * Unreachable in practice unless 8.3 generation is off, since
+     * console_safe_path() above normally hands us pure ASCII. */
+    if (!WideCharToMultiByte(CP_OEMCP, 0, uninstall_safe, -1,
+                             uninstall_a, (int)sizeof(uninstall_a), NULL, &lossy) || lossy)
+        return;
+    if (!WideCharToMultiByte(CP_OEMCP, 0, install_safe, -1,
+                             install_a, (int)sizeof(install_a), NULL, &lossy) || lossy)
+        return;
+
+    char script[MAX_PATH * 6 + 256];
+    int len = snprintf(script, sizeof(script),
+                       "@echo off\r\n"
+                       "ping -n 2 127.0.0.1 >nul\r\n"
+                       ":loop\r\n"
+                       "del /f /q \"%s\"\r\n"
+                       "if exist \"%s\" goto loop\r\n"
+                       "rmdir /s /q \"%s\"\r\n"
+                       "del \"%%~f0\"\r\n",
+                       uninstall_a, uninstall_a, install_a);
+    if (len <= 0 || len >= (int)sizeof(script)) return;
+
+    HANDLE hf = CreateFileW(bat_path, GENERIC_WRITE, 0, NULL,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    /* A short write must abort the whole thing, and the partial file has to go.
+     * WriteFile returning TRUE with written < len is the documented disk-full
+     * behaviour, and a script truncated at a path separator is not merely
+     * useless — `rmdir /s /q "C:\Users\<account>\AppData\Local\` (no closing
+     * quote, no CRLF) is accepted by cmd, exits 0, and recursively deletes that
+     * directory. Leaving the truncated file behind would be just as bad: it
+     * stays in %TEMP% where a later double-click still runs it. */
+    BOOL wrote = WriteFile(hf, script, (DWORD)len, &written, NULL)
+              && written == (DWORD)len;
+    CloseHandle(hf);
+    if (!wrote) {
+        DeleteFileW(bat_path);
+        return;
+    }
 
     ShellExecuteW(NULL, L"open", bat_path, NULL, NULL, SW_HIDE);
 }
