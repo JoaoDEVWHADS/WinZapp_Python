@@ -60,7 +60,7 @@ class TestTheBadgeIsRediscountedOnceMessagesArrive:
 
     def test_our_own_send_stops_counting_as_unread(self):
         chat = self._chat([_message("theirs", 100),
-                           _message("mine", 101, from_me=True)], 1)
+                           _message("mine", 101, from_me=True, message_type="e2e_notification")], 1)
 
         assert apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
         assert chat["unreadCount"] == 0
@@ -79,9 +79,9 @@ class TestTheBadgeIsRediscountedOnceMessagesArrive:
         assert chat["unreadCount"] == 1
 
     def test_only_the_tail_our_own_send_covers_is_discounted(self):
-        """Two unread, the newer of which is ours: one real unread remains."""
+        """Two unread, the newer of which is non-countable: one real unread remains."""
         chat = self._chat([_message("theirs", 100),
-                           _message("mine", 101, from_me=True)], 2)
+                           _message("mine", 101, from_me=True, message_type="groupNotification")], 2)
 
         apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
         assert chat["unreadCount"] == 1
