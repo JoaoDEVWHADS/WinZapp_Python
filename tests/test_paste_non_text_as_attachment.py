@@ -30,10 +30,19 @@ class _Stub:
         self.panel_shown_calls += 1
 
 
+def _open_clipboard(retries=10):
+    import time
+    for _ in range(retries):
+        if wx.TheClipboard.Open():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _clear_clipboard_after_test():
     yield
-    if wx.TheClipboard.Open():
+    if _open_clipboard():
         try:
             wx.TheClipboard.Clear()
             wx.TheClipboard.Flush()
@@ -42,7 +51,7 @@ def _clear_clipboard_after_test():
 
 
 def _set_clipboard_files(paths):
-    if not wx.TheClipboard.Open():
+    if not _open_clipboard():
         return False
     try:
         wx.TheClipboard.Clear()
@@ -67,7 +76,7 @@ def _set_clipboard_bitmap():
     dc.Clear()
     dc.SelectObject(wx.NullBitmap)
     del dc
-    if not wx.TheClipboard.Open():
+    if not _open_clipboard():
         return False
     try:
         wx.TheClipboard.Clear()
@@ -79,7 +88,7 @@ def _set_clipboard_bitmap():
 
 
 def _set_clipboard_text(text):
-    if not wx.TheClipboard.Open():
+    if not _open_clipboard():
         return False
     try:
         wx.TheClipboard.Clear()
@@ -101,7 +110,7 @@ class TestPasteFiles:
             pytest.skip("clipboard unavailable")
 
         stub = _Stub()
-        if not wx.TheClipboard.Open():
+        if not _open_clipboard():
             pytest.skip("clipboard unavailable")
         try:
             handled = stub._paste_clipboard_as_attachment()
@@ -120,7 +129,7 @@ class TestPasteFiles:
             pytest.skip("clipboard unavailable")
 
         stub = _Stub(conversation=None)
-        if not wx.TheClipboard.Open():
+        if not _open_clipboard():
             pytest.skip("clipboard unavailable")
         try:
             handled = stub._paste_clipboard_as_attachment()
@@ -138,7 +147,7 @@ class TestPasteImage:
             pytest.skip("clipboard unavailable")
 
         stub = _Stub()
-        if not wx.TheClipboard.Open():
+        if not _open_clipboard():
             pytest.skip("clipboard unavailable")
         try:
             handled = stub._paste_clipboard_as_attachment()
@@ -160,7 +169,7 @@ class TestPasteTextIsUnaffected:
             pytest.skip("clipboard unavailable")
 
         stub = _Stub()
-        if not wx.TheClipboard.Open():
+        if not _open_clipboard():
             pytest.skip("clipboard unavailable")
         try:
             handled = stub._paste_clipboard_as_attachment()
