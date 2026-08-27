@@ -345,9 +345,58 @@ class TestArchivedChatSoundAndTTS(unittest.TestCase):
 
         stub._maybe_notify_reaction(self.ARCHIVED_JID, msg)
 
-        self.assertEqual(stub.message_foreground_sound.play_count, 1)
+        self.assertEqual(stub.message_current_sound.play_count, 1)
         self.assertEqual(len(stub.spoken), 1)
         self.assertIn("👍", stub.spoken[0])
+
+    def test_matches_open_conversation_robustness(self):
+        """ConversationsPanel._matches_open_conversation must match across 9th-digit,
+        normalization, and bidirectional LID/phone mappings."""
+        from ui.conversations import ConversationsPanel
+
+        class _MockMW:
+            def __init__(self):
+                self._phone_to_lid = {"5511999998888@s.whatsapp.net": "123456789@lid"}
+                self._lid_to_phone = {"123456789@lid": "5511999998888@s.whatsapp.net"}
+
+            def _normalize_jid(self, jid):
+                if not jid:
+                    return ""
+                j = jid.strip()
+                if j.endswith("@c.us"):
+                    j = j[:-5] + "@s.whatsapp.net"
+                return j
+
+            def _phone_digits_equivalent(self, a, b):
+                if a == b:
+                    return True
+                if a.startswith("55") and b.startswith("55"):
+                    if len(a) == 13 and len(b) == 12 and a[4] == "9":
+                        return a[:4] + a[5:] == b
+                    if len(b) == 13 and len(a) == 12 and b[4] == "9":
+                        return b[:4] + b[5:] == a
+                return False
+
+        panel = object.__new__(ConversationsPanel)
+        panel.main_window = _MockMW()
+        panel.conversation = {"remoteJid": "5511999998888@s.whatsapp.net"}
+
+        # Exact match
+        self.assertTrue(panel._matches_open_conversation("5511999998888@s.whatsapp.net"))
+        # @c.us normalization
+        self.assertTrue(panel._matches_open_conversation("5511999998888@c.us"))
+        # Brazilian 9th digit variation (12 digits vs 13 digits)
+        self.assertTrue(panel._matches_open_conversation("551199998888@s.whatsapp.net"))
+        # Mapped LID
+        self.assertTrue(panel._matches_open_conversation("123456789@lid"))
+
+        # When conversation was loaded as LID
+        panel.conversation = {"remoteJid": "123456789@lid"}
+        self.assertTrue(panel._matches_open_conversation("5511999998888@s.whatsapp.net"))
+        self.assertTrue(panel._matches_open_conversation("551199998888@s.whatsapp.net"))
+        self.assertTrue(panel._matches_open_conversation("123456789@lid"))
+        # Unrelated JID
+        self.assertFalse(panel._matches_open_conversation("5521988887777@s.whatsapp.net"))
 
 
 if __name__ == "__main__":
