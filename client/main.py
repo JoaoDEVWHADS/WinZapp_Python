@@ -1230,6 +1230,22 @@ class MainWindow(wx.Frame):
         # echo, not a fromMe reaction made on the phone or another device.
         self._pending_own_reactions: dict = {}
         self._pending_own_reactions_lock = threading.Lock()
+        # Guards the unlink/logout strike counters (_logout_strikes,
+        # _resume_fail_strikes, _last_strike_ts, _logout_first_seen,
+        # _logout_handled) and the decision built from them in
+        # _act_on_unlink_decision(). check_wa_connection_http() runs from
+        # several independent threads (the health-check loop, _run_sync's
+        # tight poll, wx.CallAfter callbacks), so a bare check-then-set on
+        # _logout_handled is a real race: two callers can both read it False
+        # before either sets it True and both fire _on_disconnect() — a real
+        # incident this codebase already hit once (two wipes logged inside
+        # the same second). Held across the whole count-then-decide section
+        # including _act_on_unlink_decision(), with one deliberate exception:
+        # that call can block for up to 10s on _still_linked_on_server()'s
+        # HTTP probe when a destructive decision is actually being confirmed
+        # — rare, and correctness there matters more than another caller
+        # waiting briefly. wx.CallAfter itself is non-blocking either way.
+        self._unlink_decision_lock = threading.Lock()
         # Consecutive failed network probes (see check_whatsapp_reachable).
         self._offline_probe_strikes = 0
         # Consecutive not-yet-connected results from _set_wa_connected() this
@@ -8447,6 +8463,13 @@ class MainWindow(wx.Frame):
         desconectada, mas o celular ainda mostra a sessão aberta" report: a
         session that was never unlinked at all, wiped on the strength of a
         couple of transient readings.
+
+        Must be called with self._unlink_decision_lock already held — both
+        callers acquire it before counting a strike, and the check-then-act
+        on _logout_handled below only stays atomic across threads if the
+        whole count-then-decide sequence is one critical section. This
+        method does not acquire the lock itself (it would deadlock re-taking
+        a plain, non-reentrant Lock the caller already holds).
         """
         import connection_state as cs
 
@@ -8796,39 +8819,40 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._on_disconnect)
             return
 
-        if self._auto_restart_grace_active():
-            logging.info(
-                "[check_wa_connection_http] HTTP %s seen while an automatic "
-                "session restart is still settling — not confirming a "
-                "logout yet.", http_status,
-            )
-            self._logout_strikes = 0
-            self._resume_fail_strikes = 0
-            self._last_strike_ts = 0.0
-            self._logout_first_seen = None
-            return
+        with self._unlink_decision_lock:
+            if self._auto_restart_grace_active():
+                logging.info(
+                    "[check_wa_connection_http] HTTP %s seen while an automatic "
+                    "session restart is still settling — not confirming a "
+                    "logout yet.", http_status,
+                )
+                self._logout_strikes = 0
+                self._resume_fail_strikes = 0
+                self._last_strike_ts = 0.0
+                self._logout_first_seen = None
+                return
 
-        now = time.time()
-        if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
-            logging.info(
-                "[check_wa_connection_http] HTTP %s within strike interval — "
-                "not counting; data preserved.", http_status,
+            now = time.time()
+            if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
+                logging.info(
+                    "[check_wa_connection_http] HTTP %s within strike interval — "
+                    "not counting; data preserved.", http_status,
+                )
+                return
+            self._last_strike_ts = now
+            ever = bool(getattr(self, "_wa_connect_announced", False))
+            if ever:
+                self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
+            else:
+                self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
+            decision = cs.classify_unlink_candidate(
+                ever_connected=ever,
+                logout_strikes=getattr(self, "_logout_strikes", 0),
+                resume_strikes=getattr(self, "_resume_fail_strikes", 0),
+                logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
+                resume_fail_strikes=self._RESUME_FAIL_STRIKES,
             )
-            return
-        self._last_strike_ts = now
-        ever = bool(getattr(self, "_wa_connect_announced", False))
-        if ever:
-            self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
-        else:
-            self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
-        decision = cs.classify_unlink_candidate(
-            ever_connected=ever,
-            logout_strikes=getattr(self, "_logout_strikes", 0),
-            resume_strikes=getattr(self, "_resume_fail_strikes", 0),
-            logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
-            resume_fail_strikes=self._RESUME_FAIL_STRIKES,
-        )
-        self._act_on_unlink_decision(decision, log_label=f"HTTP {http_status}")
+            self._act_on_unlink_decision(decision, log_label=f"HTTP {http_status}")
 
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
@@ -8998,23 +9022,6 @@ class MainWindow(wx.Frame):
                         self._wa_connected = False
 
                         if self.settings.get("privateinfo", {}).get("paired"):
-                            # An automatic _restart_wpp_session() (dead-browser
-                            # recovery) legitimately re-shows a fresh QR itself
-                            # whenever the stored token turns out to already be
-                            # bad — that is NOT a phone-side unlink, and must
-                            # never be confirmed as one (a real incident: it
-                            # wiped a user's local database).
-                            if self._auto_restart_grace_active():
-                                logging.info(
-                                    "[check_wa_connection_http] %s seen while an "
-                                    "automatic session restart is still settling — "
-                                    "not confirming a logout yet.", status,
-                                )
-                                self._logout_strikes = 0
-                                self._resume_fail_strikes = 0
-                                self._last_strike_ts = 0.0
-                                self._logout_first_seen = None
-                                return
                             # Destructive decisions go through the pure classifier
                             # (connection_state.classify_unlinked) so the "logout
                             # vs still-resuming vs resume-failed" rule is one
@@ -9025,35 +9032,53 @@ class MainWindow(wx.Frame):
                             # kept wiping accounts; a real log showed the server
                             # reaching 'inChat' the same second the client wiped).
                             import connection_state as cs
-                            ever = bool(getattr(self, "_wa_connect_announced", False))
-                            # Count at most one strike per STRIKE_MIN_INTERVAL so
-                            # the thresholds mean real elapsed time, not raw
-                            # reading count: tight poll loops (e.g. _run_sync's
-                            # 0.2s cadence) used to race through 20 unlinked
-                            # readings in ~6s and wipe a session WhatsApp had just
-                            # logged back in. A reading inside the interval is
-                            # still "resuming, data preserved" — never escalates.
-                            now = time.time()
-                            if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
-                                logging.info(
-                                    "[check_wa_connection_http] Unlinked '%s' "
-                                    "(ever_connected=%s) — within strike interval, "
-                                    "not counting; data preserved.", status, ever)
-                                return
-                            self._last_strike_ts = now
-                            if ever:
-                                self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
-                            else:
-                                self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
-                            decision = cs.classify_unlinked(
-                                status,
-                                ever_connected=ever,
-                                logout_strikes=getattr(self, "_logout_strikes", 0),
-                                resume_strikes=getattr(self, "_resume_fail_strikes", 0),
-                                logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
-                                resume_fail_strikes=self._RESUME_FAIL_STRIKES,
-                            )
-                            self._act_on_unlink_decision(decision, log_label=status)
+                            with self._unlink_decision_lock:
+                                # An automatic _restart_wpp_session() (dead-browser
+                                # recovery) legitimately re-shows a fresh QR itself
+                                # whenever the stored token turns out to already be
+                                # bad — that is NOT a phone-side unlink, and must
+                                # never be confirmed as one (a real incident: it
+                                # wiped a user's local database).
+                                if self._auto_restart_grace_active():
+                                    logging.info(
+                                        "[check_wa_connection_http] %s seen while an "
+                                        "automatic session restart is still settling — "
+                                        "not confirming a logout yet.", status,
+                                    )
+                                    self._logout_strikes = 0
+                                    self._resume_fail_strikes = 0
+                                    self._last_strike_ts = 0.0
+                                    self._logout_first_seen = None
+                                    return
+                                ever = bool(getattr(self, "_wa_connect_announced", False))
+                                # Count at most one strike per STRIKE_MIN_INTERVAL so
+                                # the thresholds mean real elapsed time, not raw
+                                # reading count: tight poll loops (e.g. _run_sync's
+                                # 0.2s cadence) used to race through 20 unlinked
+                                # readings in ~6s and wipe a session WhatsApp had just
+                                # logged back in. A reading inside the interval is
+                                # still "resuming, data preserved" — never escalates.
+                                now = time.time()
+                                if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
+                                    logging.info(
+                                        "[check_wa_connection_http] Unlinked '%s' "
+                                        "(ever_connected=%s) — within strike interval, "
+                                        "not counting; data preserved.", status, ever)
+                                    return
+                                self._last_strike_ts = now
+                                if ever:
+                                    self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
+                                else:
+                                    self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
+                                decision = cs.classify_unlinked(
+                                    status,
+                                    ever_connected=ever,
+                                    logout_strikes=getattr(self, "_logout_strikes", 0),
+                                    resume_strikes=getattr(self, "_resume_fail_strikes", 0),
+                                    logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
+                                    resume_fail_strikes=self._RESUME_FAIL_STRIKES,
+                                )
+                                self._act_on_unlink_decision(decision, log_label=status)
                             return
                         else:
                             # Not paired: there is nothing to lose (the database

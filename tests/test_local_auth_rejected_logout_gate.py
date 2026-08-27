@@ -21,6 +21,8 @@ notLogged/QRCODE path uses, sharing the same counters so a healthy reading
 in between resets both.
 """
 
+import threading
+
 import pytest
 
 from main import MainWindow
@@ -50,6 +52,7 @@ class _Stub:
         self.settings = {"privateinfo": {"paired": paired}}
         self._wa_connect_announced = False
         self._wa_connected = True
+        self._unlink_decision_lock = threading.Lock()
         self._restart_grace_active = restart_grace_active
         self._still_linked = still_linked
         self.still_linked_probe_calls = 0
