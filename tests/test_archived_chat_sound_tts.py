@@ -377,7 +377,7 @@ class TestArchivedChatSoundAndTTS(unittest.TestCase):
                         return b[:4] + b[5:] == a
                 return False
 
-        panel = object.__new__(ConversationsPanel)
+        panel = ConversationsPanel.__new__(ConversationsPanel)
         panel.main_window = _MockMW()
         panel.conversation = {"remoteJid": "5511999998888@s.whatsapp.net"}
 
