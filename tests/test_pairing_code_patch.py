@@ -30,11 +30,16 @@ Timeline:
   out its full 90-second wait, and the only trace anywhere was "Unhandled
   Rejection: t: t" in wppconnect.log.
 
-* v4 (current): v3 plus a `catchLinkCodeError` hook, so the caught error
-  actually reaches the person trying to pair. v3 made the failure real and
-  non-fatal, but it still only ever landed in wppconnect.log — the user was
-  left with the same generic "no pairing code received" after 90 seconds.
-  The end-to-end path is covered by tests/test_pairing_code_error_reporting.py.
+* v4: v3 plus a `catchLinkCodeError` hook, so the caught error actually
+  reaches the person trying to pair. v3 made the failure real and non-fatal,
+  but it still only ever landed in wppconnect.log — the user was left with the
+  same generic "no pairing code received" after 90 seconds. The end-to-end
+  path is covered by tests/test_pairing_code_error_reporting.py.
+
+* v5 (current): a doubling backoff between consecutive failures. v2's cooldown
+  only ever gates a success, so a run of failures was paced by nothing at all —
+  measured live at one attempt every 20 seconds, nine and counting, which for a
+  failure that is plausibly rate-limiting made the problem self-sustaining.
 
 Both setup_api.py and ApiSetupDialog (client/ui/dialogs/api_setup.py) apply
 the same patch (see the "why two places" comment in api_setup.py). Since v3
@@ -50,7 +55,7 @@ import pytest
 
 from core.wppconnect_host_layer_patch import (
     ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, V2_CHECK_QR_CODE,
-    V3_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+    V3_CHECK_QR_CODE, V4_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
     ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE,
 )
 
@@ -506,3 +511,89 @@ class TestUpgradeFromAnAlreadyPatchedInstall:
 
         assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is False
         assert host_layer.read_text(encoding="utf-8") == before
+
+
+class TestV5BacksOffBetweenFailures:
+    """v5's addition to v4: consecutive failures back off instead of retrying
+    on every auth-code rotation.
+
+    v2's 60s cooldown only ever gates a *success* — linkCodeIssuedAt is
+    written when a code is produced, so through a run of failures it stays 0
+    and the cooldown check never fires. Measured on a real failing run: nine
+    attempts, one every 20 seconds, with nothing pacing them but WhatsApp's
+    own rotation rate.
+    """
+
+    def test_v4_had_no_backoff(self):
+        assert "linkCodeRetryAfter" not in V4_CHECK_QR_CODE
+        assert "linkCodeFailures" not in V4_CHECK_QR_CODE
+
+    def test_v5_gates_on_a_retry_deadline(self):
+        assert (
+            "if (this.linkCodeRetryAfter && now < this.linkCodeRetryAfter) {"
+            in PATCHED_CHECK_QR_CODE
+        )
+
+    def test_the_deadline_is_only_set_on_failure(self):
+        """A success must clear the backoff, not extend it."""
+        catch_start = PATCHED_CHECK_QR_CODE.index("catch (error) {")
+        deadline = PATCHED_CHECK_QR_CODE.index("this.linkCodeRetryAfter = Date.now() + backoff;")
+        assert deadline > catch_start
+
+    def test_a_success_resets_the_failure_count_and_deadline(self):
+        try_block = PATCHED_CHECK_QR_CODE[
+            PATCHED_CHECK_QR_CODE.index("await this.loginByCode(this.options.phoneNumber);")
+            : PATCHED_CHECK_QR_CODE.index("catch (error) {")
+        ]
+        assert "this.linkCodeFailures = 0;" in try_block
+        assert "this.linkCodeRetryAfter = 0;" in try_block
+
+    def test_a_completed_login_clears_the_backoff_too(self):
+        """The !needScan branch runs once pairing actually succeeds — leaving
+        a stale deadline there would delay a later, legitimate refresh."""
+        head = PATCHED_CHECK_QR_CODE[: PATCHED_CHECK_QR_CODE.index("if (typeof this.options.phoneNumber")]
+        assert "this.linkCodeFailures = 0;" in head
+        assert "this.linkCodeRetryAfter = 0;" in head
+
+    def test_the_backoff_doubles_and_is_capped(self):
+        assert (
+            "Math.min(20000 * Math.pow(2, this.linkCodeFailures - 1), 300000)"
+            in PATCHED_CHECK_QR_CODE
+        )
+
+    def test_the_backoff_schedule_is_what_we_think_it_is(self):
+        """Mirrors the JS expression so a future edit to one without the other
+        is caught here rather than in production."""
+        def backoff(failures):
+            return min(20000 * 2 ** (failures - 1), 300000)
+
+        assert [backoff(n) // 1000 for n in range(1, 7)] == [20, 40, 80, 160, 300, 300]
+
+    def test_it_never_gives_up_entirely(self):
+        """Whatever the cause, the user may resolve it — a permanent stop
+        would mean a restart to recover, which is the v1 mistake in a new
+        costume."""
+        assert "linkCodeGaveUp" not in PATCHED_CHECK_QR_CODE
+        assert "return false" not in PATCHED_CHECK_QR_CODE
+
+    def test_the_hook_still_receives_the_error_plus_the_schedule(self):
+        assert "attempt: this.linkCodeFailures," in PATCHED_CHECK_QR_CODE
+        assert "retryInSeconds: retryInSeconds," in PATCHED_CHECK_QR_CODE
+
+    def test_every_generation_is_still_distinct(self):
+        variants = [
+            ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, V2_CHECK_QR_CODE,
+            V3_CHECK_QR_CODE, V4_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+        ]
+        assert len(set(variants)) == 6
+
+    def test_a_v4_install_is_upgraded(self, fake_wppconnect_dist):
+        setup_api = _load_setup_api()
+        api_dir, host_layer = fake_wppconnect_dist
+        _write(host_layer, V4_CHECK_QR_CODE, PATCHED_LOGIN_BY_CODE)
+
+        assert setup_api._patch_wppconnect_host_layer(str(api_dir)) is True
+
+        content = host_layer.read_text(encoding="utf-8")
+        assert PATCHED_CHECK_QR_CODE in content
+        assert V4_CHECK_QR_CODE not in content

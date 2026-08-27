@@ -1403,9 +1403,21 @@ class WebSocketClient:
             # CompanionHelloError" at the user.
             detail = name if (not message or message == name) else f"{name}: {message}"
             self._phone_code_error = detail
-            logging.warning(
-                "[WebSocketClient] pairing-code request failed: %s", detail
-            )
+            # attempt/retryInSeconds come from the host.layer.js backoff (v5).
+            # Logged but deliberately kept out of the user-facing message: the
+            # reason is what they can act on, the retry schedule is for
+            # diagnosing a run from log.log afterwards.
+            attempt = data.get("attempt")
+            retry_in = data.get("retryInSeconds")
+            if attempt and retry_in:
+                logging.warning(
+                    "[WebSocketClient] pairing-code request failed: %s "
+                    "(attempt %s, next retry in %ss)", detail, attempt, retry_in,
+                )
+            else:
+                logging.warning(
+                    "[WebSocketClient] pairing-code request failed: %s", detail
+                )
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_phone_code_error error")
 

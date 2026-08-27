@@ -84,8 +84,8 @@ class TestOnWppPhoneCodeError:
         assert ws._phone_code_error == ""
 
     def test_does_not_unblock_the_phone_code_wait(self):
-        """The core design property: host.layer.js retries on its own 60s
-        cooldown, so a failure inside the 90s window may still be followed by a
+        """The core design property: host.layer.js retries on its own backoff
+        schedule, so a failure inside the 90s window may still be followed by a
         code that works. Recording the error must not cut that wait short — if
         it did, one transient refusal would abort a pairing that was about to
         succeed."""
@@ -228,3 +228,46 @@ class TestLocalesCarryTheReasonKey:
             assert text, f"{path} is missing no_pairing_code_received_reason"
             assert "{app_name}" in text, path
             assert "{reason}" in text, path
+
+
+class TestBackoffMetadataIsCarried:
+    """host.layer.js v5 attaches which attempt this was and when the next one
+    is due. Those ride along to the log — not to the dialog, where the reason
+    is the only part a user can act on."""
+
+    def test_attempt_and_retry_are_logged(self, caplog):
+        ws = _WsStub()
+        with caplog.at_level("WARNING"):
+            ws.on_wpp_phone_code_error(
+                {
+                    "session": SESSION,
+                    "name": "CompanionHelloError",
+                    "message": "CompanionHelloError",
+                    "attempt": 4,
+                    "retryInSeconds": 160,
+                }
+            )
+        assert "attempt 4" in caplog.text
+        assert "160s" in caplog.text
+
+    def test_the_stored_reason_stays_clean(self):
+        """What reaches the user must not grow a retry schedule on the end."""
+        ws = _WsStub()
+        ws.on_wpp_phone_code_error(
+            {
+                "session": SESSION,
+                "name": "CompanionHelloError",
+                "message": "CompanionHelloError",
+                "attempt": 4,
+                "retryInSeconds": 160,
+            }
+        )
+        assert ws._phone_code_error == "CompanionHelloError"
+
+    def test_it_still_works_without_the_metadata(self, caplog):
+        """An older Node side that never sends these fields must still log."""
+        ws = _WsStub()
+        with caplog.at_level("WARNING"):
+            ws.on_wpp_phone_code_error({"session": SESSION, "name": "SomeError"})
+        assert "SomeError" in caplog.text
+        assert ws._phone_code_error == "SomeError"

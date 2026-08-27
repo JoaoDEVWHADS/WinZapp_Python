@@ -31,16 +31,36 @@ History:
   the latch never got reset — the displayed code silently froze forever.
   Reported live: "esperei 10 minutos e o código não atualizou nenhuma vez."
 
-* v2 — current fix: a 60-second reuse cooldown instead of a permanent
-  latch. `linkCodeIssuedAt` is only set AFTER loginByCode() actually
-  succeeds (not before), and a separate `linkCodeInFlight` flag (not a
-  timestamp) guards against overlapping concurrent calls — so a rejected
-  attempt simply leaves `linkCodeIssuedAt` at its old value and the very
-  next `auth_code_change` tick retries, with no permanent stuck state
-  either way. Upstream still has no proper fix for this (it needs an
-  explicit expiry/refresh signal from wa-js that doesn't exist yet — see
+* v2 — a 60-second reuse cooldown instead of a permanent latch.
+  `linkCodeIssuedAt` is only set AFTER loginByCode() actually succeeds (not
+  before), and a separate `linkCodeInFlight` flag (not a timestamp) guards
+  against overlapping concurrent calls — so a rejected attempt simply leaves
+  `linkCodeIssuedAt` at its old value and the very next `auth_code_change`
+  tick retries, with no permanent stuck state either way. Upstream still has
+  no proper fix for this (it needs an explicit expiry/refresh signal from
+  wa-js that doesn't exist yet — see
   https://github.com/wppconnect-team/wa-js/pull/3554), so this is a
   WinZapp-local stopgap, not a port of an upstream patch.
+
+* v3 — a `catch` around the loginByCode() call. v2's try/finally had none, so
+  a rejection escaped checkQrCode() (called fire-and-forget) as an unhandled
+  rejection that killed the tick. Paired with the loginByCode() error-detail
+  patch further down, without which the error was the minified "t: t" anyway.
+
+* v4 — hands the caught error to an optional `catchLinkCodeError` hook read
+  off `this.options`, so it reaches the user instead of only wppconnect.log.
+
+* v5 — current fix: a doubling backoff, 20s to a 5-minute ceiling, between
+  consecutive failures. v2's cooldown only ever gates a success, so through a
+  run of failures nothing paced the retries at all and every auth-code
+  rotation went straight back into genLinkDeviceCodeForPhoneNumber() —
+  measured at one attempt every 20 seconds, indefinitely. See the comment on
+  PATCHED_CHECK_QR_CODE for why that likely made the failure it was reacting
+  to worse rather than better.
+
+Every generation is kept as its own constant: they are the rungs
+patch_host_layer_source() migrates along, so an install at any past version
+lands on the current one. Removing one strands whoever is still on it.
 """
 
 ORIGINAL_CHECK_QR_CODE = (
@@ -235,7 +255,7 @@ V3_CHECK_QR_CODE = (
 # option key WPPConnect itself knows nothing about survives untouched into
 # `this.options`. createSessionUtil.ts passes it in (see that file's own patch);
 # the `?.` chain keeps this a silent no-op wherever it isn't.
-PATCHED_CHECK_QR_CODE = (
+V4_CHECK_QR_CODE = (
     "    async checkQrCode() {\n"
     "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
     "        this.isLogged = !needScan;\n"
@@ -263,6 +283,94 @@ PATCHED_CHECK_QR_CODE = (
     "                    name: String(error?.name || 'Error'),\n"
     "                    message: String(error?.message || error),\n"
     "                    session: this.session,\n"
+    "                });\n"
+    "            }\n"
+    "            finally {\n"
+    "                this.linkCodeInFlight = false;\n"
+    "            }\n"
+    "            return;\n"
+    "        }\n"
+    "        const result = await this.getQrCode();\n"
+    "        if (!result?.urlCode || this.urlCode === result.urlCode) {\n"
+    "            return;\n"
+    "        }\n"
+    "        this.urlCode = result.urlCode;\n"
+    "        this.attempt++;\n"
+    "        let qr = '';\n"
+    "        if (this.options.logQR || this.catchQR) {\n"
+    "            qr = await (0, auth_1.asciiQr)(this.urlCode);\n"
+    "        }\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for QRCode Scan (Attempt ${this.attempt})...:\\n${qr}`, { code: this.urlCode });\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for QRCode Scan: Attempt ${this.attempt}`);\n"
+    "        }\n"
+    "        this.catchQR?.(result.base64Image, qr, this.attempt, result.urlCode);\n"
+    "    }\n"
+)
+
+
+# v5 — v4 plus a backoff between failed attempts.
+#
+# The 60-second cooldown v2 introduced only ever gates a SUCCESS:
+# `linkCodeIssuedAt` is written when a code is actually produced, so through a
+# run of failures it stays 0 and `if (this.linkCodeIssuedAt && ...)` never
+# fires. Every `conn.auth_code_change` tick therefore went straight back into
+# genLinkDeviceCodeForPhoneNumber(). Measured on a real failing run: nine
+# attempts, a steady one every 20 seconds, with no end in sight — that is
+# WhatsApp's own auth-code rotation rate, and nothing was pacing us but it.
+#
+# That is bad on its own, and probably worse than it looks: CompanionHelloError
+# (the failure that exposed this) is plausibly WhatsApp rate-limiting the
+# link-device request, in which case hammering it three times a minute is a
+# feedback loop that keeps the block alive. Backing off is what lets it clear.
+#
+# Doubling from 20s to a 5-minute ceiling, counted in consecutive failures and
+# reset on any success. Deliberately never gives up: whatever the cause, the
+# user may well resolve it (wait out a limit, fix connectivity) and pairing
+# should then recover on its own rather than needing a restart.
+PATCHED_CHECK_QR_CODE = (
+    "    async checkQrCode() {\n"
+    "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
+    "        this.isLogged = !needScan;\n"
+    "        if (!needScan) {\n"
+    "            this.attempt = 0;\n"
+    "            this.linkCodeIssuedAt = 0;\n"
+    "            this.linkCodeFailures = 0;\n"
+    "            this.linkCodeRetryAfter = 0;\n"
+    "            return;\n"
+    "        }\n"
+    "        if (typeof this.options.phoneNumber === 'string') {\n"
+    "            if (this.linkCodeInFlight) {\n"
+    "                return;\n"
+    "            }\n"
+    "            const now = Date.now();\n"
+    "            if (this.linkCodeIssuedAt && (now - this.linkCodeIssuedAt) < 60000) {\n"
+    "                return;\n"
+    "            }\n"
+    "            if (this.linkCodeRetryAfter && now < this.linkCodeRetryAfter) {\n"
+    "                return;\n"
+    "            }\n"
+    "            this.linkCodeInFlight = true;\n"
+    "            try {\n"
+    "                await this.loginByCode(this.options.phoneNumber);\n"
+    "                this.linkCodeIssuedAt = Date.now();\n"
+    "                this.linkCodeFailures = 0;\n"
+    "                this.linkCodeRetryAfter = 0;\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                this.linkCodeFailures = (this.linkCodeFailures || 0) + 1;\n"
+    "                const backoff = Math.min(20000 * Math.pow(2, this.linkCodeFailures - 1), 300000);\n"
+    "                this.linkCodeRetryAfter = Date.now() + backoff;\n"
+    "                const retryInSeconds = Math.round(backoff / 1000);\n"
+    "                this.log('error', `Could not generate the pairing code (attempt ${this.linkCodeFailures}, next retry in ${retryInSeconds}s): ${error?.name || 'Error'}: ${error?.message || error}`);\n"
+    "                this.options.catchLinkCodeError?.({\n"
+    "                    name: String(error?.name || 'Error'),\n"
+    "                    message: String(error?.message || error),\n"
+    "                    session: this.session,\n"
+    "                    attempt: this.linkCodeFailures,\n"
+    "                    retryInSeconds: retryInSeconds,\n"
     "                });\n"
     "            }\n"
     "            finally {\n"
@@ -382,27 +490,33 @@ def patch_host_layer_source(content: str):
 
     # checkQrCode: migrate whichever generation is installed up to v3.
     if PATCHED_CHECK_QR_CODE in content:
-        notes.append("checkQrCode: already at v4.")
+        notes.append("checkQrCode: already at v5.")
+    elif V4_CHECK_QR_CODE in content:
+        content = content.replace(V4_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append(
+            "checkQrCode: upgraded v4 -> v5 — repeated pairing-code failures "
+            "now back off instead of retrying every auth-code rotation."
+        )
     elif V3_CHECK_QR_CODE in content:
         content = content.replace(V3_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
         notes.append(
-            "checkQrCode: upgraded v3 -> v4 — a pairing-code failure is now "
+            "checkQrCode: upgraded v3 -> v5 — a pairing-code failure is now "
             "reported to the client, not just written to wppconnect.log."
         )
     elif V2_CHECK_QR_CODE in content:
         content = content.replace(V2_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
         notes.append(
-            "checkQrCode: upgraded v2 -> v4 — a failing loginByCode() is now "
+            "checkQrCode: upgraded v2 -> v5 — a failing loginByCode() is now "
             "caught, reported and logged instead of escaping as an unhandled "
             "rejection."
         )
     elif V1_CHECK_QR_CODE in content:
         content = content.replace(V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
-        notes.append("checkQrCode: upgraded v1 (unsafe, could freeze forever) -> v4.")
+        notes.append("checkQrCode: upgraded v1 (unsafe, could freeze forever) -> v5.")
     elif ORIGINAL_CHECK_QR_CODE in content:
         content = content.replace(ORIGINAL_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
         notes.append(
-            "checkQrCode: patched (v4) — pairing code no longer regenerates on "
+            "checkQrCode: patched (v5) — pairing code no longer regenerates on "
             "every QR rotation (60s reuse cooldown), failures are reported."
         )
     else:

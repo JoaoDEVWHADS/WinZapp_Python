@@ -532,6 +532,8 @@ export default class CreateSessionUtil {
               name?: string;
               message?: string;
               session?: string;
+              attempt?: number;
+              retryInSeconds?: number;
             }) => {
               if ((client as any).shouldClose) return;
               this.exportPhoneCodeError(
@@ -772,16 +774,28 @@ export default class CreateSessionUtil {
   exportPhoneCodeError(
     req: any,
     phone: any,
-    failure: { name?: string; message?: string },
+    failure: {
+      name?: string;
+      message?: string;
+      attempt?: number;
+      retryInSeconds?: number;
+    },
     client: WhatsAppServer
   ) {
     if ((client as any).shouldClose) return;
 
     const name = failure?.name || 'Error';
     const message = failure?.message || '';
+    // attempt/retryInSeconds come from host.layer.js's backoff. Forwarded
+    // rather than dropped: a log line saying which attempt this was and when
+    // the next one is due is most of what makes a failing pairing run
+    // diagnosable after the fact.
+    const attempt = failure?.attempt;
+    const retryInSeconds = failure?.retryInSeconds;
 
     req.logger?.warn(
-      `[${client.session}] pairing code request failed: ${name}: ${message}`
+      `[${client.session}] pairing code request failed: ${name}: ${message}` +
+        (attempt ? ` (attempt ${attempt}, next retry in ${retryInSeconds}s)` : '')
     );
 
     const payload = {
@@ -789,6 +803,8 @@ export default class CreateSessionUtil {
       message: message,
       phone: phone,
       session: client.session,
+      attempt: attempt,
+      retryInSeconds: retryInSeconds,
     };
 
     req.io.emit('phoneCodeError', payload);
