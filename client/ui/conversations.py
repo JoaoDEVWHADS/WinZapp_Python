@@ -7115,6 +7115,15 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
 
     def _hide_audio_controls(self):
+        focused = wx.Window.FindFocus()
+        audio_ctrls = (
+            getattr(self, "audio_speed_btn", None),
+            getattr(self, "audio_slider", None),
+            getattr(self, "audio_progress_label", None),
+        )
+        if focused is not None and any(focused == c for c in audio_ctrls if c is not None):
+            if hasattr(self, "messages_list") and self.messages_list.IsShown():
+                self.messages_list.SetFocus()
         self.audio_speed_btn.Hide()
         self.audio_progress_label.Hide()
         self.audio_slider.Hide()

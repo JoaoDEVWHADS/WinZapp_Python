@@ -13,6 +13,76 @@ running wx.App, so on_audio_timer() is bound onto a plain stub — same
 approach as tests/test_conversation_video_playback.py's _ControlsStub.
 """
 
+import os
+import sys
+import types
+from unittest.mock import MagicMock
+
+try:
+    import wx
+    import wx.adv
+except ImportError:
+    for _mod in ("wx", "wx.adv"):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+    class _FakeWindow:
+        @staticmethod
+        def FindFocus():
+            return None
+
+    class _FakeWxModule(types.ModuleType):
+        ACC_OK = 0
+        ACC_NOT_IMPLEMENTED = -1
+        Window = _FakeWindow
+        def __getattr__(self, name):
+            if name == "__file__":
+                return "<fake_wx>"
+            if name == "CallAfter":
+                return lambda fn, *a, **k: fn(*a, **k)
+            if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
+                return 1000
+            if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Control", "Button"):
+                return object
+            return MagicMock
+    sys.modules["wx"].__class__ = _FakeWxModule
+    sys.modules["wx.adv"].__class__ = _FakeWxModule
+    wx = sys.modules["wx"]
+
+try:
+    import accessible_output2
+    from accessible_output2 import outputs
+except ImportError:
+    if "accessible_output2" not in sys.modules:
+        sys.modules["accessible_output2"] = types.ModuleType("accessible_output2")
+    sys.modules["accessible_output2.outputs"] = types.ModuleType("accessible_output2.outputs")
+    sys.modules["accessible_output2"].outputs = sys.modules["accessible_output2.outputs"]
+
+try:
+    import sound_lib
+    from sound_lib import stream, output, main, effects
+except ImportError:
+    for _mod in (
+        "sound_lib",
+        "sound_lib.output",
+        "sound_lib.stream",
+        "sound_lib.main",
+        "sound_lib.effects",
+    ):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+
+    sys.modules["sound_lib.main"].bass_call = lambda *a, **k: None
+    sys.modules["sound_lib.stream"].FileStream = object
+    sys.modules["sound_lib.output"].Output = object
+    sys.modules["sound_lib.effects"].Tempo = object
+
+import ui.conversations as conversations_module
 from ui.conversations import ConversationsPanel
 
 
@@ -181,3 +251,70 @@ class TestPendingPlayedRefreshHandoffWhenChainingIntoTheNextVoiceNote:
 
         assert stub.main_window.skip_panel_refresh_calls == [False]
         assert stub.auto_chain_calls == [("m1", None)]
+
+
+class TestHideAudioControlsFocus:
+    class _FakeControl:
+        def __init__(self):
+            self.hidden = False
+            self.focused = False
+
+        def Hide(self):
+            self.hidden = True
+
+        def SetFocus(self):
+            self.focused = True
+
+        def IsShown(self):
+            return not self.hidden
+
+        def Layout(self):
+            pass
+
+    def test_restores_focus_to_messages_list_when_audio_speed_btn_focused(self, monkeypatch):
+        speed_btn = self._FakeControl()
+        slider = self._FakeControl()
+        progress_lbl = self._FakeControl()
+        messages_list = self._FakeControl()
+        conv_panel = self._FakeControl()
+
+        panel = types.SimpleNamespace()
+        panel.audio_speed_btn = speed_btn
+        panel.audio_slider = slider
+        panel.audio_progress_label = progress_lbl
+        panel.messages_list = messages_list
+        panel.conversation_panel = conv_panel
+        panel._hide_audio_controls = types.MethodType(
+            ConversationsPanel._hide_audio_controls, panel
+        )
+
+        monkeypatch.setattr(conversations_module.wx.Window, "FindFocus", lambda: speed_btn)
+
+        panel._hide_audio_controls()
+
+        assert messages_list.focused is True
+        assert speed_btn.hidden is True
+        assert slider.hidden is True
+        assert progress_lbl.hidden is True
+
+    def test_no_focus_change_when_other_control_focused(self, monkeypatch):
+        other_ctrl = self._FakeControl()
+        speed_btn = self._FakeControl()
+        messages_list = self._FakeControl()
+        conv_panel = self._FakeControl()
+
+        panel = types.SimpleNamespace()
+        panel.audio_speed_btn = speed_btn
+        panel.audio_slider = self._FakeControl()
+        panel.audio_progress_label = self._FakeControl()
+        panel.messages_list = messages_list
+        panel.conversation_panel = conv_panel
+        panel._hide_audio_controls = types.MethodType(
+            ConversationsPanel._hide_audio_controls, panel
+        )
+
+        monkeypatch.setattr(conversations_module.wx.Window, "FindFocus", lambda: other_ctrl)
+
+        panel._hide_audio_controls()
+
+        assert messages_list.focused is False
