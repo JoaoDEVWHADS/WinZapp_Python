@@ -5045,12 +5045,11 @@ class MainWindow(wx.Frame):
         # while that exact chat is the one currently open and the window is
         # focused (setting off) — see the two mute checks below.
         muted = self.is_chat_muted(remote_jid)
+        archived = self.is_chat_archived(remote_jid)
         priority = muted and self._is_reply_or_mention_of_me(msg, remote_jid)
         if muted and not priority and self.settings.get("general", {}).get(
             "keep_muted_chats_silent_when_open", True
         ):
-            return
-        if self.is_chat_archived(remote_jid):
             return
 
         from core.notification_manager import (
@@ -5077,13 +5076,23 @@ class MainWindow(wx.Frame):
                 if cp is not None and cp.conversation is not None
                 else ""
             )
-            is_current_conv = (current_jid == remote_jid)
+            is_current_conv = (
+                cp._matches_open_conversation(remote_jid)
+                if cp is not None and hasattr(cp, "_matches_open_conversation") and cp.conversation is not None
+                else (current_jid == remote_jid and bool(current_jid))
+            )
 
             # Muted + not the open conversation: stay silent even with the
             # window active (the "keep silent when open" setting only ever
             # exempts the chat that is actually open right now) — unless
             # it's a reply/mention, which always gets through.
             if muted and not priority and not is_current_conv:
+                return
+
+            # Archived + not the open conversation: stay silent even with the
+            # window active (archived chats only play sound / speak when the
+            # user currently has that exact conversation open and focused).
+            if archived and not is_current_conv:
                 return
 
             if is_current_conv:
@@ -5122,6 +5131,10 @@ class MainWindow(wx.Frame):
         # exempting it — the chat being open only ever matters while the
         # window is active. A reply/mention still gets through, same as above.
         if muted and not priority:
+            return
+
+        # An archived chat in the background never sends a toast or sound/speech.
+        if archived:
             return
 
         # Send system toast notification. general.notifications_enabled is
@@ -5558,7 +5571,12 @@ class MainWindow(wx.Frame):
                 except (TypeError, ValueError):
                     pass
 
-            if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
+            muted = self.is_chat_muted(remote_jid)
+            archived = self.is_chat_archived(remote_jid)
+
+            if muted and self.settings.get("general", {}).get(
+                "keep_muted_chats_silent_when_open", True
+            ):
                 return
 
             from core.notification_manager import format_notification_title
@@ -5577,8 +5595,26 @@ class MainWindow(wx.Frame):
                 and self.IsActive()
             )
             if window_active:
+                cp = getattr(self, "conversations_panel", None)
+                current_jid = (
+                    cp.conversation.get("remoteJid", "")
+                    if cp is not None and cp.conversation is not None
+                    else ""
+                )
+                is_current_conv = (
+                    cp._matches_open_conversation(remote_jid)
+                    if cp is not None and hasattr(cp, "_matches_open_conversation") and cp.conversation is not None
+                    else (current_jid == remote_jid and bool(current_jid))
+                )
+                if muted and not is_current_conv:
+                    return
+                if archived and not is_current_conv:
+                    return
                 self.message_foreground_sound.play()
                 self.output(f"{title}: {body}")
+                return
+
+            if muted or archived:
                 return
             # general.notifications_enabled only ever gates the background
             # toast below — see the matching comment in on_new_message().
