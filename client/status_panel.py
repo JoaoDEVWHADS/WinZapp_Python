@@ -2311,6 +2311,9 @@ class StatusPanel(wx.Panel):
     def _on_record_voice_button(self, event):
         if not self._is_recording:
             if not self._recording_starting:
+                import time
+                self._recording_start_timestamp = time.monotonic()
+                self._silence_send_voice_focus_if_enabled()
                 self._start_voice_recording()
         else:
             self._on_send_voice_status(event)
@@ -2472,7 +2475,7 @@ class StatusPanel(wx.Panel):
             return
         if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
             self.main_window.speak_output.silence()
-            for delay in (20, 50, 100, 200):
+            for delay in (10, 25, 50, 80, 120, 200, 350, 500):
                 wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _toggle_pause_voice_recording(self, event):
