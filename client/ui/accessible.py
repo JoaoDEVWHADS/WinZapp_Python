@@ -160,6 +160,21 @@ class _SilenceableVoiceButtonAccessible(wx.Accessible):
             return (wx.ACC_OK, "")
         return (wx.ACC_NOT_IMPLEMENTED, "")
 
+    def GetRole(self, childId):
+        if self._is_silenced():
+            return (wx.ACC_OK, 0)
+        return (wx.ACC_NOT_IMPLEMENTED, 0)
+
+    def GetDescription(self, childId):
+        if self._is_silenced():
+            return (wx.ACC_OK, "")
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+    def GetHelpText(self, childId):
+        if self._is_silenced():
+            return (wx.ACC_OK, "")
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
 
 class AccessibleDiscardVoiceMessage(_SilenceableVoiceButtonAccessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
