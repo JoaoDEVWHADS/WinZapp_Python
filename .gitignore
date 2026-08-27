@@ -227,3 +227,7 @@ node-v*.zip
 # a cada aprovação de comando. O que vale para o time inteiro fica em
 # .claude/settings.json, esse sim versionado.
 .claude/settings.local.json
+
+# Local native DLLs
+client/lib/*.dll
+*.dll
