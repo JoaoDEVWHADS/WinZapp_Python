@@ -496,30 +496,23 @@ def is_countable_message(msg: dict) -> bool:
 
 
 def _discount_non_countable_unread(records: list, unread_count: int) -> int:
-    """Discount from a server-reported unread count the tail messages that
-    must never count toward the badge: our own (fromMe) sends — WhatsApp Web
-    sometimes counts those — and system events (groupNotification,
-    protocolMessage, e2e_notification, ...) that is_countable_message()
-    excludes.
-
-    This is the mirror of the app's own counting rule: on_new_message()
-    only ever increments the badge for countable messages, so a server that
-    counts a promote/join/leave (or any other system event) toward unread
-    would otherwise mint a phantom badge on a chat that has no real unread
-    message in it — observed live with a group promote that appeared as "1
-    não lida" while the conversation held nothing new. The tail inspected is
-    the locally-stored record list, which keeps the exact shape the
-    on_new_message() increment logic itself saw.
+    """Discount from a server-reported unread count trailing system events
+    (groupNotification, protocolMessage, e2e_notification, ...) that
+    is_countable_message() excludes, which WhatsApp Web sometimes counts
+    toward unread.
     """
     if unread_count <= 0 or not records:
         return unread_count
-    tail = records[-unread_count:] if unread_count <= len(records) else records
-    discount = sum(
-        1 for m in tail
-        if (isinstance(m, dict) and (m.get("key") or {}).get("fromMe"))
-        or not is_countable_message(m)
-    )
+    discount = 0
+    for m in reversed(records):
+        if discount >= unread_count:
+            break
+        if isinstance(m, dict) and not is_countable_message(m):
+            discount += 1
+        else:
+            break
     return max(0, unread_count - discount)
+
 
 
 # Media the server could not produce because WhatsApp Web no longer holds that
@@ -5052,12 +5045,11 @@ class MainWindow(wx.Frame):
         # while that exact chat is the one currently open and the window is
         # focused (setting off) — see the two mute checks below.
         muted = self.is_chat_muted(remote_jid)
+        archived = self.is_chat_archived(remote_jid)
         priority = muted and self._is_reply_or_mention_of_me(msg, remote_jid)
         if muted and not priority and self.settings.get("general", {}).get(
             "keep_muted_chats_silent_when_open", True
         ):
-            return
-        if self.is_chat_archived(remote_jid):
             return
 
         from core.notification_manager import (
@@ -5084,13 +5076,23 @@ class MainWindow(wx.Frame):
                 if cp is not None and cp.conversation is not None
                 else ""
             )
-            is_current_conv = (current_jid == remote_jid)
+            is_current_conv = (
+                cp._matches_open_conversation(remote_jid)
+                if cp is not None and hasattr(cp, "_matches_open_conversation") and cp.conversation is not None
+                else (current_jid == remote_jid and bool(current_jid))
+            )
 
             # Muted + not the open conversation: stay silent even with the
             # window active (the "keep silent when open" setting only ever
             # exempts the chat that is actually open right now) — unless
             # it's a reply/mention, which always gets through.
             if muted and not priority and not is_current_conv:
+                return
+
+            # Archived + not the open conversation: stay silent even with the
+            # window active (archived chats only play sound / speak when the
+            # user currently has that exact conversation open and focused).
+            if archived and not is_current_conv:
                 return
 
             if is_current_conv:
@@ -5129,6 +5131,10 @@ class MainWindow(wx.Frame):
         # exempting it — the chat being open only ever matters while the
         # window is active. A reply/mention still gets through, same as above.
         if muted and not priority:
+            return
+
+        # An archived chat in the background never sends a toast or sound/speech.
+        if archived:
             return
 
         # Send system toast notification. general.notifications_enabled is
@@ -5565,7 +5571,12 @@ class MainWindow(wx.Frame):
                 except (TypeError, ValueError):
                     pass
 
-            if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
+            muted = self.is_chat_muted(remote_jid)
+            archived = self.is_chat_archived(remote_jid)
+
+            if muted and self.settings.get("general", {}).get(
+                "keep_muted_chats_silent_when_open", True
+            ):
                 return
 
             from core.notification_manager import format_notification_title
@@ -5584,8 +5595,29 @@ class MainWindow(wx.Frame):
                 and self.IsActive()
             )
             if window_active:
-                self.message_foreground_sound.play()
+                cp = getattr(self, "conversations_panel", None)
+                current_jid = (
+                    cp.conversation.get("remoteJid", "")
+                    if cp is not None and cp.conversation is not None
+                    else ""
+                )
+                is_current_conv = (
+                    cp._matches_open_conversation(remote_jid)
+                    if cp is not None and hasattr(cp, "_matches_open_conversation") and cp.conversation is not None
+                    else (current_jid == remote_jid and bool(current_jid))
+                )
+                if muted and not is_current_conv:
+                    return
+                if archived and not is_current_conv:
+                    return
+                if is_current_conv:
+                    self.message_current_sound.play()
+                else:
+                    self.message_foreground_sound.play()
                 self.output(f"{title}: {body}")
+                return
+
+            if muted or archived:
                 return
             # general.notifications_enabled only ever gates the background
             # toast below — see the matching comment in on_new_message().
@@ -10871,7 +10903,7 @@ class MainWindow(wx.Frame):
                                         _cp.conversation.get("remoteJid", "")
                                     ) == jid
                                 )
-                                if open_now:
+                                if open_now and local_val == 0:
                                     v = 0
                                 elif server_val < local_val:
                                     # WPPConnect's list-chats snapshot lagging behind
@@ -16057,8 +16089,6 @@ class MainWindow(wx.Frame):
                 if response.status_code not in (200, 201) and quoted_id and not is_status_reply:
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote on %s...",
                                     response.status_code, active_dest)
-                    wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
-                    quote_stripped = True
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     payload = {
                         "phone": [active_dest],
@@ -16068,6 +16098,9 @@ class MainWindow(wx.Frame):
                         "options": link_preview_options
                     }
                     response = api_post(url, json=payload, headers=headers, timeout=25)
+                    if response.status_code in (200, 201):
+                        wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
+                        quote_stripped = True
 
                 # 3. Final error handling if all retries failed
                 if response.status_code not in (200, 201):
@@ -17329,12 +17362,12 @@ class MainWindow(wx.Frame):
         # after opening the app. The list-chats merge in get_remote_chats()
         # is the authoritative source for the real counts; ignore live
         # chats.update while it (or the initial sync) is still running.
-        if getattr(self, "_initial_sync_running", False) or not getattr(self, "_sync_completed", False):
+        if not getattr(self, "_sync_completed", False):
             logging.info(
-                "[unread] %s: dropped, sync gate (running=%s, completed=%s, "
+                "[unread] %s: dropped, sync gate (completed=%s, "
                 "unread=%s, previous=%s).",
-                normalized, getattr(self, "_initial_sync_running", False),
-                getattr(self, "_sync_completed", False), unread_count, previous_unread,
+                normalized, getattr(self, "_sync_completed", False),
+                unread_count, previous_unread,
             )
             return
         old_count = int(chat.get("unreadCount") or 0)
@@ -20143,6 +20176,7 @@ class MainWindow(wx.Frame):
         self, remote_jid: str, file_path: str,
         media_type: str, caption: str = "", quoted: dict = None,
         progress_callback=None, upload_id: str = "",
+        custom_filename: str = "",
     ) -> bool:
         """
         Upload a file as a media message via multipart/form-data.
@@ -20170,7 +20204,7 @@ class MainWindow(wx.Frame):
             logging.error("[send_media] %s", err_msg)
             return {"ok": False, "error": err_msg, "retry": False}
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-        filename = os.path.basename(file_path)
+        filename = custom_filename or os.path.basename(file_path)
         upload_path = file_path
         converted_audio_path = None
         converted_video_path = None
@@ -20185,7 +20219,7 @@ class MainWindow(wx.Frame):
             upload_path, mime = prepared
             if upload_path != file_path:
                 converted_audio_path = upload_path
-                filename = os.path.basename(upload_path)
+                filename = custom_filename or os.path.basename(upload_path)
                 file_size = os.path.getsize(upload_path)
         elif media_type == "video":
             # WhatsApp's own pipeline expects H.264/AAC MP4 — anything else
@@ -20203,7 +20237,7 @@ class MainWindow(wx.Frame):
             upload_path, mime = prepared
             if upload_path != file_path:
                 converted_video_path = upload_path
-                filename = os.path.basename(upload_path)
+                filename = custom_filename or os.path.basename(upload_path)
                 file_size = os.path.getsize(upload_path)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
         # Authorization only — Content-Type is set automatically by requests
@@ -20811,9 +20845,18 @@ class MainWindow(wx.Frame):
 
             import mimetypes as _mimetypes
             ext = ".bin"
+            custom_filename = ""
             if media_type == "document":
-                fname = msg_inner.get("documentMessage", {}).get("fileName", "")
+                doc_dict = msg_inner.get("documentMessage", {}) if isinstance(msg_inner.get("documentMessage"), dict) else {}
+                fname = (
+                    doc_dict.get("fileName") or doc_dict.get("filename") or doc_dict.get("title")
+                    or msg.get("fileName") or msg.get("filename") or msg.get("title")
+                    or (msg.get("mediaData") if isinstance(msg.get("mediaData"), dict) else {}).get("filename")
+                    or (msg.get("mediaData") if isinstance(msg.get("mediaData"), dict) else {}).get("fileName")
+                    or ""
+                )
                 if fname:
+                    custom_filename = fname
                     _, ext2 = os.path.splitext(fname)
                     if ext2:
                         ext = ext2
@@ -20831,7 +20874,11 @@ class MainWindow(wx.Frame):
             with open(temp_path, "wb") as f:
                 f.write(decrypted_data)
 
-            success = self.send_media_attachment(target_jid, temp_path, media_type, caption=original_caption)
+            success = self.send_media_attachment(
+                target_jid, temp_path, media_type,
+                caption=original_caption,
+                custom_filename=custom_filename,
+            )
 
             try:
                 os.remove(temp_path)
