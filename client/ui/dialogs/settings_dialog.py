@@ -516,6 +516,23 @@ class SettingsDialog(wx.Dialog):
             self._status_media_viewer_dialog_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._voice_msg_mode_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_voice_message_mode_label")
+        )
+        voice_msg_sizer = wx.StaticBoxSizer(self._voice_msg_mode_box, wx.VERTICAL)
+
+        self._voice_msg_mode_audio_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_voice_message_mode_audio"), style=wx.RB_GROUP
+        )
+        voice_msg_sizer.Add(self._voice_msg_mode_audio_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._voice_msg_mode_voice_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_voice_message_mode_voice_message")
+        )
+        voice_msg_sizer.Add(self._voice_msg_mode_voice_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+
+        ui_sizer.Add(voice_msg_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -1023,6 +1040,14 @@ class SettingsDialog(wx.Dialog):
             "status_media_viewer_dialog", True
         )
         self._status_media_viewer_dialog_cb.SetValue(bool(status_media_viewer_dialog))
+
+        voice_message_mode = self.main_window.settings.get("user_interface", {}).get(
+            "voice_message_mode", "audio"
+        )
+        if voice_message_mode == "voice_message":
+            self._voice_msg_mode_voice_rb.SetValue(True)
+        else:
+            self._voice_msg_mode_audio_rb.SetValue(True)
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1772,6 +1797,14 @@ class SettingsDialog(wx.Dialog):
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
+        # UI: reading voice messages in chats and status
+        voice_message_mode = "voice_message" if self._voice_msg_mode_voice_rb.GetValue() else "audio"
+        old_vm_mode = self.main_window.settings.get("user_interface", {}).get("voice_message_mode", "audio")
+        vm_mode_changed = (old_vm_mode != voice_message_mode)
+        self.main_window.settings.setdefault("user_interface", {})[
+            "voice_message_mode"
+        ] = voice_message_mode
+
         # UI: how to refer to the user's own messages/replies in the messages list
         if self._self_ref_voce_rb.GetValue():
             self_reference_mode = "voce"
@@ -2007,7 +2040,7 @@ class SettingsDialog(wx.Dialog):
         # word for chats whose last message is our own), so a self-reference
         # change (e.g. "Eu" -> "Você") takes effect immediately instead of
         # only on the next restart.
-        if self_reference_changed:
+        if self_reference_changed or vm_mode_changed:
             cp = getattr(self.main_window, "conversations_panel", None)
             if cp is not None and getattr(cp, "conversation", None) is not None:
                 cp.populate_messages(preserve_focus=True)
@@ -2090,6 +2123,9 @@ class SettingsDialog(wx.Dialog):
             i18n.t("ui_conversation_video_media_viewer_dialog_label")
         )
         self._status_media_viewer_dialog_cb.SetLabel(i18n.t("ui_status_media_viewer_dialog_label"))
+        self._voice_msg_mode_box.SetLabel(i18n.t("ui_voice_message_mode_label"))
+        self._voice_msg_mode_audio_rb.SetLabel(i18n.t("ui_voice_message_mode_audio"))
+        self._voice_msg_mode_voice_rb.SetLabel(i18n.t("ui_voice_message_mode_voice_message"))
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
         self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))

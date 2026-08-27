@@ -411,7 +411,8 @@ DEFAULT_SETTINGS = {
         "self_reference_custom_word": "",
         "show_yesterday_label": True,
         "show_link_previews": True,
-        "status_media_viewer_dialog": True
+        "status_media_viewer_dialog": True,
+        "voice_message_mode": "audio"
     },
     "audio_playback": {
         "audio_default_speed": 1.0
