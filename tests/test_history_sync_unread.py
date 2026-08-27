@@ -59,8 +59,9 @@ class TestTheBadgeIsRediscountedOnceMessagesArrive:
         }
 
     def test_our_own_send_stops_counting_as_unread(self):
+        """Trailing system notification stops counting as unread."""
         chat = self._chat([_message("theirs", 100),
-                           _message("mine", 101, from_me=True)], 1)
+                           _message("system", 101, message_type="groupNotification")], 1)
 
         assert apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
         assert chat["unreadCount"] == 0
@@ -79,9 +80,9 @@ class TestTheBadgeIsRediscountedOnceMessagesArrive:
         assert chat["unreadCount"] == 1
 
     def test_only_the_tail_our_own_send_covers_is_discounted(self):
-        """Two unread, the newer of which is ours: one real unread remains."""
+        """Two unread, the newer of which is a system event: one real unread remains."""
         chat = self._chat([_message("theirs", 100),
-                           _message("mine", 101, from_me=True)], 2)
+                           _message("system", 101, message_type="groupNotification")], 2)
 
         apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
         assert chat["unreadCount"] == 1
