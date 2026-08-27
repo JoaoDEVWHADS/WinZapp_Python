@@ -528,13 +528,23 @@ class TestOpenActionAlwaysExternalForVideo:
         assert stub.media_viewer_calls == []
         assert len(_FakeThread.instances) == 1
 
-    def test_image_open_action_is_unaffected_and_still_uses_the_dialog(self):
+    def test_image_open_action_opens_externally(self):
+        _FakeThread.instances = []
         image_msg = {
             "key": {"id": "i1"}, "messageType": "imageMessage",
             "message": {"imageMessage": {}},
         }
         stub = _OpenActionStub([image_msg])
+        import ui.conversations as conv_mod
+        orig_thread = conv_mod.threading.Thread
+        orig_data_path = conv_mod.data_path
+        conv_mod.threading.Thread = _FakeThread
+        conv_mod.data_path = lambda *parts: "/".join(("fake_data",) + parts)
+        try:
+            stub._on_action_open(None, index=0)
+        finally:
+            conv_mod.threading.Thread = orig_thread
+            conv_mod.data_path = orig_data_path
 
-        stub._on_action_open(None, index=0)
-
-        assert stub.media_viewer_calls == [0]
+        assert stub.media_viewer_calls == []
+        assert len(_FakeThread.instances) == 1
