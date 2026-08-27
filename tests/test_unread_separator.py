@@ -18,6 +18,69 @@ wx.App, so the method under test is exercised as a plain function — same
 approach as tests/test_message_bookmarks.py.
 """
 
+import os
+import sys
+import types
+from unittest.mock import MagicMock
+
+try:
+    import wx
+    import wx.adv
+except ImportError:
+    for _mod in ("wx", "wx.adv"):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+    class _FakeWxModule(types.ModuleType):
+        ACC_OK = 0
+        ACC_NOT_IMPLEMENTED = -1
+        def __getattr__(self, name):
+            if name == "__file__":
+                return "<fake_wx>"
+            if name == "CallAfter":
+                return lambda fn, *a, **k: fn(*a, **k)
+            if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
+                return 1000
+            if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Window", "Control", "Button"):
+                return object
+            return MagicMock
+    sys.modules["wx"].__class__ = _FakeWxModule
+    sys.modules["wx.adv"].__class__ = _FakeWxModule
+    wx = sys.modules["wx"]
+
+try:
+    import accessible_output2
+    from accessible_output2 import outputs
+except ImportError:
+    if "accessible_output2" not in sys.modules:
+        sys.modules["accessible_output2"] = types.ModuleType("accessible_output2")
+    sys.modules["accessible_output2.outputs"] = types.ModuleType("accessible_output2.outputs")
+    sys.modules["accessible_output2"].outputs = sys.modules["accessible_output2.outputs"]
+
+try:
+    import sound_lib
+    from sound_lib import stream, output, main, effects
+except ImportError:
+    for _mod in (
+        "sound_lib",
+        "sound_lib.output",
+        "sound_lib.stream",
+        "sound_lib.main",
+        "sound_lib.effects",
+    ):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+
+    sys.modules["sound_lib.main"].bass_call = lambda *a, **k: None
+    sys.modules["sound_lib.stream"].FileStream = object
+    sys.modules["sound_lib.output"].Output = object
+    sys.modules["sound_lib.effects"].Tempo = object
+
 import pytest
 
 from core.utils import first_unread_index, paginated_window, db_fetch_limit
@@ -183,3 +246,53 @@ class TestShouldDismissUnreadSeparator:
     def test_separator_at_row_zero(self):
         assert self.dismiss(0, 0) is False
         assert self.dismiss(1, 0) is True
+
+
+class TestRenderUnreadSeparatorWithListboxCount:
+    class _FakeI18n:
+        def t(self, key):
+            translations = {
+                "unread_sep_singular": "1 mensagem não lida",
+                "unread_sep_plural": "{count} mensagens não lidas",
+                "of": "de",
+            }
+            return translations.get(key, key)
+
+    class _FakeMainWindow:
+        def __init__(self, show_count=True):
+            self.i18n = TestRenderUnreadSeparatorWithListboxCount._FakeI18n()
+            self.settings = {"user_interface": {"show_listbox_item_count": show_count}}
+
+    def _make_panel(self, mode="listbox", show_count=True):
+        import types
+        panel = types.SimpleNamespace()
+        panel.main_window = self._FakeMainWindow(show_count=show_count)
+        panel._message_list_mode = mode
+        panel._is_separator = lambda msg: isinstance(msg, dict) and msg.get("_type") == "unread_separator"
+        panel._render_separator = types.MethodType(ConversationsPanel._render_separator, panel)
+        panel._render_message_line = types.MethodType(ConversationsPanel._render_message_line, panel)
+        return panel
+
+    def test_separator_includes_count_in_listbox_mode(self):
+        panel = self._make_panel(mode="listbox", show_count=True)
+        sep = {"_type": "unread_separator", "count": 2}
+        panel._sorted_messages = [_msg("m1"), sep, _msg("m2")]
+
+        rendered = panel._render_message_line(sep)
+        assert rendered == "2 mensagens não lidas, 2 de 3"
+
+    def test_separator_no_count_when_setting_disabled(self):
+        panel = self._make_panel(mode="listbox", show_count=False)
+        sep = {"_type": "unread_separator", "count": 2}
+        panel._sorted_messages = [_msg("m1"), sep, _msg("m2")]
+
+        rendered = panel._render_message_line(sep)
+        assert rendered == "2 mensagens não lidas"
+
+    def test_separator_no_count_in_classic_mode(self):
+        panel = self._make_panel(mode="classic", show_count=True)
+        sep = {"_type": "unread_separator", "count": 2}
+        panel._sorted_messages = [_msg("m1"), sep, _msg("m2")]
+
+        rendered = panel._render_message_line(sep)
+        assert rendered == "2 mensagens não lidas"

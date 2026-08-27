@@ -1,15 +1,73 @@
-"""Tests for the Settings > Conteúdo Falado "silence while recording" toggle:
-AccessibleSpeechOutput's suppression gate and its silence() passthrough,
-MainWindow._voice_recording_silence_active()'s gating logic, and
-ConversationsPanel._silence_send_voice_focus_if_enabled()'s double-fire (now
-+ delayed) attempt to catch the screen reader's Enviar-button focus
-announcement whichever way it schedules its speech."""
-
+import os
+import sys
 import types
+from unittest.mock import MagicMock
+
+try:
+    import wx
+    import wx.adv
+except ImportError:
+    for _mod in ("wx", "wx.adv"):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+    class _FakeWxModule(types.ModuleType):
+        ACC_OK = 0
+        ACC_NOT_IMPLEMENTED = -1
+        def __getattr__(self, name):
+            if name == "__file__":
+                return "<fake_wx>"
+            if name == "CallAfter":
+                return lambda fn, *a, **k: fn(*a, **k)
+            if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
+                return 1000
+            if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Window", "Control", "Button"):
+                return object
+            return MagicMock
+    sys.modules["wx"].__class__ = _FakeWxModule
+    sys.modules["wx.adv"].__class__ = _FakeWxModule
+    wx = sys.modules["wx"]
+
+try:
+    import accessible_output2
+    from accessible_output2 import outputs
+except ImportError:
+    if "accessible_output2" not in sys.modules:
+        sys.modules["accessible_output2"] = types.ModuleType("accessible_output2")
+    sys.modules["accessible_output2.outputs"] = types.ModuleType("accessible_output2.outputs")
+    sys.modules["accessible_output2"].outputs = sys.modules["accessible_output2.outputs"]
+
+try:
+    import sound_lib
+    from sound_lib import stream, output, main, effects
+except ImportError:
+    for _mod in (
+        "sound_lib",
+        "sound_lib.output",
+        "sound_lib.stream",
+        "sound_lib.main",
+        "sound_lib.effects",
+    ):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+
+    sys.modules["sound_lib.main"].bass_call = lambda *a, **k: None
+    sys.modules["sound_lib.stream"].FileStream = object
+    sys.modules["sound_lib.output"].Output = object
+    sys.modules["sound_lib.effects"].Tempo = object
 
 import ui.conversations as conversations_module
 from core.accessible_speech import AccessibleSpeechOutput
-from ui.accessible import AccessibleDiscardVoiceMessage, AccessibleSendVoiceMessage
+from ui.accessible import (
+    AccessibleDiscardVoiceMessage,
+    AccessiblePauseResumeRecording,
+    AccessibleSendVoiceMessage,
+)
 from ui.conversations import ConversationsPanel
 
 
@@ -73,14 +131,14 @@ class TestAccessibleSpeechOutputSuppression:
         speech = AccessibleSpeechOutput(_FakeAuto(_NoSilenceOutput()), lambda: {})
         speech.silence()  # must not raise
 
-    def test_silence_respects_accessibility_master_switch(self):
+    def test_silence_works_when_extended_sr_compat_disabled(self):
         fake = _FakeOutput()
         speech = AccessibleSpeechOutput(
             _FakeAuto(fake),
             lambda: {"accessibility": {"extended_sr_compat_enabled": False}},
         )
         speech.silence()
-        assert fake.silenced is False
+        assert fake.silenced is True
 
 
 class TestVoiceRecordingSilenceActive:
@@ -121,78 +179,154 @@ class TestSilenceSendVoiceFocusIfEnabled:
             self.silence_calls += 1
 
     class _FakeMainWindow:
-        def __init__(self, enabled):
-            self.settings = {"speech_content": {"silence_while_recording": enabled}}
+        def __init__(self, silence_enabled=False, extended_enabled=True):
+            self.settings = {
+                "speech_content": {"silence_while_recording": silence_enabled},
+                "accessibility": {"extended_sr_compat_enabled": extended_enabled},
+            }
             self.speak_output = TestSilenceSendVoiceFocusIfEnabled._FakeSpeakOutput()
 
-    def _make_stub(self, enabled):
+    def _make_stub(self, silence_enabled=False, extended_enabled=True):
         stub = types.SimpleNamespace()
-        stub.main_window = self._FakeMainWindow(enabled)
+        stub.main_window = self._FakeMainWindow(silence_enabled, extended_enabled)
         stub._silence_send_voice_focus_if_enabled = types.MethodType(
             ConversationsPanel._silence_send_voice_focus_if_enabled, stub
         )
         return stub
 
-    def test_noop_when_setting_disabled(self, monkeypatch):
+    def test_noop_when_both_settings_disabled(self, monkeypatch):
         call_later_calls = []
         monkeypatch.setattr(
             conversations_module.wx, "CallLater",
             lambda delay, func: call_later_calls.append((delay, func)),
         )
-        stub = self._make_stub(enabled=False)
+        stub = self._make_stub(silence_enabled=False, extended_enabled=True)
         stub._silence_send_voice_focus_if_enabled()
         assert stub.main_window.speak_output.silence_calls == 0
         assert call_later_calls == []
 
-    def test_fires_immediately_and_schedules_a_delayed_retry(self, monkeypatch):
+    def test_fires_when_silence_while_recording_enabled(self, monkeypatch):
         call_later_calls = []
         monkeypatch.setattr(
             conversations_module.wx, "CallLater",
             lambda delay, func: call_later_calls.append((delay, func)),
         )
-        stub = self._make_stub(enabled=True)
+        stub = self._make_stub(silence_enabled=True, extended_enabled=True)
         stub._silence_send_voice_focus_if_enabled()
 
         # Immediate call covers a screen reader that speaks synchronously.
         assert stub.main_window.speak_output.silence_calls == 1
-        # A second, delayed call is scheduled to catch the far more common
-        # case of the screen reader announcing the focus asynchronously.
-        assert len(call_later_calls) == 1
-        delay, func = call_later_calls[0]
-        assert delay > 0
-        func()
-        assert stub.main_window.speak_output.silence_calls == 2
+        assert len(call_later_calls) == 8
+        for delay, func in call_later_calls:
+            assert delay > 0
+            func()
+        assert stub.main_window.speak_output.silence_calls == 9
+
+    def test_fires_when_extended_sr_compat_disabled(self, monkeypatch):
+        call_later_calls = []
+        monkeypatch.setattr(
+            conversations_module.wx, "CallLater",
+            lambda delay, func: call_later_calls.append((delay, func)),
+        )
+        stub = self._make_stub(silence_enabled=False, extended_enabled=False)
+        stub._silence_send_voice_focus_if_enabled()
+
+        assert stub.main_window.speak_output.silence_calls == 1
+        assert len(call_later_calls) == 8
+        for delay, func in call_later_calls:
+            assert delay > 0
+            func()
+        assert stub.main_window.speak_output.silence_calls == 9
 
 
 class TestSilenceableVoiceButtonAccessibleName:
-    """AccessibleSendVoiceMessage / AccessibleDiscardVoiceMessage blank out
-    their MSAA name while the toggle is on, so the screen reader has nothing
-    to announce for the focus event in the first place — the first line of
-    defense ahead of _silence_send_voice_focus_if_enabled()'s after-the-fact
-    silence() calls above."""
+    """AccessibleSendVoiceMessage / AccessibleDiscardVoiceMessage / AccessiblePauseResumeRecording
+    blank out their MSAA name and shortcut while silence_while_recording is on or
+    during transient startup/pause toggle windows when extended_sr_compat_enabled is off,
+    so the screen reader has nothing to announce for the initial focus/toggle event,
+    while keeping the real name/role intact afterwards."""
 
     class _FakeMainWindow:
-        def __init__(self, enabled):
-            self.settings = {"speech_content": {"silence_while_recording": enabled}}
+        def __init__(
+            self,
+            silence_enabled=False,
+            extended_enabled=True,
+            start_timestamp=0.0,
+            pause_timestamp=0.0,
+        ):
+            self.settings = {
+                "speech_content": {"silence_while_recording": silence_enabled},
+                "accessibility": {"extended_sr_compat_enabled": extended_enabled},
+            }
+            self.conversations_panel = types.SimpleNamespace(
+                _recording_start_timestamp=start_timestamp,
+                _pause_toggle_timestamp=pause_timestamp,
+            )
 
-    def test_name_blanked_when_setting_enabled(self):
+    def test_name_blanked_when_silence_while_recording_enabled(self):
         import wx
 
-        for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
-            acc = cls(self._FakeMainWindow(enabled=True))
+        for cls in (
+            AccessibleSendVoiceMessage,
+            AccessibleDiscardVoiceMessage,
+            AccessiblePauseResumeRecording,
+        ):
+            acc = cls(self._FakeMainWindow(silence_enabled=True, extended_enabled=True))
             assert acc.GetName(0) == (wx.ACC_OK, "")
+            assert acc.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
 
-    def test_name_left_to_default_when_setting_disabled(self):
+    def test_transient_silence_when_extended_sr_compat_disabled(self):
+        import wx
+        import time
+
+        now = time.monotonic()
+        for cls in (
+            AccessibleSendVoiceMessage,
+            AccessibleDiscardVoiceMessage,
+            AccessiblePauseResumeRecording,
+        ):
+            # Recent recording start: silenced (transient window)
+            acc_recent = cls(
+                self._FakeMainWindow(
+                    silence_enabled=False,
+                    extended_enabled=False,
+                    start_timestamp=now,
+                )
+            )
+            assert acc_recent.GetName(0) == (wx.ACC_OK, "")
+            assert acc_recent.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
+
+            # Recent pause toggle: silenced (transient window)
+            acc_paused = cls(
+                self._FakeMainWindow(
+                    silence_enabled=False,
+                    extended_enabled=False,
+                    pause_timestamp=now,
+                )
+            )
+            assert acc_paused.GetName(0) == (wx.ACC_OK, "")
+            assert acc_paused.GetKeyboardShortcut(0) == (wx.ACC_OK, "")
+
+            # After transient window: full name and shortcut restored
+            acc_old = cls(
+                self._FakeMainWindow(
+                    silence_enabled=False,
+                    extended_enabled=False,
+                    start_timestamp=now - 2.0,
+                    pause_timestamp=now - 2.0,
+                )
+            )
+            assert acc_old.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
+
+    def test_name_and_shortcut_reported_when_both_enabled(self):
         import wx
 
-        for cls in (AccessibleSendVoiceMessage, AccessibleDiscardVoiceMessage):
-            acc = cls(self._FakeMainWindow(enabled=False))
-            assert acc.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
-
-    def test_keyboard_shortcuts_still_reported(self):
-        import wx
-
-        send = AccessibleSendVoiceMessage(self._FakeMainWindow(enabled=True))
-        discard = AccessibleDiscardVoiceMessage(self._FakeMainWindow(enabled=True))
+        send = AccessibleSendVoiceMessage(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
+        discard = AccessibleDiscardVoiceMessage(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
+        pause = AccessiblePauseResumeRecording(self._FakeMainWindow(silence_enabled=False, extended_enabled=True))
+        assert send.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
+        assert discard.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
+        assert pause.GetName(0) == (wx.ACC_NOT_IMPLEMENTED, "")
         assert send.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+R")
         assert discard.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+D")
+        assert pause.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+P")
