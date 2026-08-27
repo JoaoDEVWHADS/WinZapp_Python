@@ -86,13 +86,15 @@ class TestMutePresets:
 
     def test_every_preset_key_is_translated_in_every_locale(self):
         import json
-        import pathlib
 
-        langs = pathlib.Path(__file__).resolve().parents[1] / "client" / "languages"
+        from tests.locales import LANGUAGES_DIR, registered_locale_codes
+
+        langs = LANGUAGES_DIR
         # From language_map.json rather than written out: pl was missing from
-        # the list this replaces, so it was never checked at all.
-        locales = json.loads((langs / "language_map.json").read_text(encoding="utf-8"))
-        for locale in sorted(locales):
+        # the list this replaces, so it was never checked at all. Through the
+        # shared helper so an empty map cannot turn this loop into zero
+        # iterations and still pass — see tests/locales.py.
+        for locale in registered_locale_codes():
             strings = json.loads((langs / f"{locale}.json").read_text(encoding="utf-8"))
             for key, _ in ConversationsPanel.MUTE_PRESETS:
                 assert strings.get(key), f"{locale} is missing {key}"
