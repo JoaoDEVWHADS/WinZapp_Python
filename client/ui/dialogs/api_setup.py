@@ -55,6 +55,7 @@ import zipfile
 import requests
 from core.wpp_dependency_setup import (
     PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
+    check_github_dependencies_updates,
     merge_dependency_patches,
     reset_dependency_state,
 )
@@ -928,21 +929,47 @@ class ApiSetupDialog(wx.Dialog):
             # Preserve upstream's dependency graph and add only WinZapp-owned packages.
             self._merge_package_json_dependencies(api_dir, patches_dir)
 
-            # ── Step 4: npm install ───────────────────────────────────────
-            removed = reset_dependency_state(api_dir)
-            if removed:
-                logging.info("[api_setup] Removed stale dependency state: %s", ", ".join(removed))
+            # ── Step 4: npm install / update ──────────────────────────────
+            has_existing_modules = os.path.isdir(os.path.join(api_dir, "node_modules"))
+            if has_existing_modules:
+                packages_to_update = check_github_dependencies_updates(api_dir)
+                if packages_to_update:
+                    self._set_stage("Atualizando pacotes do GitHub...", *stages["npm_install"])
+                    ok, err = self._run_subprocess(
+                        npm_cmd + ["update"] + packages_to_update + ["--no-audit", "--no-fund"],
+                        cwd=api_dir,
+                        env=npm_env,
+                    )
+                    if not ok:
+                        logging.warning(f"[api_setup] npm update failed ({err}), falling back to npm install...")
+                        removed = reset_dependency_state(api_dir)
+                        if removed:
+                            logging.info("[api_setup] Removed stale dependency state: %s", ", ".join(removed))
+                        ok, err = self._run_subprocess(
+                            npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
+                            cwd=api_dir,
+                            env=npm_env,
+                        )
+                else:
+                    logging.info("[api_setup] All GitHub dependencies are already up to date!")
+                    ok = True
+                    err = ""
+            else:
+                removed = reset_dependency_state(api_dir)
+                if removed:
+                    logging.info("[api_setup] Removed stale dependency state: %s", ", ".join(removed))
 
-            self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])
-            ok, err = self._run_subprocess(
-                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
-                cwd=api_dir,
-                env=npm_env,
-            )
+                self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])
+                ok, err = self._run_subprocess(
+                    npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
+                    cwd=api_dir,
+                    env=npm_env,
+                )
+
             if not ok:
                 if not self._cancelled:
                     wx.CallAfter(self._finish_error,
-                                 f"Falha em npm install:\n\n{err}")
+                                 f"Falha na instalação de dependências:\n\n{err}")
                 return
 
             if self._cancelled:

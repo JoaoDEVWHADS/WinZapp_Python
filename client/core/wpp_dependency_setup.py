@@ -82,3 +82,43 @@ def reset_dependency_state(api_dir: str) -> list[str]:
         removed.append("node_modules")
 
     return removed
+
+
+def check_github_dependencies_updates(api_dir: str) -> list[str]:
+    """Compare installed Git commit SHAs in package-lock.json with remote HEADs via git ls-remote."""
+    import subprocess
+    deps = {
+        "@wppconnect-team/wppconnect": "https://github.com/wppconnect-team/wppconnect.git",
+        "@wppconnect/wa-js": "https://github.com/wppconnect-team/wa-js.git",
+        "@wppconnect/wa-version": "https://github.com/wppconnect-team/wa-version.git",
+    }
+    lock_path = os.path.join(api_dir, "package-lock.json")
+    installed = {}
+    if os.path.isfile(lock_path):
+        try:
+            with open(lock_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            packages = data.get("packages", {})
+            for name in deps:
+                key = f"node_modules/{name}"
+                res = packages.get(key, {}).get("resolved", "")
+                if "#" in res:
+                    installed[name] = res.split("#")[-1][:7]
+        except Exception:
+            pass
+
+    to_update = []
+    for name, url in deps.items():
+        inst = installed.get(name, "unknown")
+        try:
+            p = subprocess.run(["git", "ls-remote", url, "HEAD"], capture_output=True, text=True, timeout=10)
+            if p.returncode == 0 and p.stdout.strip():
+                remote = p.stdout.strip().split()[0][:7]
+                if inst != remote:
+                    to_update.append(name)
+            else:
+                to_update.append(name)
+        except Exception:
+            to_update.append(name)
+
+    return to_update
