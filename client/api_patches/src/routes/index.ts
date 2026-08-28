@@ -116,14 +116,41 @@ routes.post(
   verifyToken,
   SessionController.closeSession
 );
+// Deliberately WITHOUT statusConnection, unlike every other phone-carrying
+// route in this file: WinZapp posts {phone, isGroup, isLid} here (main.py's
+// subscribe_presence), so the middleware's contact-validation pass is not a
+// no-op. For a plain 1:1 phone JID (isGroup/isLid false, not ending @lid) it
+// reaches `checkNumberStatus(contact)`, whose result is `.catch()`ed to
+// undefined — so any contact WhatsApp's directory fails to resolve, *or that
+// merely errors*, is answered with a 400 "O número X não existe." and the
+// controller never runs. That silently kills typing/online indicators for
+// that chat, and costs an extra page round-trip on every conversation open.
+// The 500 problem described below does not apply here either: this route is
+// called when a conversation is opened, not by a timer, so it never produced
+// the endless train of errors the middleware was added to stop.
 routes.post(
   '/api/:session/subscribe-presence',
   verifyToken,
   SessionController.subscribePresence
 );
+// statusConnection here: the controller calls `req.client.setOnlinePresence()`
+// unconditionally, and req.client is undefined whenever there is no live
+// session — so without the middleware the call throws a TypeError that the
+// controller's blanket catch reports as an HTTP 500. That is how a perfectly
+// ordinary "not paired yet" turned into a server error: WinZapp's presence
+// keep-alive fires every 20 s while the window has focus, so an unpaired or
+// dropped session produced an endless train of 500s that said nothing about
+// the actual cause. statusConnection answers the same 404 {status:
+// 'Disconnected'} the rest of the API uses.
+//
+// Safe for this route specifically: the middleware's contact-validation pass
+// reads req.body.phone, and this route sends none, so contactToArray()
+// returns an empty list and the loop is a no-op. Only the connection probe
+// applies.
 routes.post(
   '/api/:session/set-online-presence',
   verifyToken,
+  statusConnection,
   SessionController.setOnlinePresence
 );
 routes.post(
