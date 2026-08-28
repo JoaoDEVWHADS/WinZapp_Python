@@ -524,6 +524,27 @@ export default class CreateSessionUtil {
               }
               this.exportPhoneCode(req, client.config.phone, code, client, res);
             },
+            // Not a WPPConnect option — WinZapp's own host.layer.js patch reads
+            // it off `this.options` (create() spreads the caller's options into
+            // the Whatsapp instance verbatim, so an unknown key survives). See
+            // client/core/wppconnect_host_layer_patch.py, checkQrCode v4.
+            catchLinkCodeError: (failure: {
+              name?: string;
+              message?: string;
+              session?: string;
+              attempt?: number;
+              retryInSeconds?: number;
+              stack?: string;
+              details?: Record<string, string>;
+            }) => {
+              if ((client as any).shouldClose) return;
+              this.exportPhoneCodeError(
+                req,
+                client.config.phone,
+                failure,
+                client
+              );
+            },
             catchQR: (
               base64Qr: any,
               asciiQR: any,
@@ -734,6 +755,84 @@ export default class CreateSessionUtil {
         phoneCode: phoneCode,
         session: client.session,
       });
+  }
+
+  /**
+   * Report a failed pairing-code request to the client.
+   *
+   * WhatsApp can refuse to issue a link-by-code — CompanionHelloError is the
+   * one seen in practice — while the session itself stays perfectly healthy
+   * and goes on rotating auth codes. Before this the failure never left the
+   * Node process: host.layer.js logged it and the browser quietly retried,
+   * while the Python side sat out its full 90-second phoneCode timeout and
+   * then reported the generic "no pairing code received", leaving the person
+   * trying to pair with nothing to act on.
+   *
+   * Deliberately does NOT touch client.status, close the session, or answer
+   * `res`: checkQrCode()'s retry is still live and a later attempt may well
+   * succeed, and /start-session has long since responded. This is a
+   * notification, not a terminal state.
+   */
+  exportPhoneCodeError(
+    req: any,
+    phone: any,
+    failure: {
+      name?: string;
+      message?: string;
+      attempt?: number;
+      retryInSeconds?: number;
+      stack?: string;
+      details?: Record<string, string>;
+    },
+    client: WhatsAppServer
+  ) {
+    if ((client as any).shouldClose) return;
+
+    const name = failure?.name || 'Error';
+    const message = failure?.message || '';
+    // attempt/retryInSeconds come from host.layer.js's backoff. Forwarded
+    // rather than dropped: a log line saying which attempt this was and when
+    // the next one is due is most of what makes a failing pairing run
+    // diagnosable after the fact.
+    const attempt = failure?.attempt;
+    const retryInSeconds = failure?.retryInSeconds;
+
+    req.logger?.warn(
+      `[${client.session}] pairing code request failed: ${name}: ${message}` +
+        (attempt ? ` (attempt ${attempt}, next retry in ${retryInSeconds}s)` : '')
+    );
+
+    // WhatsApp Web's own bundle throws this from inside the page, and its class
+    // name ("CompanionHelloError") is all that survived to here before. The
+    // page-context stack is the only thing that names the Meta module that
+    // threw, and any extra own property on the error is the only place a
+    // server refusal code could be hiding — both are logged in full because
+    // there is nowhere else to get them from.
+    if (failure?.stack) {
+      req.logger?.warn(
+        `[${client.session}] pairing code failure stack: ${failure.stack}`
+      );
+    }
+    if (failure?.details && Object.keys(failure.details).length) {
+      req.logger?.warn(
+        `[${client.session}] pairing code failure details: ` +
+          JSON.stringify(failure.details)
+      );
+    }
+
+    const payload = {
+      name: name,
+      message: message,
+      phone: phone,
+      session: client.session,
+      attempt: attempt,
+      retryInSeconds: retryInSeconds,
+      stack: failure?.stack || '',
+      details: failure?.details || {},
+    };
+
+    req.io.emit('phoneCodeError', payload);
+    callWebHook(client, req, 'phoneCodeError', payload);
   }
 
   exportQR(
@@ -1534,7 +1633,23 @@ export default class CreateSessionUtil {
     await client.onMessageEdit(async (eventOrChat: any, _id?: string, legacyMessage?: any) => {
       // Current WPPConnect emits one { chat, id, msg } object even though its
       // public type still declares the legacy three-argument callback.
-      const message = legacyMessage ?? eventOrChat?.msg ?? eventOrChat;
+      //
+      // The last fallback is a SHAPE check, not a bare `?? eventOrChat`. The
+      // guard below exists precisely for the case where a wrapper arrives
+      // with no `msg`, and accepting the wrapper itself defeats it: `{chat,
+      // id}` is truthy and an object, so it would sail through and be
+      // re-emitted on 'received-message' as if it were a serialized message.
+      // Python then feeds it to on_new_message()'s same-id dedup and into
+      // _apply_possible_edit(), which compares the stored text against a
+      // body that does not exist — a much worse failure than a dropped edit,
+      // and a silent one. A real serialized message always carries `type`
+      // (or at least `body`); a `{chat, id}` wrapper carries neither.
+      const looksSerialized =
+        eventOrChat &&
+        typeof eventOrChat === 'object' &&
+        (eventOrChat.type !== undefined || eventOrChat.body !== undefined);
+      const message =
+        legacyMessage ?? eventOrChat?.msg ?? (looksSerialized ? eventOrChat : undefined);
       if (!message || typeof message !== 'object') {
         req.logger.warn(
           `[${client.session}] onMessageEdit emitted without a serialized message`

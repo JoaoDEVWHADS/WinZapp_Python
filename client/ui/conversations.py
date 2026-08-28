@@ -1442,6 +1442,22 @@ class ConversationsPanel(wx.Panel):
             self._add_attachment_btn.Enable()
             self._emoji_btn.Enable()
 
+    def refresh_composer_permissions(self, jid: str, transition: bool = True):
+        if not self.conversation or self.conversation.get("remoteJid") != jid:
+            return
+
+        conversation = self.main_window.chats.get(jid) or self.conversation
+        was_editable = self.message_field.IsEditable()
+        self._apply_composer_permissions(jid, conversation)
+        self.message_label.SetLabel(
+            self._message_label_text(jid, conversation, self.conversation_name)
+        )
+        self.conversation_panel.Layout()
+        if was_editable and not self.message_field.IsEditable():
+            self.main_window.output(self.main_window.i18n.t(
+                "group_send_restricted_now" if transition else "group_send_restricted"
+            ))
+
     def update_conversation_name(self, jid: str, new_name: str):
         """Apply a group rename to the conversation currently on screen.
 
@@ -2692,19 +2708,22 @@ class ConversationsPanel(wx.Panel):
         the announcement whichever way the screen reader schedules it —
         silence() is idempotent, so calling it twice is harmless.
         """
-        is_silenced = (
-            not self.main_window.settings.get("accessibility", {}).get(
-                "extended_sr_compat_enabled", True
-            )
-            or self.main_window.settings.get("speech_content", {}).get(
-                "silence_while_recording", False
-            )
-        )
-        if not is_silenced:
+        # Keyed ONLY on the "silence while recording" toggle. It used to also
+        # fire when extended_sr_compat_enabled was OFF — i.e. exactly when the
+        # user had told WinZapp never to talk to their screen reader, the app
+        # started interrupting it instead. Nothing about that switch asks for
+        # other applications' speech to be cut off.
+        if not self.main_window.settings.get("speech_content", {}).get(
+            "silence_while_recording", False
+        ):
             return
         if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
+            # Immediately, plus two follow-ups — which is what the docstring
+            # above describes. It was a burst of eight up to 500ms, half a
+            # second of repeated cancels that also swallow any unrelated
+            # announcement landing in that window.
             self.main_window.speak_output.silence()
-            for delay in (10, 25, 50, 80, 120, 200, 350, 500):
+            for delay in (50, 150):
                 wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _start_voice_recording(self):

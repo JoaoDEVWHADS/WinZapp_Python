@@ -62,8 +62,8 @@ class TestTheBadgeIsRediscountedOnceMessagesArrive:
         chat = self._chat([_message("theirs", 100),
                            _message("mine", 101, from_me=True)], 1)
 
-        assert not apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
-        assert chat["unreadCount"] == 1
+        assert apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
+        assert chat["unreadCount"] == 0
 
     def test_a_system_event_stops_counting_as_unread(self):
         chat = self._chat(
@@ -83,8 +83,8 @@ class TestTheBadgeIsRediscountedOnceMessagesArrive:
         chat = self._chat([_message("theirs", 100),
                            _message("mine", 101, from_me=True)], 2)
 
-        assert not apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
-        assert chat["unreadCount"] == 2
+        apply_history_sync_unread_correction("5511@s.whatsapp.net", chat)
+        assert chat["unreadCount"] == 1
 
     def test_a_chat_with_no_records_is_left_alone(self):
         """The pre-fetch state this correction exists to come back for — there

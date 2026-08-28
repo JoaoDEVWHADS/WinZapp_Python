@@ -2471,19 +2471,22 @@ class StatusPanel(wx.Panel):
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 
     def _silence_send_voice_focus_if_enabled(self):
-        is_silenced = (
-            not self.main_window.settings.get("accessibility", {}).get(
-                "extended_sr_compat_enabled", True
-            )
-            or self.main_window.settings.get("speech_content", {}).get(
-                "silence_while_recording", False
-            )
-        )
-        if not is_silenced:
+        # Keyed ONLY on the "silence while recording" toggle. It used to also
+        # fire when extended_sr_compat_enabled was OFF — i.e. exactly when the
+        # user had told WinZapp never to talk to their screen reader, the app
+        # started interrupting it instead. Nothing about that switch asks for
+        # other applications' speech to be cut off.
+        if not self.main_window.settings.get("speech_content", {}).get(
+            "silence_while_recording", False
+        ):
             return
         if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
+            # Immediately, plus two follow-ups — which is what the docstring
+            # above describes. It was a burst of eight up to 500ms, half a
+            # second of repeated cancels that also swallow any unrelated
+            # announcement landing in that window.
             self.main_window.speak_output.silence()
-            for delay in (10, 25, 50, 80, 120, 200, 350, 500):
+            for delay in (50, 150):
                 wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _toggle_pause_voice_recording(self, event):

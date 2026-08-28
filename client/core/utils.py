@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import copy
 import json
 import base64
 import unicodedata
@@ -453,9 +454,6 @@ DEFAULT_SETTINGS = {
     },
     "conversation_sounds": {},
     "cleared_chats": {},
-    "privateinfo": {
-        "paired": False
-    },
     "storage": {
         "auto_download_media": True,
         "media_max_days": 30,
@@ -875,6 +873,23 @@ def parse_bool_flag(value):
     return None
 
 
+def group_setting_notif_value(notif):
+    if not isinstance(notif, dict):
+        return None
+    raw = notif.get("value")
+    if raw is None:
+        raw = (notif.get("body") or "").strip()
+    if isinstance(raw, str):
+        if not raw.strip():
+            return None
+        low = raw.strip().lower()
+        if low in ("on", "announcement", "locked"):
+            return True
+        if low in ("off", "unlocked"):
+            return False
+    return parse_bool_flag(raw)
+
+
 def check_internet_connection(test_url="https://www.google.com", timeout=10):
     try:
         response = requests.get(test_url, timeout=timeout)
@@ -1083,3 +1098,28 @@ def plan_row_updates(old_rows: list, new_rows: list, max_ops: "int | None" = Non
     if len(ops) > max_ops:
         return None
     return ops
+
+
+def backfill_missing_defaults(settings: dict, defaults: dict) -> bool:
+    """Insert every key/section of *defaults* that *settings* does not have.
+
+    Returns True when anything was inserted, so the caller can decide whether
+    a save is warranted. Recurses into nested dicts, and never overwrites a
+    value the user already has — only genuinely absent keys are filled.
+
+    Module-level and pure so it can be tested directly: it used to be a
+    closure inside MainWindow.load_settings(), reachable only by constructing
+    a wx.Frame, and the ordering bug it shipped with (running BEFORE
+    _migrate_settings(), so the "ui" -> "user_interface" rename never fired
+    because the new section already existed) is exactly the kind of thing one
+    plain assertion catches.
+    """
+    modified = False
+    for key, value in defaults.items():
+        if key not in settings:
+            settings[key] = copy.deepcopy(value)
+            modified = True
+        elif isinstance(value, dict) and isinstance(settings[key], dict):
+            if backfill_missing_defaults(settings[key], value):
+                modified = True
+    return modified

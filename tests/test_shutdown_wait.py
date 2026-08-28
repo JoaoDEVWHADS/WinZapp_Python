@@ -98,14 +98,26 @@ class TestGracefulStopBudgetIsBounded:
             "gracefully' signal to poll on"
         )
 
-    def test_success_is_read_from_the_http_response_not_polled_for(self):
-        """WPPConnect's close-session handler `await`s client.close() (page.
-        close() + browser.close()) before responding — a 200 here IS proof
-        Chrome is already down, directly, with no need to then poll for
-        some other side effect."""
+    def test_the_http_response_is_read_but_not_trusted_as_proof(self):
+        """This assertion used to say the opposite, and was wrong.
+
+        The old claim was that close-session `await`s client.close(), so a 200
+        proves Chrome is down and nothing further need be polled. wppconnect's
+        close() (node_modules, api/whatsapp.js) does not support that: it
+        returns true without closing anything when the page is already closed,
+        and wraps both page.close() and browser.close() in `.catch(() => null)`,
+        so a failure or a hang also reports success. Sessions kept coming back
+        unpaired because of it — see test_shutdown_closing_state.py.
+
+        The response is still read (a non-200 is worth logging), but the
+        decision to kill now rests on the two waits that follow it."""
         src = inspect.getsource(MainWindow._stop_wpp_server)
         assert "resp.status_code == 200" in src
-        assert "timeout=self._WPP_GRACEFUL_STOP_SECONDS" in src
+        assert "_wait_for_session_flushed" in src
+        assert "wait_for_profile_release" in src
+        # The request's own timeout stays derived from the graceful-stop budget,
+        # now routed through the clipper so a Windows shutdown can shrink it.
+        assert "_phase_timeout(self._WPP_GRACEFUL_STOP_SECONDS)" in src
 
     def test_the_budget_is_short_enough_to_feel_like_quitting(self):
         """Not a hard number the user asked for, just a sanity ceiling: the old
