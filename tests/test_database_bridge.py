@@ -163,6 +163,32 @@ class TestATimeoutDoesNotCancelTheCoroutine:
             "can strand an open transaction the next write then commits"
         )
 
+    def test_a_coroutine_suspended_on_an_await_is_not_interrupted(self, bridge):
+        """The test that actually GUARDS the decision.
+
+        The queued-behind-a-hog case above documents it but cannot enforce it:
+        that coroutine has no await point before its side effect, so it runs to
+        completion whether or not the future was cancelled. This one suspends
+        on a real await with the loop free — precisely where a cancel WOULD
+        land, and where landing means a half-finished transaction left open on
+        the shared connection for the next write to commit.
+        """
+        ran = threading.Event()
+
+        async def slow():
+            await asyncio.sleep(0.4)
+            ran.set()
+
+        with pytest.raises(DatabaseBridgeTimeout):
+            bridge._call(slow(), timeout=0.1)
+
+        time.sleep(0.6)
+        assert ran.is_set(), (
+            "the timed-out coroutine was cancelled mid-await — that is what "
+            "skips database.py's `except Exception: rollback()`, since "
+            "CancelledError is a BaseException"
+        )
+
     def test_bridge_stays_usable_afterward(self, bridge):
         async def hog():
             time.sleep(0.3)
