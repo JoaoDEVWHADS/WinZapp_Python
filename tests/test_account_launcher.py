@@ -107,3 +107,94 @@ class TestSwitchToAccount:
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProcess(exit_code=1))
 
         assert switch_to_account("gd", A, frozen=True) == "failed"
+
+    def test_a_clean_exit_is_not_a_failure(self, monkeypatch):
+        """Exit code 0 means the child lost the single-instance race: it could
+        not take the mutex, forwarded its own ipc.request_activate() and quit.
+        That happens precisely when our own request_activate lost to a stale
+        socket or a busy target — so the switch DID work, and calling it
+        "failed" would put an error box on top of a window that just came to
+        the front."""
+        monkeypatch.setattr(ipc, "request_activate", lambda *a, **k: False)
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProcess(exit_code=0))
+
+        assert switch_to_account("gd", A, frozen=True) == "spawned"
+
+
+class _MainWindowStub:
+    """Only what the two MainWindow methods under test actually touch.
+
+    ConversationsPanel/MainWindow are wx classes that cannot be instantiated
+    without a running wx.App, so the unbound methods are bound onto this
+    plain object — the pattern the rest of this suite uses.
+    """
+
+    def __init__(self):
+        self.global_dir = "gd"
+        self.account_id = A
+        self.app_name = "WinZapp"
+        self.app_settings = None
+        self.settings = {"general": {"switch_behavior": "single"}}
+        self.hidden_to_tray = False
+        self.message_boxes = []
+        self.exited = False
+
+    def hide_to_tray(self):
+        self.hidden_to_tray = True
+
+    def real_exit(self):
+        self.exited = True
+
+    class _I18n:
+        @staticmethod
+        def t(key):
+            return "{app_name} Error" if key == "error" else key
+
+    i18n = _I18n()
+
+
+@pytest.fixture
+def stub(monkeypatch):
+    """Bind the two real methods onto the stub and neutralise wx."""
+    import main
+
+    s = _MainWindowStub()
+    monkeypatch.setattr(
+        main.wx, "MessageBox",
+        lambda msg, caption="", style=0, *a, **k: s.message_boxes.append(msg),
+    )
+    monkeypatch.setattr(main.wx, "CallAfter", lambda fn, *a, **k: fn(*a, **k))
+    s._switch_to_account = main.MainWindow._switch_to_account.__get__(s)
+    s._offer_switch_when_unpaired = main.MainWindow._offer_switch_when_unpaired.__get__(s)
+    return s
+
+
+class TestAFailedSwitchIsVisibleAndNonDestructive:
+    """The behaviour this PR actually delivers to the user. switch_to_account()
+    returning "failed" is only useful if the callers act on it — and both of
+    them previously did something irreversible on the assumption the switch
+    had worked."""
+
+    def test_a_failed_switch_does_not_hide_to_tray(self, stub, monkeypatch):
+        """Hiding into a switch that never happened leaves the user with no
+        visible window and no idea why the button did nothing."""
+        import main
+        monkeypatch.setattr(main, "switch_to_account", lambda *a, **k: "failed",
+                            raising=False)
+        monkeypatch.setattr(account_launcher, "switch_to_account",
+                            lambda *a, **k: "failed")
+
+        stub._switch_to_account("b" * 32)
+
+        assert stub.hidden_to_tray is False
+        assert stub.message_boxes, "the user must be told the switch failed"
+
+    def test_a_successful_switch_still_hides_to_tray(self, stub, monkeypatch):
+        """The guard must not cost the normal path its behaviour."""
+        monkeypatch.setattr(account_launcher, "switch_to_account",
+                            lambda *a, **k: "spawned")
+
+        stub._switch_to_account("b" * 32)
+
+        assert stub.hidden_to_tray is True
+        assert not stub.message_boxes

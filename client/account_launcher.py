@@ -48,9 +48,11 @@ def switch_to_account(global_dir: str, account_id: str,
     """Switch to ``account_id``: activate its running process if any, else spawn.
 
     Returns "activated" if an existing process answered the IPC request,
-    "spawned" if a new process was started and was still running a moment
-    later, or "failed" if the spawn itself raised or the process died
-    almost immediately (missing DLL, corrupted install, blocked by
+    "spawned" if a new process was started and either was still running a
+    moment later or had already exited cleanly (see the poll() check for why
+    exit code 0 counts as success), or "failed" if the spawn itself raised or
+    the process died with a nonzero code almost immediately (missing DLL,
+    corrupted install, blocked by
     antivirus). Before this, both "spawned fine" and "failed to spawn" were
     the same plain False — a caller had no way to tell a genuine failure
     apart from a normal spawn, so a crashed target silently left the user
@@ -71,7 +73,15 @@ def switch_to_account(global_dir: str, account_id: str,
         return "failed"
 
     time.sleep(_SPAWN_VERIFY_DELAY)
-    if proc.poll() is not None:
+    # A clean exit is NOT a failure. The spawned process legitimately exits 0
+    # when it loses the single-instance race: it fails to take the mutex,
+    # forwards its own ipc.request_activate() and quits (see main.py's
+    # startup path). That happens exactly when our request_activate above
+    # lost to a stale socket or a busy target — i.e. the switch DID work, and
+    # reporting "failed" there would show the user an error box on top of a
+    # window that just came to the front. Only a nonzero code means the
+    # process actually died on us (missing DLL, corrupted install, AV block).
+    if proc.poll() not in (None, 0):
         logging.error(
             "[switch_to_account] %s exited immediately after spawning (code=%s)",
             account_id, proc.returncode,
