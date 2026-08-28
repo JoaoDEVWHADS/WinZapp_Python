@@ -10088,9 +10088,26 @@ class ConversationsPanel(wx.Panel):
         if not remote_jid:
             return
 
-        content = self._get_message_content(msg) or ""
-        if content.startswith("> ") and "\n" in content:
-            content = content[content.index("\n") + 1:]
+        # Read the WIRE text, never _get_message_content() — that one returns
+        # what the LIST shows, which is not what was sent:
+        #   * link_preview_text() PREPENDS the preview WhatsApp resolved for
+        #     the URL, as "<title>. <description>. <text>". Resending that
+        #     would deliver WhatsApp's own preview card to the recipient as
+        #     literal characters in the message body.
+        #   * _resolve_mentions_in_text() turns the stored "@554899..." back
+        #     into "@João" for display. Resending that sends a literal
+        #     "@João" — no mention, and a name string WhatsApp never saw.
+        # The raw body has neither, so the "> " strip the edit path needs is
+        # not needed here either (nothing in the send path ever writes that
+        # prefix into message.conversation) — and doing it would silently
+        # truncate a message from a user who legitimately types quote-style
+        # lines.
+        body = msg.get("message") or {}
+        content = (
+            body.get("conversation")
+            or (body.get("extendedTextMessage") or {}).get("text")
+            or ""
+        )
         if not content:
             return
 

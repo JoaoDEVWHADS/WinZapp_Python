@@ -335,9 +335,13 @@ class _ResendStub:
         self.removed_ids = []
         self.registered = []
 
-    def _get_message_content(self, msg):
-        body = msg.get("message") or {}
-        return body.get("conversation") or (body.get("extendedTextMessage") or {}).get("text") or ""
+    # Deliberately NOT stubbing _get_message_content here. It used to be
+    # stubbed with a raw-body reader — which is the fix, not the production
+    # method — so the resend path was never actually exercised against the
+    # display text the real method returns, and the link-preview/mention
+    # corruption below went unnoticed. _on_menu_resend_message must not call
+    # it at all; if it starts again, these tests fail with AttributeError,
+    # which is the point.
 
     def _clear_empty_placeholder(self):
         pass
@@ -448,3 +452,65 @@ class TestResendMenuItemIsGatedCorrectly:
         src = inspect.getsource(ConversationsPanel.on_messages_context_menu)
         assert 'if _is_text and msg.get("_send_unconfirmed"):' in src
         assert "resend_message" in src
+
+
+class TestTheResendCarriesTheWireTextNotTheDisplayText:
+    """A resend must put back on the wire exactly what was sent, not what the
+    message list shows.
+
+    _get_message_content() is the LIST's renderer. For an extendedTextMessage
+    it ends in link_preview_text(), which PREPENDS the title/description
+    WhatsApp resolved for the URL ("<title>. <description>. <text>"), and it
+    runs _resolve_mentions_in_text(), which turns the stored "@5548..." back
+    into "@João". Both are display affordances. Sending either one delivers
+    characters the user never typed.
+    """
+
+    def test_a_link_preview_is_not_injected_into_the_body(self):
+        msg = _unconfirmed_text_msg()
+        msg["messageType"] = "extendedTextMessage"
+        msg["message"] = {
+            "extendedTextMessage": {
+                "text": "https://noticias.exemplo.com/materia",
+                "title": "Título da matéria",
+                "description": "Primeiro parágrafo da matéria",
+            }
+        }
+        panel = _ResendStub([msg])
+
+        ConversationsPanel._on_menu_resend_message(panel, msg)
+
+        sent = panel.main_window.message_queue.enqueued[-1]
+        assert sent.text == "https://noticias.exemplo.com/materia"
+        assert "Título da matéria" not in sent.text
+        assert "Primeiro parágrafo" not in sent.text
+
+    def test_a_mention_keeps_its_phone_form(self):
+        msg = _unconfirmed_text_msg()
+        msg["messageType"] = "extendedTextMessage"
+        msg["message"] = {
+            "extendedTextMessage": {
+                "text": "@5548999999999 bom dia",
+                "contextInfo": {"mentionedJid": ["5548999999999@s.whatsapp.net"]},
+            }
+        }
+        panel = _ResendStub([msg])
+
+        ConversationsPanel._on_menu_resend_message(panel, msg)
+
+        sent = panel.main_window.message_queue.enqueued[-1]
+        assert sent.text == "@5548999999999 bom dia"
+
+    def test_a_message_that_legitimately_starts_with_a_quote_marker_is_intact(self):
+        """The edit path strips a leading "> " because it drops the text into
+        the composer for the user to read first. A resend fires straight at
+        message_queue, so the same strip silently truncates a message from
+        anyone who types quote-style lines."""
+        msg = _unconfirmed_text_msg()
+        msg["message"] = {"conversation": "> importante\nvê isso aqui"}
+        panel = _ResendStub([msg])
+
+        ConversationsPanel._on_menu_resend_message(panel, msg)
+
+        sent = panel.main_window.message_queue.enqueued[-1]
+        assert sent.text == "> importante\nvê isso aqui"
