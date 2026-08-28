@@ -49,7 +49,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -833,6 +833,86 @@ def history_gap_closed(fetched: list, local_records: list, hole_top_ts: int) -> 
     return bool(below & got)
 
 
+def participant_digits(jid) -> str:
+    if not isinstance(jid, str):
+        return ""
+    return jid.rsplit("@", 1)[0].split(":")[0]
+
+
+def group_participant_is_me(participant, my_phone_digits, my_lid_digits,
+                            digits_equivalent) -> bool:
+    if not isinstance(participant, dict):
+        return False
+    p_id = participant.get("id") or ""
+    if isinstance(p_id, dict):
+        p_id = p_id.get("_serialized", "")
+    p_digits = participant_digits(p_id)
+    if not p_digits:
+        return False
+    if my_phone_digits and digits_equivalent(p_digits, my_phone_digits):
+        return True
+    return bool(my_lid_digits and p_digits == my_lid_digits)
+
+
+def set_group_participant_admin(participants, is_admin, my_phone_digits,
+                                my_lid_digits, digits_equivalent) -> bool:
+    if not isinstance(participants, list):
+        return False
+    for p in participants:
+        if not group_participant_is_me(p, my_phone_digits, my_lid_digits,
+                                       digits_equivalent):
+            continue
+        p["admin"] = "admin" if is_admin else None
+        p["isAdmin"] = is_admin
+        if not is_admin:
+            p["isSuperAdmin"] = False
+        return True
+    return False
+
+
+def group_participant_admin_flag(participants, my_phone_digits, my_lid_digits,
+                                 digits_equivalent) -> "bool | None":
+    if not isinstance(participants, list) or not participants:
+        return None
+    for p in participants:
+        if group_participant_is_me(p, my_phone_digits, my_lid_digits,
+                                   digits_equivalent):
+            return bool(p.get("admin") or p.get("isAdmin") or p.get("isSuperAdmin"))
+    return None
+
+
+def group_send_permission_from_metadata(chat, my_phone_digits, my_lid_digits,
+                                        digits_equivalent, known_am_admin=None):
+    group_meta = chat.get("groupMetadata")
+    if not isinstance(group_meta, dict):
+        group_meta = {}
+    announce = _parse_bool_flag(group_meta.get("announce"))
+    if announce is None:
+        announce = _parse_bool_flag(chat.get("announce"))
+    if announce is None:
+        return None
+    participants = group_meta.get("participants") or chat.get("participants") or []
+    am_admin = group_participant_admin_flag(
+        participants, my_phone_digits, my_lid_digits, digits_equivalent
+    )
+    if am_admin is None:
+        am_admin = known_am_admin
+    if announce and am_admin is None:
+        return None
+    return {"announce": announce, "am_admin": bool(am_admin)}
+
+
+def unexpired_group_send_verdict(stored, now, max_age_seconds):
+    if not isinstance(stored, dict):
+        return None
+    t = stored.get("t")
+    if isinstance(t, bool) or not isinstance(t, (int, float)) or t <= 0:
+        return None
+    if now - t > max_age_seconds:
+        return None
+    return stored
+
+
 class MainWindow(wx.Frame):
     def __init__(self, account_id=None, account_name=None, startup_source="user",
                  resume_pending=False, registry=None, global_dir=None):
@@ -1317,6 +1397,8 @@ class MainWindow(wx.Frame):
                     except Exception:
                         logging.exception("[accounts] pending→paired transition failed")
 
+        self._startup_token_tail_done = False
+
         logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
         if not self.token:
@@ -1372,67 +1454,6 @@ class MainWindow(wx.Frame):
         self._pending_lid_inserts: dict = {}
         # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
-        # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
-        def _connect_bg():
-            # Ensure session is active on WPPConnect Server before connecting WebSocket
-            self.check_wa_connection_http()
-            if reuse_existing_ws:
-                # self.ws is already the live connection from pairing —
-                # connect_websocket() itself unconditionally disconnects
-                # before reconnecting, which is exactly the premature
-                # disconnect this whole path exists to avoid (see the
-                # "Initialize websocket" comment above). Nothing else to do.
-                logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
-                return
-            try:
-                ws_connected = False
-                for _attempt in range(5):
-                    try:
-                        logging.info("MainWindow: Connecting WebSocket... attempt %d", _attempt + 1)
-                        self.connect_websocket()
-                        ws_connected = True
-                        break
-                    except Exception as _e:
-                        logging.warning("MainWindow: WebSocket connect attempt %d failed: %s", _attempt + 1, _e)
-                        time.sleep(2)
-                if not ws_connected:
-                    logging.warning("MainWindow: WebSocket could not connect during startup; background HTTP probe will auto-connect when ready.")
-                    raise RuntimeError("WebSocket could not connect after 5 attempts")
-            except Exception as e:
-                logging.exception("MainWindow: Exception during websocket connection")
-                self.error_sound.play()
-                error_str = str(e)
-                # If the instance does not exist on the server (e.g. database recreated/wiped),
-                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
-                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
-                    def _gui_logout():
-                        wx.MessageBox(
-                            self.i18n.t("device_logged_out"),
-                            self.i18n.t("error").format(self.app_name),
-                            wx.OK | wx.ICON_ERROR,
-                        )
-                        self._on_disconnect()
-                    wx.CallAfter(_gui_logout)
-                else:
-                    def _gui_failed():
-                        wx.MessageBox(
-                            self.i18n.t("websocket_failed_reconnect"),
-                            self.i18n.t("connection_error"),
-                            wx.OK | wx.ICON_WARNING,
-                        )
-                        self.connect.show_connection_dial()
-                    wx.CallAfter(_gui_failed)
-                self._just_paired = True
-                # Multi-account: re-pairing after a logout also promotes the
-                # account back to paired if it had fallen to pending (Zad 3.2).
-                if getattr(self, "account_id", None) and getattr(self, "registry", None):
-                    try:
-                        acc = self.registry.get(self.account_id)
-                        if acc and acc.get("state") == "pending":
-                            self.registry.set_state(self.account_id, "paired")
-                    except Exception:
-                        logging.exception("[accounts] re-pair pending→paired failed")
 
         logging.info("MainWindow: Initializing User Interface immediately...")
 
@@ -2995,8 +3016,66 @@ class MainWindow(wx.Frame):
             logging.info("[_raw_session_status] probe failed: %s", e)
         return ""
 
-    def _kill_orphaned_chrome_for_session(self):
-        """Kill a suspended chrome.exe still holding this account's userDataDir
+    def _chrome_pids_owning_session(self, session_name: str) -> list:
+        import sys
+        if sys.platform != "win32" or not session_name:
+            return []
+        import connection_state as cs
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+                 "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+                creationflags=no_window, text=True, stderr=subprocess.DEVNULL, timeout=15,
+            )
+        except Exception as e:
+            logging.info("[profile-lock] could not list chrome processes: %s", e)
+            return []
+        pids = []
+        for line in out.splitlines():
+            pid, _, cmdline = line.partition("\t")
+            if pid.strip() and cs.chrome_cmdline_owns_session(cmdline, session_name):
+                pids.append(pid.strip())
+        return pids
+
+    def wait_for_profile_release(self, session_name: str, timeout: float = 20.0) -> bool:
+        import sys
+        if sys.platform != "win32" or not session_name:
+            return True
+        deadline = time.monotonic() + timeout
+        polls = 0
+        while time.monotonic() < deadline:
+            polls += 1
+            holders = self._chrome_pids_owning_session(session_name)
+            if not holders:
+                if polls > 1:
+                    logging.info(
+                        "[profile-lock] %s released after %d poll(s)",
+                        session_name[:12], polls,
+                    )
+                return True
+            time.sleep(0.5)
+        logging.warning(
+            "[profile-lock] %s still held after %.0fs — killing the holder(s)",
+            session_name[:12], timeout,
+        )
+        self._kill_orphaned_chrome_for_session(session_name)
+        grace_deadline = time.monotonic() + 5.0
+        for _ in range(10):
+            if not self._chrome_pids_owning_session(session_name):
+                return True
+            if time.monotonic() >= grace_deadline:
+                break
+            time.sleep(0.5)
+        logging.warning(
+            "[profile-lock] %s is STILL held after the kill — starting the "
+            "session anyway; it will likely be refused.", session_name[:12],
+        )
+        return False
+
+    def _kill_orphaned_chrome_for_session(self, session_name: str = None):
+        """Kill a suspended chrome.exe still holding a session's userDataDir
         lock, then drop its stale lockfile, so WPPConnect can relaunch.
 
         After hibernation the WhatsApp Web chrome.exe is suspended, not killed:
@@ -3012,7 +3091,7 @@ class MainWindow(wx.Frame):
         if sys.platform != "win32":
             return
         import connection_state as cs
-        session_name = (getattr(self, "token", "") or "").split(":")[0]
+        session_name = session_name or (getattr(self, "token", "") or "").split(":")[0]
         if not session_name:
             return
         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -3044,9 +3123,7 @@ class MainWindow(wx.Frame):
         # Drop the stale lockfile so a relaunch is not refused even if the
         # process was already gone but left the file behind.
         try:
-            from app_paths import data_path
-            udd = os.path.join(os.path.dirname(data_path("settings.json")),
-                               "..", "..", "api", "userDataDir", session_name)
+            udd = resource_path("api", "userDataDir", session_name)
             for name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"):
                 p = os.path.join(udd, name)
                 if os.path.exists(p):
@@ -3348,7 +3425,13 @@ class MainWindow(wx.Frame):
         # Nothing to do only when the flag *and* the derived offline state are
         # both already consistent with `connected`.
         if connected == was and self._auto_offline == (not connected):
-            return
+            still_owed = (
+                not connected
+                and not getattr(self, "_wpp_updating", False)
+                and getattr(self, "_offline_announce_deferred", False)
+            )
+            if not still_owed:
+                return
 
         if connected:
             # True exactly when the connection just came back from being down
@@ -3362,6 +3445,7 @@ class MainWindow(wx.Frame):
             self._dead_browser_strikes = 0
             self._auto_repair_dialog_shown = False
             self._auto_offline = False
+            self._offline_announce_deferred = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
             first_ever_connect = not self._wa_connect_announced
@@ -3416,6 +3500,19 @@ class MainWindow(wx.Frame):
             return
 
         self._wa_offline_strikes += 1
+
+        if getattr(self, "_wpp_updating", False):
+            logging.info(
+                "[connection] WPPConnect update in progress (%s) — engaging "
+                "offline mode and showing 'connecting' instead of 'offline'.",
+                reason or "checked",
+            )
+            self._auto_offline = True
+            self._offline_announce_deferred = True
+            self._apply_offline_state()
+            wx.CallAfter(self._set_status, self.i18n.t("tray_connecting"))
+            return
+
         if not confirmed:
             never_connected_yet = not self._wa_connect_announced
             # Bounded by elapsed time alone, deliberately. This used to also
@@ -3453,6 +3550,7 @@ class MainWindow(wx.Frame):
                 return
 
         self._auto_offline = True
+        self._offline_announce_deferred = False
         self._apply_offline_state()
         logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
         wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
@@ -3638,11 +3736,26 @@ class MainWindow(wx.Frame):
     # and letting WinZapp reinstall from scratch. This checks the actual
     # wppconnect-team/wppconnect-server GitHub releases directly.
 
+    def wpp_update_may_run_now(self) -> bool:
+        try:
+            if self._is_pairing_dialog_active():
+                return False
+        except Exception:
+            return False
+        return not getattr(self, "_pairing_in_progress", False)
+
     def _start_wpp_update_checker(self, force: bool = False):
         if self.background_mode:
             return
         updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
         if not updates_enabled and not force:
+            return
+        if not force and not self.wpp_update_may_run_now():
+            logging.info(
+                "[wpp_update] Pairing in progress — deferring the WPPConnect "
+                "update check by 5 minutes."
+            )
+            wx.CallLater(300000, self._start_wpp_update_checker)
             return
         from updater import WppUpdateChecker
         self._wpp_update_checker = WppUpdateChecker(self)
@@ -3671,10 +3784,12 @@ class MainWindow(wx.Frame):
     def _update_wpp_server(self, target_tag: str):
         """
         Stop the running WPPConnect Server, reinstall it at *target_tag* and
-        restart it. Must run on the wx main thread (creates modal dialogs);
-        both WppUpdateChecker call sites already dispatch here via
-        wx.CallAfter, so this can call ShowModal() directly.
         """
+        if getattr(self, "_wpp_updating", False):
+            logging.info("[wpp_update] An update is already running — ignoring "
+                         "the request to update to %s.", target_tag)
+            return
+
         logging.info("[wpp_update] Stopping WPPConnect Server before update to %s...", target_tag)
         if not self.background_mode:
             self.output(self.i18n.t("wpp_update_in_progress"), interrupt=True)
@@ -3684,89 +3799,70 @@ class MainWindow(wx.Frame):
         # status-session probe, and declare the app offline/disconnected even
         # though the actual WhatsApp session never dropped.
         self._wpp_updating = True
-        try:
-            self._stop_wpp_server()
-            self.wpp_process = None
 
-            from ui.dialogs.api_setup import ApiSetupDialog
-            dlg = ApiSetupDialog(
-                self,
-                title_override=self.i18n.t("api_update_dialog_title"),
-                forced_tag=target_tag,
-            )
-            result = dlg.ShowModal()
-            dlg.Destroy()
+        def _stop_phase():
+            try:
+                self._stop_wpp_server()
+                self.wpp_process = None
 
-            if result != wx.ID_OK:
-                logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
-                self.error_sound.play()
-                wx.MessageBox(
-                    self.i18n.t("wpp_update_failed_msg"),
-                    self.i18n.t("update_error_title"),
-                    wx.OK | wx.ICON_ERROR,
-                    self,
-                )
-                # Whatever is left on disk (the previous install if the failure
-                # happened before ApiSetupDialog's cleanup step, nothing at all if
-                # it happened after) — ensure_wpp_running() already knows how to
-                # handle both: start what's there, or silently do nothing if the
-                # required files are missing.
-                self.ensure_wpp_running()
-                return
-
-            logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
-            self.ensure_wpp_running()
-
-            # ensure_wpp_running() only confirms the new WPPConnect HTTP API
-            # answers — killing the old node.exe process to update it also
-            # dropped the Socket.IO connection this app uses for live
-            # messages/presence, and nothing else here re-establishes it or
-            # tells the new process to resume the WhatsApp session. Left
-            # alone, python-socketio's own auto-reconnect (see
-            # WebSocketClient.__init__) eventually notices and retries on its
-            # own, but with up to a 60 s backoff and no guarantee the
-            # WhatsApp session itself gets told to restart — reported live as
-            # the app sitting in offline/disconnected mode until the whole
-            # program was restarted. Force it explicitly instead of waiting
-            # on the passive health checker to get around to it; a
-            # successful reconnect's on_connect() handler already re-checks
-            # HTTP status and retriggers a sync on its own — but check and
-            # trigger a sync explicitly here too, the same recovery sequence
-            # _recover_from_suspend() uses, as a fallback in case the socket
-            # was already connected (so on_connect() never fires again) or
-            # the reconnect itself is slow.
-            def _recover_after_update():
+                self._kill_orphaned_chrome_for_session()
+            except Exception:
+                logging.exception("[wpp_update] Stopping the server before the "
+                                  "update failed — reinstalling anyway, which is "
+                                  "what the user asked for")
+            finally:
                 try:
-                    self._reconnect_websocket_now()
-                    self.check_wa_connection_http()
-                    self.trigger_sync_if_needed()
+                    wx.CallAfter(_after_stop)
                 except Exception:
-                    logging.exception("[wpp_update] Post-update reconnection failed")
-            threading.Thread(target=_recover_after_update, daemon=True).start()
+                    logging.exception("[wpp_update] Could not resume the update "
+                                      "on the wx main thread")
+                    self._wpp_updating = False
 
-            # If the window was hidden (minimized to tray) when the update
-            # was requested, bring it back — the update can run for minutes
-            # and finishes with the API restarting, which is exactly the
-            # kind of state change the user needs to see.
-            #
-            # _window_hidden is only set once __init__ reaches its own
-            # "window lifecycle" setup — but WppUpdateChecker's first check
-            # is scheduled via wx.CallLater(90000, ...) very early in
-            # __init__, well before that point, and its own check can take
-            # longer still. If the initial pairing dialog is still on
-            # screen 90+ seconds after launch (completely normal — that's a
-            # human reading/scanning a QR code) and the user accepts an
-            # update from it, _update_wpp_server() runs before
-            # self._window_hidden exists at all — getattr() instead of a
-            # bare attribute access is what keeps that a no-op instead of
-            # an AttributeError crash right after the very first pairing.
-            if getattr(self, "_window_hidden", False) and not self.background_mode:
-                wx.CallAfter(self.restore_window)
+        def _after_stop():
+            try:
+                from ui.dialogs.api_setup import ApiSetupDialog
+                dlg = ApiSetupDialog(
+                    self,
+                    title_override=self.i18n.t("api_update_dialog_title"),
+                    forced_tag=target_tag,
+                )
+                result = dlg.ShowModal()
+                dlg.Destroy()
 
-            if not self.background_mode:
-                self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
-        finally:
-            self._wpp_updating = False
+                if result != wx.ID_OK:
+                    logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
+                    self.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("wpp_update_failed_msg"),
+                        self.i18n.t("update_error_title"),
+                        wx.OK | wx.ICON_ERROR,
+                        self,
+                    )
+                    self.ensure_wpp_running()
+                    return
+
+                logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
+                self.ensure_wpp_running()
+
+                def _recover_after_update():
+                    try:
+                        self._reconnect_websocket_now()
+                        self.check_wa_connection_http()
+                        self.trigger_sync_if_needed()
+                    except Exception:
+                        logging.exception("[wpp_update] Post-update reconnection failed")
+                threading.Thread(target=_recover_after_update, daemon=True).start()
+
+                if getattr(self, "_window_hidden", False) and not self.background_mode:
+                    wx.CallAfter(self.restore_window)
+
+                if not self.background_mode:
+                    self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
+            finally:
+                self._wpp_updating = False
+
+        threading.Thread(target=_stop_phase, daemon=True,
+                         name="winzapp-wpp-update-stop").start()
 
     # ── Tray / window lifecycle ───────────────────────────────────────────────
 
@@ -3852,6 +3948,11 @@ class MainWindow(wx.Frame):
         token = getattr(self, "token", None)
         if not token:
             return
+        if not getattr(self, "_wa_connected", False):
+            logging.debug(
+                "[presence] skipping '%s' — no live WhatsApp connection", presence
+            )
+            return
         url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/set-online-presence"
         is_online = presence == "available"
         headers = {
@@ -3859,9 +3960,19 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json",
         }
         try:
-            api_post(url, json={"isOnline": is_online}, headers=headers, timeout=5)
+            resp = api_post(
+                url, json={"isOnline": is_online}, headers=headers, timeout=5
+            )
+            status = getattr(resp, "status_code", None)
+            if status is not None and status >= 400:
+                logging.warning(
+                    "[presence] set-online-presence('%s') returned HTTP %s",
+                    presence, status,
+                )
         except Exception:
-            pass
+            logging.debug(
+                "[presence] set-online-presence('%s') failed", presence, exc_info=True
+            )
 
     def _init_tray(self):
         """Create the system-tray icon if the setting is enabled."""
@@ -4653,15 +4764,6 @@ class MainWindow(wx.Frame):
             and remote_jid.endswith("@s.whatsapp.net")
             and self._is_self_jid(remote_jid)
         ):
-            # Plain self-chat message, no group/participant artifact involved
-            # — just WhatsApp reporting our own number in the "other" digit
-            # variant for this particular event (with vs. without the
-            # Brazilian 9th digit). _is_self_jid() already tolerates that
-            # when deciding it's self, but without canonicalizing remote_jid
-            # here too, each variant kept its own separate chat entry —
-            # e.g. sending a photo to yourself as a document created one
-            # "Eu" chat for the (9-digit) document echo and a second "Eu"
-            # chat for the (8-digit) sync-artifact echo of the same send.
             remote_jid = my_jid
 
         return remote_jid, from_me
@@ -4879,6 +4981,7 @@ class MainWindow(wx.Frame):
         # does not — see _apply_group_subject_change).
         self._apply_group_subject_change(remote_jid, chat, msg, live=True)
         self._refresh_mention_cache_on_membership_change(remote_jid, msg)
+        self._apply_group_settings_change(remote_jid, chat, msg)
 
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
@@ -5301,6 +5404,17 @@ class MainWindow(wx.Frame):
             if ppm.get(target) != push:
                 ppm[target] = push
                 changed = True
+        if changed:
+            unresolvable = getattr(self, "_unresolvable_names", None)
+            for target in targets:
+                if not unresolvable or target not in unresolvable:
+                    continue
+                unresolvable.discard(target)
+                try:
+                    self.db.delete_unresolvable_name(target)
+                except Exception as exc:
+                    logging.warning("[_learn_sender_name] Failed to clear unresolvable name %s: %s",
+                                    target, exc)
         return changed
 
     def _needs_sender_resolution(self, jid: str) -> bool:
@@ -6391,6 +6505,14 @@ class MainWindow(wx.Frame):
         try:
             from app_paths import log_path
             self._wpp_log_path = log_path("wppconnect.log")
+            try:
+                if os.path.exists(self._wpp_log_path):
+                    prev = self._wpp_log_path + ".1"
+                    if os.path.exists(prev):
+                        os.remove(prev)
+                    os.replace(self._wpp_log_path, prev)
+            except Exception as e:
+                logging.info("[startup] could not rotate wppconnect.log: %s", e)
             log_fh = open(self._wpp_log_path, "w",
                           encoding="utf-8", errors="replace")
             # Use the short (8.3) path so PostgreSQL's initdb doesn't choke on
@@ -6774,6 +6896,13 @@ class MainWindow(wx.Frame):
                     "running under it) — the graceful close-session above didn't confirm "
                     "success, so its profile may not have finished flushing."
                 )
+            if session_name:
+                if self.wait_for_profile_release(session_name, timeout=15.0):
+                    self._shutdown_audit("Chrome released the profile before the kill")
+                else:
+                    self._shutdown_audit(
+                        "Chrome STILL held the profile — killing anyway, its "
+                        "leveldb may be incomplete")
             self._shutdown_audit(f"taskkill /F /T node pid={pid} (flush done above)")
             try:
                 import sys
@@ -7956,8 +8085,7 @@ class MainWindow(wx.Frame):
                     for s in store.list():
                         if s.get("status") == "active" and s.get("name") != new_name:
                             store.set_status(s["name"], "abandoned")
-                    store.register(new_name, token=token.replace("/", "_").replace("+", "-"),
-                                   status="active")
+                    store.register(new_name, token=token, status="active")
                 if gd:
                     try:
                         with sessions_lock(gd):
@@ -7970,6 +8098,51 @@ class MainWindow(wx.Frame):
                     _commit()
         except Exception:
             logging.exception("[sessions] registering active session failed (non-fatal)")
+
+    def _register_abandoned_session(self, token: str) -> None:
+        if not token:
+            return
+        try:
+            store = self._get_session_store()
+            if store is None:
+                return
+            name = token.replace("/", "_").replace("+", "-").split(":")[0]
+            if not name:
+                return
+            existing = store.get(name)
+            if existing is not None and existing.get("status") == "active":
+                logging.info(
+                    "[sessions] not abandoning %s — the store still holds it as "
+                    "active (a reused, possibly live session)", name[:12],
+                )
+                return
+
+            from coord_locks import sessions_lock, LockTimeout
+            gd = getattr(self, "global_dir", None)
+
+            def _commit():
+                store.register(name, token=token, status="abandoned")
+                logging.info(
+                    "[sessions] registered failed pairing session %s as abandoned "
+                    "so it can be deregistered and its userDataDir reclaimed",
+                    name[:12],
+                )
+
+            if gd:
+                try:
+                    with sessions_lock(gd):
+                        _commit()
+                except LockTimeout:
+                    logging.warning(
+                        "[sessions] sessions_lock busy — could not record "
+                        "abandoned session %s", name[:12],
+                    )
+            else:
+                _commit()
+        except Exception:
+            logging.exception(
+                "[sessions] recording an abandoned session failed (non-fatal)"
+            )
 
     def _session_crypto(self):
         """Adapter exposing .encrypt/.decrypt over token_vault + this account's
@@ -8049,6 +8222,12 @@ class MainWindow(wx.Frame):
                 store.ensure_from_legacy_token(self.token.split(":")[0], self.token)
         except Exception:
             logging.exception("[sessions] seeding session store failed (non-fatal)")
+        if self._startup_token_tail_done:
+            logging.info("[retrieve_token] Token refreshed; startup audit and "
+                         "session cleanup already done this launch — skipping.")
+            return
+        self._startup_token_tail_done = True
+
         # Persistent audit: which session are we starting with, and what does the
         # store think of it + every sibling. If a working session silently turned
         # 'abandoned' and a fresh (unpaired) one took over between quit and this
@@ -8134,9 +8313,7 @@ class MainWindow(wx.Frame):
             gd = getattr(self, "global_dir", None)
             if not gd:
                 return
-            udd_root = os.path.abspath(os.path.join(
-                os.path.dirname(data_path("settings.json")),
-                "..", "..", "api", "userDataDir"))
+            udd_root = os.path.abspath(resource_path("api", "userDataDir"))
             node_down = False  # circuit breaker: stop retrying logout once refused
             # Whole scan -> validate -> rmtree runs under the shared sessions_lock
             # so no other account can register/activate a name mid-cleanup, and
@@ -8167,7 +8344,8 @@ class MainWindow(wx.Frame):
                             logging.warning("[sessions] refusing unsafe session name for cleanup")
                             continue
                         try:
-                            node_down = not self._logout_abandoned_session(name, skip=node_down)
+                            node_down = not self._logout_abandoned_session(
+                                name, token=s.get("token"), skip=node_down)
                             # Delete then CONFIRM gone before dropping the store row.
                             # No ignore_errors: a failed delete (e.g. a lock) leaves
                             # the 'abandoned' record so we retry next start (GPT r1 #2/#c).
@@ -8187,19 +8365,26 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[sessions] _cleanup_abandoned_sessions failed (non-fatal)")
 
-    def _logout_abandoned_session(self, name: str, skip: bool = False) -> bool:
+    def _logout_abandoned_session(self, name: str, token: str = None,
+                                  skip: bool = False) -> bool:
         """Best-effort logout by SESSION NAME (never the token — a token in the
         URL can be mis-parsed and leak to logs; the token goes in Bearer only,
         GPT r1 #1). Returns True if Node is reachable (so the caller's circuit
         breaker keeps trying), False on connection-refused (Node down — skip the
-        rest). ``skip`` short-circuits once Node is known down."""
+        """
         if skip or not name:
             return not skip
+        if not token:
+            logging.info(
+                "[sessions] no stored token for %s — cannot deregister it at "
+                "WhatsApp; removing its local profile only", name[:12],
+            )
+            return True
+        signature = token.split(":", 1)[1] if ":" in token else token
         try:
-            token = self._get_wa_token() or name
             api_post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{name}/logout-session",
-                headers={"Authorization": f"Bearer {token}"}, timeout=5,
+                headers={"Authorization": f"Bearer {signature}"}, timeout=5,
             )
             return True
         except requests.exceptions.ConnectionError:
@@ -8330,6 +8515,12 @@ class MainWindow(wx.Frame):
         self._locally_read_at = {
             k: int(v or 0)
             for k, v in dict(self.db.get_metadata_json("locally_read_at", {})).items()
+        }
+
+        self._group_send_perms = {
+            k: v
+            for k, v in dict(self.db.get_metadata_json("group_send_perms", {})).items()
+            if isinstance(v, dict)
         }
 
         if settings_dirty:
@@ -10262,6 +10453,50 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
         # _initial_sync_running is reset by start_sync()'s finally block.
 
+    def _probe_chats_and_start_sync(self) -> bool:
+        def _already_syncing() -> bool:
+            if self.messages_set_completed:
+                return True
+            existing = getattr(self, "sync_thread", None)
+            if existing and existing.is_alive():
+                return True
+            return getattr(self, "_sync_completed", False)
+
+        if _already_syncing():
+            if getattr(self, "_sync_completed", False):
+                wx.CallAfter(self._set_status, "")
+            return True
+        try:
+            url = (
+                f"{self.wpp_server}:{self.wpp_port}"
+                f"/api/{self.token}/list-chats"
+            )
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            }
+            r = api_post(
+                url,
+                json={"ignoreGroupMetadata": True},
+                headers=headers,
+                timeout=5,
+            )
+            if r.ok and isinstance(r.json(), list):
+                self.messages_set_completed = True
+                self._try_start_sync_thread()
+                return True
+            if self._check_wa_connection_closed(r):
+                logging.warning(
+                    "[wait_messages_set] list-chats answered Disconnected (HTTP %s) — "
+                    "ending the probe instead of syncing against a dead session; "
+                    "the health checker retries once WhatsApp is reachable.",
+                    r.status_code,
+                )
+                return True
+        except Exception:
+            pass
+        return False
+
     def wait_messages_set(self):
         # _set_wa_connected() is what sets "preparing_to_sync" now, exactly
         # when the connected sound plays — not here. This function runs
@@ -10275,59 +10510,14 @@ class MainWindow(wx.Frame):
         # responds.  If the API never responds within the window, start sync
         # unconditionally so the program never stays stuck on "preparing to sync".
         def _fallback():
-            def _already_syncing() -> bool:
-                if self.messages_set_completed:
-                    return True
-                existing = getattr(self, "sync_thread", None)
-                if existing and existing.is_alive():
-                    return True
-                return getattr(self, "_sync_completed", False)
-
-            def _probe_and_start() -> bool:
-                """Probe the API for existing chats; start sync and return True if found."""
-                if _already_syncing():
-                    # Sync is already running or completed — clear "preparing" status
-                    # if it was left visible because the sync finished before this
-                    # fallback thread checked in.
-                    if getattr(self, "_sync_completed", False):
-                        wx.CallAfter(self._set_status, "")
-                    return True
-                try:
-                    url = (
-                        f"{self.wpp_server}:{self.wpp_port}"
-                        f"/api/{self.token}/list-chats"
-                    )
-                    headers = {
-                        "Authorization": f"Bearer {self.token}",
-                        "Content-Type": "application/json",
-                    }
-                    # Same reason as in get_remote_chats(): without this flag the
-                    # probe kicks off WPP.chat.list()'s serial per-group metadata
-                    # fetch inside the page.  Our 5 s timeout doesn't cancel it,
-                    # so a probe that "failed" still leaves that loop running and
-                    # competing with the real chat-list fetch that follows.
-                    r = api_post(
-                        url,
-                        json={"ignoreGroupMetadata": True},
-                        headers=headers,
-                        timeout=5,
-                    )
-                    if r.ok and isinstance(r.json(), list):
-                        self.messages_set_completed = True
-                        self._try_start_sync_thread()
-                        return True
-                except Exception:
-                    pass
-                return False
-
             # Probe immediately — when the server is already connected (no
             # session-logged event fires), this avoids an unnecessary 5-second wait.
-            if _probe_and_start():
+            if self._probe_chats_and_start_sync():
                 return
 
             for _ in range(12):   # 12 × 5 s = 60 s maximum
                 time.sleep(5)
-                if _probe_and_start():
+                if self._probe_chats_and_start_sync():
                     return
 
             # 60 s elapsed and sync still hasn't started — start it unconditionally
@@ -10727,11 +10917,10 @@ class MainWindow(wx.Frame):
 
                     self._lift_contact_identity(chat)
 
-                # Diagnostic log to inspect chat keys
                 lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
                 if lid_chats:
-                    logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
-                    logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
+                    shape = {k: type(v).__name__ for k, v in lid_chats[0].items()}
+                    logging.info("[get_remote_chats] @lid chat shape: %s", shape)
 
                 # The deleted-chat list lives in DB metadata (self._deleted_chats)
                 # since 0.17 — prepare_sync() pops it out of settings.json on
@@ -11162,6 +11351,54 @@ class MainWindow(wx.Frame):
                 if archive_changed and hasattr(self, "db") and self.db is not None:
                     self.db.set_metadata_json("archived_chats", list(self._archived_chats))
 
+                perms_changed = False
+                groups_total = groups_with_metadata = 0
+                groups_with_announce = groups_with_verdict = 0
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    jid = self._normalize_jid(chat.get("remoteJid", ""))
+                    if not jid.endswith("@g.us"):
+                        continue
+                    groups_total += 1
+                    group_meta = chat.get("groupMetadata")
+                    if isinstance(group_meta, dict) and group_meta:
+                        groups_with_metadata += 1
+                    else:
+                        group_meta = {}
+                    if (_parse_bool_flag(group_meta.get("announce")) is not None
+                            or _parse_bool_flag(chat.get("announce")) is not None):
+                        groups_with_announce += 1
+                    else:
+                        continue
+                    previous = dict(getattr(self, "_group_send_perms", {}).get(jid) or {})
+                    current = self._record_group_send_perms(jid, chat)
+                    if current is None:
+                        continue
+                    groups_with_verdict += 1
+                    if (previous.get("announce") == current["announce"]
+                            and previous.get("am_admin") == current["am_admin"]
+                            and previous.get("t") == current.get("t")):
+                        continue
+                    perms_changed = True
+                    was_restricted = (bool(previous.get("announce"))
+                                      and not bool(previous.get("am_admin")))
+                    now_restricted = (bool(current.get("announce"))
+                                      and not bool(current.get("am_admin")))
+                    if now_restricted != was_restricted:
+                        cp = getattr(self, "conversations_panel", None)
+                        if cp is not None:
+                            wx.CallAfter(cp.refresh_composer_permissions, jid,
+                                         bool(previous))
+                if perms_changed:
+                    self._persist_group_send_perms()
+                if groups_total:
+                    logging.info(
+                        "[get_remote_chats] group metadata shape: %d groups, %d with groupMetadata, "
+                        "%d stating announce, %d yielding a usable send-permission verdict",
+                        groups_total, groups_with_metadata, groups_with_announce, groups_with_verdict,
+                    )
+
                 # Retroactively prune 1:1 phantom chats that slipped into the
                 # local cache before this filter existed: no local messages,
                 # no server-reported activity, and not deliberately pinned or
@@ -11355,7 +11592,10 @@ class MainWindow(wx.Frame):
                     try:
                         self.db.merge_or_rename_chat(cand_jid, my_jid)
                     except Exception as db_err:
-                        logging.error(f"[deduplicate_chats] Failed to merge/rename {cand_jid} to {my_jid} in DB: {db_err}")
+                        logging.error(
+                            "[deduplicate_chats] Failed to merge/rename self-chat artifact in DB (%s)",
+                            type(db_err).__name__,
+                        )
                 if my_jid in chats:
                     dst_records = (
                         chats[my_jid]
@@ -11576,6 +11816,8 @@ class MainWindow(wx.Frame):
                 return gm_subject
         return ""
 
+    _GROUP_SEND_PERMS_MAX_AGE_SECONDS = 24 * 3600
+
     def _is_group_send_restricted(self, chat: dict) -> bool:
         """True when `chat` is a WhatsApp group set to "only admins can send
         messages" (Baileys/WPPConnect's groupMetadata.announce) and the
@@ -11583,54 +11825,60 @@ class MainWindow(wx.Frame):
 
         Only ever reads group metadata local sync already has — this must
         stay synchronous and side-effect-free since it runs from
-        navigate_to_conversation() on the UI thread. If the data needed to
-        decide isn't available yet (participants not hydrated in local
-        metadata), this fails OPEN (returns False, message field stays
-        writable): WhatsApp Web itself is the actual source of truth and
-        would reject the send if this guess were wrong in that direction,
-        whereas guessing wrong the other way would silently lock a user out
-        of a group they can genuinely post in.
         """
         jid = chat.get("remoteJid", "")
         if not jid.endswith("@g.us"):
             return False
-        group_meta = chat.get("groupMetadata")
-        if not isinstance(group_meta, dict):
-            group_meta = {}
-        announce = _parse_bool_flag(group_meta.get("announce"))
-        if announce is None:
-            announce = _parse_bool_flag(chat.get("announce"))
-        if not announce:
-            return False
+        stored = unexpired_group_send_verdict(
+            getattr(self, "_group_send_perms", {}).get(jid),
+            time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
+        if stored is None:
+            stored = {}
+        verdict = group_send_permission_from_metadata(
+            chat,
+            participant_digits(getattr(self, "my_jid", "")),
+            participant_digits(getattr(self, "my_lid", "")),
+            self._phone_digits_equivalent,
+            known_am_admin=stored.get("am_admin"),
+        )
+        if verdict is None:
+            verdict = stored
+        return bool(verdict.get("announce")) and not bool(verdict.get("am_admin"))
 
-        participants = group_meta.get("participants") or chat.get("participants") or []
-        if not isinstance(participants, list) or not participants:
-            return False  # can't verify admin status — fail open
+    def _record_group_send_perms(self, jid: str, chat: dict) -> "dict | None":
+        if not hasattr(self, "_group_send_perms"):
+            self._group_send_perms = {}
+        previous = unexpired_group_send_verdict(
+            self._group_send_perms.get(jid),
+            time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
+        verdict = group_send_permission_from_metadata(
+            chat,
+            participant_digits(getattr(self, "my_jid", "")),
+            participant_digits(getattr(self, "my_lid", "")),
+            self._phone_digits_equivalent,
+            known_am_admin=(previous or {}).get("am_admin"),
+        )
+        if verdict is None:
+            return None
+        if (previous
+                and previous.get("announce") == verdict["announce"]
+                and previous.get("am_admin") == verdict["am_admin"]):
+            return previous
+        verdict["t"] = int(time.time())
+        self._group_send_perms[jid] = verdict
+        return verdict
 
-        def _phone_part(j) -> str:
-            if not isinstance(j, str):
-                return ""
-            return j.rsplit("@", 1)[0].split(":")[0]
-
-        my_phone_digits = _phone_part(getattr(self, "my_jid", ""))
-        my_lid_digits   = _phone_part(getattr(self, "my_lid", ""))
-
-        for p in participants:
-            if not isinstance(p, dict):
-                continue
-            p_id = p.get("id") or ""
-            if isinstance(p_id, dict):
-                p_id = p_id.get("_serialized", "")
-            p_digits = _phone_part(p_id)
-            if not p_digits:
-                continue
-            is_me = (
-                (my_phone_digits and self._phone_digits_equivalent(p_digits, my_phone_digits))
-                or (my_lid_digits and p_digits == my_lid_digits)
+    def _persist_group_send_perms(self):
+        db = getattr(self, "db", None)
+        if db is None:
+            return
+        try:
+            db.set_metadata_json(
+                "group_send_perms", dict(getattr(self, "_group_send_perms", {}))
             )
-            if is_me:
-                return not bool(p.get("admin") or p.get("isAdmin"))
-        return False  # current user not found in participants — fail open
+        except Exception as exc:
+            logging.warning(
+                "[group_send_perms] failed to persist send permissions: %s", exc)
 
     def _fill_group_name(self, jid: str) -> str:
         """Fetch group info from API and cache the name.
@@ -11752,6 +12000,114 @@ class MainWindow(wx.Frame):
             args=(remote_jid,),
             daemon=True,
         ).start()
+
+    _GROUP_ANNOUNCE_NOTIF_SUBTYPES = frozenset({"announce", "announcement", "restrict_messages"})
+    _GROUP_RESTRICT_NOTIF_SUBTYPES = frozenset({"restrict", "locked", "settings"})
+    _GROUP_ADMIN_NOTIF_SUBTYPES = frozenset({"promote", "promotion", "demote", "demotion"})
+
+    def _apply_group_settings_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
+        if not remote_jid.endswith("@g.us"):
+            return
+        if msg.get("messageType") != "groupNotification":
+            return
+        notif = (msg.get("message") or {}).get("groupNotification") or {}
+        subtype = (notif.get("subtype") or "").lower()
+        if subtype in self._GROUP_ADMIN_NOTIF_SUBTYPES:
+            self._apply_group_admin_change(remote_jid, chat, notif, subtype)
+            return
+        is_announce = subtype in self._GROUP_ANNOUNCE_NOTIF_SUBTYPES
+        if not is_announce and subtype not in self._GROUP_RESTRICT_NOTIF_SUBTYPES:
+            return
+        value = group_setting_notif_value(notif)
+        if value is None:
+            logging.info(
+                "[_apply_group_settings_change] %s notification stated no value "
+                "(keys: %s) — local state left untouched", subtype, sorted(notif.keys()))
+            return
+        group_meta = chat.get("groupMetadata")
+        if not isinstance(group_meta, dict):
+            group_meta = {}
+            chat["groupMetadata"] = group_meta
+        group_meta["announce" if is_announce else "restrict"] = value
+        if not is_announce:
+            return
+        if self._record_group_send_perms(remote_jid, chat) is not None:
+            self._persist_group_send_perms()
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None:
+            wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
+
+    def _group_admin_notif_targets_me(self, notif: dict) -> "bool | None":
+        targets = []
+        for raw in (notif.get("recipients") or []):
+            if isinstance(raw, dict):
+                raw = raw.get("_serialized") or raw.get("id") or ""
+            if isinstance(raw, str) and raw:
+                targets.append(raw)
+        if not targets:
+            return None
+        if not getattr(self, "my_jid", ""):
+            return None
+        undecidable = False
+        for target in targets:
+            if self._is_self_jid(target):
+                return True
+            if (target.endswith("@lid")
+                    and target not in getattr(self, "_lid_to_phone", {})
+                    and not getattr(self, "my_lid", "")):
+                undecidable = True
+        return None if undecidable else False
+
+    def _apply_group_admin_change(self, remote_jid: str, chat: dict, notif: dict,
+                                  subtype: str) -> None:
+        targets_me = self._group_admin_notif_targets_me(notif)
+        if targets_me is False:
+            return
+        if not hasattr(self, "_group_send_perms"):
+            self._group_send_perms = {}
+        cp = getattr(self, "conversations_panel", None)
+        if targets_me is None:
+            logging.info(
+                "[_apply_group_admin_change] %s notification named no target "
+                "this account can be matched against — dropping the stored "
+                "verdict so the composer fails open", subtype)
+            if self._group_send_perms.pop(remote_jid, None) is not None:
+                self._persist_group_send_perms()
+                if cp is not None:
+                    wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
+            return
+        is_admin = subtype in ("promote", "promotion")
+        group_meta = chat.get("groupMetadata")
+        if not isinstance(group_meta, dict):
+            group_meta = {}
+        set_group_participant_admin(
+            group_meta.get("participants") or chat.get("participants") or [],
+            is_admin,
+            participant_digits(getattr(self, "my_jid", "")),
+            participant_digits(getattr(self, "my_lid", "")),
+            self._phone_digits_equivalent,
+        )
+        announce = _parse_bool_flag(group_meta.get("announce"))
+        if announce is None:
+            announce = _parse_bool_flag(chat.get("announce"))
+        if announce is None:
+            stored = unexpired_group_send_verdict(
+                self._group_send_perms.get(remote_jid),
+                time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
+            announce = None if stored is None else bool(stored.get("announce"))
+        if announce is None:
+            changed = self._group_send_perms.pop(remote_jid, None) is not None
+        else:
+            self._group_send_perms[remote_jid] = {
+                "announce": bool(announce),
+                "am_admin": is_admin,
+                "t": int(time.time()),
+            }
+            changed = True
+        if changed:
+            self._persist_group_send_perms()
+        if cp is not None:
+            wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
 
     def _resolve_subject_change_async(self, jid: str, chat: dict, notif: dict) -> None:
         """Fetch the group's current subject after a rename notification that
@@ -12067,6 +12423,8 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[maintenance] VACUUM failed: %s", exc)
 
+    _UNRESOLVABLE_MAX_AGE_SECONDS = 7 * 24 * 3600
+
     def _load_local_lid_cache(self):
         try:
             # The DB read stays outside the lock — DatabaseBridge blocks this
@@ -12076,6 +12434,14 @@ class MainWindow(wx.Frame):
             with self._lid_mapping_lock:
                 self._lid_to_phone = mappings
                 self._phone_to_lid = {v: k for k, v in mappings.items()}
+            try:
+                cutoff = int(time.time()) - self._UNRESOLVABLE_MAX_AGE_SECONDS
+                expired = self.db.delete_expired_unresolvable(cutoff)
+                if expired:
+                    logging.info("[LID Cache] %d expired unresolvable entr%s purged — they will be retried.",
+                                 expired, "y" if expired == 1 else "ies")
+            except Exception as exc:
+                logging.warning("[LID Cache] Failed to purge expired unresolvable entries: %s", exc)
             lids, names = self.db.get_unresolvable_lids()
             self._unresolvable_lids = lids
             self._unresolvable_names = names
@@ -19033,6 +19399,7 @@ class MainWindow(wx.Frame):
         # exactly what must not happen while the Socket.IO thread is waiting
         # for the lock.
         changed = False
+        was_unresolvable = False
         with self._lid_mapping_lock:
             if not hasattr(self, "_lid_to_phone"):
                 self._lid_to_phone = {}
@@ -19049,6 +19416,7 @@ class MainWindow(wx.Frame):
                 # If it was in the unresolvable set, remove it
                 if hasattr(self, "_unresolvable_lids") and lid_jid in self._unresolvable_lids:
                     self._unresolvable_lids.discard(lid_jid)
+                    was_unresolvable = True
 
                 # Update the contact name display mappings in contacts if possible
                 if phone_jid in self.contacts and self.contacts[phone_jid]:
@@ -19058,6 +19426,11 @@ class MainWindow(wx.Frame):
                         self.contacts[lid_jid]["remoteJid"] = lid_jid
 
         if changed:
+            if was_unresolvable:
+                try:
+                    self.db.delete_unresolvable_lid(lid_jid)
+                except Exception as exc:
+                    logging.warning("[LID Mapping] Failed to clear unresolvable LID %s: %s", lid_jid, exc)
             if save:
                 # Save the mapping to SQLite incrementally
                 try:

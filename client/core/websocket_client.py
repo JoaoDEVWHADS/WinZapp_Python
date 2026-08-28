@@ -112,6 +112,7 @@ class WebSocketClient:
         self.sio.on("received-message", self.on_wpp_message_received)
         self.sio.on("onack", self.on_wpp_ack)
         self.sio.on("phoneCode", self.on_wpp_phone_code)
+        self.sio.on("phoneCodeError", self.on_wpp_phone_code_error)
         self.sio.on("status-find", self.on_wpp_status_find)
         self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
         self.sio.on("chats-update", self.on_chats_update)
@@ -134,6 +135,8 @@ class WebSocketClient:
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
+
+        self._phone_code_error: str = ""
 
         # Debounce timer for on_disconnect() — see that method.
         self._disconnect_timer = None
@@ -1369,6 +1372,37 @@ class WebSocketClient:
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
+    def on_wpp_phone_code_error(self, data):
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            name = str(data.get("name") or "Error")
+            message = str(data.get("message") or "")
+            detail = name if (not message or message == name) else f"{name}: {message}"
+            self._phone_code_error = detail
+            attempt = data.get("attempt")
+            retry_in = data.get("retryInSeconds")
+            if attempt and retry_in:
+                logging.warning(
+                    "[WebSocketClient] pairing-code request failed: %s "
+                    "(attempt %s, next retry in %ss)", detail, attempt, retry_in,
+                )
+            else:
+                logging.warning(
+                    "[WebSocketClient] pairing-code request failed: %s", detail
+                )
+            stack = data.get("stack")
+            if stack:
+                logging.warning(
+                    "[WebSocketClient] pairing-code failure stack: %s", stack
+                )
+            details = data.get("details")
+            if details:
+                logging.warning(
+                    "[WebSocketClient] pairing-code failure details: %r", details
+                )
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_phone_code_error error")
 
     def _belongs_to_this_session(self, info) -> bool:
         if not isinstance(info, dict):
@@ -2019,10 +2053,6 @@ class WebSocketClient:
             if not is_forwarded:
                 is_forwarded = bool(ctx_info.get("isForwarded"))
 
-        # Debug quotes
-        body_text = str(wpp_msg.get('body') or '').strip().lower()
-        if body_text in ('..', 'oi'):
-            logging.info(f"[Raw Message Debug] Message {wpp_msg.get('id')} body: {body_text}. Full payload: {wpp_msg}")
 
         # Determine if there is any quoted context
         has_quote = False

@@ -835,6 +835,23 @@ def parse_bool_flag(value):
     return None
 
 
+def group_setting_notif_value(notif):
+    if not isinstance(notif, dict):
+        return None
+    raw = notif.get("value")
+    if raw is None:
+        raw = (notif.get("body") or "").strip()
+    if isinstance(raw, str):
+        if not raw.strip():
+            return None
+        low = raw.strip().lower()
+        if low in ("on", "announcement", "locked"):
+            return True
+        if low in ("off", "unlocked"):
+            return False
+    return parse_bool_flag(raw)
+
+
 def check_internet_connection(test_url="https://www.google.com", timeout=10):
     try:
         response = requests.get(test_url, timeout=timeout)
