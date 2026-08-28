@@ -10167,11 +10167,16 @@ class ConversationsPanel(wx.Panel):
             pending_local_id and (msg.get("_local_pending") or msg.get("_send_unconfirmed"))
         )
         if cancelled_pending:
-            # cancel() on an already-resolved (unconfirmed) send is a
-            # harmless no-op — the queue has nothing left to cancel by then —
-            # so an unconfirmed message takes this same "nothing to revoke,
-            # local delete only" path without needing a branch of its own.
-            self._cancel_pending_message(msg, pending_local_id)
+            # An unconfirmed send shares the "nothing to revoke, local delete
+            # only" path, but NOT the wait for an echo: its send already
+            # finished and reported. Saying so explicitly matters because
+            # cancel() answers False for both "a worker owns it" and "it is not
+            # in the queue any more", and only the first justifies holding the
+            # record.
+            self._cancel_pending_message(
+                msg, pending_local_id,
+                hold_for_echo=bool(msg.get("_local_pending")),
+            )
         elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
@@ -10195,8 +10200,22 @@ class ConversationsPanel(wx.Panel):
         else:
             self._delete_message_for_me_only(msg, msg_id, index)
 
-    def _cancel_pending_message(self, msg: dict, pending_local_id: str):
+    def _cancel_pending_message(self, msg: dict, pending_local_id: str,
+                                hold_for_echo: bool = True):
         """Delete a message that is still pending — the delete-while-sending path.
+
+        ``hold_for_echo=False`` is for a send that is already OVER: an
+        unconfirmed one (_send_unconfirmed), where the worker finished and
+        reported long ago. cancel() returns False for it — not because a worker
+        still owns the message, but because it is no longer in the queue at all
+        — so without this flag it would take the hold-for-echo tail below and
+        be stashed waiting for an outcome report that has already happened and
+        will never come again. The record would sit in the chat forever:
+        invisible (_is_displayable_message and _counts_as_last_message both
+        refuse _cancelled_awaiting_id), re-persisted on every save, and holding
+        a slot in _cancelled_pending_messages. Nor can the echo matcher claim
+        it, since that only considers _local_pending records and an unconfirmed
+        one has that False.
 
         There is no WhatsApp message ID to revoke yet, so whichever scope the
         delete dialog had selected, this cancels the queued/in-flight send and
@@ -10235,6 +10254,14 @@ class ConversationsPanel(wx.Panel):
             # (voice_messages/<local_id>.msv, media/<local_id>.wzmedia) belong to
             # a message that no longer exists anywhere, and no later rename can
             # ever claim them.
+            discard_local_media_cache(
+                data_path("voice_messages"), data_path("media"), pending_local_id
+            )
+            return
+        if not hold_for_echo:
+            # The send already ran to completion and its outcome was already
+            # reported; there is nothing left to wait for. Same disposal as the
+            # stopped-for-good branch above.
             discard_local_media_cache(
                 data_path("voice_messages"), data_path("media"), pending_local_id
             )

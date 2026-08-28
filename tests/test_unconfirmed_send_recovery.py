@@ -155,9 +155,15 @@ class _FakeMainWindow:
         return True
 
     # main_window.message_queue.cancel(...)
+    # cancel_result mirrors the real contract: True only when the message was
+    # still queued and untouched. False covers BOTH "a worker owns it" and
+    # "it is not in the queue any more" — the distinction _cancel_pending_message
+    # can no longer infer, which is why the caller passes hold_for_echo.
+    cancel_result = True
+
     def cancel(self, local_id):
         self.cancel_calls.append(local_id)
-        return True
+        return self.cancel_result
 
     def get_chat(self, jid):
         # _cancel_pending_message() looks the chat up to find the record's
@@ -193,7 +199,9 @@ class _DeleteStub:
         self.gauge_hidden += 1
 
     def _record_position(self, chat, local_id):
-        return None
+        # -1 = "not in the chat's records", which is what an empty fake chat
+        # means. _cancel_pending_message() reads it as "nothing to re-insert".
+        return -1
 
 
 def _unconfirmed_msg():
@@ -534,3 +542,57 @@ class TestTheResendCarriesTheWireTextNotTheDisplayText:
 
         sent = panel.main_window.message_queue.enqueued[-1]
         assert sent.text == "> importante\nvê isso aqui"
+
+
+class TestDeletingAnUnconfirmedMessageDoesNotWaitForAnEcho:
+    """An unconfirmed send is already OVER — the worker finished it and
+    reported the outcome. Deleting it must dispose of the record, not park it.
+
+    MessageQueue.cancel() answers False for two different situations: "a worker
+    owns this message right now" and "this message is not in the queue at all
+    any more". Only the first justifies _cancel_pending_message()'s
+    hold-for-echo tail (mark _cancelled_awaiting_id, stash it, re-insert the
+    record at its old position, wait for the queue to report). An unconfirmed
+    message is the second, and its report already came and went — so parking it
+    strands the record in the chat permanently: invisible to the list and the
+    preview, re-persisted on every save, holding a slot in the 50-entry stash,
+    and unreachable by the echo matcher, which only looks at _local_pending
+    records.
+    """
+
+    def test_the_record_is_not_marked_awaiting_an_id(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, tmp_path=tmp_path)
+        msg = _unconfirmed_msg()
+        stub = _DeleteStub(msg)
+
+        stub._on_menu_delete_message(0)
+
+        assert "_cancelled_awaiting_id" not in msg
+
+    def test_it_is_not_stashed_waiting_for_an_outcome_report(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, tmp_path=tmp_path)
+        stub = _DeleteStub(_unconfirmed_msg())
+        stashed = []
+        stub._remember_cancelled_pending = lambda lid, rec: stashed.append(lid)
+
+        stub._on_menu_delete_message(0)
+
+        assert stashed == [], (
+            "nothing will ever release it — the outcome report it would be "
+            "waiting for already happened"
+        )
+
+    def test_a_still_pending_send_IS_held(self, monkeypatch, tmp_path):
+        """The other half: a genuinely in-flight send must keep the hold, or
+        its echo gets handed to the next unrelated message of the same type."""
+        _patch_delete_dialog(monkeypatch, tmp_path=tmp_path)
+        msg = _still_pending_msg()
+        stub = _DeleteStub(msg)
+        stub.main_window.cancel_result = False
+        stashed = []
+        stub._remember_cancelled_pending = lambda lid, rec: stashed.append(lid)
+
+        stub._on_menu_delete_message(0)
+
+        assert msg.get("_cancelled_awaiting_id") is True
+        assert stashed == ["loc-2"]
