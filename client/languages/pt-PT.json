@@ -320,6 +320,7 @@
     "menu_disconnect": "&Desconectar",
     "disconnect_confirm_title": "Desconectar",
     "disconnect_confirm_msg": "Tem a certeza de que pretende desconectar? Isto vai remover o emparelhamento e os dados locais desta conta.",
+    "account_switch_failed": "Não foi possível trocar de conta. O outro processo do WinZapp falhou ao iniciar.",
     "menu_exit": "&Sair",
     "menu_sync": "&Sincronização",
     "menu_resync_all": "&Ressincronizar todas as conversas",

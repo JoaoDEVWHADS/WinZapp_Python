@@ -320,6 +320,7 @@
     "menu_disconnect": "&Rozłącz",
     "disconnect_confirm_title": "Rozłącz",
     "disconnect_confirm_msg": "Czy na pewno chcesz się rozłączyć? Spowoduje to usunięcie parowania i danych lokalnych tego konta.",
+    "account_switch_failed": "Nie udało się przełączyć konta. Nie udało się uruchomić drugiego procesu WinZapp.",
     "menu_exit": "Za&kończ",
     "menu_sync": "S&ynchronizacja",
     "menu_resync_all": "&Zsynchronizuj ponownie wszystkie rozmowy",

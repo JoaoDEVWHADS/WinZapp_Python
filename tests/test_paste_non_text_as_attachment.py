@@ -5,10 +5,12 @@ same shortcut the official WhatsApp client offers.
 
 import os
 import tempfile
+import time
 
 import pytest
 import wx
 
+from tests.conftest import set_clipboard_data, set_clipboard_text
 from ui.conversations import ConversationsPanel
 
 
@@ -30,17 +32,19 @@ class _Stub:
         self.panel_shown_calls += 1
 
 
+# The retrying writer lives in conftest so both clipboard-using test modules
+# share one implementation — see conftest.set_clipboard_data's docstring.
+_set_clipboard_data = set_clipboard_data
+
+
 def _set_clipboard_files(paths):
-    if not wx.TheClipboard.Open():
-        return False
-    try:
+    def make():
         data = wx.FileDataObject()
         for p in paths:
             data.AddFile(p)
-        wx.TheClipboard.SetData(data)
-    finally:
-        wx.TheClipboard.Close()
-    return True
+        return data
+
+    return _set_clipboard_data(make)
 
 
 def _set_clipboard_bitmap():
@@ -49,23 +53,15 @@ def _set_clipboard_bitmap():
     dc.SetBackground(wx.Brush(wx.Colour(255, 0, 0)))
     dc.Clear()
     dc.SelectObject(wx.NullBitmap)
-    if not wx.TheClipboard.Open():
-        return False
-    try:
-        wx.TheClipboard.SetData(wx.BitmapDataObject(bmp))
-    finally:
-        wx.TheClipboard.Close()
-    return True
+
+    return _set_clipboard_data(lambda: wx.BitmapDataObject(bmp))
 
 
-def _set_clipboard_text(text):
-    if not wx.TheClipboard.Open():
-        return False
-    try:
-        wx.TheClipboard.SetData(wx.TextDataObject(text))
-    finally:
-        wx.TheClipboard.Close()
-    return True
+# Was the one helper here that still ignored SetData()'s return value, three
+# lines below the one that fixed it. It backs the tests asserting that plain
+# text is NOT staged as an attachment — so a stale FileDataObject left by an
+# earlier test made exactly those assertions fail.
+_set_clipboard_text = set_clipboard_text
 
 
 class TestPasteFiles:
