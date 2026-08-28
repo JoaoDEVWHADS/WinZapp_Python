@@ -1,21 +1,26 @@
-"""Windows Focus Assist ("Não incomodar") detection.
+"""Windows Focus Assist, Do Not Disturb ("Não incomodar"), and Notifications detection.
 
-SHQueryUserNotificationState (shell32) is the one documented Win32 API that
-reflects Focus Assist state without requiring the app to be a packaged UWP
-app — it's also what Windows itself effectively consults to decide whether
-one of ITS OWN toast notifications gets a sound/banner. WinZapp's
-background-notification sound (MainWindow.play_background_notification_sound)
-is a raw audio file played directly through BASS/sound_lib, entirely outside
-that toast pipeline, so it never got the same treatment — reported live as
-still playing with Focus Assist on Priority Only / Alarms Only.
+Detects when Windows suppresses toast notifications and sounds:
+1. Windows 11 "Não Incomodar" (Do Not Disturb) and Focus Assist via:
+   - WNF (Windows Notification Facility) real-time state: WNF_SHEL_QUIETHOURS_ACTIVE
+   - WinRT ToastNotificationManagerPolicy
+   - Windows Registry (FocusAssistMode / QuietHours)
+2. Windows Notifications Disabled globally ("Obter notificações de apps e outros remetentes" desativado) via:
+   - HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications (ToastEnabled == 0)
+   - HKCU/HKLM Group Policy (NoToastApplicationNotification == 1)
+   - Notification Settings (NOC_GLOBAL_SETTING_TOASTS_ENABLED == 0)
+   - WinRT ToastNotificationManagerPolicy (status == Disabled)
+3. Fullscreen DirectX games, presentation mode, or busy state via:
+   - Win32 SHQueryUserNotificationState (shell32)
 
 Deliberately NOT applied to message_current_sound (a message arriving in the
 conversation the user already has open and focused) or to incoming-call
-alerts — Focus Assist is about notifications competing for attention while
-the user is doing something else, neither of which applies there.
+alerts — Focus Assist / DND is about notifications competing for attention while
+the user is doing something else.
 """
 
 import sys
+from typing import Optional
 
 # QUERY_USER_NOTIFICATION_STATE values (shellapi.h)
 _QUNS_NOT_PRESENT = 1
@@ -61,16 +66,190 @@ def _query_notification_state():
         return None
 
 
+def _query_wnf_quiet_hours() -> Optional[bool]:
+    """Query Windows Notification Facility (WNF) for real-time Focus Assist /
+    Do Not Disturb state in Windows 10 (1803+) and Windows 11.
+
+    WNF_SHEL_QUIETHOURS_ACTIVE (0x0D83063EA3B64835) is the internal state name
+    used by the Windows Shell / Action Center to toggle 'Não Incomodar'.
+    Buffer contains a DWORD:
+      0 = Inactive / Off (notifications permitted)
+      1 = Priority Only (suppressed)
+      2 = Alarms Only / Do Not Disturb (suppressed)
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ntdll = getattr(ctypes.windll, "ntdll", None)
+        if not ntdll or not hasattr(ntdll, "RtlQueryWnfStateData"):
+            return None
+
+        state_name = ctypes.c_uint64(0x0D83063EA3B64835)
+        change_stamp = wintypes.DWORD(0)
+        buffer = wintypes.DWORD(0)
+        buffer_size = wintypes.ULONG(ctypes.sizeof(buffer))
+
+        status = ntdll.RtlQueryWnfStateData(
+            ctypes.byref(state_name),
+            None,
+            None,
+            ctypes.byref(change_stamp),
+            ctypes.byref(buffer),
+            ctypes.byref(buffer_size),
+        )
+        if status == 0:  # STATUS_SUCCESS
+            return buffer.value > 0
+    except Exception:
+        pass
+    return None
+
+
+def _query_registry_notifications_disabled() -> bool:
+    """Check Windows registry for whether notifications are disabled globally
+    or in 'Não incomodar' / Focus Assist mode:
+    1. 'Obter notificações de apps e outros remetentes' disabled:
+       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications -> ToastEnabled == 0
+    2. Group Policy:
+       HKCU/HKLM\\Software\\Policies\\Microsoft\\Windows\\CurrentVersion\\PushNotifications -> NoToastApplicationNotification == 1
+    3. Action Center global toasts disabled:
+       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings -> NOC_GLOBAL_SETTING_TOASTS_ENABLED == 0
+    4. Focus Assist / DND registry values:
+       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\FocusAssist -> FocusAssistMode > 0
+       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\QuietHours -> Profile > 0 or Enabled == 1
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        # 1. Global toggle: "Obter notificações de apps e outros remetentes"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\PushNotifications") as k:
+                val, _ = winreg.QueryValueEx(k, "ToastEnabled")
+                if val == 0:
+                    return True
+        except OSError:
+            pass
+
+        # 2. Group Policy
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(root, r"Software\Policies\Microsoft\Windows\CurrentVersion\PushNotifications") as k:
+                    val, _ = winreg.QueryValueEx(k, "NoToastApplicationNotification")
+                    if val == 1:
+                        return True
+            except OSError:
+                pass
+
+        # 3. Action Center global setting
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings") as k:
+                val, _ = winreg.QueryValueEx(k, "NOC_GLOBAL_SETTING_TOASTS_ENABLED")
+                if val == 0:
+                    return True
+        except OSError:
+            pass
+
+        # 4. App-specific toggle for WinZapp in Windows Settings
+        for app_key in (r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\WinZapp",):
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, app_key) as k:
+                    val, _ = winreg.QueryValueEx(k, "Enabled")
+                    if val == 0:
+                        return True
+            except OSError:
+                pass
+
+        # 5. Focus Assist Mode in registry
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\FocusAssist") as k:
+                val, _ = winreg.QueryValueEx(k, "FocusAssistMode")
+                if val in (1, 2):
+                    return True
+        except OSError:
+            pass
+
+        # 6. QuietHours profile/enabled in registry
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Notifications\QuietHours") as k:
+                try:
+                    profile, _ = winreg.QueryValueEx(k, "Profile")
+                    if profile > 0:
+                        return True
+                except OSError:
+                    pass
+                try:
+                    enabled, _ = winreg.QueryValueEx(k, "Enabled")
+                    if enabled == 1:
+                        return True
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    except Exception:
+        pass
+    return False
+
+
+def _query_winrt_notification_policy() -> Optional[bool]:
+    """Query WinRT ToastNotificationManagerPolicy if available on Windows 10/11.
+    Values of ToastNotificationMode:
+      0 = Unrestricted (allowed)
+      1 = PriorityOnly (suppressed)
+      2 = AlarmsOnly (suppressed)
+      3 = DoNotDisturb (suppressed)
+      4 = Disabled (suppressed)
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        try:
+            from winsdk.windows.ui.notifications import ToastNotificationManagerPolicy
+            policy = ToastNotificationManagerPolicy.get_default()
+            if policy is not None:
+                return int(policy.notification_status) != 0
+        except ImportError:
+            from winrt.windows.ui.notifications import ToastNotificationManagerPolicy
+            policy = ToastNotificationManagerPolicy.get_default()
+            if policy is not None:
+                return int(policy.notification_status) != 0
+    except Exception:
+        pass
+    return None
+
+
 def is_quiet_hours_active() -> bool:
-    """True if Windows is currently in a state where it would itself
-    suppress a toast notification's sound (Focus Assist on, a fullscreen
-    app/game, presentation mode, ...).
+    """True if Windows is currently in a state where toast notifications / sounds
+    should be suppressed (Do Not Disturb / "Não Incomodar", Focus Assist,
+    notifications toggled off in Windows Settings, fullscreen games, presentation mode).
 
     Fails open (False) off-Windows or on any API failure — an API failure is
     a reason to fall back to the pre-existing behavior (always play), not to
     go silent for a reason nobody can see.
     """
+    # 1. Check if notifications are disabled in Windows Settings (Registry)
+    if _query_registry_notifications_disabled():
+        return True
+
+    # 2. Check WNF state for real-time Windows 10/11 Do Not Disturb / Focus Assist
+    wnf_state = _query_wnf_quiet_hours()
+    if wnf_state is not None:
+        if wnf_state is True:
+            return True
+
+    # 3. Check WinRT notification policy (if accessible)
+    winrt_policy = _query_winrt_notification_policy()
+    if winrt_policy is not None:
+        if winrt_policy is True:
+            return True
+
+    # 4. Check legacy Win32 SHQueryUserNotificationState (fullscreen games, presentation mode)
     state = _query_notification_state()
-    if state is None:
-        return False
-    return should_suppress_notification_sound(state)
+    if state is not None and should_suppress_notification_sound(state):
+        return True
+
+    return False
+
