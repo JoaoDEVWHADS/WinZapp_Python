@@ -68,6 +68,17 @@ class AccessibleSpeechOutput:
         """Immediately cancel whatever the resolved output is currently
         saying or has queued. Used to cut off a screen reader's own focus
         announcement, not just future output() calls."""
+        # Resolved through the SAME gate as output(), never a laxer one. A
+        # separate resolver here skipped extended_sr_compat_enabled, whose
+        # documented contract (see this class's docstring) is that the app
+        # never calls into accessible_output2 at all when it is off — so a
+        # user who turned it off but still runs NVDA for the rest of Windows
+        # had their screen reader cut off by WinZapp anyway. It also fell
+        # through to get_first_available_output(), reaching SAPI even with
+        # sapi_fallback_enabled off.
         output = self._resolve_output()
         if output and hasattr(output, "silence"):
-            output.silence()
+            try:
+                output.silence()
+            except Exception:
+                pass

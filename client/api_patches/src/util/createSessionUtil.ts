@@ -1632,10 +1632,26 @@ export default class CreateSessionUtil {
     // MainWindow.on_new_message() (client/main.py's _apply_possible_edit())
     // that was already built for exactly this — it just never received a
     // live edit event to actually detect until now.
-    await client.onMessageEdit(async (eventOrChat: any, _id: string, legacyMessage: any) => {
+    await client.onMessageEdit(async (eventOrChat: any, _id?: string, legacyMessage?: any) => {
       // Current WPPConnect emits one { chat, id, msg } object even though its
       // public type still declares the legacy three-argument callback.
-      const message = legacyMessage ?? eventOrChat?.msg;
+      //
+      // The last fallback is a SHAPE check, not a bare `?? eventOrChat`. The
+      // guard below exists precisely for the case where a wrapper arrives
+      // with no `msg`, and accepting the wrapper itself defeats it: `{chat,
+      // id}` is truthy and an object, so it would sail through and be
+      // re-emitted on 'received-message' as if it were a serialized message.
+      // Python then feeds it to on_new_message()'s same-id dedup and into
+      // _apply_possible_edit(), which compares the stored text against a
+      // body that does not exist — a much worse failure than a dropped edit,
+      // and a silent one. A real serialized message always carries `type`
+      // (or at least `body`); a `{chat, id}` wrapper carries neither.
+      const looksSerialized =
+        eventOrChat &&
+        typeof eventOrChat === 'object' &&
+        (eventOrChat.type !== undefined || eventOrChat.body !== undefined);
+      const message =
+        legacyMessage ?? eventOrChat?.msg ?? (looksSerialized ? eventOrChat : undefined);
       if (!message || typeof message !== 'object') {
         req.logger.warn(
           `[${client.session}] onMessageEdit emitted without a serialized message`

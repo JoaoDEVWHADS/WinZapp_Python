@@ -49,7 +49,7 @@ from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
 from core.api_client import api_get, api_post, redact_credentials
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -510,6 +510,10 @@ def _discount_non_countable_unread(records: list, unread_count: int) -> int:
     não lida" while the conversation held nothing new. The tail inspected is
     the locally-stored record list, which keeps the exact shape the
     on_new_message() increment logic itself saw.
+
+    Both halves of the predicate matter and neither can be dropped: a chat
+    whose tail is [groupNotification, our own reply] has no unread message at
+    all, and either rule alone still reports one.
     """
     if unread_count <= 0 or not records:
         return unread_count
@@ -5350,12 +5354,11 @@ class MainWindow(wx.Frame):
         # while that exact chat is the one currently open and the window is
         # focused (setting off) — see the two mute checks below.
         muted = self.is_chat_muted(remote_jid)
+        archived = self.is_chat_archived(remote_jid)
         priority = muted and self._is_reply_or_mention_of_me(msg, remote_jid)
         if muted and not priority and self.settings.get("general", {}).get(
             "keep_muted_chats_silent_when_open", True
         ):
-            return
-        if self.is_chat_archived(remote_jid):
             return
 
         from core.notification_manager import (
@@ -5382,13 +5385,23 @@ class MainWindow(wx.Frame):
                 if cp is not None and cp.conversation is not None
                 else ""
             )
-            is_current_conv = (current_jid == remote_jid)
+            is_current_conv = (
+                cp._matches_open_conversation(remote_jid)
+                if cp is not None and hasattr(cp, "_matches_open_conversation") and cp.conversation is not None
+                else (current_jid == remote_jid and bool(current_jid))
+            )
 
             # Muted + not the open conversation: stay silent even with the
             # window active (the "keep silent when open" setting only ever
             # exempts the chat that is actually open right now) — unless
             # it's a reply/mention, which always gets through.
             if muted and not priority and not is_current_conv:
+                return
+
+            # Archived + not the open conversation: stay silent even with the
+            # window active (archived chats only play sound / speak when the
+            # user currently has that exact conversation open and focused).
+            if archived and not is_current_conv:
                 return
 
             if is_current_conv:
@@ -5427,6 +5440,10 @@ class MainWindow(wx.Frame):
         # exempting it — the chat being open only ever matters while the
         # window is active. A reply/mention still gets through, same as above.
         if muted and not priority:
+            return
+
+        # An archived chat in the background never sends a toast or sound/speech.
+        if archived:
             return
 
         # Send system toast notification. general.notifications_enabled is
@@ -5889,7 +5906,12 @@ class MainWindow(wx.Frame):
                 except (TypeError, ValueError):
                     pass
 
-            if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
+            muted = self.is_chat_muted(remote_jid)
+            archived = self.is_chat_archived(remote_jid)
+
+            if muted and self.settings.get("general", {}).get(
+                "keep_muted_chats_silent_when_open", True
+            ):
                 return
 
             from core.notification_manager import format_notification_title
@@ -5908,8 +5930,29 @@ class MainWindow(wx.Frame):
                 and self.IsActive()
             )
             if window_active:
-                self.message_foreground_sound.play()
+                cp = getattr(self, "conversations_panel", None)
+                current_jid = (
+                    cp.conversation.get("remoteJid", "")
+                    if cp is not None and cp.conversation is not None
+                    else ""
+                )
+                is_current_conv = (
+                    cp._matches_open_conversation(remote_jid)
+                    if cp is not None and hasattr(cp, "_matches_open_conversation") and cp.conversation is not None
+                    else (current_jid == remote_jid and bool(current_jid))
+                )
+                if muted and not is_current_conv:
+                    return
+                if archived and not is_current_conv:
+                    return
+                if is_current_conv:
+                    self.message_current_sound.play()
+                else:
+                    self.message_foreground_sound.play()
                 self.output(f"{title}: {body}")
+                return
+
+            if muted or archived:
                 return
             # general.notifications_enabled only ever gates the background
             # toast below — see the matching comment in on_new_message().
@@ -7876,7 +7919,23 @@ class MainWindow(wx.Frame):
                 self.error_sound.play()
             if not self.background_mode:
                 wx.CallAfter(wx.MessageBox, f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_WARNING)
+
         self._migrate_settings()
+
+        # Backfill any missing default keys/sections so settings are always
+        # complete. Strictly AFTER _migrate_settings(): backfilling first
+        # creates the post-rename section, which makes the migration's
+        # `"ui" in settings and "user_interface" not in settings` condition
+        # False — the legacy block is then orphaned and every UI preference an
+        # older install had set silently reverts to defaults.
+        #
+        # Persisted through save_settings() rather than a bare json.dump: that
+        # is what takes self._save_lock, and WebSocket handlers and the
+        # debounce timer write this same file concurrently.
+        if isinstance(self.settings, dict) and backfill_missing_defaults(
+            self.settings, fallback_dict
+        ):
+            self.save_settings()
         self._apply_global_settings()
 
     def _apply_global_settings(self):
@@ -16964,8 +17023,6 @@ class MainWindow(wx.Frame):
                 if response.status_code not in (200, 201) and quoted_id and not is_status_reply:
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote on %s...",
                                     response.status_code, active_dest)
-                    wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
-                    quote_stripped = True
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     payload = {
                         "phone": [active_dest],
@@ -16975,6 +17032,9 @@ class MainWindow(wx.Frame):
                         "options": link_preview_options
                     }
                     response = api_post(url, json=payload, headers=headers, timeout=25)
+                    if response.status_code in (200, 201):
+                        wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
+                        quote_stripped = True
 
                 # 3. Final error handling if all retries failed
                 if response.status_code not in (200, 201):
@@ -21203,6 +21263,7 @@ class MainWindow(wx.Frame):
         self, remote_jid: str, file_path: str,
         media_type: str, caption: str = "", quoted: dict = None,
         progress_callback=None, upload_id: str = "",
+        custom_filename: str = "",
     ) -> bool:
         """
         Upload a file as a media message via multipart/form-data.
@@ -21230,7 +21291,7 @@ class MainWindow(wx.Frame):
             logging.error("[send_media] %s", err_msg)
             return {"ok": False, "error": err_msg, "retry": False}
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-        filename = os.path.basename(file_path)
+        filename = custom_filename or os.path.basename(file_path)
         upload_path = file_path
         converted_audio_path = None
         converted_video_path = None
@@ -21245,7 +21306,7 @@ class MainWindow(wx.Frame):
             upload_path, mime = prepared
             if upload_path != file_path:
                 converted_audio_path = upload_path
-                filename = os.path.basename(upload_path)
+                filename = custom_filename or os.path.basename(upload_path)
                 file_size = os.path.getsize(upload_path)
         elif media_type == "video":
             # WhatsApp's own pipeline expects H.264/AAC MP4 — anything else
@@ -21263,7 +21324,7 @@ class MainWindow(wx.Frame):
             upload_path, mime = prepared
             if upload_path != file_path:
                 converted_video_path = upload_path
-                filename = os.path.basename(upload_path)
+                filename = custom_filename or os.path.basename(upload_path)
                 file_size = os.path.getsize(upload_path)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
         # Authorization only — Content-Type is set automatically by requests
@@ -21871,9 +21932,18 @@ class MainWindow(wx.Frame):
 
             import mimetypes as _mimetypes
             ext = ".bin"
+            custom_filename = ""
             if media_type == "document":
-                fname = msg_inner.get("documentMessage", {}).get("fileName", "")
+                doc_dict = msg_inner.get("documentMessage", {}) if isinstance(msg_inner.get("documentMessage"), dict) else {}
+                fname = (
+                    doc_dict.get("fileName") or doc_dict.get("filename") or doc_dict.get("title")
+                    or msg.get("fileName") or msg.get("filename") or msg.get("title")
+                    or (msg.get("mediaData") if isinstance(msg.get("mediaData"), dict) else {}).get("filename")
+                    or (msg.get("mediaData") if isinstance(msg.get("mediaData"), dict) else {}).get("fileName")
+                    or ""
+                )
                 if fname:
+                    custom_filename = fname
                     _, ext2 = os.path.splitext(fname)
                     if ext2:
                         ext = ext2
@@ -21891,7 +21961,11 @@ class MainWindow(wx.Frame):
             with open(temp_path, "wb") as f:
                 f.write(decrypted_data)
 
-            success = self.send_media_attachment(target_jid, temp_path, media_type, caption=original_caption)
+            success = self.send_media_attachment(
+                target_jid, temp_path, media_type,
+                caption=original_caption,
+                custom_filename=custom_filename,
+            )
 
             try:
                 os.remove(temp_path)
@@ -22187,8 +22261,10 @@ class MainWindow(wx.Frame):
                             orig_text = (orig_obj.get("conversation") or "")
                         elif orig_type == "extendedTextMessage":
                             orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
-                        elif orig_type == "audioMessage":
-                            orig_text = i18n.t("message_type_audio")
+                        elif orig_type in ("audioMessage", "audio", "ptt"):
+                            is_ptt = is_voice_message(m) or bool(isinstance(orig_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": orig_obj}))
+                            vm_mode = self.settings.get("user_interface", {}).get("voice_message_mode", "audio")
+                            orig_text = i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else i18n.t("message_type_audio")
                         elif orig_type == "videoMessage":
                             orig_text = i18n.t("video")
                         elif orig_type == "imageMessage":
@@ -22303,9 +22379,13 @@ class MainWindow(wx.Frame):
                         
                     if name and name != placeholder and name != jid:
                         content = content.replace(f"@{placeholder}", f"@{name}")
-        elif msg_type == "audioMessage":
-            dur     = _dur((msg_obj.get("audioMessage") or {}).get("seconds"))
-            content = f"{i18n.t('message_type_audio')} {dur}"
+        elif msg_type in ("audioMessage", "audio", "ptt"):
+            audio_inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+            dur = _dur(audio_inner.get("seconds"))
+            is_ptt = is_voice_message(last) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
+            vm_mode = self.settings.get("user_interface", {}).get("voice_message_mode", "audio")
+            lbl = i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else i18n.t("message_type_audio")
+            content = f"{lbl} {dur}".strip()
         elif msg_type == "videoMessage":
             video = msg_obj.get("videoMessage") or {}
             dur   = _dur(video.get("seconds"))

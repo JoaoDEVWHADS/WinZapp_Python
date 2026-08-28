@@ -243,6 +243,11 @@ def api_headers(token: str, *, json_body: bool = True,
     return headers
 
 
+# Ceiling for the second attempt after a stale keep-alive socket. See the
+# retry's own comment for why it is not simply the caller's timeout.
+_STALE_RETRY_TIMEOUT = 2.0
+
+
 def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
                 timeout: float = 30, session: requests.Session = None,
                 **kwargs) -> requests.Response:
@@ -275,12 +280,73 @@ def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
         # exists to keep out of the log. Scrub before logging *and* before
         # re-raising, so the callers that log the exception are covered too.
         _scrub_exception_args(exc)
-        logging.warning(
-            "[api] rid=%s %s %s failed after %.0fms: %s",
-            request_id, method.upper(), label,
-            (time.monotonic() - started) * 1000, redact_api_error(exc),
+
+        # Retry a stale keep-alive socket ONCE — but only for a method that is
+        # safe to repeat.
+        #
+        # A connection dropped before any response is ambiguous by nature: the
+        # server may have processed the request and lost the socket while
+        # answering. For a POST that means WhatsApp Web can already hold the
+        # message in its own outbox, so resending here delivers it twice. That
+        # is not hypothetical — CLAUDE.md records it as shipped and fixed once,
+        # and MessageQueue._classify_send_exception() is where the decision
+        # belongs precisely because it is the layer that knows a send from a
+        # poll. Retrying down here hides the failure from it entirely.
+        #
+        # It also has to stay cheap: _stop_wpp_server() polls /status-session
+        # inside a 4s total budget during a Windows shutdown, and the Node
+        # tearing down keep-alive connections is exactly what produces these
+        # errors — a blanket retry doubles every poll's worst case inside that
+        # budget, which is what keeps taskkill off a half-written profile.
+        is_stale_socket = (
+            method.lower() in ("get", "head")
+            and (time.monotonic() - started) < 2.0
+            and any(err in str(exc) for err in (
+                "RemoteDisconnected", "Connection aborted", "ConnectionResetError",
+                "BadStatusLine", "Remote end closed connection"
+            ))
         )
-        raise
+        if is_stale_socket:
+            logging.info(
+                "[api] rid=%s %s %s stale socket reset after %.0fms (%s) — "
+                "retrying once on fresh connection",
+                request_id, method.upper(), label,
+                (time.monotonic() - started) * 1000, redact_api_error(exc),
+            )
+            try:
+                # Same seam as the first attempt: reusing `caller` would drop a
+                # caller-supplied session (and its adapters, and the stubs the
+                # suite patches onto it) on the retry only.
+                #
+                # Capped, because the retry must not double a caller's budget.
+                # _wait_for_session_flushed() polls /status-session with
+                # timeout=5 inside a _WINDOWS_SHUTDOWN_BUDGET of 4s, and the
+                # Node tearing down keep-alives is exactly what produces the
+                # errors retried here — so an uncapped retry could sit in a
+                # single call for 5s past a 4s deadline, which is the overrun
+                # that budget exists to prevent (taskkill landing mid-leveldb-
+                # write). The first attempt already proved the socket answers
+                # fast or not at all: it only qualifies as stale after failing
+                # in under 2s.
+                response = caller(
+                    url, headers=headers, timeout=min(timeout, _STALE_RETRY_TIMEOUT),
+                    **kwargs,
+                )
+            except Exception as retry_exc:
+                _scrub_exception_args(retry_exc)
+                logging.warning(
+                    "[api] rid=%s %s %s retry failed after %.0fms: %s",
+                    request_id, method.upper(), label,
+                    (time.monotonic() - started) * 1000, redact_api_error(retry_exc),
+                )
+                raise
+        else:
+            logging.warning(
+                "[api] rid=%s %s %s failed after %.0fms: %s",
+                request_id, method.upper(), label,
+                (time.monotonic() - started) * 1000, redact_api_error(exc),
+            )
+            raise
     elapsed = time.monotonic() - started
     log = logging.warning if elapsed >= SLOW_REQUEST_SECONDS else logging.info
     log(
