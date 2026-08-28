@@ -886,7 +886,9 @@ class NotificationManager:
             # between hearing the notification and seeing the banner. Not
             # perfect — Windows' own toast pipeline still isn't instant — but
             # this removes the part of the delay that was our own doing.
-            wx.CallAfter(self._play_sound, remote_jid)
+            from core.quiet_hours import is_quiet_hours_active
+            if not is_quiet_hours_active():
+                wx.CallAfter(self._play_sound, remote_jid)
 
             # Clear whatever WinZapp notification is currently on screen (or
             # waiting to be shown) before posting the new one.  This is what

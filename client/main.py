@@ -5144,13 +5144,14 @@ class MainWindow(wx.Frame):
                     ).start()
             else:
                 # Scenario 2: message in a DIFFERENT conversation (window active)
-                # Play foreground sound (always), speak "Nova mensagem de X: body"
-                # via AO2 only when speak_other_conv_messages is on.
-                self.message_foreground_sound.play()
-                if speech.get("speak_other_conv_messages", True):
-                    title = format_notification_title(msg, self, self.i18n)
-                    spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
-                    self.output(spoken)
+                # Play foreground sound only when not in quiet hours/DND, speak "Nova mensagem de X: body"
+                # via AO2 only when speak_other_conv_messages is on and quiet hours is not active.
+                if not is_quiet_hours_active():
+                    self.message_foreground_sound.play()
+                    if speech.get("speak_other_conv_messages", True):
+                        title = format_notification_title(msg, self, self.i18n)
+                        spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+                        self.output(spoken)
             return  # never send system toast when window is active
 
         # Window is not focused: a muted chat is never "open" from here, so
@@ -5639,9 +5640,11 @@ class MainWindow(wx.Frame):
                     return
                 if is_current_conv:
                     self.message_current_sound.play()
+                    self.output(f"{title}: {body}")
                 else:
-                    self.message_foreground_sound.play()
-                self.output(f"{title}: {body}")
+                    if not is_quiet_hours_active():
+                        self.message_foreground_sound.play()
+                        self.output(f"{title}: {body}")
                 return
 
             if muted or archived:
@@ -16255,23 +16258,33 @@ class MainWindow(wx.Frame):
                     return path
 
         # 2. Bundled npm package (local API dev/run mode)
-        installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
-        explicit_paths = [
-            os.path.join(installer_root, "win32-x64", "ffmpeg.exe"),
-            os.path.join(installer_root, "win32-ia32", "ffmpeg.exe"),
-            os.path.join(installer_root, "win32-arm64", "ffmpeg.exe"),
-            os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg.exe"),
-            os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg"),
+        installer_roots = [
+            resource_path("api", "node_modules", "@ffmpeg-installer"),
+            resource_path("client", "api", "node_modules", "@ffmpeg-installer"),
+            os.path.join(os.path.dirname(__file__), "api", "node_modules", "@ffmpeg-installer"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "client", "api", "node_modules", "@ffmpeg-installer"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "node_modules", "@ffmpeg-installer"),
         ]
-        for ep in explicit_paths:
-            if os.path.isfile(ep):
-                return ep
+        for installer_root in installer_roots:
+            if not os.path.isdir(installer_root):
+                continue
+            explicit_paths = [
+                os.path.join(installer_root, "win32-x64", "ffmpeg.exe"),
+                os.path.join(installer_root, "win32-ia32", "ffmpeg.exe"),
+                os.path.join(installer_root, "win32-arm64", "ffmpeg.exe"),
+                os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg.exe"),
+                os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg"),
+                os.path.join(installer_root, "linux-x64", "ffmpeg"),
+            ]
+            for ep in explicit_paths:
+                if os.path.isfile(ep):
+                    return ep
 
-        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
-        if not hits:
-            hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
-        if hits:
-            return hits[0]
+            hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
+            if not hits:
+                hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+            if hits:
+                return hits[0]
 
         # 3. Fallback: ffmpeg on the system PATH (user-installed)
         system_ffmpeg = shutil.which("ffmpeg")
