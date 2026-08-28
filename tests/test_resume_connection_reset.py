@@ -42,6 +42,7 @@ def _stale_stub():
         _offline_probe_strikes=5,
         _logout_strikes=3,            # dangerously close to a confirmed logout
         _resume_fail_strikes=7,
+        _still_linked_vetoes=4,       # one short of the veto limit, from before the sleep
         _logout_handled=True,
         _wa_connect_announced=True,   # THE stale latch that caused the wipe
         _wa_startup_time=time.time() - 100_000,  # long-expired grace window
@@ -63,6 +64,12 @@ def test_reset_zeroes_all_strike_tallies_and_logout_latch():
     assert stub._logout_strikes == 0
     assert stub._resume_fail_strikes == 0
     assert stub._logout_handled is False
+    # The host-device veto run counts CONSECUTIVE vetoes
+    # (MainWindow._STILL_LINKED_VETO_LIMIT), and a hibernation is as much a
+    # break in that run as a healthy reading is. Carried across, four stale
+    # vetoes plus the first post-wake one hit the limit and park a session the
+    # probe says is linked on the pairing dialog.
+    assert stub._still_linked_vetoes == 0
 
 
 def test_reset_reearms_startup_grace_window():

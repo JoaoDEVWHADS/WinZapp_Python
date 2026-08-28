@@ -87,9 +87,6 @@
     },
     "conversation_sounds": {},
     "cleared_chats": {},
-    "privateinfo": {
-        "paired": false
-    },
     "storage": {
         "auto_download_media": true,
         "media_max_days": 30,

@@ -204,6 +204,16 @@ class _StubMainWindow:
     def _extract_lid_mapping(self, msg):
         pass
 
+    def _apply_group_settings_change(self, remote_jid, chat, msg):
+        pass
+
+    def _redirect_self_chat_artifact(self, remote_jid, key, from_me):
+        # on_new_message() calls this to catch a fake self-chat sync artifact
+        # (a @g.us JID built from a participant's own @lid digits). Irrelevant
+        # to the archived-chat sound/TTS decision under test here, so it is a
+        # pure passthrough — same as tests/test_duplicate_message_echo_matching.py.
+        return remote_jid, from_me
+
     def _is_chat_empty(self, jid):
         return False
 
@@ -377,7 +387,10 @@ class TestArchivedChatSoundAndTTS(unittest.TestCase):
                         return b[:4] + b[5:] == a
                 return False
 
-        panel = object.__new__(ConversationsPanel)
+        class _StubPanel:
+            _matches_open_conversation = ConversationsPanel._matches_open_conversation
+
+        panel = _StubPanel()
         panel.main_window = _MockMW()
         panel.conversation = {"remoteJid": "5511999998888@s.whatsapp.net"}
 

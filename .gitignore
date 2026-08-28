@@ -236,3 +236,12 @@ client/lib/*.dll
 fast_forensics.sh
 fast_forensics.py
 
+# Logs de usuario enviados para diagnostico — nunca versionar
+logs.zip
+logs/
+log.log
+shutdown_audit.log
+
+# Worktrees temporarios de agentes
+.claude/worktrees/
+

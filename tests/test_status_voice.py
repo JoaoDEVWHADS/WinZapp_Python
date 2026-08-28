@@ -113,6 +113,7 @@ class _FakeTimer:
 class _FakeMainWindow:
     def __init__(self, convert_result="converted.ogg"):
         self.i18n = _FakeI18n()
+        self.settings = {}
         self.app_name = "WinZapp"
         self.wpp_server = "http://127.0.0.1"
         self.wpp_port = 6300
@@ -142,6 +143,7 @@ class _Stub:
     _send_status_voice_bg     = StatusPanel._send_status_voice_bg
     _stop_recorded_audio_preview = StatusPanel._stop_recorded_audio_preview
     _cleanup_recorded_audio_temp_file = StatusPanel._cleanup_recorded_audio_temp_file
+    _silence_send_voice_focus_if_enabled = StatusPanel._silence_send_voice_focus_if_enabled
 
     def __init__(self, convert_result="converted.ogg"):
         self.main_window = _FakeMainWindow(convert_result=convert_result)

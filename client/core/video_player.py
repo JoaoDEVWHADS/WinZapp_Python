@@ -645,12 +645,27 @@ class VideoPlayer:
         if proc is not None:
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Silently swallowed before this change — a report of
+                # ffmpeg.exe processes piling up over a long session had
+                # nothing in log.log to explain why. Usually benign (the
+                # process had already exited on its own right as stop()
+                # was called), but worth a trace either way.
+                logging.warning(
+                    "[video_player] failed to signal ffmpeg (pid=%s) to stop: %s",
+                    proc.pid, exc,
+                )
             try:
                 proc.wait(timeout=2)
-            except Exception:
-                pass
+            except Exception as exc:
+                # This one is the actual leak signal: kill() was sent but
+                # the process did not exit within 2s, so it may still be
+                # running after this call returns.
+                logging.warning(
+                    "[video_player] ffmpeg (pid=%s) did not exit within 2s "
+                    "after being killed — it may still be running: %s",
+                    proc.pid, exc,
+                )
 
     def _kill_ffmpeg(self):
         with self._pipe_lock:

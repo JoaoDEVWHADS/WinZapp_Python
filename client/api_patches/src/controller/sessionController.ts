@@ -284,11 +284,62 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
         .json({ status: true, message: 'Session force closed' });
     }
 
-    (clientsArray as any)[session] = { status: null };
+    // WinZapp fix: this placeholder has to be distinguishable from "gone".
+    //
+    // It exists so requests arriving DURING the close see an unusable client:
+    // statusConnection.ts tests `req.client && req.client.isConnected`, and a
+    // stub without that property falls through to 404 Disconnected — which the
+    // MessageQueue relies on to classify a send as "do not resend". That part
+    // must not change.
+    //
+    // But it used to be `{ status: null }`, and getSessionState() answers
+    // `{status: 'CLOSED'}` for `client == null || client.status == null`. So
+    // status-session started reporting CLOSED the instant this line ran —
+    // before `await req.client.close()` below had done anything. WinZapp's
+    // shutdown polls exactly that endpoint to decide the browser has finished
+    // flushing its profile (_wait_for_session_flushed) and then force-kills the
+    // Node tree, Chrome included. The poll could never observe the flush: every
+    // shutdown_audit.log from the field shows it satisfied on poll #1 at 0.1s,
+    // and a Chrome killed mid-write leaves a torn leveldb that WhatsApp Web
+    // reads as a logged-out device on the next launch — the phone still listing
+    // it under Linked Devices.
+    //
+    // 'CLOSING' keeps the stub (still no isConnected, still 404) but makes the
+    // status honest: connection_state.session_closed_after_flush() rejects it,
+    // so the poll waits for the `finally` below, which only runs once close()
+    // has actually returned.
+    (clientsArray as any)[session] = { status: 'CLOSING' };
 
     try {
       if (req.client && typeof req.client.close === 'function') {
-        await req.client.close();
+        // Bounded, because 'CLOSING' above is now a state that BLOCKS a
+        // concurrent /start-session (createSessionUtil returns early for any
+        // status that is neither null nor 'CLOSED'). That block is what we
+        // want — starting a browser while the previous one still owns
+        // userDataDir/<session> is the "The browser is already running"
+        // collision — but only for as long as the close actually lasts.
+        //
+        // wppconnect's own close() cannot be trusted to settle: it wraps both
+        // page.close() and browser.close() in `.catch(() => null)`, so a
+        // browser that never dies (a suspended chrome.exe, the known
+        // post-hibernation case) leaves the await pending forever, and the
+        // `finally` that clears this slot would never run. The session would
+        // be permanently unstartable — recoverable only by restarting Node.
+        //
+        // Racing it keeps the slot self-clearing. WinZapp's own POST budget
+        // (_WPP_GRACEFUL_STOP_SECONDS) is 10s, so this has to answer first.
+        await Promise.race([
+          req.client.close(),
+          new Promise((resolve) => setTimeout(resolve, 8000)).then(() => {
+            req.logger?.warn?.(
+              `[${session}] close() did not settle in 8s — force killing so ` +
+                `the session slot is not left stuck in CLOSING.`
+            );
+            try {
+              SessionUtil.forceKillSession(session, req.logger);
+            } catch (e) {}
+          }),
+        ]);
       }
     } catch (closeErr) {
       req.logger?.warn?.(

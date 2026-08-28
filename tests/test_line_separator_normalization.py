@@ -22,6 +22,7 @@ import pytest
 import wx
 
 from core.utils import normalize_line_separators
+from tests.conftest import set_clipboard_text
 from ui.conversations import ConversationsPanel
 
 
@@ -114,10 +115,7 @@ class TestPasteNormalization:
         frame = wx.Frame(None)
         try:
             stub = _Stub(frame)
-            if wx.TheClipboard.Open():
-                wx.TheClipboard.SetData(wx.TextDataObject("A\u2029B\u2029C"))
-                wx.TheClipboard.Close()
-            else:
+            if not set_clipboard_text("A\u2029B\u2029C"):
                 pytest.skip("clipboard unavailable")
 
             stub._on_text_field_paste(_FakeKeyEvent(stub.message_field))
@@ -131,10 +129,7 @@ class TestPasteNormalization:
         frame = wx.Frame(None)
         try:
             stub = _Stub(frame)
-            if wx.TheClipboard.Open():
-                wx.TheClipboard.SetData(wx.TextDataObject("hello\nworld"))
-                wx.TheClipboard.Close()
-            else:
+            if not set_clipboard_text("hello\nworld"):
                 pytest.skip("clipboard unavailable")
 
             event = _FakeKeyEvent(stub.message_field)
@@ -196,10 +191,7 @@ class TestPasteHandlerIsGeneric:
         frame = wx.Frame(None)
         try:
             stub = _Stub(frame)
-            if wx.TheClipboard.Open():
-                wx.TheClipboard.SetData(wx.TextDataObject("A\u2029B"))
-                wx.TheClipboard.Close()
-            else:
+            if not set_clipboard_text("A\u2029B"):
                 pytest.skip("clipboard unavailable")
 
             stub._on_text_field_paste(_FakeKeyEvent(stub._caption_field))

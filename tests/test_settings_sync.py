@@ -46,6 +46,17 @@ except ImportError:
 from core.utils import DEFAULT_SETTINGS
 
 
+# Runtime-only sections that must NOT be shipped as defaults, and so are
+# excluded from the invariant rather than added to the template to satisfy it.
+# "privateinfo" is the token vault's own section (WA_token / WA_token_protected
+# live there), and its "paired" key is used as a PRESENCE flag — unpairing does
+# `pi.pop("paired", None)` and every read is a truthy `.get("paired")`. Baking
+# the key into the template means the backfill re-injects it after every
+# unpair; harmless while the value is falsy, wrong the moment anything checks
+# `"paired" in pi`.
+_RUNTIME_ONLY_SECTIONS = {"privateinfo"}
+
+
 def test_default_settings_matches_json_structure():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     json_path = os.path.join(base_dir, "client", "data", "settings_default.json")
@@ -54,6 +65,10 @@ def test_default_settings_matches_json_structure():
 
     assert set(DEFAULT_SETTINGS.keys()) == set(json_data.keys()), (
         f"Top-level keys mismatch: {set(DEFAULT_SETTINGS.keys()) ^ set(json_data.keys())}"
+    )
+    assert not (_RUNTIME_ONLY_SECTIONS & set(json_data.keys())), (
+        f"runtime-only state shipped as a default: "
+        f"{_RUNTIME_ONLY_SECTIONS & set(json_data.keys())}"
     )
 
     for section, val in DEFAULT_SETTINGS.items():

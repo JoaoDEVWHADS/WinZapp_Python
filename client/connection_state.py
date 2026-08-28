@@ -23,6 +23,19 @@ RESUMING = "resuming"             # unlinked, never connected yet — keep waiti
 RESUME_FAILED = "resume_failed"   # unlinked too long while resuming — pair, NO wipe
 LOGOUT = "logout"                 # confirmed logout after being connected — wipe
 
+# Outcomes of MainWindow._still_linked_on_server()'s host-device probe, the last
+# gate before any destructive wipe. Deliberately THREE values and not a bool:
+# the probe goes out through the very same local auth middleware that may have
+# just answered 401/403, so "the probe itself failed" is a routine outcome on
+# the path that needs this gate most — and collapsing it into "not linked" is
+# what turned a rotated local token into a full database wipe 60s later. Only
+# LINK_PROBE_UNLINKED (a session that answered, and could not name our phone)
+# may ever authorise a wipe; LINK_PROBE_UNKNOWN falls back to the pairing
+# dialog with the data kept.
+LINK_PROBE_LINKED = "linked"      # answered with our own phone number — NOT unlinked
+LINK_PROBE_UNLINKED = "unlinked"  # answered, and it holds no linked phone
+LINK_PROBE_UNKNOWN = "unknown"    # the probe never got an answer it could read
+
 # WPPConnect exposes the same permanent unlink through different channels:
 # statusFind uses disconnectedMobile/notLogged, while onStateChange and the
 # REST status endpoint use UNPAIRED variants.
@@ -33,11 +46,13 @@ LOGOUT = "logout"                 # confirmed logout after being connected — w
 # asleep) and is not the same thing as the user unlinking the device;
 # `notLogged` is the one that means "scan the QR code again". Listing it in
 # this tuple is defensible only because every consumer of it goes through
-# MainWindow._logout_confirmed(), which demands four independent things before
-# anything is wiped: the startup grace has passed, _LOGOUT_CONFIRM_STRIKES
-# consecutive readings at least STRIKE_MIN_INTERVAL_SECONDS apart, the state
-# has held for _LOGOUT_CONFIRM_SECONDS, and _still_linked_on_server() cannot
-# prove the device is in fact still linked.
+# MainWindow._act_on_unlink_decision(), which demands several independent
+# things before anything is wiped: never before the session has actually
+# connected THIS run (classify_unlink_candidate()'s ever_connected split),
+# _LOGOUT_CONFIRM_STRIKES consecutive readings at least
+# STRIKE_MIN_INTERVAL_SECONDS apart, and _still_linked_on_server() positively
+# answering LINK_PROBE_UNLINKED — a probe that merely failed (LINK_PROBE_UNKNOWN)
+# lands on the pairing dialog with the data kept, never on a wipe.
 #
 # It is NOT safe on an unguarded path. websocket_client.on_wpp_status_find()
 # treats a single one of these as a permanent logout and wipes credentials and
@@ -147,6 +162,11 @@ _RESET_ZERO_ATTRS = (
     "_offline_probe_strikes",
     "_logout_strikes",
     "_resume_fail_strikes",
+    # The host-device veto run (MainWindow._STILL_LINKED_VETO_LIMIT) counts
+    # CONSECUTIVE vetoes, and a suspend/resume is as much a break in that run
+    # as a healthy status reading is: the session on the other side of the
+    # wake is a fresh attempt, not more of the same one.
+    "_still_linked_vetoes",
 )
 _RESET_FALSE_ATTRS = (
     "_logout_handled",
@@ -186,8 +206,7 @@ def reset_state_for_resume(obj, now: float) -> None:
 
 
 
-def classify_unlinked(
-    status: str,
+def classify_unlink_candidate(
     *,
     ever_connected: bool,
     logout_strikes: int,
@@ -195,24 +214,21 @@ def classify_unlinked(
     logout_confirm_strikes: int,
     resume_fail_strikes: int,
 ) -> str:
-    """Classify an unlinked status reading into an action.
+    """The strike/timing decision shared by every "this might be an unlink"
+    signal, once the caller has already decided the signal itself counts
+    (a WPPConnect unlinked status string, or a local HTTP 401/403 — see
+    classify_unlinked() and MainWindow.check_wa_connection_http()).
 
     Args mirror MainWindow state at the time of the reading:
-      status            — the WPPConnect status string just read.
       ever_connected    — have we announced a live connection THIS run?
-      logout_strikes    — consecutive unlinked readings AFTER being connected.
-      resume_strikes    — consecutive unlinked readings while never connected.
+      logout_strikes    — consecutive unlink-candidate readings AFTER being connected.
+      resume_strikes    — consecutive unlink-candidate readings while never connected.
       *_strikes thresholds — the confirm limits.
 
-    Returns one of ONLINE / RESUMING / RESUME_FAILED / LOGOUT. Callers pass the
-    strike counts they will have AFTER incrementing for this reading, so the
+    Returns one of RESUMING / RESUME_FAILED / LOGOUT. Callers pass the strike
+    counts they will have AFTER incrementing for this reading, so the
     thresholds are simple >= comparisons.
-
-    Only unlinked states are meaningful here; a non-unlinked status is ONLINE
-    (the caller resets both strike counters).
     """
-    if status not in UNLINKED_STATES:
-        return ONLINE
     if not ever_connected:
         # Session still restoring from its saved profile — a failed resume is
         # NOT proof of an unlink, so we never wipe. Only after a long timeout do
@@ -225,6 +241,33 @@ def classify_unlinked(
     if logout_strikes >= logout_confirm_strikes:
         return LOGOUT
     return RESUMING  # connected before, brief blip — keep waiting (no wipe)
+
+
+def classify_unlinked(
+    status: str,
+    *,
+    ever_connected: bool,
+    logout_strikes: int,
+    resume_strikes: int,
+    logout_confirm_strikes: int,
+    resume_fail_strikes: int,
+) -> str:
+    """Classify a WPPConnect status reading into an action.
+
+    status — the WPPConnect status string just read. Only an unlinked state
+    (UNLINKED_STATES) is meaningful here; anything else is ONLINE (the caller
+    resets both strike counters). See classify_unlink_candidate() for what
+    happens once a reading counts.
+    """
+    if status not in UNLINKED_STATES:
+        return ONLINE
+    return classify_unlink_candidate(
+        ever_connected=ever_connected,
+        logout_strikes=logout_strikes,
+        resume_strikes=resume_strikes,
+        logout_confirm_strikes=logout_confirm_strikes,
+        resume_fail_strikes=resume_fail_strikes,
+    )
 
 
 def try_begin_resume_recovery(obj, lock) -> bool:
@@ -269,15 +312,27 @@ _CLOSED_AFTER_FLUSH_STATES = ("CLOSED", "DESTROYED", "")
 
 
 def session_closed_after_flush(status: str) -> bool:
-    """True once the WPPConnect session has fully closed after a close-session
-    (browser shut down, WhatsApp Web auth flushed to userDataDir).
+    """True once WPPConnect has finished its own teardown of the session.
 
-    Used to replace a fixed sleep(2) during shutdown: proceeding to
-    `taskkill /F` before this is True cut the leveldb write mid-flush, so the
-    account came back to a pairing screen ("Session Unpaired") on next launch —
-    reported live as "closed one window, another account demanded re-pairing".
-    A larger profile needs longer than 2s to flush, hence waiting on the actual
-    CLOSED signal rather than a blind sleep.
+    This is HALF the shutdown gate, not the whole one. It says the server let
+    go of the session; it does NOT say Chrome has finished writing the profile.
+    Only `MainWindow.wait_for_profile_release()` — which watches for the
+    chrome.exe owning userDataDir/<session> to actually exit — means that, and
+    `_stop_wpp_server()` waits on both, in that order.
+
+    Getting this wrong is what corrupts a pairing. `taskkill /F` landing before
+    the profile is released cuts the leveldb mid-write, and the account comes
+    back to a pairing screen ("Session Unpaired") on the next launch while the
+    phone still lists the device under Linked Devices.
+
+    The reason this predicate can be trusted at all is a WinZapp patch in
+    closeSession (api_patches/src/controller/sessionController.ts): the
+    placeholder it parks in clientsArray during the close is 'CLOSING', not
+    `{status: null}`. Upstream's null makes getSessionState answer 'CLOSED'
+    immediately — before `await client.close()` has done anything — so this
+    returned True on the first poll, ~0.1s in, on every shutdown ever audited.
+    'CLOSING' is deliberately absent from the tuple below so the poll waits for
+    the real transition.
 
     Pure/wx-free so the decision is unit-testable without the requests/wx stack.
     """

@@ -131,14 +131,22 @@ class TestAccessibleSpeechOutputSuppression:
         speech = AccessibleSpeechOutput(_FakeAuto(_NoSilenceOutput()), lambda: {})
         speech.silence()  # must not raise
 
-    def test_silence_works_when_extended_sr_compat_disabled(self):
+    def test_silence_is_a_no_op_when_extended_sr_compat_disabled(self):
+        """This asserted the opposite, and the opposite was the bug.
+
+        extended_sr_compat_enabled off means WinZapp never calls into
+        accessible_output2 at all (see AccessibleSpeechOutput's docstring).
+        silence() reaches into the screen reader to cancel speech already in
+        flight — including speech WinZapp never produced — so honouring it
+        while the master switch is off cut off NVDA for a user who had asked
+        the app to stay out of their screen reader entirely."""
         fake = _FakeOutput()
         speech = AccessibleSpeechOutput(
             _FakeAuto(fake),
             lambda: {"accessibility": {"extended_sr_compat_enabled": False}},
         )
         speech.silence()
-        assert fake.silenced is True
+        assert fake.silenced is False
 
 
 class TestVoiceRecordingSilenceActive:
@@ -214,15 +222,24 @@ class TestSilenceSendVoiceFocusIfEnabled:
         stub = self._make_stub(silence_enabled=True, extended_enabled=True)
         stub._silence_send_voice_focus_if_enabled()
 
-        # Immediate call covers a screen reader that speaks synchronously.
+        # Immediate call covers a screen reader that speaks synchronously,
+        # the two follow-ups the async case — which is what this method's
+        # docstring describes. It was a burst of eight up to 500ms: half a
+        # second of repeated cancels, which also swallow any unrelated
+        # announcement that lands in that window.
         assert stub.main_window.speak_output.silence_calls == 1
-        assert len(call_later_calls) == 8
+        assert len(call_later_calls) == 2
         for delay, func in call_later_calls:
             assert delay > 0
             func()
-        assert stub.main_window.speak_output.silence_calls == 9
+        assert stub.main_window.speak_output.silence_calls == 3
 
-    def test_fires_when_extended_sr_compat_disabled(self, monkeypatch):
+    def test_does_not_fire_merely_because_extended_sr_compat_is_off(self, monkeypatch):
+        """The master switch means "never speak through the screen reader",
+        not "cancel the screen reader's speech". Firing here interrupted NVDA
+        on every recording for a user who had asked WinZapp to stay out of it
+        entirely — and ui/accessible.py already covers this case the
+        non-invasive way, by blanking the button's accessible name."""
         call_later_calls = []
         monkeypatch.setattr(
             conversations_module.wx, "CallLater",
@@ -231,12 +248,8 @@ class TestSilenceSendVoiceFocusIfEnabled:
         stub = self._make_stub(silence_enabled=False, extended_enabled=False)
         stub._silence_send_voice_focus_if_enabled()
 
-        assert stub.main_window.speak_output.silence_calls == 1
-        assert len(call_later_calls) == 8
-        for delay, func in call_later_calls:
-            assert delay > 0
-            func()
-        assert stub.main_window.speak_output.silence_calls == 9
+        assert stub.main_window.speak_output.silence_calls == 0
+        assert call_later_calls == []
 
 
 class TestSilenceableVoiceButtonAccessibleName:

@@ -1443,6 +1443,22 @@ class ConversationsPanel(wx.Panel):
             self._add_attachment_btn.Enable()
             self._emoji_btn.Enable()
 
+    def refresh_composer_permissions(self, jid: str, transition: bool = True):
+        if not self.conversation or self.conversation.get("remoteJid") != jid:
+            return
+
+        conversation = self.main_window.chats.get(jid) or self.conversation
+        was_editable = self.message_field.IsEditable()
+        self._apply_composer_permissions(jid, conversation)
+        self.message_label.SetLabel(
+            self._message_label_text(jid, conversation, self.conversation_name)
+        )
+        self.conversation_panel.Layout()
+        if was_editable and not self.message_field.IsEditable():
+            self.main_window.output(self.main_window.i18n.t(
+                "group_send_restricted_now" if transition else "group_send_restricted"
+            ))
+
     def update_conversation_name(self, jid: str, new_name: str):
         """Apply a group rename to the conversation currently on screen.
 
@@ -2281,15 +2297,41 @@ class ConversationsPanel(wx.Panel):
         went out as a plain send (send_text_message's fallback): the virtual
         message's reply contextInfo is dropped so the row stops reading as a
         reply — the quote never actually reached the recipient.
+
+        A missing/non-string real_id means the send itself succeeded (this is
+        only ever called after one did) but its real WhatsApp id couldn't be
+        parsed out of the API response. Finalising the row here regardless
+        used to strand it permanently: on_new_message()'s later echo match
+        only ever considers rows still marked pending, so this call was the
+        one and only chance a message like that got to be linked to its real
+        id — every one after it landed as a brand new, separately-stored
+        duplicate instead of resolving the original. Returning without
+        touching the row leaves it pending, so the echo (which always does
+        carry the real id) resolves it via a second call to this same method,
+        exactly as if this inconclusive one had never happened.
         """
+        # The transfer itself is over even when the id is not knowable — the
+        # send succeeded, only its response was unparseable. So the gauge and
+        # the "this row has a transfer in progress" marker come down either
+        # way; leaving them up strands a finished upload on screen, and
+        # _sync_pending_document_gauge() (which keys off _media_transfer_started
+        # plus _local_pending) re-shows it every time the row is selected.
         self._hide_media_transfer_gauge()
+        self._media_transfer_started.discard(local_id)
+        if not (real_id and isinstance(real_id, str)):
+            # Pin the row at 100% rather than popping the entry: the row stays
+            # pending on purpose (see above), and _render_message_line's
+            # pending clause falls back to .get(local_id, 0.0) — popping would
+            # make a just-finished upload announce as ", enviando 0%".
+            if local_id in self._media_upload_progress:
+                self._media_upload_progress[local_id] = 1.0
+            return
         tracked = self._outgoing_virtual_messages.pop(local_id, None)
         if tracked is not None:
             tracked["_local_pending"] = False
             if real_id and isinstance(real_id, str):
                 tracked.setdefault("key", {})["id"] = real_id
         self._media_upload_progress.pop(local_id, None)
-        self._media_transfer_started.discard(local_id)
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)
@@ -2693,19 +2735,22 @@ class ConversationsPanel(wx.Panel):
         the announcement whichever way the screen reader schedules it —
         silence() is idempotent, so calling it twice is harmless.
         """
-        is_silenced = (
-            not self.main_window.settings.get("accessibility", {}).get(
-                "extended_sr_compat_enabled", True
-            )
-            or self.main_window.settings.get("speech_content", {}).get(
-                "silence_while_recording", False
-            )
-        )
-        if not is_silenced:
+        # Keyed ONLY on the "silence while recording" toggle. It used to also
+        # fire when extended_sr_compat_enabled was OFF — i.e. exactly when the
+        # user had told WinZapp never to talk to their screen reader, the app
+        # started interrupting it instead. Nothing about that switch asks for
+        # other applications' speech to be cut off.
+        if not self.main_window.settings.get("speech_content", {}).get(
+            "silence_while_recording", False
+        ):
             return
         if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
+            # Immediately, plus two follow-ups — which is what the docstring
+            # above describes. It was a burst of eight up to 500ms, half a
+            # second of repeated cancels that also swallow any unrelated
+            # announcement landing in that window.
             self.main_window.speak_output.silence()
-            for delay in (10, 25, 50, 80, 120, 200, 350, 500):
+            for delay in (50, 150):
                 wx.CallLater(delay, self.main_window.speak_output.silence)
 
     def _start_voice_recording(self):
@@ -4057,6 +4102,19 @@ class ConversationsPanel(wx.Panel):
                 wx.EVT_MENU,
                 lambda e, i=index, m=msg: self._on_menu_edit_message(i, m),
                 edit_item,
+            )
+
+        # Resend (text messages WinZapp itself never confirmed — see
+        # _mark_message_unconfirmed's docstring). Deleting one already works
+        # today (treated as nothing-to-revoke, see _on_menu_delete_message);
+        # this is the other half — a way to try again instead of only being
+        # able to give up on it.
+        if _is_text and msg.get("_send_unconfirmed"):
+            resend_item = menu.Append(wx.ID_ANY, i18n.t("resend_message"))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_resend_message(m),
+                resend_item,
             )
 
         menu.AppendSeparator()
@@ -10202,9 +10260,27 @@ class ConversationsPanel(wx.Panel):
         )
 
         pending_local_id = str(msg.get("_local_id") or "")
-        cancelled_pending = bool(msg.get("_local_pending") and pending_local_id)
+        # An unconfirmed send (see _mark_message_unconfirmed's docstring) has
+        # no real WhatsApp id any more than a still-queued/in-flight one
+        # does — WinZapp just never learned whether it actually went out —
+        # so it belongs in the same "nothing to revoke, local delete only"
+        # bucket as a cancelled pending send, not the fromMe/for-everyone
+        # path below (which would build a revoke request around the local
+        # UUID this row's key.id still holds and could only fail).
+        cancelled_pending = bool(
+            pending_local_id and (msg.get("_local_pending") or msg.get("_send_unconfirmed"))
+        )
         if cancelled_pending:
-            self._cancel_pending_message(msg, pending_local_id)
+            # An unconfirmed send shares the "nothing to revoke, local delete
+            # only" path, but NOT the wait for an echo: its send already
+            # finished and reported. Saying so explicitly matters because
+            # cancel() answers False for both "a worker owns it" and "it is not
+            # in the queue any more", and only the first justifies holding the
+            # record.
+            self._cancel_pending_message(
+                msg, pending_local_id,
+                hold_for_echo=bool(msg.get("_local_pending")),
+            )
         elif for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
@@ -10228,8 +10304,22 @@ class ConversationsPanel(wx.Panel):
         else:
             self._delete_message_for_me_only(msg, msg_id, index)
 
-    def _cancel_pending_message(self, msg: dict, pending_local_id: str):
+    def _cancel_pending_message(self, msg: dict, pending_local_id: str,
+                                hold_for_echo: bool = True):
         """Delete a message that is still pending — the delete-while-sending path.
+
+        ``hold_for_echo=False`` is for a send that is already OVER: an
+        unconfirmed one (_send_unconfirmed), where the worker finished and
+        reported long ago. cancel() returns False for it — not because a worker
+        still owns the message, but because it is no longer in the queue at all
+        — so without this flag it would take the hold-for-echo tail below and
+        be stashed waiting for an outcome report that has already happened and
+        will never come again. The record would sit in the chat forever:
+        invisible (_is_displayable_message and _counts_as_last_message both
+        refuse _cancelled_awaiting_id), re-persisted on every save, and holding
+        a slot in _cancelled_pending_messages. Nor can the echo matcher claim
+        it, since that only considers _local_pending records and an unconfirmed
+        one has that False.
 
         There is no WhatsApp message ID to revoke yet, so whichever scope the
         delete dialog had selected, this cancels the queued/in-flight send and
@@ -10268,6 +10358,14 @@ class ConversationsPanel(wx.Panel):
             # (voice_messages/<local_id>.msv, media/<local_id>.wzmedia) belong to
             # a message that no longer exists anywhere, and no later rename can
             # ever claim them.
+            discard_local_media_cache(
+                data_path("voice_messages"), data_path("media"), pending_local_id
+            )
+            return
+        if not hold_for_echo:
+            # The send already ran to completion and its outcome was already
+            # reported; there is nothing left to wait for. Same disposal as the
+            # stopped-for-good branch above.
             discard_local_media_cache(
                 data_path("voice_messages"), data_path("media"), pending_local_id
             )
@@ -10499,6 +10597,87 @@ class ConversationsPanel(wx.Panel):
         # Show cancel button so the user knows they're in edit mode
         self._cancel_edit_btn.Show()
         self.conversation_panel.Layout()
+
+    def _on_menu_resend_message(self, msg: dict):
+        """Manually re-send a text message WinZapp itself never confirmed —
+        the other recovery option besides dismissing it outright (see
+        _on_menu_delete_message's cancelled_pending branch, which already
+        treats this state as nothing-to-revoke).
+
+        Deliberately does not attempt to preserve a quote or @mentions the
+        original had: rebuilding those faithfully from contextInfo is more
+        machinery than a rare manual recovery action warrants, and this
+        must not read the composer's own current _quoted_message/
+        _pending_mentions state either — those describe whatever the user
+        is composing right now, unrelated to the row being resent. A resend
+        goes out as plain text; if the quote mattered, the user can reply
+        again themselves.
+        """
+        remote_jid = msg.get("key", {}).get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+        if not remote_jid:
+            return
+
+        # Read the WIRE text, never _get_message_content() — that one returns
+        # what the LIST shows, which is not what was sent:
+        #   * link_preview_text() PREPENDS the preview WhatsApp resolved for
+        #     the URL, as "<title>. <description>. <text>". Resending that
+        #     would deliver WhatsApp's own preview card to the recipient as
+        #     literal characters in the message body.
+        #   * _resolve_mentions_in_text() turns the stored "@554899..." back
+        #     into "@João" for display. Resending that sends a literal
+        #     "@João" — no mention, and a name string WhatsApp never saw.
+        # The raw body has neither, so the "> " strip the edit path needs is
+        # not needed here either (nothing in the send path ever writes that
+        # prefix into message.conversation) — and doing it would silently
+        # truncate a message from a user who legitimately types quote-style
+        # lines.
+        body = msg.get("message") or {}
+        content = (
+            body.get("conversation")
+            or (body.get("extendedTextMessage") or {}).get("text")
+            or ""
+        )
+        if not content:
+            return
+
+        old_local_id = str(msg.get("_local_id") or "")
+        if old_local_id:
+            # Harmless no-op on message_queue's side — an unconfirmed send
+            # has already left its queue by definition — but still clears
+            # this row's own tracking entries the same way a dismiss would.
+            self.main_window.message_queue.cancel(old_local_id)
+            self._outgoing_virtual_messages.pop(old_local_id, None)
+            self.remove_messages_by_id({old_local_id}, focus_previous=True)
+
+        local_id = str(uuid.uuid4())
+        virtual_msg = {
+            "_local_pending": True,
+            "_local_id":      local_id,
+            "key": {
+                "id":       local_id,
+                "fromMe":   True,
+                "remoteJid": remote_jid,
+            },
+            "messageType":      "conversation",
+            "message":          {"conversation": content},
+            "messageTimestamp": int(time.time()),
+            "pushName":         "",
+        }
+        self._clear_empty_placeholder()
+        self._sorted_messages.append(virtual_msg)
+        self.messages_list.Append((self._render_message_line(virtual_msg),))
+        last = self.messages_list.GetItemCount() - 1
+        if last >= 0:
+            self.messages_list.EnsureVisible(last)
+
+        self.main_window.message_queue.enqueue(
+            PendingMessage(local_id, remote_jid, text=content)
+        )
+
+        self._register_virtual_msg(virtual_msg)
+        self.main_window._schedule_set_chats()
 
     def _on_cancel_edit(self, event=None):
         """Leave edit mode without saving."""

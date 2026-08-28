@@ -63,6 +63,39 @@ def test_logout_needs_connection_first():
     assert _classify("QRCODE", False, 1000, 0) == cs.RESUMING
 
 
+def _classify_candidate(ever, logout_strikes, resume_strikes):
+    return cs.classify_unlink_candidate(
+        ever_connected=ever,
+        logout_strikes=logout_strikes,
+        resume_strikes=resume_strikes,
+        logout_confirm_strikes=LOGOUT_CONFIRM,
+        resume_fail_strikes=RESUME_FAIL,
+    )
+
+
+class TestClassifyUnlinkCandidate:
+    """classify_unlink_candidate() is the strike/timing core classify_unlinked()
+    delegates to once a WPPConnect status string is confirmed unlinked; it is
+    also what MainWindow._handle_local_auth_rejected() uses directly for a
+    local HTTP 401/403, which carries no WPPConnect status string to check
+    membership of. Same rules, same thresholds, no ONLINE outcome (the caller
+    has already decided this reading counts)."""
+
+    def test_matches_classify_unlinked_for_every_outcome(self):
+        # Same three outcomes as classify_unlinked(), same thresholds, with no
+        # status string to gate on.
+        assert _classify_candidate(False, 99, 1) == cs.RESUMING
+        assert _classify_candidate(False, 0, RESUME_FAIL - 1) == cs.RESUMING
+        assert _classify_candidate(False, 0, RESUME_FAIL) == cs.RESUME_FAILED
+        assert _classify_candidate(True, LOGOUT_CONFIRM - 1, 0) == cs.RESUMING
+        assert _classify_candidate(True, LOGOUT_CONFIRM, 0) == cs.LOGOUT
+
+    def test_never_logs_out_before_connecting_this_run(self):
+        # The same destructive-bug guard as classify_unlinked(): a huge
+        # logout-strike count means nothing before ever_connected is True.
+        assert _classify_candidate(False, 1000, 0) == cs.RESUMING
+
+
 def test_wake_from_suspend_detects_long_gap():
     # A 30s loop that really took 5 minutes = the machine was asleep.
     assert cs.is_wake_from_suspend(300.0, 30, 90) is True
