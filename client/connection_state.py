@@ -23,6 +23,19 @@ RESUMING = "resuming"             # unlinked, never connected yet — keep waiti
 RESUME_FAILED = "resume_failed"   # unlinked too long while resuming — pair, NO wipe
 LOGOUT = "logout"                 # confirmed logout after being connected — wipe
 
+# Outcomes of MainWindow._still_linked_on_server()'s host-device probe, the last
+# gate before any destructive wipe. Deliberately THREE values and not a bool:
+# the probe goes out through the very same local auth middleware that may have
+# just answered 401/403, so "the probe itself failed" is a routine outcome on
+# the path that needs this gate most — and collapsing it into "not linked" is
+# what turned a rotated local token into a full database wipe 60s later. Only
+# LINK_PROBE_UNLINKED (a session that answered, and could not name our phone)
+# may ever authorise a wipe; LINK_PROBE_UNKNOWN falls back to the pairing
+# dialog with the data kept.
+LINK_PROBE_LINKED = "linked"      # answered with our own phone number — NOT unlinked
+LINK_PROBE_UNLINKED = "unlinked"  # answered, and it holds no linked phone
+LINK_PROBE_UNKNOWN = "unknown"    # the probe never got an answer it could read
+
 # WPPConnect exposes the same permanent unlink through different channels:
 # statusFind uses disconnectedMobile/notLogged, while onStateChange and the
 # REST status endpoint use UNPAIRED variants.
@@ -37,8 +50,9 @@ LOGOUT = "logout"                 # confirmed logout after being connected — w
 # things before anything is wiped: never before the session has actually
 # connected THIS run (classify_unlink_candidate()'s ever_connected split),
 # _LOGOUT_CONFIRM_STRIKES consecutive readings at least
-# STRIKE_MIN_INTERVAL_SECONDS apart, and _still_linked_on_server() cannot
-# prove the device is in fact still linked.
+# STRIKE_MIN_INTERVAL_SECONDS apart, and _still_linked_on_server() positively
+# answering LINK_PROBE_UNLINKED — a probe that merely failed (LINK_PROBE_UNKNOWN)
+# lands on the pairing dialog with the data kept, never on a wipe.
 #
 # It is NOT safe on an unguarded path. websocket_client.on_wpp_status_find()
 # treats a single one of these as a permanent logout and wipes credentials and
@@ -148,6 +162,11 @@ _RESET_ZERO_ATTRS = (
     "_offline_probe_strikes",
     "_logout_strikes",
     "_resume_fail_strikes",
+    # The host-device veto run (MainWindow._STILL_LINKED_VETO_LIMIT) counts
+    # CONSECUTIVE vetoes, and a suspend/resume is as much a break in that run
+    # as a healthy status reading is: the session on the other side of the
+    # wake is a fresh attempt, not more of the same one.
+    "_still_linked_vetoes",
 )
 _RESET_FALSE_ATTRS = (
     "_logout_handled",

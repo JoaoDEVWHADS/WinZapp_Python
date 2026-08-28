@@ -25,6 +25,7 @@ wx.App to construct for real.
 """
 
 import logging
+import types
 
 import pytest
 import requests
@@ -217,4 +218,51 @@ class TestAFailedCloseSessionLeaksNothingEither:
         with caplog.at_level(logging.INFO):
             close_active_session(stub, sync=True)
 
+        assert SESSION in caplog.text
+
+
+class TestTheHostDeviceProbeMasksItsTransportError:
+    """The same leak, in the probe this change made reachable.
+
+    MainWindow._still_linked_on_server() is the last gate before a
+    destructive wipe, and it existed with no caller at all until the
+    local-401 fix started calling it. Its URL carries the token in the path
+    exactly like close-session's does, so the transport failure it logs
+    publishes the credential the same way -- and this probe runs precisely
+    when the local Node is unhealthy, i.e. when the failure is likely.
+    check_wa_connection_http()'s own host-device call has the same shape.
+    """
+
+    @staticmethod
+    def _stub():
+        import main
+
+        stub = types.SimpleNamespace(
+            token=TOKEN, wpp_server="http://127.0.0.1", wpp_port=6300)
+        stub._still_linked_on_server = types.MethodType(
+            main.MainWindow._still_linked_on_server, stub)
+        return stub
+
+    @pytest.fixture
+    def failing_api_get(self, monkeypatch):
+        import main
+
+        def _raise(*_args, **_kwargs):
+            raise requests.exceptions.ConnectionError(
+                f"HTTPConnectionPool(host='127.0.0.1', port=6300): Max retries "
+                f"exceeded with url: /api/{TOKEN}/host-device")
+
+        monkeypatch.setattr(main, "api_get", _raise)
+
+    def test_the_probe_masks_the_transport_error(self, caplog, failing_api_get):
+        import connection_state as cs
+
+        with caplog.at_level(logging.INFO):
+            outcome = self._stub()._still_linked_on_server()
+
+        assert SECRET not in caplog.text
+        # An unreadable probe must never be read as permission to wipe.
+        assert outcome == cs.LINK_PROBE_UNKNOWN
+        # The line still has to say what went wrong, and for which session.
+        assert "ConnectionError" in caplog.text
         assert SESSION in caplog.text
