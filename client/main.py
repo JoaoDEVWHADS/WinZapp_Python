@@ -6266,8 +6266,21 @@ class MainWindow(wx.Frame):
                 logging.exception(
                     "[node-port] persisting re-resolved port failed (non-fatal)"
                 )
-        logging.info("[node-port] account %s → re-resolved WPPConnect port %s",
-                     self.account_id, new_port)
+        if new_port == self.wpp_port:
+            # allocate_port_for_account() never raises: with every port in its
+            # range busy it returns the deterministic start, which is by
+            # construction the occupied one we came here to escape. Say so, or
+            # this resurfaces as the same generic "API failed to start in time"
+            # the re-check exists to eliminate — the one case where the
+            # self-healing silently did not heal.
+            logging.error(
+                "[node-port] account %s: port %s is taken and no free port was "
+                "available — Node will fail to bind",
+                self.account_id, new_port,
+            )
+        else:
+            logging.info("[node-port] account %s → re-resolved WPPConnect port %s",
+                         self.account_id, new_port)
         self.wpp_port = new_port
 
     def _resolve_wpp_port(self, conn: dict) -> int:
@@ -6952,6 +6965,28 @@ class MainWindow(wx.Frame):
                          self.wpp_port)
             self._check_wpp_version_pin()
             return
+
+        # Settle the port BEFORE the dialog captures it. _start_wpp_background()
+        # calls this too, but it runs from the wx.CallAfter below — i.e. after
+        # ApiStartupDialog.__init__ has already stored self.wpp_port and started
+        # polling it every 500ms to decide the API came up.
+        #
+        # Without this, the fix defeats itself on its own success path: a
+        # squatter takes 6301, the re-check correctly moves Node to 6302, and
+        # the dialog goes on polling 6301 — which the squatter is answering, so
+        # it reports success immediately while Node is still booting elsewhere.
+        # If the squatter releases the port instead, the dialog polls a dead one
+        # for the full 5 minutes and reports "API failed to start in time" while
+        # Node is running fine. Either way a clean EADDRINUSE becomes a false
+        # success or a false timeout, and the port announced to the screen
+        # reader is the wrong one.
+        #
+        # Safe here specifically because the _is_wpp_running() check above just
+        # returned False: that is a TCP connect and _is_port_free() is a bind,
+        # exact logical complements — so our own still-listening Node has
+        # already been adopted and cannot be moved out from under itself.
+        # The call in _start_wpp_background() stays; it is idempotent.
+        self._ensure_wpp_port_still_free()
 
         from ui.dialogs.api_startup import ApiStartupDialog
         def _show_startup_dlg():

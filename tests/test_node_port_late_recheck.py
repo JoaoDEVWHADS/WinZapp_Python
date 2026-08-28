@@ -108,3 +108,44 @@ class TestSkipsWhenNotApplicable:
 
         assert stub.wpp_port == 6301
         assert stub.save_calls == 0
+
+
+class TestThePortIsSettledBeforeTheDialogSeesIt:
+    """ApiStartupDialog stores the port handed to its constructor and polls it
+    every 500ms to decide the API came up. So the re-check has to have already
+    run by then, or the fix defeats itself on its own success path.
+
+    _start_wpp_background() also calls _ensure_wpp_port_still_free(), but it is
+    reached through the wx.CallAfter *inside* the dialog helper — after the
+    constructor captured self.wpp_port. With a squatter on the old port the
+    dialog polls the squatter and reports success while Node is still booting
+    elsewhere; if the squatter leaves, it polls a dead port for the full
+    5-minute budget and reports a timeout while Node is running fine. It is
+    also the wrong port announced to the screen reader.
+    """
+
+    @staticmethod
+    def _source():
+        import inspect
+        from main import MainWindow
+        return inspect.getsource(MainWindow.ensure_wpp_running)
+
+    def test_ensure_wpp_running_settles_the_port_itself(self):
+        assert "self._ensure_wpp_port_still_free()" in self._source(), (
+            "leaving it to _start_wpp_background() alone runs it too late"
+        )
+
+    def test_it_runs_before_the_dialog_is_constructed(self):
+        src = self._source()
+        recheck = src.index("self._ensure_wpp_port_still_free()")
+        dialog = src.index("ApiStartupDialog(self, self.wpp_port)")
+        assert recheck < dialog
+
+    def test_it_runs_after_the_adopt_check(self):
+        """_is_wpp_running() is a TCP connect and _is_port_free() a bind —
+        exact complements. Re-allocating before the adopt check could move us
+        off a port our own still-listening Node is on."""
+        src = self._source()
+        recheck = src.index("self._ensure_wpp_port_still_free()")
+        last_adopt = src.rindex("if self._is_wpp_running():", 0, recheck)
+        assert last_adopt < recheck
