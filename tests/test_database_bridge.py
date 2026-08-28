@@ -113,21 +113,37 @@ class TestClose:
         assert "error" not in result
 
 
-class TestTimeoutCancelsThePendingCoroutine:
-    """A timed-out call now cancels its future — see DatabaseBridgeTimeout's
-    own docstring. A coroutine still queued behind other work on the loop
-    (as opposed to one already running) must never get a chance to run at
-    all once its caller has given up on it, or a caller that retried the
-    same write after the timeout could race its own retry."""
+class TestATimeoutDoesNotCancelTheCoroutine:
+    """A timed-out call leaves its coroutine running, on purpose.
 
-    def test_a_still_queued_coroutine_never_runs_after_its_timeout(self, bridge):
+    An earlier revision of this branch cancelled the future instead, so that
+    no stale write could land after the caller gave up. Two things killed
+    that idea, both measured rather than argued:
+
+    * It corrupts the database. Batch writes run `BEGIN` ... `COMMIT` under
+      `except Exception: await conn.rollback()`, and CancelledError is a
+      BaseException, so the rollback is skipped and the half-finished
+      transaction stays open on the single shared connection for the next
+      write to commit. Cancelling `import_from_dict(clear_first=True)`
+      mid-flight left the old chats deleted and 285 of 4000 new ones
+      committed.
+    * It did not even work as advertised. `run_coroutine_threadsafe` queues
+      the task creation before the cancel, so a "still queued" coroutine
+      with no await before its side effect runs to completion anyway — while
+      `future.cancel()` returns True, because the concurrent future never
+      leaves PENDING. The log line said "cancel succeeded" on the same line
+      the coroutine ran.
+
+    See DatabaseBridgeTimeout's docstring for what would have to change in
+    database.py before cancelling could be reconsidered."""
+
+    def test_the_coroutine_still_completes_after_its_caller_gave_up(self, bridge):
         ran = threading.Event()
 
         async def hog():
             # Genuinely blocks the loop thread, unlike asyncio.sleep (which
             # cooperatively yields and would let "second" run interleaved,
-            # defeating the point of this test — verified empirically
-            # before writing this).
+            # defeating the point of this test).
             time.sleep(0.4)
 
         async def second():
@@ -141,8 +157,11 @@ class TestTimeoutCancelsThePendingCoroutine:
             bridge._call(second(), timeout=0.1)
 
         t.join(timeout=5)
-        time.sleep(0.1)  # a beat for a cancelled-but-otherwise-runnable task
-        assert not ran.is_set()
+        time.sleep(0.1)
+        assert ran.is_set(), (
+            "the timeout must not cancel the coroutine — a cancelled write "
+            "can strand an open transaction the next write then commits"
+        )
 
     def test_bridge_stays_usable_afterward(self, bridge):
         async def hog():

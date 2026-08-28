@@ -60,17 +60,28 @@ class DatabaseBridgeClosed(RuntimeError):
 class DatabaseBridgeTimeout(RuntimeError):
     """Raised when a database call does not complete within its timeout.
 
-    This does NOT mean the underlying operation failed or was rolled back.
-    _call() cancels the coroutine's future the moment the timeout fires,
-    which asyncio delivers at the coroutine's next await point: a call still
-    queued behind other work never gets to start at all, and one already
-    suspended waiting on something (a lock, an I/O op) is interrupted right
-    there — in both cases no stale write lands later for a caller that
-    already timed out and moved on (e.g. retried the same write). The one
-    case cancellation cannot reach is a coroutine actively executing
-    synchronous code with no await in between (e.g. mid-way through
-    encrypting a large payload) — Python cannot preempt that, so it keeps
-    running and may still complete in the background.
+    This does NOT mean the underlying operation failed or was rolled back —
+    only that the calling thread stopped waiting for it. The operation may
+    still complete on the event-loop thread afterwards.
+
+    That is deliberate: the timeout does NOT cancel the coroutine, and must
+    not start doing so. Cancelling looks like the tidier option — no stale
+    write landing after the caller gave up — but it corrupts the database.
+    Every batch write in DatabaseManager runs `BEGIN` ... `COMMIT` guarded by
+    `except Exception: await conn.rollback()`, and asyncio.CancelledError
+    derives from BaseException, so that rollback never runs. The connection
+    is a single serialized one, so the half-finished transaction stays open
+    and the NEXT unrelated write commits it. Measured on a real database:
+    cancelling `import_from_dict(clear_first=True)` mid-flight left the old
+    chats deleted and 285 of 4000 new ones committed, with no error surfaced
+    anywhere. `clear_all()` fails the same way.
+
+    Nor would cancelling buy anything today: nothing in client/ catches
+    DatabaseBridgeTimeout, so no caller ever retries a timed-out write —
+    the "stale write races the caller's retry" scenario it would protect
+    against has no call site. If one ever appears, the fix belongs in
+    database.py (roll back on BaseException, or asyncio.shield the
+    transaction), and both halves have to land together.
     """
 
 
@@ -189,14 +200,13 @@ class DatabaseBridge:
         try:
             return future.result(timeout=timeout)
         except asyncio.TimeoutError as exc:
-            # See DatabaseBridgeTimeout's own docstring for exactly what
-            # this does and does not stop: a call still queued, or blocked
-            # on I/O, is genuinely interrupted; one running synchronous code
-            # with no await in between cannot be preempted and keeps going.
-            cancelled = future.cancel()
+            # Deliberately does NOT cancel the future — see
+            # DatabaseBridgeTimeout's docstring for why letting the coroutine
+            # run to completion is the safe option.
             log.error(
-                "[DatabaseBridge] Call timed out after %.0fs (cancel %s): %s",
-                timeout, "succeeded" if cancelled else "had no effect — already running", coro,
+                "[DatabaseBridge] Call timed out after %.0fs (coroutine may "
+                "still complete in the background): %s",
+                timeout, coro,
             )
             raise DatabaseBridgeTimeout(
                 f"Database call timed out after {timeout:.0f}s"
