@@ -27,6 +27,8 @@ import pytest
 
 from main import MainWindow
 
+from tests.locales import registered_locale_files
+
 
 class _FakeI18n:
     _STRINGS = {
@@ -83,7 +85,16 @@ class TestSelfReferenceLabelModes:
 LANG_DIR = os.path.join(os.path.dirname(__file__), "..", "client", "languages")
 
 
-@pytest.mark.parametrize("lang_file", ["pt-BR.json", "pt-PT.json", "en-US.json", "es-ES.json"])
+#: Every registered locale, from language_map.json — pl used to be left out
+#: of this list, and this is the only check that the two keys are *distinct*
+#: (the union check in test_language_files_in_sync.py catches a missing or
+#: blank value, never two identical ones). Through the shared helper so an
+#: empty derivation cannot quietly turn the parametrize below into zero cases
+#: — see tests/locales.py.
+_LANG_FILES = list(registered_locale_files())
+
+
+@pytest.mark.parametrize("lang_file", _LANG_FILES)
 class TestSelfReferenceKeysDifferAcrossEveryLanguage:
     def test_eu_and_voce_keys_are_both_present_and_distinct(self, lang_file):
         with open(os.path.join(LANG_DIR, lang_file), encoding="utf-8") as f:

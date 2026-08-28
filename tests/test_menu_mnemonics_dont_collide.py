@@ -17,7 +17,15 @@ import re
 
 from app_paths import resource_path
 
-LOCALES = ["pt-BR", "pt-PT", "en-US", "es-ES", "pl"]
+from tests.locales import registered_locale_codes
+
+#: Derived from language_map.json, not repeated here — the set of locales is
+#: data, not code (a locale is added by dropping in `<code>.json` plus an entry
+#: in that map, with no rebuild), so a list written out here goes stale the
+#: moment one is added and silently stops checking it. Through the shared
+#: helper because the derivation has to be checked for emptiness before it is
+#: looped over — see tests/locales.py.
+LOCALES = list(registered_locale_codes())
 
 # Every label MainWindow._build_menubar() adds directly to the wx.MenuBar,
 # in i18n key form. acc_menu_title (Accounts) is intentionally excluded: it
