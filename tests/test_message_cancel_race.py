@@ -824,6 +824,13 @@ class _EchoMainWindow(_MainWindow):
     on_new_message = MainWindow.on_new_message
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _counts_as_last_message = MainWindow._counts_as_last_message
+    # The real guard, not a no-op: on_new_message() routes every message
+    # through it, and binding the genuine one means these echo tests would
+    # also catch it starting to redirect an ordinary 1:1 echo. Inert for the
+    # fixtures here — CHAT is a plain phone JID and no message carries a
+    # "participant", so neither shape it looks for can match.
+    _redirect_self_chat_artifact = MainWindow._redirect_self_chat_artifact
+    _phone_digits_equivalent = staticmethod(MainWindow._phone_digits_equivalent)
 
     def __init__(self, records):
         super().__init__()

@@ -4685,6 +4685,89 @@ class MainWindow(wx.Frame):
             return False
         return getattr(self, "_sync_ever_started", False)
 
+    def _redirect_self_chat_artifact(self, remote_jid: str, key: dict, from_me: bool):
+        """Detect and redirect a WPPConnect/Baileys self-chat sync artifact.
+
+        WPPConnect/Baileys occasionally reports one of our own sends (seen
+        with self-chat text, audio and documents) tagged with an identity
+        that isn't our real phone JID, in one of two shapes:
+
+          (a) "participant" (the actual sender/author, per wa-js semantics)
+              has the same digits as "remoteJid" (the chat). For a real
+              GROUP, remoteJid is the group's own independently-allocated
+              ID, never equal to any participant's JID — so this overlap
+              alone proves it's not a real group, regardless of whatever
+              fromMe flag WPPConnect attached to the event (observed: it
+              can arrive as fromMe=False, producing a bogus "new message
+              from an unnamed participant" notification). For a bare,
+              not-yet-resolved @lid or @s.whatsapp.net remoteJid, the same
+              overlap is only unambiguous when fromMe is already True —
+              for a real 1:1 chat, an incoming (fromMe=False) message's
+              participant legitimately mirrors remoteJid (the sender IS
+              the chat), so that combination must NOT be redirected.
+
+          (b) remoteJid is suffixed "@g.us" but its digits are simply our
+              own phone number (with the Brazilian 9th-digit variant) — no
+              real group JID is ever shaped like a plain phone number.
+
+        Either shape otherwise spawns an unnamed phantom "group"/duplicate
+        chat that (1) duplicates a message already stored under "Eu" and
+        (2) can't be cleanly identified/deleted afterwards.
+
+        Returns (remote_jid, from_me), redirected/forced True when either
+        shape matched, unchanged otherwise.
+
+        Shared by on_new_message() (the live path) and
+        on_historical_message() (history sync) — the latter used to have no
+        guard at all, so a fake self-chat arriving through a history-sync
+        batch sat in the chat list unfiltered until the next full
+        deduplicate_chats() pass happened to run. deduplicate_chats() keeps
+        its own equivalent guard pass for chats that slipped through before
+        either of these ran (e.g. a session resumed from a store that
+        already had one saved) — all three must keep agreeing on what
+        counts as a fake self-chat.
+
+        That third one doesn't call this method — it needs a verdict about a
+        whole chat's stored records, not about one arriving message — so it
+        restates the same condition instead. Keeping the two in step matters
+        in both directions: a shape that pass accepts but these funnels
+        don't is a chat wiped on every launch and recreated by live traffic
+        in between, and a shape these reject but that pass doesn't is one
+        already saved in messages.db that nothing ever cleans up.
+        """
+        participant_raw = key.get("participant") or ""
+        remote_digits = remote_jid.split("@", 1)[0]
+        part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
+        my_jid = self._normalize_jid(getattr(self, "my_jid", ""))
+        my_lid = getattr(self, "my_lid", "")
+        is_group_jid = remote_jid.endswith("@g.us")
+
+        digits_self_referential = bool(part_digits and remote_digits == part_digits)
+        is_self_referential = digits_self_referential and (
+            is_group_jid or (from_me and my_jid and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0]))
+        )
+        is_self_phone_group = bool(
+            is_group_jid and my_jid
+            and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0])
+        )
+
+        if is_self_referential or is_self_phone_group:
+            from_me = True
+            if my_jid:
+                remote_jid = my_jid
+            elif my_lid:
+                remote_jid = my_lid
+            else:
+                remote_jid = participant_raw or remote_jid
+        elif (
+            my_jid and remote_jid != my_jid
+            and remote_jid.endswith("@s.whatsapp.net")
+            and self._is_self_jid(remote_jid)
+        ):
+            remote_jid = my_jid
+
+        return remote_jid, from_me
+
     def on_new_message(self, msg: dict):
         """
         Called on the main thread (via wx.CallAfter) when a new message
@@ -4717,9 +4800,13 @@ class MainWindow(wx.Frame):
             return
 
         # ── Guard against self-chat multi-device-sync artifacts ─────────────
+        # See _redirect_self_chat_artifact()'s own docstring for the two
+        # shapes this catches — shared with on_historical_message() so both
+        # the live and history-sync paths agree on what counts as fake.
+        # Opportunistically learn my_lid from case (a) first, so later
+        # messages resolve immediately via _is_self_jid() without waiting on
+        # resolve_self_lid()'s async API round-trip.
         participant_raw = key.get("participant") or ""
-        remote_digits = remote_jid.split("@", 1)[0]
-        part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
         # Normalize before using as a redirect target below — my_jid can be
         # in raw "@c.us" form early in a session (set directly from the
         # host-device API response, before resolve_self_lid() gets a chance
@@ -4727,7 +4814,6 @@ class MainWindow(wx.Frame):
         # duplicate "Eu" chat under @c.us instead of the canonical @s.whatsapp.net one.
         my_jid = self._normalize_jid(getattr(self, "my_jid", ""))
         my_lid = getattr(self, "my_lid", "")
-        is_group_jid = remote_jid.endswith("@g.us")
 
         # A fromMe message's own "participant" field always identifies us —
         # wa-js only populates it to tag the sender within a group, and the
@@ -4757,29 +4843,7 @@ class MainWindow(wx.Frame):
             if my_jid:
                 self.register_jid_mapping(participant_raw, my_jid)
 
-        digits_self_referential = bool(part_digits and remote_digits == part_digits)
-        is_self_referential = digits_self_referential and (
-            is_group_jid or (from_me and my_jid and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0]))
-        )
-        is_self_phone_group = bool(
-            is_group_jid and my_jid
-            and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0])
-        )
-
-        if is_self_referential or is_self_phone_group:
-            from_me = True
-            if my_jid:
-                remote_jid = my_jid
-            elif my_lid:
-                remote_jid = my_lid
-            else:
-                remote_jid = participant_raw or remote_jid
-        elif (
-            my_jid and remote_jid != my_jid
-            and remote_jid.endswith("@s.whatsapp.net")
-            and self._is_self_jid(remote_jid)
-        ):
-            remote_jid = my_jid
+        remote_jid, from_me = self._redirect_self_chat_artifact(remote_jid, key, from_me)
 
         # Learn/update presence pushName map from incoming message
         if not from_me and self._learn_sender_name(msg):
@@ -5404,6 +5468,21 @@ class MainWindow(wx.Frame):
 
         if not remote_jid or not msg_id:
             return
+
+        # Guard against the same self-chat multi-device-sync artifacts
+        # on_new_message() redirects on the live path — see
+        # _redirect_self_chat_artifact()'s own docstring. Without this, a
+        # fake self-chat arriving through a history-sync batch (rather than
+        # a live event) sat in the chat list unfiltered — an unnamed
+        # phantom "group"/duplicate of "Eu" that couldn't be cleanly
+        # identified or deleted afterwards — until the next full
+        # deduplicate_chats() pass happened to run.
+        #
+        # from_me is discarded on purpose: unlike on_new_message(), this funnel
+        # never reads it again — the history path files by JID alone.
+        remote_jid, _ = self._redirect_self_chat_artifact(
+            remote_jid, key, key.get("fromMe", False)
+        )
 
         # Statuses (stories) or channels ignored
         if remote_jid.endswith("@broadcast") or remote_jid.endswith("@newsletter"):
@@ -11469,10 +11548,28 @@ class MainWindow(wx.Frame):
                     continue
                 cand_digits = cand_jid.split("@", 1)[0]
                 records = cand_chat.get("messages", {}).get("messages", {}).get("records", [])
+                # Same shape as _redirect_self_chat_artifact()'s own test, and
+                # deliberately so — the two must agree or a chat one of them
+                # rejects is a chat the other keeps resurrecting. Note fromMe
+                # is required only for the non-@g.us case: the group-suffixed
+                # artifact can arrive with fromMe=False, so demanding it here
+                # left every such chat already saved in messages.db
+                # untouchable — the funnels only stop new ones from being
+                # created, and this pass is what deals with the old ones.
+                #
+                # Keeping the relaxation scoped to @g.us is what makes it
+                # safe, and candidate_jids also holds @lid: a @lid chat whose
+                # digits mirror its participant is the ordinary shape of a
+                # legitimate 1:1, where the sender IS the chat. Letting the
+                # relaxation reach those would swallow real conversations
+                # into "Eu" wholesale.
                 is_self_referential = any(
-                    r.get("key", {}).get("fromMe")
-                    and r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
-                    and (cand_jid.endswith("@g.us") or self._phone_digits_equivalent(cand_digits, my_jid_digits))
+                    r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
+                    and (
+                        cand_jid.endswith("@g.us")
+                        or (r.get("key", {}).get("fromMe")
+                            and self._phone_digits_equivalent(cand_digits, my_jid_digits))
+                    )
                     for r in records
                     if r.get("key", {}).get("participant")
                 )
@@ -11482,6 +11579,20 @@ class MainWindow(wx.Frame):
                 )
                 if not (is_self_referential or is_self_phone_group):
                     continue
+                # Persist it, like Pass 1 and Pass 2 already do for their own
+                # re-keys. Without this the pass only ever filtered in memory:
+                # _do_save() writes the chats table through upsert_chat and
+                # never deletes, so the phantom's rows — the chat and every
+                # message stored under its JID — survived in messages.db and
+                # were filtered out again from scratch on every single launch.
+                # The user stopped seeing it, which is why this went unnoticed,
+                # but nothing ever removed it and its messages never moved to
+                # the self-chat they belong to.
+                if hasattr(self, "db") and self.db is not None:
+                    try:
+                        self.db.merge_or_rename_chat(cand_jid, my_jid)
+                    except Exception as db_err:
+                        logging.error(f"[deduplicate_chats] Failed to merge/rename {cand_jid} to {my_jid} in DB: {db_err}")
                 if my_jid in chats:
                     dst_records = (
                         chats[my_jid]

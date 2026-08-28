@@ -5,7 +5,8 @@ import threading
 import socketio
 import wx
 import requests
-from core.api_client import api_get, api_post, redact_api_url
+from core.api_client import (api_get, api_post, redact_api_error,
+                             redact_api_url, redact_token)
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from app_paths import data_path, resource_path
@@ -510,7 +511,7 @@ class Connect:
             token = getattr(self.main_window, 'token', '')
         if not token:
             token = getattr(self, '_last_started_qr_token', '')
-        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", token, sync)
+        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", redact_token(token), sync)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=False)
@@ -539,7 +540,12 @@ class Connect:
                     resp = api_post(close_url, headers=headers, timeout=5)
                     logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
-                    logging.error("[_close_active_session] Error sending close-session request: %s", e)
+                    # Never `e` raw: close-session runs while switching account
+                    # or after Node is already down, so a timeout here is the
+                    # normal case — and requests puts the whole URL, token
+                    # included, into the message it would have logged.
+                    logging.error("[_close_active_session] Error sending close-session request: %s",
+                                  redact_api_error(e))
 
             if sync:
                 _close_api_session()
@@ -1431,7 +1437,7 @@ class Connect:
 
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
-        logging.info("[cleanup_pairing_session] Retrieved token: %s", token)
+        logging.info("[cleanup_pairing_session] Retrieved token: %s", redact_token(token))
         if token:
             headers = self._wpp_headers(use_global_key=False)
             def _close_api_session():
@@ -1445,7 +1451,11 @@ class Connect:
                     resp = api_post(close_url, headers=headers, timeout=5)
                     logging.info("[cleanup_pairing_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
-                    logging.error("[cleanup_pairing_session] Error sending close-session request: %s", e)
+                    # Same leak as in _close_active_session(): the cancelled
+                    # pairing attempt is exactly when this call times out, and
+                    # the exception message carries the token-bearing URL.
+                    logging.error("[cleanup_pairing_session] Error sending close-session request: %s",
+                                  redact_api_error(e))
             threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_dialog_close(self, event):
