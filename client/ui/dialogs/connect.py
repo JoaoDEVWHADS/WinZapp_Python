@@ -5,7 +5,8 @@ import threading
 import socketio
 import wx
 import requests
-from core.api_client import api_get, api_post, redact_api_url
+from core.api_client import (api_get, api_post, redact_api_error,
+                             redact_api_url, redact_token)
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from app_paths import data_path, resource_path
@@ -510,7 +511,7 @@ class Connect:
             token = getattr(self.main_window, 'token', '')
         if not token:
             token = getattr(self, '_last_started_qr_token', '')
-        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", token, sync)
+        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", redact_token(token), sync)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=False)
@@ -539,7 +540,12 @@ class Connect:
                     resp = api_post(close_url, headers=headers, timeout=5)
                     logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
-                    logging.error("[_close_active_session] Error sending close-session request: %s", e)
+                    # Never `e` raw: close-session runs while switching account
+                    # or after Node is already down, so a timeout here is the
+                    # normal case — and requests puts the whole URL, token
+                    # included, into the message it would have logged.
+                    logging.error("[_close_active_session] Error sending close-session request: %s",
+                                  redact_api_error(e))
 
             if sync:
                 _close_api_session()
@@ -909,6 +915,7 @@ class Connect:
             wx.GetApp = lambda: app
 
         def _bg_pairing_flow():
+            _attempt_token = ""
             try:
                 # Capture the old token to close it, preventing conflict
                 _old_token = self.main_window.token or ""
@@ -944,6 +951,8 @@ class Connect:
                     except Exception:
                         self.main_window.token = raw_token
 
+                _attempt_token = self.main_window.token or ""
+
                 # Terminate any existing session running on the server. If a session is already
                 # active/initializing in QR code mode (e.g. from the startup check), WPPConnect
                 # will ignore new start-session requests, and the pairing code will never generate.
@@ -966,6 +975,9 @@ class Connect:
                         )
                         api_post(close_url, headers=_close_headers, timeout=10)
                         logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code: %s", _session_name)
+                        if _old_token:
+                            self.main_window._wait_for_session_flushed(_old_token)
+                        self.main_window.wait_for_profile_release(_session_name, timeout=15.0)
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
                     finally:
@@ -973,9 +985,7 @@ class Connect:
 
                 threading.Thread(target=_close_and_signal, daemon=True).start()
 
-                # Wait for close to finish (max 3s) so Node has time to release the session
-                # and unlock userDataDir before we call /start-session.
-                close_done.wait(timeout=3)
+                close_done.wait(timeout=45)
 
                 if my_attempt != self._pairing_attempt_id:
                     # Superseded — the user cancelled and/or started a newer
@@ -1048,6 +1058,7 @@ class Connect:
                     # this attempt's token/settings or pop up pairing_dial
                     # behind whatever the user is now looking at.
                     logging.info("[_bg_pairing_flow] Attempt %d superseded after phoneCode wait — discarding result.", my_attempt)
+                    self.main_window._register_abandoned_session(_attempt_token)
                     return
 
                 if pairing_code:
@@ -1060,12 +1071,15 @@ class Connect:
                 else:
                     # No code received — clear any partially-saved token so next
                     # launch shows the connection dialog instead of acting connected.
+                    self.main_window._register_abandoned_session(_attempt_token)
                     self.main_window._set_wa_token("")
                     self.main_window.save_settings()
-                    wx.CallAfter(self._on_pairing_code_error)
+                    reason = getattr(self.main_window.ws, "_phone_code_error", "")
+                    wx.CallAfter(self._on_pairing_code_error, reason)
 
             except Exception as exc:
                 # On any unexpected error, clear the token so next launch works correctly.
+                self.main_window._register_abandoned_session(_attempt_token)
                 self.main_window._set_wa_token("")
                 self.main_window.save_settings()
                 wx.CallAfter(self._on_pairing_code_exception, str(exc))
@@ -1084,7 +1098,7 @@ class Connect:
         self.continue_btn.SetLabel(self.i18n.t("continue"))
         self.show_pairing_dial(pairing_code)
 
-    def _on_pairing_code_error(self):
+    def _on_pairing_code_error(self, reason: str = ""):
         try:
             if not self or not self.continue_btn:
                 return
@@ -1092,8 +1106,16 @@ class Connect:
             return
         self.continue_btn.Enable()
         self.continue_btn.SetLabel(self.i18n.t("continue"))
+        if reason:
+            message = self.i18n.t("no_pairing_code_received_reason").format(
+                app_name=self.main_window.app_name, reason=reason,
+            )
+        else:
+            message = self.i18n.t("no_pairing_code_received").format(
+                app_name=self.main_window.app_name,
+            )
         wx.MessageBox(
-            self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name),
+            message,
             self.i18n.t("connection_error"),
             wx.OK | wx.ICON_ERROR,
         )
@@ -1415,7 +1437,7 @@ class Connect:
 
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
-        logging.info("[cleanup_pairing_session] Retrieved token: %s", token)
+        logging.info("[cleanup_pairing_session] Retrieved token: %s", redact_token(token))
         if token:
             headers = self._wpp_headers(use_global_key=False)
             def _close_api_session():
@@ -1429,7 +1451,11 @@ class Connect:
                     resp = api_post(close_url, headers=headers, timeout=5)
                     logging.info("[cleanup_pairing_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
-                    logging.error("[cleanup_pairing_session] Error sending close-session request: %s", e)
+                    # Same leak as in _close_active_session(): the cancelled
+                    # pairing attempt is exactly when this call times out, and
+                    # the exception message carries the token-bearing URL.
+                    logging.error("[cleanup_pairing_session] Error sending close-session request: %s",
+                                  redact_api_error(e))
             threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_dialog_close(self, event):

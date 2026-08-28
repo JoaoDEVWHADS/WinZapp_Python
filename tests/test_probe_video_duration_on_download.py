@@ -18,7 +18,38 @@ tests/test_lid_merge_keeps_messages.py.
 """
 
 import json
+import os
 import pathlib
+import sys
+import types
+from unittest.mock import MagicMock
+
+try:
+    import wx
+    import wx.adv
+except ImportError:
+    for _mod in ("wx", "wx.adv"):
+        if _mod not in sys.modules:
+            mod = types.ModuleType(_mod)
+            if "." not in _mod:
+                mod.__path__ = []
+            sys.modules[_mod] = mod
+    class _FakeWxModule(types.ModuleType):
+        ACC_OK = 0
+        ACC_NOT_IMPLEMENTED = -1
+        def __getattr__(self, name):
+            if name == "__file__":
+                return "<fake_wx>"
+            if name == "CallAfter":
+                return lambda fn, *a, **k: fn(*a, **k)
+            if name.startswith("ID_") or name.startswith("wxID_") or name in ("HORIZONTAL", "VERTICAL", "EXPAND", "ALL"):
+                return 1000
+            if name in ("Frame", "Panel", "Dialog", "Accessible", "Timer", "App", "Window", "Control", "Button"):
+                return object
+            return MagicMock
+    sys.modules["wx"].__class__ = _FakeWxModule
+    sys.modules["wx.adv"].__class__ = _FakeWxModule
+    wx = sys.modules["wx"]
 
 import pytest
 

@@ -206,3 +206,12 @@ def test_media_viewer_translations_exist_in_every_locale():
         missing = required.difference(data)
         assert not missing, f"{locale}: missing {sorted(missing)}"
         assert all(str(data[key]).strip() for key in required)
+
+
+def test_media_viewer_has_accessible_media_bitmap_panel():
+    mv_src = _source("client/ui/media_viewer.py")
+    assert "AccessibleMediaBitmapPanel" in mv_src
+    assert "_get_current_media_label" in mv_src
+    assert "_update_media_labels" in mv_src
+    acc_src = _source("client/ui/accessible.py")
+    assert "class AccessibleMediaBitmapPanel" in acc_src

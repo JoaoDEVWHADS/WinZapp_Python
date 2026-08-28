@@ -1,0 +1,56 @@
+# Roda a suíte de testes em todo PR para a main.
+#
+# Até aqui os testes só rodavam DEPOIS do merge, no job `test` do
+# alpha-release.yml (e no release.yml, num release já criado). Ou seja: um PR
+# quebrado passava pela única barreira que existe — uma aprovação humana — e o
+# problema só aparecia quando o código já estava na main e a alpha publicada.
+# Este workflow move essa descoberta para enquanto o PR ainda está aberto e dá
+# para consertar.
+#
+# É uma cópia deliberada do job `test` do alpha-release.yml. Mantenha os dois
+# em sincronia: divergir faria um PR passar aqui e a alpha quebrar no merge,
+# que é exatamente a surpresa que este arquivo existe para evitar.
+#
+# Só `pull_request`, não `push`: um vermelho em rascunho é o tipo de alarme que
+# o time aprende a ignorar, e `pull_request` é a única forma que pode virar
+# check obrigatório no ruleset (um admin precisa marcá-lo lá — enquanto isso
+# ele informa, mas não bloqueia o merge).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.13"
+
+# Um push novo no PR cancela a execução anterior: só o último commit interessa.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run test suite
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip --quiet
+          pip install -r requirements.txt --quiet
+          pip install -r requirements-dev.txt --quiet
+
+      # client/api/ não existe aqui (é git-ignored e não há clone da
+      # WPPConnect), então os testes que comparam as duas cópias dos patches se
+      # pulam sozinhos — vide test_api_patches_in_sync.py. Isso é esperado: a
+      # deriva que eles pegam só é detectável numa máquina de dev.
+      - name: Run pytest
+        run: pytest

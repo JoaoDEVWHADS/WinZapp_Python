@@ -29,6 +29,9 @@ class _FakeOutput:
     def speak(self, text, **options):
         self.spoken.append((text, options))
 
+    def silence(self):
+        self.silenced = getattr(self, "silenced", 0) + 1
+
 
 class _FakeAuto:
     """Mimics accessible_output2.outputs.auto.Auto's public surface: a
@@ -149,3 +152,55 @@ class TestOutputOptions:
         out = AccessibleSpeechOutput(auto, lambda: _settings())
         out.output("hello", interrupt=True)
         assert nvda.spoken == [("hello", {"interrupt": True})]
+
+
+class TestSilenceObeysTheSameGatesAsOutput:
+    """silence() reaches into the screen reader to cancel speech already in
+    flight — including speech WinZapp did not produce. It therefore has to
+    respect exactly the switches that govern speaking.
+
+    It briefly did not: a separate resolver skipped
+    extended_sr_compat_enabled entirely and fell through to
+    get_first_available_output(). A user who turned the master switch off
+    (WinZapp must not talk to my screen reader) but still ran NVDA for the
+    rest of Windows had NVDA cut off by WinZapp anyway — and with
+    sapi_fallback_enabled off, SAPI reached too.
+    """
+
+    def test_the_master_switch_off_means_no_silence_call_at_all(self):
+        nvda = _FakeOutput("nvda", active=True)
+        auto = _FakeAuto([nvda])
+        out = AccessibleSpeechOutput(auto, lambda: _settings(extended=False))
+
+        out.silence()
+
+        assert getattr(nvda, "silenced", 0) == 0
+
+    def test_it_silences_normally_when_the_master_switch_is_on(self):
+        nvda = _FakeOutput("nvda", active=True)
+        auto = _FakeAuto([nvda])
+        out = AccessibleSpeechOutput(auto, lambda: _settings())
+
+        out.silence()
+
+        assert nvda.silenced == 1
+
+    def test_sapi_is_not_silenced_when_the_fallback_is_off(self):
+        """Same rule output() follows: with the fallback off, only a real
+        screen reader is ever touched."""
+        sapi = _FakeOutput("sapi", active=True, system_output=True)
+        auto = _FakeAuto([sapi])
+        out = AccessibleSpeechOutput(auto, lambda: _settings(sapi_fallback=False))
+
+        out.silence()
+
+        assert getattr(sapi, "silenced", 0) == 0
+
+    def test_sapi_is_silenced_when_the_fallback_is_on(self):
+        sapi = _FakeOutput("sapi", active=True, system_output=True)
+        auto = _FakeAuto([sapi])
+        out = AccessibleSpeechOutput(auto, lambda: _settings(sapi_fallback=True))
+
+        out.silence()
+
+        assert sapi.silenced == 1

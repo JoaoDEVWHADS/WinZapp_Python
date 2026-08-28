@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -170,3 +171,57 @@ async def db_with_data(in_memory_db, sample_data: dict):
     """Yield a DatabaseManager pre-populated with sample_data."""
     await in_memory_db.import_from_dict(sample_data)
     return in_memory_db
+
+
+# ── Helpers: clipboard writes that actually land ─────────────────────────────
+
+
+def set_clipboard_data(make_data_object, attempts=10, delay=0.05):
+    """Open the clipboard and write ``make_data_object()`` to it, retrying
+    until the write is confirmed. Returns True on success.
+
+    wx.TheClipboard.SetData() wraps Windows' OLE clipboard, which can
+    transiently refuse a write right after another Open/Close cycle elsewhere
+    in the same process — reproduced by running the clipboard tests after
+    enough other wx-using tests earlier in a full suite run.
+
+    Two things make that refusal invisible if you do not handle it here:
+
+    * A failed SetData() leaves the PREVIOUS content in place, and the
+      clipboard still opens fine — so a caller that only checks Open() reads
+      some earlier test's data and asserts happily against it. Hence checking
+      SetData()'s return value, and retrying.
+    * Clear() first, so that if every attempt somehow fails the clipboard is
+      empty rather than stale: the test then fails honestly instead of
+      passing on someone else's data.
+
+    Flush() is deliberately NOT called. It asks the OS to render every format
+    so the data outlives the owning process; these tests read the clipboard
+    back in the same process with the wx.App still alive, so it buys nothing
+    and is one more thing that can block or be refused.
+
+    Lives in conftest (imported as tests.conftest — tests/ is a package)
+    because both clipboard-using test modules need it, and they were drifting
+    apart: one retried, the other only called Flush().
+    """
+    import wx
+
+    for _ in range(attempts):
+        if not wx.TheClipboard.Open():
+            time.sleep(delay)
+            continue
+        try:
+            wx.TheClipboard.Clear()
+            if wx.TheClipboard.SetData(make_data_object()):
+                return True
+        finally:
+            wx.TheClipboard.Close()
+        time.sleep(delay)
+    return False
+
+
+def set_clipboard_text(text):
+    """Write plain text to the clipboard, with the same retry guarantee."""
+    import wx
+
+    return set_clipboard_data(lambda: wx.TextDataObject(text))

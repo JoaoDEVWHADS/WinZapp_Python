@@ -220,3 +220,19 @@ wppconnect_repos/
 /boot_trace.log
 node-v*.zip
 *.bat
+# Claude Code / agentes de IA
+# settings.local.json é o allowlist PESSOAL de permissões de cada dev (o sufixo
+# .local significa exatamente isso). Ficou versionado por engano desde abril,
+# acumulando caminhos absolutos de uma máquina só e gerando conflito de merge
+# a cada aprovação de comando. O que vale para o time inteiro fica em
+# .claude/settings.json, esse sim versionado.
+.claude/settings.local.json
+
+# Logs de usuario enviados para diagnostico — nunca versionar
+logs.zip
+logs/
+log.log
+shutdown_audit.log
+
+# Worktrees temporarios de agentes
+.claude/worktrees/

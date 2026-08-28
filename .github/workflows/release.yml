@@ -44,8 +44,12 @@ jobs:
           pip install -r requirements.txt --quiet
           pip install -r requirements-dev.txt --quiet
 
+      # -m "not docs": the docs-marked tests assert that CLAUDE.md still
+      # describes the code accurately. Useful on a PR, but this job's
+      # reject-on-test-failure below DELETES the release and its tag, and a
+      # stale sentence in a Markdown file must never be able to do that.
       - name: Run pytest
-        run: pytest
+        run: pytest -m "not docs"
 
       # Alpha builds (alpha-release.yml) are versioned as
       # <major>.<minor>.<patch>.<commit count>alpha off the CURRENT stable

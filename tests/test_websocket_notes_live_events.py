@@ -17,9 +17,13 @@ from core.websocket_client import WebSocketClient, ack_to_status
 class _FakeMainWindow:
     def __init__(self):
         self.live_event_calls = 0
+        self.unread_updates = []
 
     def _note_live_wpp_event(self):
         self.live_event_calls += 1
+
+    def on_chat_unread_update(self, *args):
+        self.unread_updates.append(args)
 
 
 class _Stub:
@@ -64,6 +68,30 @@ class TestLiveEventNoting:
         stub.on_chats_update({"session": "someone-elses-session", "data": []})
 
         assert stub.main_window.live_event_calls == 0
+
+    def test_manual_unread_sentinel_is_normalized_for_both_transitions(self, monkeypatch):
+        monkeypatch.setattr("core.websocket_client.wx.CallAfter", lambda fn, *args: fn(*args))
+        stub = _Stub()
+
+        stub.on_chats_update({
+            "data": [{
+                "remoteJid": "1@s.whatsapp.net",
+                "unreadCount": -1,
+                "previousUnreadCount": 0,
+            }]
+        })
+        stub.on_chats_update({
+            "data": [{
+                "remoteJid": "1@s.whatsapp.net",
+                "unreadCount": 0,
+                "previousUnreadCount": -1,
+            }]
+        })
+
+        assert stub.main_window.unread_updates == [
+            ("1@s.whatsapp.net", 1, 0),
+            ("1@s.whatsapp.net", 0, 1),
+        ]
 
     def test_ack_to_status_still_works_untouched(self):
         # Sanity: the import path used above still resolves correctly.

@@ -16,6 +16,7 @@ MainWindow is a wx.Frame and cannot be instantiated without a running wx.App,
 so the method is bound to a plain stub, as elsewhere in this suite.
 """
 
+import threading
 import types
 
 import pytest
@@ -42,6 +43,9 @@ class _Stub:
         self._lid_to_phone = {}
         self._phone_to_lid = {}
         self._unresolvable_lids = set()
+        # register_jid_mapping() writes the mapping caches under this lock
+        # (see tests/test_lid_mapping_thread_safety.py for what it guards).
+        self._lid_mapping_lock = threading.RLock()
         self.refreshes = 0
 
     def _is_self_jid(self, jid):

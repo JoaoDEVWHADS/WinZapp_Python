@@ -46,6 +46,8 @@ class _DB:
 class _Stub:
     """Minimum surface get_remote_chats() actually reads on the happy path."""
 
+    _mute_state_jids = MainWindow._mute_state_jids
+
     def __init__(self, chats=None):
         self.wpp_server = "http://127.0.0.1"
         self.wpp_port = 6300

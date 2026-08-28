@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import aiosqlite
@@ -79,9 +80,21 @@ CREATE TABLE IF NOT EXISTS lid_mappings (
     phone_jid   TEXT NOT NULL
 );
 
+-- A retry damper, never a verdict: `recorded_at` (unix seconds) is what lets
+-- MainWindow purge entries once they are old enough to be worth asking about
+-- again.  Without it a LID recorded here once was blacklisted for good, across
+-- every future launch, and its contact kept reading as "Contato sem nome" even
+-- after WhatsApp had learned the real name.
+-- The key is (jid, type) and not jid alone because both add_unresolvable_lid()
+-- and add_unresolvable_name() can fire for the same JID in a single resolution
+-- pass: under a jid-only key the first INSERT won and the second was silently
+-- dropped, so memory held both flags for the session and the database held
+-- only one of them after a restart.
 CREATE TABLE IF NOT EXISTS unresolvable_lids (
-    jid     TEXT PRIMARY KEY,
-    type    TEXT DEFAULT 'lid'
+    jid         TEXT NOT NULL,
+    type        TEXT NOT NULL DEFAULT 'lid',
+    recorded_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (jid, type)
 );
 
 CREATE TABLE IF NOT EXISTS status_updates (
@@ -262,7 +275,18 @@ class DatabaseManager:
             if "duplicate column" not in str(exc).lower():
                 log.error("[connect] ALTER TABLE chats ADD COLUMN t failed: %s", exc)
                 raise
+        await self._upgrade_unresolvable_lids()
         await self._conn.commit()
+
+    async def _upgrade_unresolvable_lids(self) -> None:
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(unresolvable_lids)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "recorded_at" in columns:
+            return
+        log.info("[connect] Upgrading unresolvable_lids to the expiring schema.")
+        await self._conn.execute("DROP TABLE IF EXISTS unresolvable_lids")
+        await self._conn.executescript(_SCHEMA_SQL)
 
     async def close(self) -> None:
         """Close the connection if open."""
@@ -1004,24 +1028,52 @@ class DatabaseManager:
         return lids, names
 
     async def add_unresolvable_lid(self, jid: str) -> None:
-        """Mark a LID as unresolvable."""
         async with self._write_lock:
             conn = await self._ensure_conn()
             await conn.execute(
-                "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'lid')",
-                (jid,),
+                "INSERT OR REPLACE INTO unresolvable_lids (jid, type, recorded_at) "
+                "VALUES (?, 'lid', ?)",
+                (jid, int(time.time())),
             )
             await conn.commit()
 
     async def add_unresolvable_name(self, jid: str) -> None:
-        """Mark a LID as having an unresolvable name."""
         async with self._write_lock:
             conn = await self._ensure_conn()
             await conn.execute(
-                "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'name')",
+                "INSERT OR REPLACE INTO unresolvable_lids (jid, type, recorded_at) "
+                "VALUES (?, 'name', ?)",
+                (jid, int(time.time())),
+            )
+            await conn.commit()
+
+    async def delete_unresolvable_lid(self, jid: str) -> None:
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "DELETE FROM unresolvable_lids WHERE jid = ? AND type = 'lid'",
                 (jid,),
             )
             await conn.commit()
+
+    async def delete_unresolvable_name(self, jid: str) -> None:
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "DELETE FROM unresolvable_lids WHERE jid = ? AND type = 'name'",
+                (jid,),
+            )
+            await conn.commit()
+
+    async def delete_expired_unresolvable(self, cutoff_ts: int) -> int:
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            cursor = await conn.execute(
+                "DELETE FROM unresolvable_lids WHERE recorded_at < ?",
+                (cutoff_ts,),
+            )
+            await conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
 
     # ── Status Updates (Stories) ─────────────────────────────────────────────
 
