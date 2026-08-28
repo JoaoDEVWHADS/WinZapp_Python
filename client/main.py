@@ -728,6 +728,59 @@ def unread_after_history_sync(
     return max(baseline, max(0, int(local_unread or 0)) + inferred)
 
 
+def reconcile_open_chat_unread(
+    server_unread: int,
+    local_new: int,
+    remote_read_confirmed: bool = False,
+) -> tuple:
+    """Decide the unread count for a chat the user has OPEN in the panel.
+
+    Returns ``(count, clear_new_since_read)``.
+
+    "Open" is not the same as "read". on_new_message() increments both
+    unreadCount and _new_since_read whenever a message lands in the open
+    conversation while the window is hidden or minimized (its guard is
+    ``if not (_open and _visible)``), and Alt+F4 only hides to tray — so an
+    open chat routinely holds a legitimate backlog. Zeroing it blind wipes the
+    badge, the window-title counter and the toast count, and the next arrival
+    then announces "1 mensagem não lida" for a conversation holding several.
+
+    Both surfaces that reconcile an open chat's count go through this one
+    function: the live chats-update event (on_chat_unread_update) and the 60s
+    list-chats resync (get_remote_chats). They used to each carry their own
+    copy — and the resync's was a bare `= 0` under a comment claiming parity
+    with the live one, which is exactly the shape that hides a bug from code
+    review. Same reasoning as link_preview_text() and _status_content_label().
+
+    ``remote_read_confirmed`` says a zero really is somebody reading the chat
+    elsewhere rather than an uninformative one. The resync has no
+    previousUnreadCount to derive it from, so it passes False — the
+    conservative side, the same default _remote_read_confirmed() itself
+    documents for an unknown. The cost is explicit: a read performed on the
+    phone, for a chat left open here with the window hidden, keeps the badge
+    lit until the user focuses the window (only mark_conversation_as_read
+    clears _new_since_read).
+
+    min(), never max(), when both are positive: for an OPEN chat the local
+    read state is the authoritative one by definition. A server count above
+    the local backlog is the lag of a /send-seen the server has not
+    acknowledged yet, and taking it resurrects already-read messages into the
+    badge and the unread separator — a symptom this file has already fixed
+    once (see the read_at_t branch in on_chat_unread_update).
+    """
+    server_unread = max(0, int(server_unread or 0))
+    local_new = max(0, int(local_new or 0))
+    if not local_new:
+        return 0, False
+    if server_unread == 0:
+        if remote_read_confirmed:
+            # The messages we counted really have been read; the badge goes
+            # with them, and so does the tracking entry behind it.
+            return 0, True
+        return local_new, False
+    return min(server_unread, local_new), False
+
+
 def reconcile_snapshot_unread(
     server_unread: int,
     local_unread: int,
@@ -11223,11 +11276,21 @@ class MainWindow(wx.Frame):
                                     .get("records", []),
                                     server_val,
                                 )
-                                # Never resurrect unread count for the conversation the
-                                # user has open right now — mark_conversation_as_read()
-                                # already set it to 0 locally, and this snapshot can be
-                                # a few seconds stale relative to that. Same guard as
-                                # on_chat_unread_update()'s live-event path.
+                                # An open conversation is reconciled, not zeroed.
+                                # This used to be a bare `v = 0` under a comment
+                                # claiming parity with on_chat_unread_update() —
+                                # there was none. on_new_message() counts messages
+                                # that land in the open chat while the window is
+                                # hidden (Alt+F4 only hides to tray), so this
+                                # 60s-polled merge was wiping a real backlog: badge,
+                                # title counter and toast count all reset, and the
+                                # next arrival announcing "1 mensagem não lida" for a
+                                # conversation holding six. Both surfaces now share
+                                # reconcile_open_chat_unread(), so the parity the
+                                # comment asserts is a fact rather than a claim.
+                                # remote_read_confirmed is False here because
+                                # list-chats carries no previousUnreadCount — see the
+                                # helper for what that costs.
                                 _cp = getattr(self, "conversations_panel", None)
                                 open_now = (
                                     _cp is not None
@@ -11237,7 +11300,14 @@ class MainWindow(wx.Frame):
                                     ) == jid
                                 )
                                 if open_now:
-                                    v = 0
+                                    _local_new = getattr(
+                                        self, "_new_since_read", {}
+                                    ).get(jid, 0)
+                                    v, _clear_new = reconcile_open_chat_unread(
+                                        server_val, _local_new
+                                    )
+                                    if _clear_new:
+                                        getattr(self, "_new_since_read", {}).pop(jid, None)
                                 elif server_val < local_val:
                                     # WPPConnect's list-chats snapshot lagging behind
                                     # live on_new_message increments isn't just a
@@ -18127,19 +18197,11 @@ class MainWindow(wx.Frame):
             # below is unreachable here (this branch already matched), so the
             # same protection has to be spelled out on this side too.
             local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
-            if not local_new:
-                unread_count = 0
-            elif unread_count == 0 and not _remote_read:
-                # Server says zero and nothing says it was a real read: trust
-                # ourselves, exactly as the read-ack branch below does for the
-                # same event.
-                unread_count = local_new
-            elif unread_count == 0:
-                # A confirmed read elsewhere — the messages we counted really
-                # have been read, so the badge goes with them.
+            unread_count, _clear_new = reconcile_open_chat_unread(
+                unread_count, local_new, remote_read_confirmed=_remote_read
+            )
+            if _clear_new:
                 self._new_since_read.pop(normalized, None)
-            else:
-                unread_count = min(unread_count, local_new)
         elif read_at_t is None and unread_count < old_count and not _remote_read:
             # WA-JS fires chat.unread_count_changed (forwarded to us as
             # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
