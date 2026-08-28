@@ -8,6 +8,17 @@ launch (see CLAUDE.md's Paths/config/i18n section) but is also the file
 users are asked to paste when reporting a bug, so a live session token
 sitting in it defeats the point of encrypting it at rest.
 
+Masking the *retrieved token* breadcrumb is only half of it. A few lines
+below each of those two, the same function builds the close-session URL
+with the raw token in the path and posts it inside a try/except that used
+to log the exception straight — and requests copies the whole failed URL
+into its own message ("Max retries exceeded with url: /api/<session>:
+<secret>/close-session"). A timeout there is not exotic: close-session is
+called precisely while switching account, while cancelling a pairing
+attempt, and after the Node process is already gone. So the fix that
+masked the success breadcrumb left the *failure* breadcrumb — the one a
+bug report is most likely to contain — leaking the whole credential.
+
 Both call sites are unbound-method tests against a plain stub, the same
 style test_pairing_session_reuse.py uses, since Connect needs a running
 wx.App to construct for real.
@@ -16,6 +27,7 @@ wx.App to construct for real.
 import logging
 
 import pytest
+import requests
 
 from core.api_client import redact_token
 from ui.dialogs.connect import Connect
@@ -30,6 +42,33 @@ TOKEN = f"{SESSION}:{SECRET}"
 
 class _Response:
     status_code = 200
+
+
+def _transport_failure():
+    """The exception requests really raises when nothing answers on 6300.
+
+    Copied from an actual run against a dead port rather than invented —
+    the leak is that urllib3 embeds the request path, and the path is where
+    WPPConnect keeps the credential.
+    """
+    return requests.exceptions.ConnectionError(
+        f"HTTPConnectionPool(host='127.0.0.1', port=6300): Max retries "
+        f"exceeded with url: /api/{TOKEN}/close-session (Caused by "
+        f"NewConnectionError('<urllib3.connection.HTTPConnection object at "
+        f"0x0000023F1C0>: Failed to establish a new connection: "
+        f"[WinError 10061] No connection could be made'))"
+    )
+
+
+@pytest.fixture
+def failing_api_post(monkeypatch):
+    """Make the close-session call fail the way a dead Node process does."""
+    import ui.dialogs.connect as connect_mod
+
+    def _raise(*_args, **_kwargs):
+        raise _transport_failure()
+
+    monkeypatch.setattr(connect_mod, "api_post", _raise)
 
 
 class _ImmediateThread:
@@ -138,3 +177,44 @@ class TestCleanupPairingSessionNeverLogsTheRawToken:
             cleanup_pairing_session(stub)
 
         assert "Retrieved token" in caplog.text
+
+
+class TestAFailedCloseSessionLeaksNothingEither:
+    """The sibling breadcrumb: `except Exception as e` a few lines below.
+
+    The suite that shipped with the original fix always stubbed api_post to
+    succeed, so this whole path went unexercised and the leak survived the
+    change meant to close it.
+    """
+
+    def test_close_active_session_masks_the_transport_error(
+            self, caplog, failing_api_post):
+        stub = _ConnectStub(_MainWindow(token=TOKEN))
+
+        with caplog.at_level(logging.INFO):
+            close_active_session(stub, sync=True)
+
+        assert SECRET not in caplog.text
+        assert "Error sending close-session request" in caplog.text
+        # The kind of failure still has to be readable, or the line is useless.
+        assert "ConnectionError" in caplog.text
+
+    def test_cleanup_pairing_session_masks_the_transport_error(
+            self, caplog, failing_api_post):
+        stub = _ConnectStub(_MainWindow(token=TOKEN))
+
+        with caplog.at_level(logging.INFO):
+            cleanup_pairing_session(stub)
+
+        assert SECRET not in caplog.text
+        assert "Error sending close-session request" in caplog.text
+        assert "ConnectionError" in caplog.text
+
+    def test_the_session_name_survives_so_the_line_is_still_traceable(
+            self, caplog, failing_api_post):
+        stub = _ConnectStub(_MainWindow(token=TOKEN))
+
+        with caplog.at_level(logging.INFO):
+            close_active_session(stub, sync=True)
+
+        assert SESSION in caplog.text
