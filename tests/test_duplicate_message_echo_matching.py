@@ -215,6 +215,12 @@ class _Stub:
     def _apply_group_subject_change(self, remote_jid, chat, msg, live=False):
         pass
 
+    def _apply_group_settings_change(self, remote_jid, chat, msg):
+        # on_new_message() calls this for group settings notifications
+        # (announcement/restrict toggles). Nothing to do with echo matching,
+        # so a pure no-op — same treatment the other collaborators above get.
+        pass
+
     def _refresh_mention_cache_on_membership_change(self, remote_jid, msg):
         pass
 
