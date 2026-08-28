@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import socket
 import sys
@@ -168,26 +169,90 @@ class IpcListener:
                 continue
             except OSError:
                 break
-            with conn:
-                self._handle_conn(conn)
+            # Handed off to its own thread for the same reason as the
+            # Windows pipe loop below: a "quit" reply waits here for up to
+            # 10s for released_predicate(), and handling it inline would
+            # stall accept() from picking up any other request (e.g. a
+            # concurrent "activate") for that whole window.
+            threading.Thread(target=self._handle_conn, args=(conn,), daemon=True).start()
         try:
             srv.close()
             os.unlink(path)
         except OSError:
             pass
 
+    @staticmethod
+    def _current_user_pipe_sa():
+        """SECURITY_ATTRIBUTES with a DACL granting access to this Windows
+        user's SID only — nobody else, not even other local administrators.
+
+        A bare ``win32security.SECURITY_ATTRIBUTES()`` (the previous code
+        here) has no security descriptor of its own, so ``CreateNamedPipe``
+        falls back to the default DACL for a kernel object created by this
+        process: verified directly against a real pipe, that default grants
+        full control to the current user AND to ``BUILTIN\\Administrators``
+        AND ``NT AUTHORITY\\SYSTEM`` — not "current user only" the way the
+        module docstring above has always claimed. Any other account able to
+        reach that pipe name (any local admin, not just this user) could send
+        it an "activate"/"quit" command for a WinZapp instance it does not
+        own. This SID-scoped DACL is what actually delivers on that claim.
+        """
+        import win32security
+        import win32api
+        import ntsecuritycon
+
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+        )
+        user_sid, _ = win32security.GetTokenInformation(token, win32security.TokenUser)
+
+        dacl = win32security.ACL()
+        # FILE_ALL_ACCESS rather than just read+write: every pipe instance
+        # after the first one is created against the SAME name and therefore
+        # against this DACL, and that needs FILE_CREATE_PIPE_INSTANCE (0x4) —
+        # granted here only because it sits inside FILE_ALL_ACCESS (0x1F01FF).
+        # A narrower read/write mask would serve exactly one connection and
+        # then fail the accept loop's next CreateNamedPipe with access denied.
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, user_sid)
+
+        sd = win32security.SECURITY_DESCRIPTOR()
+        sd.SetSecurityDescriptorDacl(1, dacl, 0)
+
+        sa = win32security.SECURITY_ATTRIBUTES()
+        sa.SECURITY_DESCRIPTOR = sd
+        sa.bInheritHandle = False
+        return sa
+
     def _serve_windows(self) -> None:  # pragma: no cover (Windows-only)
-        # Uses pywin32 named pipes with a current-user DACL. Protocol identical
-        # to the AF_UNIX path. Imported lazily so non-Windows never needs it.
+        # Protocol identical to the AF_UNIX path; imported lazily so
+        # non-Windows never needs pywin32.
         import win32pipe
         import win32file
         import pywintypes
-        import win32security
 
         name = _pipe_name(self.global_dir, self.account_id)
-        sa = win32security.SECURITY_ATTRIBUTES()  # default = current user token
+        try:
+            sa = self._current_user_pipe_sa()
+        except Exception:
+            # Fail closed — no fallback to a default-DACL pipe. But the failure
+            # has to be *visible*: this runs on the service thread, where an
+            # escaping exception goes to threading.excepthook -> stderr, which
+            # a PyInstaller --windowed build discards, and main.py's try/except
+            # around start() has already returned by then. All that would be
+            # left is "[ipc] listener started (ready=False)" with no reason,
+            # while account_launcher reads the resulting request_activate()
+            # False as "no process running" and launches a SECOND process for
+            # an account that is already running.
+            logging.exception("[ipc] pipe DACL build failed — listener not started")
+            return
         self._ready.set()
         while not self._stop.is_set():
+            # Bound to None first so the handler below can tell "CreateNamedPipe
+            # itself failed" from "this iteration's handle needs closing". A
+            # bare CloseHandle(handle) in the except would otherwise close the
+            # *previous* iteration's handle — which a live connection thread is
+            # still using — and kill a working connection.
+            handle = None
             try:
                 handle = win32pipe.CreateNamedPipe(
                     name,
@@ -197,33 +262,125 @@ class IpcListener:
                     65536, 65536, 0, sa,
                 )
                 win32pipe.ConnectNamedPipe(handle, None)
-                data = win32file.ReadFile(handle, 65536)[1]
-                reply_lines = self._handle_message(data.decode("utf-8"))
-                for line in reply_lines:
-                    win32file.WriteFile(handle, (line + "\n").encode("utf-8"))
-                win32file.FlushFileBuffers(handle)
-                win32pipe.DisconnectNamedPipe(handle)
-                win32file.CloseHandle(handle)
             except pywintypes.error:
+                # A client that connected and closed again before we reached
+                # ConnectNamedPipe raises ERROR_NO_DATA (232) here — routine,
+                # since request_activate()/request_quit() give up on their own
+                # deadline and quit_all_accounts() is explicitly best-effort
+                # about unresponsive peers. Without this close, every such
+                # give-up leaked a kernel handle and a pipe instance for the
+                # life of the process, and PIPE_UNLIMITED_INSTANCES means
+                # nothing ever caps that.
+                # (ERROR_PIPE_CONNECTED, 535 — client already waiting — is not
+                # an exception in pywin32; it returns normally and the read
+                # below works, so it never lands here.)
+                if handle is not None:
+                    try:
+                        win32file.CloseHandle(handle)
+                    except Exception:
+                        pass
                 if self._stop.is_set():
                     break
                 time.sleep(0.05)
+                continue
+            # Handed off to its own thread so a slow reply — "quit" waits
+            # here for up to 10s for released_predicate() — can't stall this
+            # loop from accepting the next connection. Before this, a "quit"
+            # in flight made every other request (e.g. a concurrent
+            # "activate" from another account switching in) simply time out
+            # on the caller's side, since nothing was accepting it.
+            threading.Thread(
+                target=self._handle_pipe_connection, args=(handle,), daemon=True
+            ).start()
+
+    def _read_pipe_message(self, handle, timeout: float = 5.0) -> Optional[bytes]:
+        """Read one message from a connected pipe instance, or None if the
+        client sent nothing within `timeout` (mirrors the AF_UNIX side's
+        conn.settimeout(5.0)).
+
+        The pipe is PIPE_WAIT, so a bare ReadFile against a client that
+        connects and never writes blocks FOREVER. Polling PeekNamedPipe is the
+        cheapest way out that this transport can carry: overlapped I/O would
+        mean threading FILE_FLAG_OVERLAPPED plus an OVERLAPPED/event through
+        CreateNamedPipe, ConnectNamedPipe and every WriteFile in this file, and
+        PIPE_NOWAIT is documented as legacy-only and just turns ReadFile into
+        this same poll with worse semantics. Cancelling the read from a
+        watchdog thread was the other candidate and was rejected as tearing a
+        handle out from under a blocked syscall.
+        """
+        import win32pipe
+        import win32file
+
+        deadline = time.monotonic() + timeout
+        while True:
+            if win32pipe.PeekNamedPipe(handle, 0)[1] > 0:
+                return win32file.ReadFile(handle, 65536)[1]
+            if self._stop.is_set() or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
+
+    def _handle_pipe_connection(self, handle) -> None:
+        import win32pipe
+        import win32file
+        import pywintypes
+
+        try:
+            data = self._read_pipe_message(handle)
+            if data is None:
+                return
+            for line in self._handle_message(data.decode("utf-8")):
+                win32file.WriteFile(handle, (line + "\n").encode("utf-8"))
+            win32file.FlushFileBuffers(handle)
+        except pywintypes.error as exc:
+            # The peer going away mid-exchange is a transport condition, not a
+            # fault, and it happens on an expected path: a "quit" reply waits up
+            # to 10s for released_predicate(), while the caller's own timeout is
+            # also 10s but starts earlier — so the client always closes first
+            # and our WriteFile/FlushFileBuffers always raises 109. Logging that
+            # as an ERROR traceback would send whoever reads log.log chasing a
+            # broken transport that isn't broken, and drown the ERROR that does
+            # matter — the file is the project's primary diagnostic and is
+            # truncated every launch.
+            logging.info("[ipc] pipe connection ended: winerror=%s %s",
+                         exc.winerror, exc.funcname)
+        except Exception:
+            # Deliberately broader than pywintypes.error: a client sending
+            # non-UTF-8 raises UnicodeDecodeError (a ValueError), which the
+            # AF_UNIX twin catches and this one used not to — leaving an
+            # unhandled exception on a connection thread AND, since the cleanup
+            # lived at the end of the same try, a leaked handle with it.
+            logging.exception("[ipc] pipe connection handler failed")
+        finally:
+            # Always: any error above used to leak the handle and its pipe
+            # instance. Closing an already-closed pywin32 handle is a no-op,
+            # so nothing here needs to know how far the exchange got.
+            try:
+                win32pipe.DisconnectNamedPipe(handle)
+            except Exception:
+                pass
+            try:
+                win32file.CloseHandle(handle)
+            except Exception:
+                pass
 
     # ── per-connection handling (shared logic) ───────────────────────────
     def _handle_conn(self, conn: socket.socket) -> None:
-        conn.settimeout(5.0)
-        buf = b""
-        try:
-            while b"\n" not in buf:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    return
-                buf += chunk
-            line = buf.split(b"\n", 1)[0].decode("utf-8")
-            for reply in self._handle_message(line):
-                conn.sendall((reply + "\n").encode("utf-8"))
-        except (OSError, ValueError):
-            pass
+        # Runs on its own thread (see _serve_unix) — closes conn itself now
+        # that the accept loop no longer wraps the call in `with conn:`.
+        with conn:
+            conn.settimeout(5.0)
+            buf = b""
+            try:
+                while b"\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    buf += chunk
+                line = buf.split(b"\n", 1)[0].decode("utf-8")
+                for reply in self._handle_message(line):
+                    conn.sendall((reply + "\n").encode("utf-8"))
+            except (OSError, ValueError):
+                pass
 
     def _handle_message(self, line: str) -> list[str]:
         try:

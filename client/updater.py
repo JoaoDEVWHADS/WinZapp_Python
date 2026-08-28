@@ -1206,6 +1206,7 @@ class WppUpdateChecker:
     """
 
     _RETRY_INTERVAL = 12 * 60 * 60  # 12 hours
+    _PAIRING_RETRY_INTERVAL = 5 * 60  # 5 minutes
 
     def __init__(self, main_window):
         self._mw          = main_window
@@ -1284,6 +1285,14 @@ class WppUpdateChecker:
         wx.CallAfter(self._prompt_update, installed, remote_version, tag)
 
     def _prompt_update(self, installed: str, remote_version: str, tag: str):
+        if not self._mw.wpp_update_may_run_now():
+            logging.info(
+                "[WppUpdateChecker] Pairing in progress — not prompting for "
+                "the %s update yet.", remote_version,
+            )
+            self._schedule_retry(self._PAIRING_RETRY_INTERVAL)
+            return
+
         i18n = self._mw.i18n
         # wx.NO_DEFAULT: this can pop up while the user is typing a message,
         # and Space is how NVDA/JAWS/Narrator users activate the focused
@@ -1325,8 +1334,12 @@ class WppUpdateChecker:
             return
         self._mw._update_wpp_server(tag)
 
-    def _schedule_retry(self):
-        self._retry_timer = threading.Timer(self._RETRY_INTERVAL, self._check_once)
+    def _schedule_retry(self, interval: float = None):
+        if interval is None:
+            interval = self._RETRY_INTERVAL
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+        self._retry_timer = threading.Timer(interval, self._check_once)
         self._retry_timer.daemon = True
         self._retry_timer.start()
 

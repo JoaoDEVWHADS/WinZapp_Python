@@ -524,6 +524,27 @@ export default class CreateSessionUtil {
               }
               this.exportPhoneCode(req, client.config.phone, code, client, res);
             },
+            // Not a WPPConnect option — WinZapp's own host.layer.js patch reads
+            // it off `this.options` (create() spreads the caller's options into
+            // the Whatsapp instance verbatim, so an unknown key survives). See
+            // client/core/wppconnect_host_layer_patch.py, checkQrCode v4.
+            catchLinkCodeError: (failure: {
+              name?: string;
+              message?: string;
+              session?: string;
+              attempt?: number;
+              retryInSeconds?: number;
+              stack?: string;
+              details?: Record<string, string>;
+            }) => {
+              if ((client as any).shouldClose) return;
+              this.exportPhoneCodeError(
+                req,
+                client.config.phone,
+                failure,
+                client
+              );
+            },
             catchQR: (
               base64Qr: any,
               asciiQR: any,
@@ -571,9 +592,11 @@ export default class CreateSessionUtil {
                 // _reset_credentials_and_show_pairing(), which wipes the
                 // WA_token, drops `paired`, and runs clear_local_data() over
                 // the whole local database. One event, no confirmation — none
-                // of the four safeguards main.py's _logout_confirmed() applies
-                // (startup grace, consecutive strikes, a 180s dwell, and
-                // _still_linked_on_server() proof) are on that path.
+                // of the safeguards main.py's _act_on_unlink_decision() applies
+                // (never before the session has connected this run, several
+                // consecutive strikes spaced by real wall-clock time, and a
+                // _still_linked_on_server() probe that must positively answer
+                // "no linked phone" before anything is wiped) are on that path.
                 //
                 // But `disconnectedMobile` does not mean "unlinked". WPPConnect
                 // documents it as "Client has disconnected to the mobile
@@ -734,6 +757,84 @@ export default class CreateSessionUtil {
         phoneCode: phoneCode,
         session: client.session,
       });
+  }
+
+  /**
+   * Report a failed pairing-code request to the client.
+   *
+   * WhatsApp can refuse to issue a link-by-code — CompanionHelloError is the
+   * one seen in practice — while the session itself stays perfectly healthy
+   * and goes on rotating auth codes. Before this the failure never left the
+   * Node process: host.layer.js logged it and the browser quietly retried,
+   * while the Python side sat out its full 90-second phoneCode timeout and
+   * then reported the generic "no pairing code received", leaving the person
+   * trying to pair with nothing to act on.
+   *
+   * Deliberately does NOT touch client.status, close the session, or answer
+   * `res`: checkQrCode()'s retry is still live and a later attempt may well
+   * succeed, and /start-session has long since responded. This is a
+   * notification, not a terminal state.
+   */
+  exportPhoneCodeError(
+    req: any,
+    phone: any,
+    failure: {
+      name?: string;
+      message?: string;
+      attempt?: number;
+      retryInSeconds?: number;
+      stack?: string;
+      details?: Record<string, string>;
+    },
+    client: WhatsAppServer
+  ) {
+    if ((client as any).shouldClose) return;
+
+    const name = failure?.name || 'Error';
+    const message = failure?.message || '';
+    // attempt/retryInSeconds come from host.layer.js's backoff. Forwarded
+    // rather than dropped: a log line saying which attempt this was and when
+    // the next one is due is most of what makes a failing pairing run
+    // diagnosable after the fact.
+    const attempt = failure?.attempt;
+    const retryInSeconds = failure?.retryInSeconds;
+
+    req.logger?.warn(
+      `[${client.session}] pairing code request failed: ${name}: ${message}` +
+        (attempt ? ` (attempt ${attempt}, next retry in ${retryInSeconds}s)` : '')
+    );
+
+    // WhatsApp Web's own bundle throws this from inside the page, and its class
+    // name ("CompanionHelloError") is all that survived to here before. The
+    // page-context stack is the only thing that names the Meta module that
+    // threw, and any extra own property on the error is the only place a
+    // server refusal code could be hiding — both are logged in full because
+    // there is nowhere else to get them from.
+    if (failure?.stack) {
+      req.logger?.warn(
+        `[${client.session}] pairing code failure stack: ${failure.stack}`
+      );
+    }
+    if (failure?.details && Object.keys(failure.details).length) {
+      req.logger?.warn(
+        `[${client.session}] pairing code failure details: ` +
+          JSON.stringify(failure.details)
+      );
+    }
+
+    const payload = {
+      name: name,
+      message: message,
+      phone: phone,
+      session: client.session,
+      attempt: attempt,
+      retryInSeconds: retryInSeconds,
+      stack: failure?.stack || '',
+      details: failure?.details || {},
+    };
+
+    req.io.emit('phoneCodeError', payload);
+    callWebHook(client, req, 'phoneCodeError', payload);
   }
 
   exportQR(
@@ -1464,6 +1565,38 @@ export default class CreateSessionUtil {
 
     await client.onAnyMessage(async (message: any) => {
       message.session = client.session;
+
+      if (message.type === 'gp2' && message.subtype === 'subject') {
+        const serialized = (value: any) =>
+          value?._serialized || value?.id?._serialized || value || '';
+        const candidates = [message.chatId, message.from, message.to].map(serialized);
+        const groupId = candidates.find(
+          (value: any) => typeof value === 'string' && value.endsWith('@g.us')
+        );
+        if (groupId) {
+          let subject = message.body || message.subject || message.value || '';
+          if (!subject) {
+            try {
+              const chat: any = await client.getChatById(groupId);
+              subject =
+                chat?.groupMetadata?.subject ||
+                chat?.name ||
+                chat?.formattedTitle ||
+                '';
+            } catch (e: any) {
+              req.logger.warn(
+                `[group-subject] Failed to resolve ${groupId}: ${e?.message || e}`
+              );
+            }
+          }
+          if (subject) {
+            req.io.emit('groups.update', {
+              data: [{ id: groupId, subject }],
+              session: client.session,
+            });
+          }
+        }
+      }
 
       if (message.type === 'sticker') {
         download(message, client, req.logger);

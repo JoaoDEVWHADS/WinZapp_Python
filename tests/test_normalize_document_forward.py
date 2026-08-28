@@ -101,3 +101,31 @@ class TestDocumentNormalization:
         doc = result["message"]["documentMessage"]
         assert doc["fileName"] == "Document"
         assert doc["fileLength"] == 0
+
+    def test_plain_text_caption_is_preserved_for_the_recipient(self):
+        stub = _Stub()
+
+        result = stub._normalize_wpp_message(
+            _base_msg(filename="report.pdf", caption="Relatório mensal")
+        )
+
+        assert result["message"]["documentMessage"]["caption"] == "Relatório mensal"
+
+    def test_link_caption_is_preserved_as_ordinary_caption_text(self):
+        stub = _Stub()
+        caption = "Confira em https://example.com/documento"
+
+        result = stub._normalize_wpp_message(
+            _base_msg(filename="report.pdf", caption=caption)
+        )
+
+        assert result["message"]["documentMessage"]["caption"] == caption
+
+    def test_document_body_is_not_mistaken_for_a_caption(self):
+        stub = _Stub()
+
+        result = stub._normalize_wpp_message(
+            _base_msg(filename="report.pdf", body="A" * 5000)
+        )
+
+        assert result["message"]["documentMessage"]["caption"] == ""
