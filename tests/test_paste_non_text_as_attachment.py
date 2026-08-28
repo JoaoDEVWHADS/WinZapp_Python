@@ -10,6 +10,7 @@ import time
 import pytest
 import wx
 
+from tests.conftest import set_clipboard_data, set_clipboard_text
 from ui.conversations import ConversationsPanel
 
 
@@ -31,30 +32,9 @@ class _Stub:
         self.panel_shown_calls += 1
 
 
-def _set_clipboard_data(make_data_object, attempts=10, delay=0.05):
-    """Open the clipboard and write `make_data_object()` to it, retrying on
-    failure.
-
-    wx.TheClipboard.SetData() wraps Windows' OLE clipboard, which can
-    transiently refuse a write (returns False, clipboard content unchanged)
-    right after a previous Open/Close cycle elsewhere in the same process --
-    reproduced by running this file after enough other wx-using tests earlier
-    in a full suite run. SetData()'s return value must be checked: unlike
-    Open(), a failed SetData() still leaves the clipboard "open"-able, so the
-    old content (e.g. leftover text from another test) silently stays put
-    and looks like a successful write to a caller that only checks Open().
-    """
-    for _ in range(attempts):
-        if not wx.TheClipboard.Open():
-            time.sleep(delay)
-            continue
-        try:
-            if wx.TheClipboard.SetData(make_data_object()):
-                return True
-        finally:
-            wx.TheClipboard.Close()
-        time.sleep(delay)
-    return False
+# The retrying writer lives in conftest so both clipboard-using test modules
+# share one implementation — see conftest.set_clipboard_data's docstring.
+_set_clipboard_data = set_clipboard_data
 
 
 def _set_clipboard_files(paths):
@@ -77,14 +57,11 @@ def _set_clipboard_bitmap():
     return _set_clipboard_data(lambda: wx.BitmapDataObject(bmp))
 
 
-def _set_clipboard_text(text):
-    if not wx.TheClipboard.Open():
-        return False
-    try:
-        wx.TheClipboard.SetData(wx.TextDataObject(text))
-    finally:
-        wx.TheClipboard.Close()
-    return True
+# Was the one helper here that still ignored SetData()'s return value, three
+# lines below the one that fixed it. It backs the tests asserting that plain
+# text is NOT staged as an attachment — so a stale FileDataObject left by an
+# earlier test made exactly those assertions fail.
+_set_clipboard_text = set_clipboard_text
 
 
 class TestPasteFiles:
