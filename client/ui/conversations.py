@@ -1443,30 +1443,6 @@ class ConversationsPanel(wx.Panel):
             self._emoji_btn.Enable()
 
     def refresh_composer_permissions(self, jid: str, transition: bool = True):
-        """Re-apply the composer's writable/read-only state to the open
-        conversation, after its group permissions changed under it.
-
-        _apply_composer_permissions() has exactly one other call site —
-        navigate_to_conversation() — and that early-returns for the
-        conversation already on screen, so a group switched to
-        "only admins can send messages" while the user was sitting in it kept
-        a writable message field, and re-selecting the chat did not help
-        either. Called via wx.CallAfter from MainWindow's two funnels that
-        learn about the change (the list-chats merge and the live group
-        notification), so this runs on the UI thread. A no-op unless *jid* is
-        the open conversation — same shape as update_conversation_name().
-
-        The transition is spoken because it is the accessibility-critical
-        half of the bug: a message field that silently stops accepting text,
-        with no announcement, is exactly the failure that was reported.
-
-        *transition* is what the announcement is worded from. The composer
-        also goes read-only the very first time a verdict lands for a group
-        that has been announcement-only for months — nothing changed there
-        except what WinZapp knows, so callers pass False and the wording drops
-        the "now". Only MainWindow can tell the two apart (it holds the
-        previous verdict), hence the argument rather than state kept here.
-        """
         if not self.conversation or self.conversation.get("remoteJid") != jid:
             return
 

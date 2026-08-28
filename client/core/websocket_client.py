@@ -1373,18 +1373,6 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
     def on_wpp_phone_code_error(self, data):
-        """Handle the 'phoneCodeError' Socket.IO event.
-
-        Emitted by WinZapp's own createSessionUtil.ts patch when WhatsApp
-        refuses to issue a link-by-code — CompanionHelloError is the one seen
-        in practice. The session itself is usually fine and goes on rotating
-        auth codes, so this is recorded rather than acted on: _bg_pairing_flow()
-        reads it only if its wait times out with no code, turning the generic
-        "no pairing code received" into something the user can actually act on.
-
-        See _phone_code_error's own comment for why this must not set
-        _phone_code_event.
-        """
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return

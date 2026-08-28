@@ -31,38 +31,6 @@ History:
   the latch never got reset — the displayed code silently froze forever.
   Reported live: "esperei 10 minutos e o código não atualizou nenhuma vez."
 
-* v2 — a 60-second reuse cooldown instead of a permanent latch.
-  `linkCodeIssuedAt` is only set AFTER loginByCode() actually succeeds (not
-  before), and a separate `linkCodeInFlight` flag (not a timestamp) guards
-  against overlapping concurrent calls — so a rejected attempt simply leaves
-  `linkCodeIssuedAt` at its old value and the very next `auth_code_change`
-  tick retries, with no permanent stuck state either way. This was written as
-  a WinZapp-local stopgap because wa-js had no explicit expiry/refresh signal
-  at the time (https://github.com/wppconnect-team/wa-js/pull/3554). That PR
-  has since landed — see the loginByCode migration further down — so the
-  cooldown is now belt-and-braces over a library that dedupes properly. Kept
-  for now only because changing one thing at a time is what keeps a
-  regression attributable; retiring it is a reasonable follow-up.
-
-* v3 — a `catch` around the loginByCode() call. v2's try/finally had none, so
-  a rejection escaped checkQrCode() (called fire-and-forget) as an unhandled
-  rejection that killed the tick. Paired with the loginByCode() error-detail
-  patch further down, without which the error was the minified "t: t" anyway.
-
-* v4 — hands the caught error to an optional `catchLinkCodeError` hook read
-  off `this.options`, so it reaches the user instead of only wppconnect.log.
-
-* v5 — current fix: a doubling backoff, 20s to a 5-minute ceiling, between
-  consecutive failures. v2's cooldown only ever gates a success, so through a
-  run of failures nothing paced the retries at all and every auth-code
-  rotation went straight back into genLinkDeviceCodeForPhoneNumber() —
-  measured at one attempt every 20 seconds, indefinitely. See the comment on
-  PATCHED_CHECK_QR_CODE for why that likely made the failure it was reacting
-  to worse rather than better.
-
-Every generation is kept as its own constant: they are the rungs
-patch_host_layer_source() migrates along, so an install at any past version
-lands on the current one. Removing one strands whoever is still on it.
 """
 
 ORIGINAL_CHECK_QR_CODE = (
@@ -485,24 +453,6 @@ PATCHED_LOGIN_BY_CODE = (
 
 
 def patch_host_layer_source(content: str):
-    """Apply every host.layer.js patch to *content*, idempotently.
-
-    Returns ``(new_content, notes, ok)``:
-
-    * ``new_content`` — the patched source (identical to *content* when
-      everything was already applied),
-    * ``notes`` — one short human-readable line per patch, for the caller to
-      log in whatever style it uses (setup_api.py prints, ApiSetupDialog
-      logs),
-    * ``ok`` — False if any patch failed to find a source text it recognises,
-      i.e. the installed @wppconnect-team/wppconnect changed the file.
-
-    Both call sites (setup_api.py for dev/CI, ApiSetupDialog for the real
-    end-user install) go through this rather than each carrying their own
-    copy of the migration ladder — they used to, and only one of the two got
-    fixed when the patch was corrected. Same reasoning, and same shape, as
-    wppconnect_sender_layer_patch.patch_sender_layer_source().
-    """
     notes = []
 
     if PATCHED_CHECK_QR_CODE in content:

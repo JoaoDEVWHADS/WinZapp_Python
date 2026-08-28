@@ -836,22 +836,6 @@ def parse_bool_flag(value):
 
 
 def group_setting_notif_value(notif):
-    """The new ON/OFF value a group-settings groupNotification carries
-    (announce / restrict / ephemeral), or None when the payload doesn't say.
-
-    WPPConnect reports it under "value" on some versions and only in the
-    notification body on others, and spells it as a real bool, as "on"/"off",
-    or in WhatsApp's own words ("announcement"/"locked" for on, "unlocked"
-    for off).  Deliberately strict about "doesn't say": an absent value and an
-    empty body both return None rather than the False `parse_bool_flag("")`
-    would give.  The caller is the composer's read-only switch, and either
-    guessing direction there is a real bug — "on" locks a user out of a group
-    they can post in, "off" re-opens the composer of a group an admin just
-    restricted.  Leaving the last known verdict alone is the only safe
-    answer.  (The timeline renderer in ui/conversations.py keeps its own,
-    looser reading of the same field: it only has to word a sentence, so an
-    unstated value there is harmless.)
-    """
     if not isinstance(notif, dict):
         return None
     raw = notif.get("value")

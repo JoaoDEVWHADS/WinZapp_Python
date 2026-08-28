@@ -1335,11 +1335,6 @@ class WppUpdateChecker:
         self._mw._update_wpp_server(tag)
 
     def _schedule_retry(self, interval: float = None):
-        """Re-check after *interval* seconds (default: the periodic interval).
-
-        A shorter interval is passed when a check succeeded but the prompt was
-        held back because pairing was underway — see _prompt_update().
-        """
         if interval is None:
             interval = self._RETRY_INTERVAL
         if self._retry_timer is not None:

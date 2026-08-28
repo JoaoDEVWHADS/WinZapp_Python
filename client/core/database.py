@@ -279,18 +279,6 @@ class DatabaseManager:
         await self._conn.commit()
 
     async def _upgrade_unresolvable_lids(self) -> None:
-        """Rebuild a pre-expiry ``unresolvable_lids`` table.
-
-        The old table had ``jid`` as its sole primary key and no
-        ``recorded_at``.  Neither can be added by ALTER TABLE, and copying the
-        old rows over would buy nothing: they carry no timestamp, so every one
-        of them counts as expired the first time
-        delete_expired_unresolvable() runs and gets retried anyway.  Dropping
-        is therefore the same outcome as copying, minus the fragile copy —
-        the cost is one extra resolution pass on the first launch after the
-        upgrade, which is exactly the pass that unsticks the contacts this
-        table had blacklisted forever.
-        """
         assert self._conn is not None
         cursor = await self._conn.execute("PRAGMA table_info(unresolvable_lids)")
         columns = {row["name"] for row in await cursor.fetchall()}
@@ -1040,13 +1028,6 @@ class DatabaseManager:
         return lids, names
 
     async def add_unresolvable_lid(self, jid: str) -> None:
-        """Mark a LID as unresolvable, starting its retry clock now.
-
-        INSERT OR REPLACE, not OR IGNORE: re-recording a LID that was just
-        retried and failed again has to restart the clock, otherwise the entry
-        would stay stale-dated and be retried on every single launch from then
-        on — the tight re-query loop this table exists to stop.
-        """
         async with self._write_lock:
             conn = await self._ensure_conn()
             await conn.execute(
@@ -1057,7 +1038,6 @@ class DatabaseManager:
             await conn.commit()
 
     async def add_unresolvable_name(self, jid: str) -> None:
-        """Mark a LID as having an unresolvable name (see add_unresolvable_lid)."""
         async with self._write_lock:
             conn = await self._ensure_conn()
             await conn.execute(
@@ -1068,12 +1048,6 @@ class DatabaseManager:
             await conn.commit()
 
     async def delete_unresolvable_lid(self, jid: str) -> None:
-        """Clear the 'this LID bridges to no phone number' mark for *jid*.
-
-        Called once the mapping is genuinely learned.  main.py used to only
-        discard it from its in-memory set; the row stayed and the next launch
-        loaded the LID back as unresolvable even though we had just bridged it.
-        """
         async with self._write_lock:
             conn = await self._ensure_conn()
             await conn.execute(
@@ -1083,7 +1057,6 @@ class DatabaseManager:
             await conn.commit()
 
     async def delete_unresolvable_name(self, jid: str) -> None:
-        """Clear the 'this JID has no resolvable name' mark for *jid*."""
         async with self._write_lock:
             conn = await self._ensure_conn()
             await conn.execute(
@@ -1093,13 +1066,6 @@ class DatabaseManager:
             await conn.commit()
 
     async def delete_expired_unresolvable(self, cutoff_ts: int) -> int:
-        """Delete blacklist entries recorded before *cutoff_ts* (unix seconds).
-
-        Returns the number of rows deleted.  Rows written by an older WinZapp
-        (and by import_from_dict, whose dict shape carries no timestamps) have
-        recorded_at = 0 and so always expire on the first sweep — deliberately:
-        those are exactly the entries that were never going to be retried.
-        """
         async with self._write_lock:
             conn = await self._ensure_conn()
             cursor = await conn.execute(

@@ -834,14 +834,6 @@ def history_gap_closed(fetched: list, local_records: list, hole_top_ts: int) -> 
 
 
 def participant_digits(jid) -> str:
-    """Bare digits of a participant/self JID, dropping both the @suffix and
-    any ":device" companion suffix ("5511999999999:60@s.whatsapp.net" ->
-    "5511999999999").
-
-    WPPConnect's group-participant ids routinely carry that device suffix, so
-    comparing a plain `split("@")[0]` against the current user's own JID never
-    matched and the "am I an admin here" check always answered False.
-    """
     if not isinstance(jid, str):
         return ""
     return jid.rsplit("@", 1)[0].split(":")[0]
@@ -849,15 +841,6 @@ def participant_digits(jid) -> str:
 
 def group_participant_is_me(participant, my_phone_digits, my_lid_digits,
                             digits_equivalent) -> bool:
-    """True when this entry of a group's participants list is the current user.
-
-    Split out of group_participant_admin_flag() only because
-    set_group_participant_admin() has to find exactly the same entry in order
-    to rewrite it, and a second copy of the match would be one copy too many
-    already — ui/dialogs/conversation_data_dialog.py's _participant_is_me() is
-    the other, and it exists because it works on a bare JID rather than on a
-    participant dict.
-    """
     if not isinstance(participant, dict):
         return False
     p_id = participant.get("id") or ""
@@ -873,21 +856,6 @@ def group_participant_is_me(participant, my_phone_digits, my_lid_digits,
 
 def set_group_participant_admin(participants, is_admin, my_phone_digits,
                                 my_lid_digits, digits_equivalent) -> bool:
-    """Write *is_admin* onto the current user's own entry of a live
-    *participants* list, returning whether that entry was found.
-
-    A promote/demote notification carries no participants of its own, so the
-    list sitting in self.chats still says whatever the last list-chats
-    snapshot said. group_send_permission_from_metadata() prefers a live
-    participants list over the persisted verdict — rightly, it is normally
-    the fresher of the two — so leaving the stale entry alone would let it
-    overrule the verdict the promotion just corrected, and the composer would
-    stay read-only exactly as it did before this was handled at all.
-
-    All three flags are written rather than just `admin`, because the reader
-    ORs admin/isAdmin/isSuperAdmin: clearing one of them on a demotion would
-    leave the user still reading as an admin through the other two.
-    """
     if not isinstance(participants, list):
         return False
     for p in participants:
@@ -904,22 +872,6 @@ def set_group_participant_admin(participants, is_admin, my_phone_digits,
 
 def group_participant_admin_flag(participants, my_phone_digits, my_lid_digits,
                                  digits_equivalent) -> "bool | None":
-    """Whether the current user is an admin of the group whose *participants*
-    list this is — None when the list simply doesn't say (empty, malformed,
-    or the user isn't in it at all).
-
-    `isSuperAdmin` is read alongside `admin`/`isAdmin` because WhatsApp Web
-    reports a group's own creator as `isAdmin=false, isSuperAdmin=true`:
-    reading `isAdmin` alone locked the creator out of their own announcement
-    group, which is the fail-*closed* direction. Upstream WPPConnect's own
-    getGroupInfo (groupController.ts) ORs the same three fields for exactly
-    this reason — it does not trust raw `isAdmin` either.
-
-    *digits_equivalent* is passed in rather than imported so this stays a
-    pure function (MainWindow._phone_digits_equivalent is what callers hand
-    it) — same shape as ui/dialogs/conversation_data_dialog.py's
-    _participant_is_me().
-    """
     if not isinstance(participants, list) or not participants:
         return None
     for p in participants:
@@ -931,24 +883,6 @@ def group_participant_admin_flag(participants, my_phone_digits, my_lid_digits,
 
 def group_send_permission_from_metadata(chat, my_phone_digits, my_lid_digits,
                                         digits_equivalent, known_am_admin=None):
-    """The "only admins can send" verdict for one group chat dict, as
-    ``{"announce": bool, "am_admin": bool}`` — or None when this snapshot
-    cannot decide it and the caller must fall back to the persisted verdict
-    (or fail open).
-
-    Two separate facts are needed and they do not always arrive together:
-    list-chats is called with `ignoreGroupMetadata`, so a group can serialise
-    with `announce` and no participants at all, and a live announce
-    notification carries neither. *known_am_admin* is the admin answer a
-    previous snapshot did give (the persisted verdict), used only when this
-    one doesn't — without it, a chat list that reports `announce: true` with
-    no participants would throw away the perfectly good admin answer stored
-    from the last full snapshot.
-
-    Returning None rather than guessing matters: `announce` on with an
-    unknown admin status is genuinely undecidable, and writing a guess into
-    the persisted verdict would make it authoritative on the next launch.
-    """
     group_meta = chat.get("groupMetadata")
     if not isinstance(group_meta, dict):
         group_meta = {}
@@ -969,25 +903,6 @@ def group_send_permission_from_metadata(chat, my_phone_digits, my_lid_digits,
 
 
 def unexpired_group_send_verdict(stored, now, max_age_seconds):
-    """The persisted send-permission verdict *stored*, or None when it is
-    missing, malformed, or too old to still be trusted.
-
-    Nothing re-validates a stored verdict by itself. Its admin half can only
-    be refreshed by a list-chats snapshot that happens to carry
-    groupMetadata.participants — list-chats is called with
-    `ignoreGroupMetadata`, so WhatsApp Web supplies those only when it already
-    has them cached — or by a promote/demote notification naming a target we
-    can match. A member promoted to admin in an announcement group while
-    neither happens keeps ``{"announce": True, "am_admin": False}`` forever:
-    persisted, surviving restarts, composer read-only, screen reader
-    announcing "only admins can send" in a group the user *can* post in. That
-    is a lockout, the one direction this whole area is built never to fail
-    in, so an aged verdict goes back to being no answer at all.
-
-    A record with no usable "t" is treated as expired for the same reason
-    unresolvable_lids does: an entry of unknown age is better re-derived than
-    trusted.
-    """
     if not isinstance(stored, dict):
         return None
     t = stored.get("t")
@@ -3102,12 +3017,6 @@ class MainWindow(wx.Frame):
         return ""
 
     def _chrome_pids_owning_session(self, session_name: str) -> list:
-        """PIDs of chrome.exe processes whose --user-data-dir is this session's
-        profile. Empty list when nothing holds it (or off Windows).
-
-        Matching goes through connection_state.chrome_cmdline_owns_session, so
-        it can never match the user's own Chrome or another account's browser.
-        """
         import sys
         if sys.platform != "win32" or not session_name:
             return []
@@ -3131,26 +3040,6 @@ class MainWindow(wx.Frame):
         return pids
 
     def wait_for_profile_release(self, session_name: str, timeout: float = 20.0) -> bool:
-        """Block until no chrome.exe holds *session_name*'s profile.
-
-        Returns True once the profile is free, False if it is still held when
-        *timeout* elapses. Kills whatever is left in that case, then gives it a
-        short grace period, because a profile nothing can release is worse than
-        one process lost.
-
-        This exists because `status-session` reporting CLOSED is NOT the same
-        claim. Measured on a real run: close-session answered, the CLOSED poll
-        confirmed in 0.1 s, /start-session went out 118 ms later, and Chrome —
-        still exiting — refused it with
-
-            The browser is already running for ...\\userDataDir\\<session>
-            Auto Close Called
-
-        The session died there, so no pairing code was ever produced and the
-        Python side sat out its full 90-second wait. Session status and browser
-        process lifetime are different things; only the second one owns the
-        lock, so only the second one is worth waiting on.
-        """
         import sys
         if sys.platform != "win32" or not session_name:
             return True
@@ -3188,10 +3077,6 @@ class MainWindow(wx.Frame):
     def _kill_orphaned_chrome_for_session(self, session_name: str = None):
         """Kill a suspended chrome.exe still holding a session's userDataDir
         lock, then drop its stale lockfile, so WPPConnect can relaunch.
-
-        *session_name* defaults to this account's current session; callers that
-        need to release a session other than the live one (the pairing flow
-        closing the previous session, for instance) pass it explicitly.
 
         After hibernation the WhatsApp Web chrome.exe is suspended, not killed:
         it keeps the lock on ./userDataDir/<session>, so the post-wake
@@ -3852,25 +3737,6 @@ class MainWindow(wx.Frame):
     # wppconnect-team/wppconnect-server GitHub releases directly.
 
     def wpp_update_may_run_now(self) -> bool:
-        """False while the user is pairing — accepting a WPPConnect update
-        stops the running API session, which pulls the server out from under
-        the pairing flow in progress.
-
-        The only thing that used to stand between those two was the fixed
-        `wx.CallLater(90000, self._start_wpp_update_checker)` in __init__, and
-        90 seconds of wall clock is not the same claim as "pairing is done".
-        Seen live: a first run spent 42 s of startup downloading the headless
-        Chrome shell, so the checker's T+90s landed squarely on an open
-        pairing dialog; accepting the update called _stop_wpp_server() and
-        every subsequent request failed with connection-refused until the
-        reinstall finished, with the pairing attempt abandoned in the middle.
-
-        Checks the same two signals check_wa_connection_http() does — the
-        on-screen dialog AND _pairing_in_progress, which covers the window
-        where the flow is running before/after the dialog itself is up. See
-        that method for why _pairing_in_progress is the authoritative
-        "do not touch the session" signal.
-        """
         try:
             if self._is_pairing_dialog_active():
                 return False
@@ -3918,21 +3784,6 @@ class MainWindow(wx.Frame):
     def _update_wpp_server(self, target_tag: str):
         """
         Stop the running WPPConnect Server, reinstall it at *target_tag* and
-        restart it. Entered on the wx main thread — the modal dialogs below
-        need it, and both WppUpdateChecker call sites already dispatch here via
-        wx.CallAfter — but it returns immediately: the *stop* runs on a worker
-        thread and everything after it resumes from _after_stop().
-
-        That split is not cosmetic. _stop_wpp_server()'s own docstring says it
-        must not be called on the wx main thread, and it has since grown a
-        wait_for_profile_release() call on top of its close-session grace (10 s)
-        and CLOSED flush poll (15 s): another 15 s, plus a post-kill grace whose
-        nominal 0.5 s polls each spawn a PowerShell Get-CimInstance measured at
-        0.57 s. That is ~45 s in which the message loop does not pump, so
-        Windows paints the window "Not Responding" — the exact symptom
-        real_exit()'s docstring records as already reported live for "Sair" —
-        and a screen-reader user is simply left with a UI that stopped
-        answering, seconds after accepting a prompt.
         """
         if getattr(self, "_wpp_updating", False):
             logging.info("[wpp_update] An update is already running — ignoring "
@@ -3950,7 +3801,6 @@ class MainWindow(wx.Frame):
         self._wpp_updating = True
 
         def _stop_phase():
-            """The blocking half, on a worker thread. Touches no wx control."""
             try:
                 self._stop_wpp_server()
                 self.wpp_process = None
@@ -3969,7 +3819,6 @@ class MainWindow(wx.Frame):
                     self._wpp_updating = False
 
         def _after_stop():
-            """Back on the wx main thread: the modal dialogs and the restart."""
             try:
                 from ui.dialogs.api_setup import ApiSetupDialog
                 dlg = ApiSetupDialog(
@@ -4095,20 +3944,6 @@ class MainWindow(wx.Frame):
         Body: {"isOnline": true | false}
 
         Always runs on a background thread — never blocks the UI.
-
-        Gated on the connection, not just on having a token. self.token is set
-        at startup from the stored WA_token, long before — and independently
-        of — the WhatsApp session actually being usable, so the 20-second
-        keep-alive happily hammered a session that was CLOSED on the Node side.
-        Observed as an endless train of HTTP 500s in a real run, with the
-        response discarded and nothing logged, for a session that could not
-        possibly accept presence.
-
-        The failed call is not free either: wa-js's markAvailable() pins
-        Stream.available through Object.defineProperty for the page's lifetime,
-        so a successful markAvailable(false) followed by a failing
-        markAvailable(true) can leave the page stuck advertising "offline"
-        while messaging still works.
         """
         token = getattr(self, "token", None)
         if not token:
@@ -8186,26 +8021,6 @@ class MainWindow(wx.Frame):
             logging.exception("[sessions] registering active session failed (non-fatal)")
 
     def _register_abandoned_session(self, token: str) -> None:
-        """Record a failed pairing attempt's session as 'abandoned'.
-
-        A pairing attempt mints a fresh session name and calls /start-session,
-        which makes WPPConnect create a Chrome profile under api/userDataDir/.
-        When the attempt then fails, connect.py clears the token via
-        _set_wa_token("") — and that path returns before the store block above,
-        so the name was never written to the SessionStore at all. Never
-        registered means it can never be marked abandoned, and
-        sessions_to_close() only ever returns abandoned entries: the profile
-        became unreachable by every cleanup path, permanently. A single
-        afternoon of failed pairing left 12 such directories and 754 MB behind
-        against a store that listed one session.
-
-        Deliberately does NOT abandon a name the store still holds as 'active'.
-        _can_reuse_existing_session() lets an attempt reuse the token of an
-        already-paired session, so a failed attempt's token can BE the live
-        one — and abandoning it would hand the working profile to the cleanup
-        to delete. A reused session that merely failed to produce a code is not
-        known to be dead; leaving it alone is the recoverable choice.
-        """
         if not token:
             return
         try:
@@ -8477,19 +8292,6 @@ class MainWindow(wx.Frame):
         URL can be mis-parsed and leak to logs; the token goes in Bearer only,
         GPT r1 #1). Returns True if Node is reachable (so the caller's circuit
         breaker keeps trying), False on connection-refused (Node down — skip the
-        rest). ``skip`` short-circuits once Node is known down.
-
-        *token* must be the abandoned session's OWN token, from the
-        SessionStore. This used to send `self._get_wa_token()` — the CURRENT
-        account's token — for a logout addressed to a different session, and
-        WPPConnect's verifyToken middleware checks the token against the
-        session named in the URL, so it could only ever answer 401. Seen in a
-        real run: `POST /logout-session -> 401 in 2ms`, immediately followed
-        by the store row being dropped as though the session had been
-        deregistered. It never was: `close-session` only kills the browser,
-        and `logout-session` is the sole call that deregisters the companion
-        device at WhatsApp. Every superseded WinZapp session therefore stayed
-        a linked device on the account indefinitely.
         """
         if skip or not name:
             return not skip
@@ -10573,18 +10375,6 @@ class MainWindow(wx.Frame):
         # _initial_sync_running is reset by start_sync()'s finally block.
 
     def _probe_chats_and_start_sync(self) -> bool:
-        """One list-chats probe for wait_messages_set()'s fallback poll.
-
-        Returns True when that poll has nothing left to do — either a sync is
-        now running (or already was), or the API answered "Disconnected", which
-        no amount of further probing can change.  False means "ask again in
-        5 s": a timeout or a connection error is a server still warming up, not
-        a dead session, and must keep the poll going exactly as before.
-
-        Lives here as a method rather than inside wait_messages_set()'s
-        _fallback() closure so that split can be tested without a wx.App
-        (tests/test_wait_messages_set_probe.py).
-        """
         def _already_syncing() -> bool:
             if self.messages_set_completed:
                 return True
@@ -11921,26 +11711,6 @@ class MainWindow(wx.Frame):
 
         Only ever reads group metadata local sync already has — this must
         stay synchronous and side-effect-free since it runs from
-        navigate_to_conversation() on the UI thread. If neither the live chat
-        dict nor the persisted verdict can decide, this fails OPEN (returns
-        False, message field stays writable): WhatsApp Web itself is the
-        actual source of truth and would reject the send if this guess were
-        wrong in that direction, whereas guessing wrong the other way would
-        silently lock a user out of a group they can genuinely post in.
-
-        The persisted verdict (`_group_send_perms`, filled by
-        get_remote_chats() and prepare_sync()) is what makes this work at
-        all before the first list-chats merge lands: the chats table stores
-        no group metadata whatsoever, so every group get_chats() rehydrates
-        arrives with none and this used to fail open for the whole of
-        startup — and permanently while offline or whenever the sync fails,
-        which is exactly when an announcement group showed a writable
-        message field to a member who cannot post in it.
-
-        That stored verdict expires (_GROUP_SEND_PERMS_MAX_AGE_SECONDS): it is
-        the one input here that can go silently wrong in the lockout
-        direction, because nothing re-validates it on its own — see
-        unexpired_group_send_verdict().
         """
         jid = chat.get("remoteJid", "")
         if not jid.endswith("@g.us"):
@@ -11962,24 +11732,6 @@ class MainWindow(wx.Frame):
         return bool(verdict.get("announce")) and not bool(verdict.get("am_admin"))
 
     def _record_group_send_perms(self, jid: str, chat: dict) -> "dict | None":
-        """Store the "only admins can send" verdict `chat`'s group metadata
-        gives for *jid*, and return it — or None when this chat dict could
-        not decide (see group_send_permission_from_metadata).
-
-        Callers keep their own copy of the previous verdict to tell whether
-        it moved; that is not returned here because "unchanged" still has to
-        answer "yes, this snapshot was decidable" for the diagnostic counter
-        in get_remote_chats().
-
-        Kept as a verdict ({"announce", "am_admin", "t"}) rather than a copy
-        of groupMetadata on purpose: the chats table has no group-metadata
-        column and adding one would mean a schema migration to persist a
-        single boolean pair, while system_metadata (the same store
-        locally_read_at uses) already survives restarts.  "t" is when this
-        verdict last *changed* — re-observing the same answer rewrites
-        nothing, so the periodic 60 s list-chats refresh doesn't turn into a
-        DB write per group per minute.
-        """
         if not hasattr(self, "_group_send_perms"):
             self._group_send_perms = {}
         previous = unexpired_group_send_verdict(
@@ -12003,13 +11755,6 @@ class MainWindow(wx.Frame):
         return verdict
 
     def _persist_group_send_perms(self):
-        """Write the group send-permission verdicts to DB metadata.
-
-        Same reason locally_read_at is persisted rather than kept in memory:
-        this is the only copy that outlives the process, and the gap it
-        covers (a cold start with no successful list-chats yet) is precisely
-        a restart.
-        """
         db = getattr(self, "db", None)
         if db is None:
             return
@@ -12147,18 +11892,6 @@ class MainWindow(wx.Frame):
     _GROUP_ADMIN_NOTIF_SUBTYPES = frozenset({"promote", "promotion", "demote", "demotion"})
 
     def _apply_group_settings_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
-        """Apply a live "only admins can send / edit" notification to local
-        state, instead of only rendering it as a line in the timeline.
-
-        Nothing but the timeline text reacted to this before: self.chats kept
-        whatever announce value the last list-chats snapshot carried, so a
-        group switched to announcement-only while the user had it open left
-        the message field writable — and re-selecting the chat did not help,
-        since navigate_to_conversation() early-returns for the conversation
-        already on screen. Writing the new value into the chat's own
-        groupMetadata keeps state and UI agreeing, and recording the verdict
-        carries it across the restart that has no group metadata at all.
-        """
         if not remote_jid.endswith("@g.us"):
             return
         if msg.get("messageType") != "groupNotification":
@@ -12191,22 +11924,6 @@ class MainWindow(wx.Frame):
             wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
 
     def _group_admin_notif_targets_me(self, notif: dict) -> "bool | None":
-        """Whether a promote/demote notification names the current user —
-        None when its recipients cannot be judged either way.
-
-        The match goes through _is_self_jid(), the same helper the rest of the
-        app uses for "is this me": it strips Baileys' ":N" device suffix,
-        bridges an @lid through the resolution cache and tolerates the
-        Brazilian 8/9-digit variant. Writing a fresh comparison here would
-        make three copies of that rule.
-
-        Tri-state on purpose. _is_self_jid() answers False for everything it
-        cannot decide (no my_jid known yet, an @lid that is neither bridged
-        nor equal to a known my_lid), and a plain False here would read as
-        "somebody else was promoted, nothing to do" — which is precisely the
-        case that would keep a stale verdict locking the user out. Those
-        answer None so the caller can fail open instead.
-        """
         targets = []
         for raw in (notif.get("recipients") or []):
             if isinstance(raw, dict):
@@ -12229,26 +11946,6 @@ class MainWindow(wx.Frame):
 
     def _apply_group_admin_change(self, remote_jid: str, chat: dict, notif: dict,
                                   subtype: str) -> None:
-        """Apply a live promote/demote notification to the group's stored
-        send-permission verdict, when it is the current user being promoted
-        or demoted.
-
-        Nothing else ever refreshes the admin half of that verdict: it can
-        only come from a list-chats snapshot carrying
-        groupMetadata.participants, and list-chats is called with
-        `ignoreGroupMetadata`, so WhatsApp Web supplies those only when it
-        already has them cached. A member promoted to admin in an
-        announcement group therefore kept a persisted
-        ``{"announce": True, "am_admin": False}`` across restarts, with the
-        composer read-only and the screen reader announcing that only admins
-        may post — in a group they had just been given the right to post in.
-
-        Someone *else* being promoted changes nothing here and is ignored. A
-        notification whose target cannot be matched confidently drops the
-        stored verdict rather than guessing, which returns the composer to
-        fail-open until the next decidable snapshot — the same trade this
-        whole area makes everywhere else.
-        """
         targets_me = self._group_admin_notif_targets_me(notif)
         if targets_me is False:
             return

@@ -702,19 +702,6 @@ class ApiSetupDialog(wx.Dialog):
     @staticmethod
     def _patch_wppconnect_host_layer(wppconnect_api_dir: str) -> bool:
         """Patch @wppconnect-team/wppconnect's compiled host.layer.js: the
-        phone-number pairing code must stop regenerating on every QR-code
-        rotation without freezing forever if it should ever need a refresh
-        (WinZapp issue #8), and a failed pairing-code request must report
-        the real browser-side error instead of the minified "t: t". Port of
-        setup_api.py's function of the same name — both delegate the actual
-        search-and-replace to patch_host_layer_source() so the two copies
-        can't drift apart. See client/core/wppconnect_host_layer_patch.py's
-        module docstring for the v0/v1/v2/v3 history.
-
-        Idempotent (a no-op once v3 is applied, and it upgrades a machine
-        still carrying v1 or v2 on the way) and best-effort: a logged
-        warning, never a crash, if the installed wppconnect version no
-        longer matches a known source text.
 
         *wppconnect_api_dir* is .../node_modules/@wppconnect-team/wppconnect/dist/api
         (i.e. the caller has already descended into node_modules — unlike
