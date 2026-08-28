@@ -696,7 +696,7 @@
     "mention_all_keyword": "all",
     "mention_all_label": "@all — Mention everyone",
     "channel_read_only": "This channel is read-only",
-    "group_admins_only": "Only &admins can send messages in this group",
+    "group_admins_only": "Only admins can send messages in this grou&p",
     "group_send_restricted": "Only admins can send messages in this group. The message field is read-only.",
     "group_send_restricted_now": "Only admins can send messages in this group now. The message field is read-only.",
     "interactive_reply": "interactive reply",
