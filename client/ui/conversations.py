@@ -2296,15 +2296,41 @@ class ConversationsPanel(wx.Panel):
         went out as a plain send (send_text_message's fallback): the virtual
         message's reply contextInfo is dropped so the row stops reading as a
         reply — the quote never actually reached the recipient.
+
+        A missing/non-string real_id means the send itself succeeded (this is
+        only ever called after one did) but its real WhatsApp id couldn't be
+        parsed out of the API response. Finalising the row here regardless
+        used to strand it permanently: on_new_message()'s later echo match
+        only ever considers rows still marked pending, so this call was the
+        one and only chance a message like that got to be linked to its real
+        id — every one after it landed as a brand new, separately-stored
+        duplicate instead of resolving the original. Returning without
+        touching the row leaves it pending, so the echo (which always does
+        carry the real id) resolves it via a second call to this same method,
+        exactly as if this inconclusive one had never happened.
         """
+        # The transfer itself is over even when the id is not knowable — the
+        # send succeeded, only its response was unparseable. So the gauge and
+        # the "this row has a transfer in progress" marker come down either
+        # way; leaving them up strands a finished upload on screen, and
+        # _sync_pending_document_gauge() (which keys off _media_transfer_started
+        # plus _local_pending) re-shows it every time the row is selected.
         self._hide_media_transfer_gauge()
+        self._media_transfer_started.discard(local_id)
+        if not (real_id and isinstance(real_id, str)):
+            # Pin the row at 100% rather than popping the entry: the row stays
+            # pending on purpose (see above), and _render_message_line's
+            # pending clause falls back to .get(local_id, 0.0) — popping would
+            # make a just-finished upload announce as ", enviando 0%".
+            if local_id in self._media_upload_progress:
+                self._media_upload_progress[local_id] = 1.0
+            return
         tracked = self._outgoing_virtual_messages.pop(local_id, None)
         if tracked is not None:
             tracked["_local_pending"] = False
             if real_id and isinstance(real_id, str):
                 tracked.setdefault("key", {})["id"] = real_id
         self._media_upload_progress.pop(local_id, None)
-        self._media_transfer_started.discard(local_id)
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)

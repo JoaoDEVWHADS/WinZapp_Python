@@ -5153,17 +5153,41 @@ class MainWindow(wx.Frame):
             incoming_type = msg.get("messageType", "")
             _text_types = ("conversation", "extendedTextMessage")
             pending_msg = None
-            for r in records:
-                if not r.get("_local_pending"):
-                    continue
-                r_type = r.get("messageType", "")
-                if incoming_type in _text_types:
-                    if r_type not in _text_types:
+            # A message whose id some record already carries was matched to
+            # its pending row earlier. Running the type search again for a
+            # redelivery of that same echo — or a delayed one that lands after
+            # a *second* same-type message started sending in the meantime —
+            # would pick the first still-pending record of that type and hand
+            # it an id belonging to a different message entirely. Skipping the
+            # search lets it fall through to the exact id/edit check below,
+            # which is unambiguous.
+            #
+            # The question asked is deliberately "has a record already claimed
+            # this id?", not "is this id in _own_sent_ids?". The latter races
+            # the very notification it is meant to follow: MessageQueue calls
+            # _remember_own_sent_id(real_id) one line BEFORE the wx.CallAfter
+            # that eventually stamps the id onto the record (see that method's
+            # docstring — "the echo routinely arrives first"). In that window
+            # the id is in the set but no record carries it, so the type search
+            # would be skipped, the exact-id check below would find nothing,
+            # and the echo would be appended as a brand new record — leaving
+            # two records with the same key.id, which is the duplicate this
+            # guard exists to prevent.
+            already_resolved = bool(msg_id) and any(
+                (r.get("key") or {}).get("id") == msg_id for r in records
+            )
+            if not already_resolved:
+                for r in records:
+                    if not r.get("_local_pending"):
                         continue
-                elif r_type != incoming_type:
-                    continue
-                pending_msg = r
-                break
+                    r_type = r.get("messageType", "")
+                    if incoming_type in _text_types:
+                        if r_type not in _text_types:
+                            continue
+                    elif r_type != incoming_type:
+                        continue
+                    pending_msg = r
+                    break
             if pending_msg:
                 # Found the corresponding pending message: update it and skip appending a duplicate
                 pending_msg["_local_pending"] = False
