@@ -4851,18 +4851,29 @@ class MainWindow(wx.Frame):
             incoming_type = msg.get("messageType", "")
             _text_types = ("conversation", "extendedTextMessage")
             pending_msg = None
-            # A message whose real id we already know (recorded in
-            # _own_sent_ids the moment the HTTP send response came back, well
-            # before this echo could arrive) was already matched to its
-            # correct pending record then. Running the type search again for
-            # a redelivery of that same echo — or a delayed one that lands
-            # after a *second* same-type message started sending in the
-            # meantime — would pick the first still-pending record of that
-            # type and hand it an id that belongs to a different message
-            # entirely. Skipping the search here lets it fall through to the
-            # exact id/edit check below instead, which is unambiguous.
-            with self._own_sent_ids_lock:
-                already_resolved = bool(msg_id) and msg_id in self._own_sent_ids
+            # A message whose id some record already carries was matched to
+            # its pending row earlier. Running the type search again for a
+            # redelivery of that same echo — or a delayed one that lands after
+            # a *second* same-type message started sending in the meantime —
+            # would pick the first still-pending record of that type and hand
+            # it an id belonging to a different message entirely. Skipping the
+            # search lets it fall through to the exact id/edit check below,
+            # which is unambiguous.
+            #
+            # The question asked is deliberately "has a record already claimed
+            # this id?", not "is this id in _own_sent_ids?". The latter races
+            # the very notification it is meant to follow: MessageQueue calls
+            # _remember_own_sent_id(real_id) one line BEFORE the wx.CallAfter
+            # that eventually stamps the id onto the record (see that method's
+            # docstring — "the echo routinely arrives first"). In that window
+            # the id is in the set but no record carries it, so the type search
+            # would be skipped, the exact-id check below would find nothing,
+            # and the echo would be appended as a brand new record — leaving
+            # two records with the same key.id, which is the duplicate this
+            # guard exists to prevent.
+            already_resolved = bool(msg_id) and any(
+                (r.get("key") or {}).get("id") == msg_id for r in records
+            )
             if not already_resolved:
                 for r in records:
                     if not r.get("_local_pending"):

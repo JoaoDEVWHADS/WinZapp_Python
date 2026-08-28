@@ -72,7 +72,10 @@ def _make_panel(msg):
     panel._outgoing_virtual_messages = {"loc-1": msg}
     panel._media_upload_progress = {}
     panel._media_transfer_started = set()
-    panel._hide_media_transfer_gauge = lambda: None
+    panel.gauge_hidden = False
+    def _hide():
+        panel.gauge_hidden = True
+    panel._hide_media_transfer_gauge = _hide
     panel.messages_list = _FakeList()
     panel.conversation = {"remoteJid": REMOTE}
     panel.main_window = _FakeMainWindow()
@@ -302,3 +305,99 @@ class TestEchoMatchingStillWorksWhenNothingIsAlreadyResolved:
         stub.on_new_message(_echo("REAL_B"))
 
         assert "REAL_B" in stub._own_sent_ids
+
+
+class TestTheGuardDoesNotRaceTheNotificationItFollows:
+    """The guard asks "has a record already claimed this id?", never "is this
+    id in _own_sent_ids?".
+
+    MessageQueue calls _remember_own_sent_id(real_id) one line BEFORE the
+    wx.CallAfter that eventually stamps that id onto the pending record — and
+    _remember_own_sent_id's own docstring says the echo routinely arrives
+    first. So there is a real window where the id is in the set and no record
+    carries it yet. Keying the guard off the set skips the type search in that
+    window, the exact-id check finds nothing, and the echo is appended as a
+    new record: two records, one key.id — the duplicate this whole file exists
+    to prevent.
+    """
+
+    def test_an_echo_arriving_before_the_ui_was_notified_is_still_matched(self):
+        # The set already knows REAL_B (worker thread got the HTTP response),
+        # but the CallAfter that stamps it onto the record has not run yet, so
+        # the row is still pending under its local id.
+        record_b = _pending_record("locB", local_pending=True)
+        chat = _chat_with([record_b])
+        stub = _Stub(chat, own_sent_ids={"REAL_B"})
+
+        stub.on_new_message(_echo("REAL_B"))
+
+        assert record_b["key"]["id"] == "REAL_B", (
+            "the pending row must still be matched — the id being in "
+            "_own_sent_ids says nothing about whether a record carries it"
+        )
+        assert record_b["_local_pending"] is False
+
+    def test_no_duplicate_record_is_appended_in_that_window(self):
+        record_b = _pending_record("locB", local_pending=True)
+        chat = _chat_with([record_b])
+        stub = _Stub(chat, own_sent_ids={"REAL_B"})
+
+        stub.on_new_message(_echo("REAL_B"))
+
+        assert len(chat["messages"]["messages"]["records"]) == 1
+
+
+class TestTheFinishedTransferIsCleanedUpEvenWithoutAnId:
+    """The send succeeded — only its real id could not be parsed out of the
+    response. So the row stays pending on purpose (that is what lets the echo
+    resolve it), but the TRANSFER is over and its UI has to come down.
+
+    Leaving it up strands a finished upload on screen, and worse for the
+    screen reader: _render_message_line's pending clause keeps appending
+    ", enviando 100%" forever, so NVDA reads a delivered attachment as a live
+    upload. _sync_pending_document_gauge() also re-shows the gauge on every
+    selection of that row, because it keys off _media_transfer_started plus
+    _local_pending.
+    """
+
+    def test_the_gauge_is_hidden(self):
+        msg = _make_msg(messageType="documentMessage")
+        panel = _make_panel(msg)
+        panel._media_transfer_started.add("loc-1")
+        panel._media_upload_progress["loc-1"] = 1.0
+
+        ConversationsPanel._mark_message_sent(panel, "loc-1", real_id=None)
+
+        assert panel.gauge_hidden is True
+
+    def test_the_transfer_marker_is_cleared(self):
+        msg = _make_msg(messageType="documentMessage")
+        panel = _make_panel(msg)
+        panel._media_transfer_started.add("loc-1")
+
+        ConversationsPanel._mark_message_sent(panel, "loc-1", real_id=None)
+
+        assert "loc-1" not in panel._media_transfer_started
+
+    def test_the_progress_entry_is_pinned_at_100_not_dropped(self):
+        """Popping it would make _render_message_line fall back to
+        .get(local_id, 0.0) and announce a just-finished upload as
+        ", enviando 0%"."""
+        msg = _make_msg(messageType="documentMessage")
+        panel = _make_panel(msg)
+        panel._media_upload_progress["loc-1"] = 0.87
+
+        ConversationsPanel._mark_message_sent(panel, "loc-1", real_id=None)
+
+        assert panel._media_upload_progress["loc-1"] == 1.0
+
+    def test_the_row_is_still_left_pending_for_the_echo(self):
+        """The whole point of the early return — this must not regress while
+        cleaning up the transfer UI above it."""
+        msg = _make_msg(messageType="documentMessage")
+        panel = _make_panel(msg)
+
+        ConversationsPanel._mark_message_sent(panel, "loc-1", real_id=None)
+
+        assert msg["_local_pending"] is True
+        assert "loc-1" in panel._outgoing_virtual_messages

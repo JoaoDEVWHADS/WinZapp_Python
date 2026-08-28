@@ -2238,16 +2238,28 @@ class ConversationsPanel(wx.Panel):
         carry the real id) resolves it via a second call to this same method,
         exactly as if this inconclusive one had never happened.
         """
-        if not (real_id and isinstance(real_id, str)):
-            return
+        # The transfer itself is over even when the id is not knowable — the
+        # send succeeded, only its response was unparseable. So the gauge and
+        # the "this row has a transfer in progress" marker come down either
+        # way; leaving them up strands a finished upload on screen, and
+        # _sync_pending_document_gauge() (which keys off _media_transfer_started
+        # plus _local_pending) re-shows it every time the row is selected.
         self._hide_media_transfer_gauge()
+        self._media_transfer_started.discard(local_id)
+        if not (real_id and isinstance(real_id, str)):
+            # Pin the row at 100% rather than popping the entry: the row stays
+            # pending on purpose (see above), and _render_message_line's
+            # pending clause falls back to .get(local_id, 0.0) — popping would
+            # make a just-finished upload announce as ", enviando 0%".
+            if local_id in self._media_upload_progress:
+                self._media_upload_progress[local_id] = 1.0
+            return
         tracked = self._outgoing_virtual_messages.pop(local_id, None)
         if tracked is not None:
             tracked["_local_pending"] = False
             if real_id and isinstance(real_id, str):
                 tracked.setdefault("key", {})["id"] = real_id
         self._media_upload_progress.pop(local_id, None)
-        self._media_transfer_started.discard(local_id)
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)
