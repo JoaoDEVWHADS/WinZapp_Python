@@ -35,6 +35,7 @@ would quietly undo that.
 """
 
 import logging
+import re
 import time
 import uuid
 
@@ -56,6 +57,25 @@ def new_request_id() -> str:
     return uuid.uuid4().hex
 
 
+# WPPConnect's GLOBAL secret key (config.json's SECRET_KEY — the credential
+# that mints session tokens, and a real user secret whenever wpp_custom_api is
+# on) also travels in the URL path, across six routes, in two different
+# positions. Enumerated rather than inferred: only routes/index.ts knows which
+# path segment is a credential and which is an id, so a new `:secretkey` route
+# added there has to be added to the matching tuple here as well.
+# Source: client/api_patches/src/routes/index.ts (lines 59, 63, 66, 111, 946, 948).
+_SECRET_KEY_FIRST_ROUTES = (   # /api/<key>/<endpoint>
+    "/show-all-sessions",
+    "/start-all",
+    "/backup-sessions",
+    "/restore-sessions",
+)
+_SECRET_KEY_SECOND_ROUTES = (  # /api/<session>/<key>/<endpoint>
+    "/generate-token",
+    "/clear-session-data",
+)
+
+
 def redact_api_url(url: str) -> str:
     """A log-safe label for an API URL: no token, just the endpoint.
 
@@ -75,7 +95,140 @@ def redact_api_url(url: str) -> str:
     # rest is "<session>:<token>/<endpoint>/<...>" — drop the credential segment.
     parts = rest.split("/", 1)
     endpoint = parts[1] if len(parts) > 1 else ""
+    # ...except for the routes that carry WPPConnect's GLOBAL secret key in a
+    # *second* path segment (_SECRET_KEY_SECOND_ROUTES): dropping only the
+    # first segment left that key in the label — logged at INFO on every
+    # pairing and on every legacy plaintext-token migration. The routes that
+    # carry it in the *first* segment instead (_SECRET_KEY_FIRST_ROUTES) are
+    # already safe here, since that is the segment this drops anyway.
+    if endpoint.endswith(_SECRET_KEY_SECOND_ROUTES):
+        endpoint = endpoint.rsplit("/", 1)[-1]
     return "/" + endpoint if endpoint else "/api/"
+
+
+def redact_token(token: str) -> str:
+    """A log-safe label for a WPPConnect token: session name, secret masked.
+
+    Tokens are "<session>:<secret>". The session name alone is enough to
+    trace which session a log line refers to; the secret half is the same
+    credential Fernet-protects at rest and must never reach a log file.
+    """
+    if not token:
+        return ""
+    session_name, sep, _secret = token.partition(":")
+    return f"{session_name}:***" if sep else "***"
+
+
+# The same "/api/<session>:<secret>/" shape redact_api_url() splits on, matched
+# by regex because here it is embedded in prose rather than being the whole
+# string: requests and urllib3 copy the failed URL verbatim into their own
+# exception messages ("Max retries exceeded with url: /api/<session>:<secret>/
+# close-session"), so logging that exception publishes the credential exactly
+# the way logging the URL would.
+#
+# The secret half is consumed as [^/\s'"),] — i.e. "up to the next slash". That
+# is only safe because the token is a bcrypt hash that encryptController.ts
+# already rewrites (`hash.replace(/\//g, '_').replace(/\+/g, '-')`) before
+# handing it over, so it can never itself contain a slash. If that rewrite ever
+# went away the match would stop mid-secret and publish the tail — and nothing
+# would catch it: that controller is upstream-only, with no copy in
+# client/api_patches/, so a re-clone that changed it is invisible to the suite.
+_URL_CREDENTIAL = re.compile(r"(/api/)([^/\s:]+):[^/\s'\"),]+")
+
+# The global secret key in either of its two path positions — see the route
+# tuples above for why both exist and why they are enumerated.
+_URL_SECRET_KEY_FIRST = re.compile(
+    r"(/api/)[^/\s]+(/(?:%s)\b)"
+    % "|".join(re.escape(r.lstrip("/")) for r in _SECRET_KEY_FIRST_ROUTES)
+)
+_URL_SECRET_KEY_SECOND = re.compile(
+    r"(/api/[^/\s]+/)[^/\s]+(/(?:%s)\b)"
+    % "|".join(re.escape(r.lstrip("/")) for r in _SECRET_KEY_SECOND_ROUTES)
+)
+
+
+def redact_credentials(text: str) -> str:
+    """Mask WPPConnect credentials appearing in *URL form* inside `text`.
+
+    Covers what actually leaks in practice: the session token and the global
+    secret key as they sit in a request path, which is how requests/urllib3
+    quote a failed call back at us. Deliberately not a general secret
+    scrubber — a credential reaching a log any *other* way is not caught here
+    and needs its own fix at its own call site. Specifically NOT covered,
+    all verified: an `Authorization: Bearer <session>:<secret>` header, a
+    `?token=<session>:<secret>` query parameter, and any path whose literal
+    is not lowercase `/api/` (the match is case-sensitive).
+
+    Keeps the session name the way redact_token() does, so the line stays
+    traceable. Idempotent — an already-masked string comes back unchanged.
+    """
+    if not text:
+        return ""
+    masked = _URL_CREDENTIAL.sub(r"\1\2:***", text)
+    masked = _URL_SECRET_KEY_FIRST.sub(r"\1***\2", masked)
+    return _URL_SECRET_KEY_SECOND.sub(r"\1***\2", masked)
+
+
+def redact_api_error(exc: BaseException) -> str:
+    """A log-safe rendering of an exception raised by a call to the API.
+
+    The type name is what actually separates the failures worth telling apart
+    here (ConnectTimeout vs ConnectionError vs ReadTimeout); the message keeps
+    the remaining detail minus the credential.
+    """
+    return f"{type(exc).__name__}: {redact_credentials(str(exc))}"
+
+
+def _scrub_exception_args(exc: BaseException, _depth: int = 0) -> None:
+    """Mask the credential inside an exception's own message, in place.
+
+    api_request() re-raises whatever requests raised, and ~50 call sites in
+    main.py and connect.py then log that exception — message_queue even puts
+    str(exc) into a user-facing "message failed" dialog. Scrubbing it once
+    here, at the only door to the API, is what keeps all of them safe instead
+    of every call site having to remember.
+
+    The exception object itself is kept and only str args are rewritten, so its
+    type, its .request/.response attributes and any isinstance-based handling
+    survive untouched — _classify_send_exception() in main.py still sees a
+    Timeout/ConnectionError and still answers ambiguous, which is the invariant
+    that keeps an ambiguous send from being retried into a duplicate. requests
+    nests the real message one exception deep (ConnectionError(MaxRetryError(
+    ...))), hence the recursion.
+
+    What this does NOT reach: `exc.request.url` still holds the raw URL, token
+    and all. Nothing logs it today, and rewriting a PreparedRequest would be a
+    far bigger promise than masking a message — so if you ever add a log line
+    that touches exc.request or exc.response.url, redact it yourself.
+    """
+    if _depth > 3:
+        return
+    scrubbed = []
+    for arg in exc.args:
+        if isinstance(arg, str):
+            scrubbed.append(redact_credentials(arg))
+        else:
+            if isinstance(arg, BaseException):
+                _scrub_exception_args(arg, _depth + 1)
+            scrubbed.append(arg)
+    # Left strictly alone when nothing matched, so an exception that never
+    # carried a credential comes out bit-identical to the one requests raised.
+    if scrubbed == list(exc.args):
+        return
+    try:
+        exc.args = tuple(scrubbed)
+    except Exception:
+        # Only reachable for an exotic exception type with a read-only args.
+        # A scrub that raised here would replace the very failure the caller
+        # is about to classify, which is far worse than an unmasked message —
+        # but failing open *and* silently is how a leak goes unnoticed, so say
+        # so. Never the exception text itself: that is the unmasked thing.
+        #
+        # WARNING, not DEBUG: main.py sets the root logger to INFO, so a DEBUG
+        # breadcrumb here would never reach log.log — the one file that would
+        # tell whoever reads a leaked token afterwards that the scrub had not
+        # run at all.
+        logging.warning("[api] could not scrub %s args", type(exc).__name__)
 
 
 def api_headers(token: str, *, json_body: bool = True,
@@ -117,10 +270,15 @@ def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
     try:
         response = caller(url, headers=headers, timeout=timeout, **kwargs)
     except Exception as exc:
+        # `label` was already safe, but `exc` was not: requests carries the
+        # full URL in its own message, so this line published the token it
+        # exists to keep out of the log. Scrub before logging *and* before
+        # re-raising, so the callers that log the exception are covered too.
+        _scrub_exception_args(exc)
         logging.warning(
             "[api] rid=%s %s %s failed after %.0fms: %s",
             request_id, method.upper(), label,
-            (time.monotonic() - started) * 1000, exc,
+            (time.monotonic() - started) * 1000, redact_api_error(exc),
         )
         raise
     elapsed = time.monotonic() - started

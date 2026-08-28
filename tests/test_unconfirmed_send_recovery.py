@@ -113,8 +113,15 @@ def _make_fake_dialog(result, everyone_selected):
     return _FakeDialog
 
 
-def _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=False):
+def _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=False,
+                         tmp_path=None):
     _FakeRadioButton._all = []
+    if tmp_path is not None:
+        # _cancel_pending_message() drops the pre-cached copies of a send that
+        # was genuinely stopped, and data_path() refuses to answer without an
+        # active account — same redirect tests/test_message_cancel_race.py uses.
+        import ui.conversations as conversations
+        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path / name))
     monkeypatch.setattr(wx, "Dialog", _make_fake_dialog(result, everyone_selected))
     monkeypatch.setattr(wx, "Panel", _FakePanel)
     monkeypatch.setattr(wx, "BoxSizer", _FakeSizer)
@@ -152,10 +159,20 @@ class _FakeMainWindow:
         self.cancel_calls.append(local_id)
         return True
 
+    def get_chat(self, jid):
+        # _cancel_pending_message() looks the chat up to find the record's
+        # position before removing the row. Nothing here depends on the
+        # position, so an empty chat is enough.
+        return {}
+
 
 class _DeleteStub:
     _on_menu_delete_message     = ConversationsPanel._on_menu_delete_message
     _delete_message_for_me_only = ConversationsPanel._delete_message_for_me_only
+    # The real helper, not a stand-in: the cancelled_pending branch delegates
+    # to it, and what it does with a cancel() that could not stop the send is
+    # exactly what these tests are about.
+    _cancel_pending_message     = ConversationsPanel._cancel_pending_message
     _is_separator = ConversationsPanel._is_separator
     _is_system_event = lambda self, msg: False
 
@@ -174,6 +191,9 @@ class _DeleteStub:
 
     def _hide_media_transfer_gauge(self):
         self.gauge_hidden += 1
+
+    def _record_position(self, chat, local_id):
+        return None
 
 
 def _unconfirmed_msg():
@@ -203,8 +223,8 @@ def _real_sent_msg():
 
 
 class TestDeletingAnUnconfirmedMessage:
-    def test_deletes_locally_only_no_api_revoke_attempted(self, monkeypatch):
-        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=False)
+    def test_deletes_locally_only_no_api_revoke_attempted(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=False, tmp_path=tmp_path)
         stub = _DeleteStub(_unconfirmed_msg())
 
         stub._on_menu_delete_message(0)
@@ -214,11 +234,11 @@ class TestDeletingAnUnconfirmedMessage:
         assert stub.main_window.for_me_calls == []
         assert stub.main_window.cancel_calls == ["loc-1"]
 
-    def test_ignores_a_for_everyone_choice(self, monkeypatch):
+    def test_ignores_a_for_everyone_choice(self, monkeypatch, tmp_path):
         """The dialog still offers "for everyone" (from_me=True, not a
         group/self-chat), but there is no real id to revoke — whichever
         radio the user picked must not reach the API."""
-        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=True)
+        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=True, tmp_path=tmp_path)
         stub = _DeleteStub(_unconfirmed_msg())
 
         stub._on_menu_delete_message(0)
@@ -226,8 +246,8 @@ class TestDeletingAnUnconfirmedMessage:
         assert stub.main_window.everyone_calls == []
         assert stub.removed_ids == [{"loc-1"}]
 
-    def test_cleans_up_tracking_state(self, monkeypatch):
-        _patch_delete_dialog(monkeypatch)
+    def test_cleans_up_tracking_state(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, tmp_path=tmp_path)
         msg = _unconfirmed_msg()
         stub = _DeleteStub(msg)
         stub._media_upload_progress["loc-1"] = 0.5
@@ -245,8 +265,8 @@ class TestStillPendingMessageIsUnaffected:
     """Regression guard: the pre-existing cancelled_pending behavior for a
     still-queued/in-flight send must keep working exactly as before."""
 
-    def test_still_uses_the_local_only_path(self, monkeypatch):
-        _patch_delete_dialog(monkeypatch)
+    def test_still_uses_the_local_only_path(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, tmp_path=tmp_path)
         stub = _DeleteStub(_still_pending_msg())
 
         stub._on_menu_delete_message(0)
@@ -259,8 +279,8 @@ class TestANormalSentMessageIsUnaffected:
     """Regression guard: a message with a real WhatsApp id must still go
     through the actual revoke API, not the local-only shortcut."""
 
-    def test_for_everyone_still_calls_the_api(self, monkeypatch):
-        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=True)
+    def test_for_everyone_still_calls_the_api(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=True, tmp_path=tmp_path)
         stub = _DeleteStub(_real_sent_msg())
 
         stub._on_menu_delete_message(0)
@@ -271,8 +291,8 @@ class TestANormalSentMessageIsUnaffected:
 
         assert stub.main_window.everyone_calls == [(REMOTE, {"id": "REAL_ID", "fromMe": True, "remoteJid": REMOTE})]
 
-    def test_plain_delete_still_calls_delete_for_me(self, monkeypatch):
-        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=False)
+    def test_plain_delete_still_calls_delete_for_me(self, monkeypatch, tmp_path):
+        _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=False, tmp_path=tmp_path)
         stub = _DeleteStub(_real_sent_msg())
 
         stub._on_menu_delete_message(0)

@@ -269,15 +269,27 @@ _CLOSED_AFTER_FLUSH_STATES = ("CLOSED", "DESTROYED", "")
 
 
 def session_closed_after_flush(status: str) -> bool:
-    """True once the WPPConnect session has fully closed after a close-session
-    (browser shut down, WhatsApp Web auth flushed to userDataDir).
+    """True once WPPConnect has finished its own teardown of the session.
 
-    Used to replace a fixed sleep(2) during shutdown: proceeding to
-    `taskkill /F` before this is True cut the leveldb write mid-flush, so the
-    account came back to a pairing screen ("Session Unpaired") on next launch —
-    reported live as "closed one window, another account demanded re-pairing".
-    A larger profile needs longer than 2s to flush, hence waiting on the actual
-    CLOSED signal rather than a blind sleep.
+    This is HALF the shutdown gate, not the whole one. It says the server let
+    go of the session; it does NOT say Chrome has finished writing the profile.
+    Only `MainWindow.wait_for_profile_release()` — which watches for the
+    chrome.exe owning userDataDir/<session> to actually exit — means that, and
+    `_stop_wpp_server()` waits on both, in that order.
+
+    Getting this wrong is what corrupts a pairing. `taskkill /F` landing before
+    the profile is released cuts the leveldb mid-write, and the account comes
+    back to a pairing screen ("Session Unpaired") on the next launch while the
+    phone still lists the device under Linked Devices.
+
+    The reason this predicate can be trusted at all is a WinZapp patch in
+    closeSession (api_patches/src/controller/sessionController.ts): the
+    placeholder it parks in clientsArray during the close is 'CLOSING', not
+    `{status: null}`. Upstream's null makes getSessionState answer 'CLOSED'
+    immediately — before `await client.close()` has done anything — so this
+    returned True on the first poll, ~0.1s in, on every shutdown ever audited.
+    'CLOSING' is deliberately absent from the tuple below so the poll waits for
+    the real transition.
 
     Pure/wx-free so the decision is unit-testable without the requests/wx stack.
     """

@@ -45,9 +45,17 @@ class TestWppUpdatePromptDefaultButton:
         monkeypatch.setattr(updater.wx, "MessageBox", _fake_message_box)
 
         checker = WppUpdateChecker.__new__(WppUpdateChecker)
-        checker._mw = type("MW", (), {"i18n": _FakeI18n()})()
+        checker._mw = type(
+            "MW",
+            (),
+            {
+                "i18n": _FakeI18n(),
+                # The prompt is gated on this — see WppUpdateChecker._prompt_update.
+                "wpp_update_may_run_now": lambda self: True,
+            },
+        )()
         checker._retry_timer = None
-        checker._schedule_retry = lambda: calls.append("scheduled_retry")
+        checker._schedule_retry = lambda *a: calls.append("scheduled_retry")
 
         checker._prompt_update("2.10.1", "2.10.4", "v2.10.4")
 

@@ -31,16 +31,6 @@ History:
   the latch never got reset — the displayed code silently froze forever.
   Reported live: "esperei 10 minutos e o código não atualizou nenhuma vez."
 
-* v2 — current fix: a 60-second reuse cooldown instead of a permanent
-  latch. `linkCodeIssuedAt` is only set AFTER loginByCode() actually
-  succeeds (not before), and a separate `linkCodeInFlight` flag (not a
-  timestamp) guards against overlapping concurrent calls — so a rejected
-  attempt simply leaves `linkCodeIssuedAt` at its old value and the very
-  next `auth_code_change` tick retries, with no permanent stuck state
-  either way. Upstream still has no proper fix for this (it needs an
-  explicit expiry/refresh signal from wa-js that doesn't exist yet — see
-  https://github.com/wppconnect-team/wa-js/pull/3554), so this is a
-  WinZapp-local stopgap, not a port of an upstream patch.
 """
 
 ORIGINAL_CHECK_QR_CODE = (
@@ -110,7 +100,7 @@ V1_CHECK_QR_CODE = (
     "    }\n"
 )
 
-PATCHED_CHECK_QR_CODE = (
+V2_CHECK_QR_CODE = (
     "    async checkQrCode() {\n"
     "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
     "        this.isLogged = !needScan;\n"
@@ -156,3 +146,364 @@ PATCHED_CHECK_QR_CODE = (
     "        this.catchQR?.(result.base64Image, qr, this.attempt, result.urlCode);\n"
     "    }\n"
 )
+
+V3_CHECK_QR_CODE = (
+    "    async checkQrCode() {\n"
+    "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
+    "        this.isLogged = !needScan;\n"
+    "        if (!needScan) {\n"
+    "            this.attempt = 0;\n"
+    "            this.linkCodeIssuedAt = 0;\n"
+    "            return;\n"
+    "        }\n"
+    "        if (typeof this.options.phoneNumber === 'string') {\n"
+    "            if (this.linkCodeInFlight) {\n"
+    "                return;\n"
+    "            }\n"
+    "            const now = Date.now();\n"
+    "            if (this.linkCodeIssuedAt && (now - this.linkCodeIssuedAt) < 60000) {\n"
+    "                return;\n"
+    "            }\n"
+    "            this.linkCodeInFlight = true;\n"
+    "            try {\n"
+    "                await this.loginByCode(this.options.phoneNumber);\n"
+    "                this.linkCodeIssuedAt = Date.now();\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                this.log('error', `Could not generate the pairing code: ${error?.name || 'Error'}: ${error?.message || error}`);\n"
+    "            }\n"
+    "            finally {\n"
+    "                this.linkCodeInFlight = false;\n"
+    "            }\n"
+    "            return;\n"
+    "        }\n"
+    "        const result = await this.getQrCode();\n"
+    "        if (!result?.urlCode || this.urlCode === result.urlCode) {\n"
+    "            return;\n"
+    "        }\n"
+    "        this.urlCode = result.urlCode;\n"
+    "        this.attempt++;\n"
+    "        let qr = '';\n"
+    "        if (this.options.logQR || this.catchQR) {\n"
+    "            qr = await (0, auth_1.asciiQr)(this.urlCode);\n"
+    "        }\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for QRCode Scan (Attempt ${this.attempt})...:\\n${qr}`, { code: this.urlCode });\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for QRCode Scan: Attempt ${this.attempt}`);\n"
+    "        }\n"
+    "        this.catchQR?.(result.base64Image, qr, this.attempt, result.urlCode);\n"
+    "    }\n"
+)
+
+
+V4_CHECK_QR_CODE = (
+    "    async checkQrCode() {\n"
+    "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
+    "        this.isLogged = !needScan;\n"
+    "        if (!needScan) {\n"
+    "            this.attempt = 0;\n"
+    "            this.linkCodeIssuedAt = 0;\n"
+    "            return;\n"
+    "        }\n"
+    "        if (typeof this.options.phoneNumber === 'string') {\n"
+    "            if (this.linkCodeInFlight) {\n"
+    "                return;\n"
+    "            }\n"
+    "            const now = Date.now();\n"
+    "            if (this.linkCodeIssuedAt && (now - this.linkCodeIssuedAt) < 60000) {\n"
+    "                return;\n"
+    "            }\n"
+    "            this.linkCodeInFlight = true;\n"
+    "            try {\n"
+    "                await this.loginByCode(this.options.phoneNumber);\n"
+    "                this.linkCodeIssuedAt = Date.now();\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                this.log('error', `Could not generate the pairing code: ${error?.name || 'Error'}: ${error?.message || error}`);\n"
+    "                this.options.catchLinkCodeError?.({\n"
+    "                    name: String(error?.name || 'Error'),\n"
+    "                    message: String(error?.message || error),\n"
+    "                    session: this.session,\n"
+    "                });\n"
+    "            }\n"
+    "            finally {\n"
+    "                this.linkCodeInFlight = false;\n"
+    "            }\n"
+    "            return;\n"
+    "        }\n"
+    "        const result = await this.getQrCode();\n"
+    "        if (!result?.urlCode || this.urlCode === result.urlCode) {\n"
+    "            return;\n"
+    "        }\n"
+    "        this.urlCode = result.urlCode;\n"
+    "        this.attempt++;\n"
+    "        let qr = '';\n"
+    "        if (this.options.logQR || this.catchQR) {\n"
+    "            qr = await (0, auth_1.asciiQr)(this.urlCode);\n"
+    "        }\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for QRCode Scan (Attempt ${this.attempt})...:\\n${qr}`, { code: this.urlCode });\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for QRCode Scan: Attempt ${this.attempt}`);\n"
+    "        }\n"
+    "        this.catchQR?.(result.base64Image, qr, this.attempt, result.urlCode);\n"
+    "    }\n"
+)
+
+
+PATCHED_CHECK_QR_CODE = (
+    "    async checkQrCode() {\n"
+    "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
+    "        this.isLogged = !needScan;\n"
+    "        if (!needScan) {\n"
+    "            this.attempt = 0;\n"
+    "            this.linkCodeIssuedAt = 0;\n"
+    "            this.linkCodeFailures = 0;\n"
+    "            this.linkCodeRetryAfter = 0;\n"
+    "            return;\n"
+    "        }\n"
+    "        if (typeof this.options.phoneNumber === 'string') {\n"
+    "            if (this.linkCodeInFlight) {\n"
+    "                return;\n"
+    "            }\n"
+    "            const now = Date.now();\n"
+    "            if (this.linkCodeIssuedAt && (now - this.linkCodeIssuedAt) < 60000) {\n"
+    "                return;\n"
+    "            }\n"
+    "            if (this.linkCodeRetryAfter && now < this.linkCodeRetryAfter) {\n"
+    "                return;\n"
+    "            }\n"
+    "            this.linkCodeInFlight = true;\n"
+    "            try {\n"
+    "                await this.loginByCode(this.options.phoneNumber);\n"
+    "                this.linkCodeIssuedAt = Date.now();\n"
+    "                this.linkCodeFailures = 0;\n"
+    "                this.linkCodeRetryAfter = 0;\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                this.linkCodeFailures = (this.linkCodeFailures || 0) + 1;\n"
+    "                const backoff = Math.min(20000 * Math.pow(2, this.linkCodeFailures - 1), 300000);\n"
+    "                this.linkCodeRetryAfter = Date.now() + backoff;\n"
+    "                const retryInSeconds = Math.round(backoff / 1000);\n"
+    "                this.log('error', `Could not generate the pairing code (attempt ${this.linkCodeFailures}, next retry in ${retryInSeconds}s): ${error?.name || 'Error'}: ${error?.message || error}`);\n"
+    "                this.options.catchLinkCodeError?.({\n"
+    "                    name: String(error?.name || 'Error'),\n"
+    "                    message: String(error?.message || error),\n"
+    "                    session: this.session,\n"
+    "                    attempt: this.linkCodeFailures,\n"
+    "                    retryInSeconds: retryInSeconds,\n"
+    "                    stack: String(error?.stack || ''),\n"
+    "                    details: error?.winzappDetails || {},\n"
+    "                });\n"
+    "            }\n"
+    "            finally {\n"
+    "                this.linkCodeInFlight = false;\n"
+    "            }\n"
+    "            return;\n"
+    "        }\n"
+    "        const result = await this.getQrCode();\n"
+    "        if (!result?.urlCode || this.urlCode === result.urlCode) {\n"
+    "            return;\n"
+    "        }\n"
+    "        this.urlCode = result.urlCode;\n"
+    "        this.attempt++;\n"
+    "        let qr = '';\n"
+    "        if (this.options.logQR || this.catchQR) {\n"
+    "            qr = await (0, auth_1.asciiQr)(this.urlCode);\n"
+    "        }\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for QRCode Scan (Attempt ${this.attempt})...:\\n${qr}`, { code: this.urlCode });\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for QRCode Scan: Attempt ${this.attempt}`);\n"
+    "        }\n"
+    "        this.catchQR?.(result.base64Image, qr, this.attempt, result.urlCode);\n"
+    "    }\n"
+)
+
+
+ORIGINAL_LOGIN_BY_CODE = (
+    "    async loginByCode(phone) {\n"
+    "        const code = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
+    "            return JSON.parse(JSON.stringify(await WPP.conn.genLinkDeviceCodeForPhoneNumber(phone)));\n"
+    "        }, { phone });\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for Login By Code (Code: ${code})\\n`);\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for Login By Code`);\n"
+    "        }\n"
+    "        this.catchLinkCode?.(code);\n"
+    "    }\n"
+)
+
+LEGACY_LOGIN_BY_CODE_RAW = (
+    "    async loginByCode(phone) {\n"
+    "        const outcome = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
+    "            try {\n"
+    "                return { code: JSON.parse(JSON.stringify(await WPP.conn.genLinkDeviceCodeForPhoneNumber(phone))) };\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                const details = {};\n"
+    "                try {\n"
+    "                    for (const key of Object.getOwnPropertyNames(Object(error))) {\n"
+    "                        if (key === 'stack') { continue; }\n"
+    "                        const value = error[key];\n"
+    "                        const kind = typeof value;\n"
+    "                        if (value === null || kind === 'string' || kind === 'number' || kind === 'boolean') {\n"
+    "                            details[key] = String(value);\n"
+    "                        }\n"
+    "                        else if (kind !== 'function') {\n"
+    "                            try { details[key] = JSON.stringify(value); } catch (e) { details[key] = '[unserializable]'; }\n"
+    "                        }\n"
+    "                    }\n"
+    "                }\n"
+    "                catch (e) { }\n"
+    "                return {\n"
+    "                    __winzappError: {\n"
+    "                        name: String(error?.name || 'Error'),\n"
+    "                        message: String(error?.message || error?.reason || error?.text || error),\n"
+    "                        stack: String(error?.stack || ''),\n"
+    "                        details: details,\n"
+    "                    },\n"
+    "                };\n"
+    "            }\n"
+    "        }, { phone });\n"
+    "        if (outcome?.__winzappError) {\n"
+    "            const failure = new Error(outcome.__winzappError.message);\n"
+    "            failure.name = outcome.__winzappError.name;\n"
+    "            if (outcome.__winzappError.stack) {\n"
+    "                failure.stack = outcome.__winzappError.stack;\n"
+    "            }\n"
+    "            failure.winzappDetails = outcome.__winzappError.details || {};\n"
+    "            throw failure;\n"
+    "        }\n"
+    "        const code = outcome?.code;\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for Login By Code (Code: ${code})\\n`);\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for Login By Code`);\n"
+    "        }\n"
+    "        this.catchLinkCode?.(code);\n"
+    "    }\n"
+)
+
+
+PATCHED_LOGIN_BY_CODE = (
+    "    async loginByCode(phone) {\n"
+    "        const outcome = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
+    "            try {\n"
+    "                const managed = typeof WPP.conn.startLinkDeviceCodeForPhoneNumber === 'function';\n"
+    "                const value = managed\n"
+    "                    ? await WPP.conn.startLinkDeviceCodeForPhoneNumber(phone)\n"
+    "                    : JSON.parse(JSON.stringify(await WPP.conn.genLinkDeviceCodeForPhoneNumber(phone)));\n"
+    "                return { code: String(value), managed: managed };\n"
+    "            }\n"
+    "            catch (error) {\n"
+    "                const details = {};\n"
+    "                try {\n"
+    "                    for (const key of Object.getOwnPropertyNames(Object(error))) {\n"
+    "                        if (key === 'stack') { continue; }\n"
+    "                        const value = error[key];\n"
+    "                        const kind = typeof value;\n"
+    "                        if (value === null || kind === 'string' || kind === 'number' || kind === 'boolean') {\n"
+    "                            details[key] = String(value);\n"
+    "                        }\n"
+    "                        else if (kind !== 'function') {\n"
+    "                            try { details[key] = JSON.stringify(value); } catch (e) { details[key] = '[unserializable]'; }\n"
+    "                        }\n"
+    "                    }\n"
+    "                    details.__winzappManagedApi = String(typeof WPP.conn.startLinkDeviceCodeForPhoneNumber === 'function');\n"
+    "                }\n"
+    "                catch (e) { }\n"
+    "                return {\n"
+    "                    __winzappError: {\n"
+    "                        name: String(error?.name || 'Error'),\n"
+    "                        message: String(error?.message || error?.reason || error?.text || error),\n"
+    "                        stack: String(error?.stack || ''),\n"
+    "                        details: details,\n"
+    "                    },\n"
+    "                };\n"
+    "            }\n"
+    "        }, { phone });\n"
+    "        if (outcome?.__winzappError) {\n"
+    "            const failure = new Error(outcome.__winzappError.message);\n"
+    "            failure.name = outcome.__winzappError.name;\n"
+    "            if (outcome.__winzappError.stack) {\n"
+    "                failure.stack = outcome.__winzappError.stack;\n"
+    "            }\n"
+    "            failure.winzappDetails = outcome.__winzappError.details || {};\n"
+    "            throw failure;\n"
+    "        }\n"
+    "        const code = outcome?.code;\n"
+    "        this.log('info', `Link code obtained via the ${outcome?.managed ? 'managed' : 'legacy raw'} wa-js API.`);\n"
+    "        if (this.options.logQR) {\n"
+    "            this.log('info', `Waiting for Login By Code (Code: ${code})\\n`);\n"
+    "        }\n"
+    "        else {\n"
+    "            this.log('verbose', `Waiting for Login By Code`);\n"
+    "        }\n"
+    "        this.catchLinkCode?.(code);\n"
+    "    }\n"
+)
+
+
+def patch_host_layer_source(content: str):
+    notes = []
+
+    if PATCHED_CHECK_QR_CODE in content:
+        notes.append("checkQrCode: already at v5.")
+    elif V4_CHECK_QR_CODE in content:
+        content = content.replace(V4_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append(
+            "checkQrCode: upgraded v4 -> v5 — repeated pairing-code failures "
+            "now back off instead of retrying every auth-code rotation."
+        )
+    elif V3_CHECK_QR_CODE in content:
+        content = content.replace(V3_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append(
+            "checkQrCode: upgraded v3 -> v5 — a pairing-code failure is now "
+            "reported to the client, not just written to wppconnect.log."
+        )
+    elif V2_CHECK_QR_CODE in content:
+        content = content.replace(V2_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append(
+            "checkQrCode: upgraded v2 -> v5 — a failing loginByCode() is now "
+            "caught, reported and logged instead of escaping as an unhandled "
+            "rejection."
+        )
+    elif V1_CHECK_QR_CODE in content:
+        content = content.replace(V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append("checkQrCode: upgraded v1 (unsafe, could freeze forever) -> v5.")
+    elif ORIGINAL_CHECK_QR_CODE in content:
+        content = content.replace(ORIGINAL_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        notes.append(
+            "checkQrCode: patched (v5) — pairing code no longer regenerates on "
+            "every QR rotation (60s reuse cooldown), failures are reported."
+        )
+    else:
+        notes.append("checkQrCode: DID NOT MATCH any known source text — left untouched.")
+
+    if PATCHED_LOGIN_BY_CODE in content:
+        notes.append("loginByCode: already on the managed wa-js linking API.")
+    elif LEGACY_LOGIN_BY_CODE_RAW in content:
+        content = content.replace(LEGACY_LOGIN_BY_CODE_RAW, PATCHED_LOGIN_BY_CODE, 1)
+        notes.append(
+            "loginByCode: switched from the raw genLinkDeviceCodeForPhoneNumber "
+            "call to wa-js's managed linking lifecycle."
+        )
+    elif ORIGINAL_LOGIN_BY_CODE in content:
+        content = content.replace(ORIGINAL_LOGIN_BY_CODE, PATCHED_LOGIN_BY_CODE, 1)
+        notes.append(
+            "loginByCode: patched — uses wa-js's managed linking lifecycle and "
+            "reports the real browser-side error instead of the minified 't: t'."
+        )
+    else:
+        notes.append("loginByCode: DID NOT MATCH the known source text — left untouched.")
+
+    ok = not any("DID NOT MATCH" in note for note in notes)
+    return content, notes, ok
