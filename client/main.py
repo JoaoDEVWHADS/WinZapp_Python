@@ -3507,7 +3507,20 @@ class MainWindow(wx.Frame):
         # Nothing to do only when the flag *and* the derived offline state are
         # both already consistent with `connected`.
         if connected == was and self._auto_offline == (not connected):
-            return
+            # …with one exception: a WPPConnect update engages offline mode
+            # without announcing it (see the _wpp_updating branch below), so
+            # the state is *already* offline by the time the update ends. If
+            # the server never came back, the health check that finally
+            # notices would match this guard and return, leaving a genuine
+            # outage silent for the rest of the session with the status text
+            # stuck on "conectando". Fall through once, to say it.
+            still_owed = (
+                not connected
+                and not getattr(self, "_wpp_updating", False)
+                and getattr(self, "_offline_announce_deferred", False)
+            )
+            if not still_owed:
+                return
 
         if connected:
             # True exactly when the connection just came back from being down
@@ -3521,6 +3534,9 @@ class MainWindow(wx.Frame):
             self._dead_browser_strikes = 0
             self._auto_repair_dialog_shown = False
             self._auto_offline = False
+            # The update ended with the connection back: the announcement it
+            # suppressed is moot now, nothing is owed.
+            self._offline_announce_deferred = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
             first_ever_connect = not self._wa_connect_announced
@@ -3593,16 +3609,36 @@ class MainWindow(wx.Frame):
         # deliberately. One guard at the single place that decides the message
         # cannot be half-applied like that again.
         #
-        # Deliberately no sound, no speech and no _apply_offline_state(): this
-        # returns before all of it, exactly as the startup-grace branch below
-        # does. Nothing is being hidden — the update has its own progress
-        # dialog, and a genuine outage that outlives the update is caught by the
-        # next health check once the flag clears in _update_wpp_server's finally.
+        # Deliberately no sound and no speech, and the status text stays
+        # "conectando": the announcement is the only thing that was ever wrong
+        # here. Nothing is being hidden — the update has its own progress
+        # dialog, and a genuine outage that outlives the update is still
+        # announced, through the fall-through in the early-return guard at the
+        # top of this method once _update_wpp_server's finally clears the flag.
+        #
+        # Offline mode itself IS engaged, exactly as a real outage engages it.
+        # This branch used to return before the _auto_offline /
+        # _apply_offline_state() below, leaving self.offline_mode False — and
+        # MessageQueue._run holds sends only while that is True. A message sent
+        # moments before the user accepted the update therefore went out against
+        # the already-stopped server, raised requests.exceptions.ConnectionError,
+        # and _classify_send_exception classified that as ambiguous (a timeout
+        # can mean WhatsApp Web took the message into its own outbox, where a
+        # resend would duplicate it), so the queue dropped it without resending:
+        # the pending bubble resolved to nothing and the message never arrived.
+        # That ambiguity does not hold here — _stop_wpp_server() has just killed
+        # Node and Chrome, so nothing holds the message. Offline mode parks it in
+        # the queue instead, and _apply_offline_state()'s flush sends it once the
+        # server is back.
         if getattr(self, "_wpp_updating", False):
             logging.info(
-                "[connection] WPPConnect update in progress (%s) — showing "
-                "'connecting' instead of 'offline'.", reason or "checked",
+                "[connection] WPPConnect update in progress (%s) — engaging "
+                "offline mode and showing 'connecting' instead of 'offline'.",
+                reason or "checked",
             )
+            self._auto_offline = True
+            self._offline_announce_deferred = True
+            self._apply_offline_state()
             wx.CallAfter(self._set_status, self.i18n.t("tray_connecting"))
             return
 
@@ -3643,6 +3679,10 @@ class MainWindow(wx.Frame):
                 return
 
         self._auto_offline = True
+        # Cleared here rather than after the announcement below: this is the
+        # one path that actually says it, and clearing it before the early
+        # return can match again is what keeps it from being said twice.
+        self._offline_announce_deferred = False
         self._apply_offline_state()
         logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
         wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
