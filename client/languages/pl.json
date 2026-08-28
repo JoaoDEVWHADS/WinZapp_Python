@@ -259,6 +259,7 @@
     "delete_for_everyone": "Usuń u wszystkich",
     "delete_for_everyone_failed": "Nie udało się usunąć wiadomości u wszystkich. Może być zbyt stara lub możesz nie mieć uprawnień.",
     "edit_message": "Edytuj",
+    "resend_message": "Wyślij ponownie",
     "cancel_edit": "Anuluj edycję",
     "noise_reduction_label": "Włącz &redukcję szumów mikrofonu",
     "notifications_label": "Włącz &powiadomienia w tle o nowych wiadomościach",
