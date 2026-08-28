@@ -526,7 +526,6 @@ def _discount_non_countable_unread(records: list, unread_count: int) -> int:
     return max(0, unread_count - discount)
 
 
-
 # Media the server could not produce because WhatsApp Web no longer holds that
 # message, counted for the summary _report_media_fetch_failure() emits.
 _media_not_in_store_lock = threading.Lock()

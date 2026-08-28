@@ -108,3 +108,46 @@ class TestTheRetryDoesNotLeakTheToken:
 
         assert "s3cr3tv4lue" not in caplog.text
         assert "sess123" in caplog.text, "the session name stays, for traceability"
+
+
+class TestTheRetryDoesNotDoubleTheCallersBudget:
+    """_wait_for_session_flushed() polls /status-session with timeout=5 inside
+    a _WINDOWS_SHUTDOWN_BUDGET of 4s, and a Node tearing down keep-alives is
+    exactly what produces the errors retried here. An uncapped retry could sit
+    in one call for 5s past a 4s deadline — the overrun that budget exists to
+    prevent, since it is what keeps taskkill off a half-written profile."""
+
+    def test_the_retry_timeout_is_capped(self, monkeypatch):
+        seen = []
+
+        def _call(url, headers=None, timeout=None, **kwargs):
+            seen.append(timeout)
+            if len(seen) == 1:
+                raise _dropped_connection()
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+        monkeypatch.setattr("requests.get", _call)
+
+        api_request("GET", "http://127.0.0.1:6300/api/tok/status-session",
+                    token="tok", timeout=5)
+
+        assert seen[0] == 5, "the first attempt keeps the caller's timeout"
+        assert seen[1] <= 2.0, f"the retry must be capped, got {seen[1]}"
+
+    def test_a_shorter_caller_timeout_is_not_raised_by_the_cap(self, monkeypatch):
+        seen = []
+
+        def _call(url, headers=None, timeout=None, **kwargs):
+            seen.append(timeout)
+            if len(seen) == 1:
+                raise _dropped_connection()
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+        monkeypatch.setattr("requests.get", _call)
+
+        api_request("GET", "http://127.0.0.1:6300/api/tok/status-session",
+                    token="tok", timeout=0.5)
+
+        assert seen[1] == 0.5

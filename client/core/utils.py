@@ -378,6 +378,8 @@ DEFAULT_SETTINGS = {
         "notifications_enabled": True,
         "keep_muted_chats_silent_when_open": True,
         "updates_enabled": True,
+        # Alpha channel (one build per commit on main) — opt-in, see
+        # client/updater.py's select_release().
         "alpha_updates_enabled": False,
         "noise_reduction_enabled": False,
         "first_run": True,
@@ -389,6 +391,9 @@ DEFAULT_SETTINGS = {
         "quick_tip_shown": False,
         "global_hotkey": None,
         "switch_behavior": "single",
+        # Master mute (Settings > Geral) for the spoken+sound announcements of
+        # sync progress/completion, media downloads and the automatic offline
+        # transition. On by default; unchecked = those warnings stay silent.
         "announce_sync_events": True,
         "search_normalization": "off"
     },

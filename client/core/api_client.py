@@ -243,6 +243,11 @@ def api_headers(token: str, *, json_body: bool = True,
     return headers
 
 
+# Ceiling for the second attempt after a stale keep-alive socket. See the
+# retry's own comment for why it is not simply the caller's timeout.
+_STALE_RETRY_TIMEOUT = 2.0
+
+
 def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
                 timeout: float = 30, session: requests.Session = None,
                 **kwargs) -> requests.Response:
@@ -312,7 +317,21 @@ def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
                 # Same seam as the first attempt: reusing `caller` would drop a
                 # caller-supplied session (and its adapters, and the stubs the
                 # suite patches onto it) on the retry only.
-                response = caller(url, headers=headers, timeout=timeout, **kwargs)
+                #
+                # Capped, because the retry must not double a caller's budget.
+                # _wait_for_session_flushed() polls /status-session with
+                # timeout=5 inside a _WINDOWS_SHUTDOWN_BUDGET of 4s, and the
+                # Node tearing down keep-alives is exactly what produces the
+                # errors retried here — so an uncapped retry could sit in a
+                # single call for 5s past a 4s deadline, which is the overrun
+                # that budget exists to prevent (taskkill landing mid-leveldb-
+                # write). The first attempt already proved the socket answers
+                # fast or not at all: it only qualifies as stale after failing
+                # in under 2s.
+                response = caller(
+                    url, headers=headers, timeout=min(timeout, _STALE_RETRY_TIMEOUT),
+                    **kwargs,
+                )
             except Exception as retry_exc:
                 _scrub_exception_args(retry_exc)
                 logging.warning(
