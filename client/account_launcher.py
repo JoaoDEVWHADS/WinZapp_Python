@@ -16,6 +16,12 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import time
+
+# Long enough to catch a spawn that fails almost immediately (missing DLL,
+# corrupted install, blocked by antivirus) without noticeably freezing the
+# UI for what is otherwise a rare, deliberate user action.
+_SPAWN_VERIFY_DELAY = 0.3
 
 
 def build_launch_command(argv0: str, executable: str, account_id: str,
@@ -38,21 +44,47 @@ def build_launch_command(argv0: str, executable: str, account_id: str,
 
 
 def switch_to_account(global_dir: str, account_id: str,
-                      frozen: bool | None = None) -> bool:
+                      frozen: bool | None = None) -> str:
     """Switch to ``account_id``: activate its running process if any, else spawn.
 
-    Returns True if an existing process was activated, False if a new one was
-    spawned (or spawn failed — see log). The current window stays open (1b).
+    Returns "activated" if an existing process answered the IPC request,
+    "spawned" if a new process was started and either was still running a
+    moment later or had already exited cleanly (see the poll() check for why
+    exit code 0 counts as success), or "failed" if the spawn itself raised or
+    the process died with a nonzero code almost immediately (missing DLL,
+    corrupted install, blocked by
+    antivirus). Before this, both "spawned fine" and "failed to spawn" were
+    the same plain False — a caller had no way to tell a genuine failure
+    apart from a normal spawn, so a crashed target silently left the user
+    with no indication the switch never actually happened. The current
+    window stays open (1b) unless the caller decides otherwise.
     """
     import ipc
 
     if ipc.request_activate(global_dir, account_id, source="user"):
-        return True
+        return "activated"
     if frozen is None:
         frozen = getattr(sys, "frozen", False)
     try:
-        subprocess.Popen(build_launch_command(
+        proc = subprocess.Popen(build_launch_command(
             sys.argv[0], sys.executable, account_id, frozen, startup_source="user"))
     except Exception:
         logging.exception("[switch_to_account] failed to spawn %s", account_id)
-    return False
+        return "failed"
+
+    time.sleep(_SPAWN_VERIFY_DELAY)
+    # A clean exit is NOT a failure. The spawned process legitimately exits 0
+    # when it loses the single-instance race: it fails to take the mutex,
+    # forwards its own ipc.request_activate() and quits (see main.py's
+    # startup path). That happens exactly when our request_activate above
+    # lost to a stale socket or a busy target — i.e. the switch DID work, and
+    # reporting "failed" there would show the user an error box on top of a
+    # window that just came to the front. Only a nonzero code means the
+    # process actually died on us (missing DLL, corrupted install, AV block).
+    if proc.poll() not in (None, 0):
+        logging.error(
+            "[switch_to_account] %s exited immediately after spawning (code=%s)",
+            account_id, proc.returncode,
+        )
+        return "failed"
+    return "spawned"

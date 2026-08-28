@@ -697,8 +697,9 @@ class WebSocketClient:
                 # poll watches (which needs several minutes of confirmation
                 # to rule out a normal slow boot). Surfacing the pairing
                 # dialog immediately — instead of leaving the user staring at
-                # "offline" for up to _LOGOUT_STARTUP_GRACE_SECONDS /
-                # _AUTO_RESTART_LOGOUT_GRACE_SECONDS with no explanation —
+                # "offline" for however long _AUTO_RESTART_LOGOUT_GRACE_SECONDS
+                # or the multi-minute unlink confirmation takes with no
+                # explanation —
                 # was an explicit, accepted tradeoff: this dialog's own
                 # Cancel/close buttons quit the app / drop the WebSocket for
                 # good, which is fine here specifically because a session

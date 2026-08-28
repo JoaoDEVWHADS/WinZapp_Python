@@ -4,9 +4,9 @@ Reported live: after an automatic session recovery attempt found the stored
 token already invalid, WPPConnect correctly started generating a fresh QR
 code (on_qrcode_update fired repeatedly with real image bytes) — but nothing
 in the app surfaced it. The user was left staring at "offline" with no
-explanation for up to _LOGOUT_STARTUP_GRACE_SECONDS / dialog
-_AUTO_RESTART_LOGOUT_GRACE_SECONDS (several minutes) before the much more
-conservative confirmed-logout detection would finally show a dialog.
+explanation for however long _AUTO_RESTART_LOGOUT_GRACE_SECONDS or the
+multi-minute confirmed-logout detection (several minutes either way) took
+before finally showing a dialog.
 
 A real QR/pairing-code event with no pairing dialog already open is actually
 a reliable "you need to re-pair" signal on its own — WPPConnect only ever

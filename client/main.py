@@ -48,8 +48,8 @@ from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.websocket_client import WebSocketClient
-from core.api_client import api_get, api_post
-from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, is_voice_message, backfill_missing_defaults, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY
+from core.api_client import api_get, api_post, redact_credentials
+from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core.database_bridge import DatabaseBridge
@@ -732,6 +732,59 @@ def unread_after_history_sync(
     return max(baseline, max(0, int(local_unread or 0)) + inferred)
 
 
+def reconcile_open_chat_unread(
+    server_unread: int,
+    local_new: int,
+    remote_read_confirmed: bool = False,
+) -> tuple:
+    """Decide the unread count for a chat the user has OPEN in the panel.
+
+    Returns ``(count, clear_new_since_read)``.
+
+    "Open" is not the same as "read". on_new_message() increments both
+    unreadCount and _new_since_read whenever a message lands in the open
+    conversation while the window is hidden or minimized (its guard is
+    ``if not (_open and _visible)``), and Alt+F4 only hides to tray — so an
+    open chat routinely holds a legitimate backlog. Zeroing it blind wipes the
+    badge, the window-title counter and the toast count, and the next arrival
+    then announces "1 mensagem não lida" for a conversation holding several.
+
+    Both surfaces that reconcile an open chat's count go through this one
+    function: the live chats-update event (on_chat_unread_update) and the 60s
+    list-chats resync (get_remote_chats). They used to each carry their own
+    copy — and the resync's was a bare `= 0` under a comment claiming parity
+    with the live one, which is exactly the shape that hides a bug from code
+    review. Same reasoning as link_preview_text() and _status_content_label().
+
+    ``remote_read_confirmed`` says a zero really is somebody reading the chat
+    elsewhere rather than an uninformative one. The resync has no
+    previousUnreadCount to derive it from, so it passes False — the
+    conservative side, the same default _remote_read_confirmed() itself
+    documents for an unknown. The cost is explicit: a read performed on the
+    phone, for a chat left open here with the window hidden, keeps the badge
+    lit until the user focuses the window (only mark_conversation_as_read
+    clears _new_since_read).
+
+    min(), never max(), when both are positive: for an OPEN chat the local
+    read state is the authoritative one by definition. A server count above
+    the local backlog is the lag of a /send-seen the server has not
+    acknowledged yet, and taking it resurrects already-read messages into the
+    badge and the unread separator — a symptom this file has already fixed
+    once (see the read_at_t branch in on_chat_unread_update).
+    """
+    server_unread = max(0, int(server_unread or 0))
+    local_new = max(0, int(local_new or 0))
+    if not local_new:
+        return 0, False
+    if server_unread == 0:
+        if remote_read_confirmed:
+            # The messages we counted really have been read; the badge goes
+            # with them, and so does the tracking entry behind it.
+            return 0, True
+        return local_new, False
+    return min(server_unread, local_new), False
+
+
 def reconcile_snapshot_unread(
     server_unread: int,
     local_unread: int,
@@ -1314,6 +1367,22 @@ class MainWindow(wx.Frame):
         # echo, not a fromMe reaction made on the phone or another device.
         self._pending_own_reactions: dict = {}
         self._pending_own_reactions_lock = threading.Lock()
+        # Guards the unlink/logout strike counters (_logout_strikes,
+        # _resume_fail_strikes, _last_strike_ts, _still_linked_vetoes,
+        # _logout_handled) and the decision built from them in
+        # _act_on_unlink_decision(). check_wa_connection_http() runs from
+        # several independent threads (the health-check loop, _run_sync's
+        # tight poll, wx.CallAfter callbacks), so a bare check-then-set on
+        # _logout_handled is a real race: two callers can both read it False
+        # before either sets it True and both fire _on_disconnect() — a real
+        # incident this codebase already hit once (two wipes logged inside
+        # the same second). Held across the whole count-then-decide section
+        # including _act_on_unlink_decision(), with one deliberate exception:
+        # that call can block for up to 10s on _still_linked_on_server()'s
+        # HTTP probe when a destructive decision is actually being confirmed
+        # — rare, and correctness there matters more than another caller
+        # waiting briefly. wx.CallAfter itself is non-blocking either way.
+        self._unlink_decision_lock = threading.Lock()
         # Consecutive failed network probes (see check_whatsapp_reachable).
         self._offline_probe_strikes = 0
         # Consecutive not-yet-connected results from _set_wa_connected() this
@@ -1523,6 +1592,7 @@ class MainWindow(wx.Frame):
 
                 logging.info("[post_ui_init] STEP 6 — connecting WebSocket...")
                 ws_connected = False
+                saw_invalid_namespace = False
                 for attempt in range(1, 7):
                     try:
                         self.connect_websocket()
@@ -1531,23 +1601,59 @@ class MainWindow(wx.Frame):
                         break
                     except Exception as e:
                         error_str = str(e)
-                        if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                            logging.info("[post_ui_init] STEP 6 — WebSocket namespace invalid (instance not on server). Triggering logout.")
-                            def _gui_logout():
-                                wx.MessageBox(
-                                    self.i18n.t("device_logged_out"),
-                                    self.i18n.t("error").format(self.app_name),
-                                    wx.OK | wx.ICON_ERROR,
-                                )
-                                self._on_disconnect()
-                            wx.CallAfter(_gui_logout)
-                            ws_connected = False
-                            break
-                        else:
-                            logging.warning("[post_ui_init] STEP 6 — WebSocket connect attempt %d/6 failed (%s). Retrying in 3s...", attempt, e)
+                        # Accumulated, never reassigned: a plain assignment
+                        # here made this mean "the LAST attempt was an invalid
+                        # namespace", so five namespace failures followed by
+                        # one ECONNREFUSED landed in the generic
+                        # websocket_failed_reconnect dialog instead of the
+                        # pairing one the namespace failures called for.
+                        invalid_namespace = (
+                            "Invalid namespace" in error_str
+                            or "namespaces failed to connect" in error_str
+                        )
+                        saw_invalid_namespace = saw_invalid_namespace or invalid_namespace
+                        # "Invalid namespace" means the server has no
+                        # Socket.IO namespace for our session at all — which
+                        # can mean the session was really deleted
+                        # server-side, but early in startup can just as
+                        # easily mean Node has not finished registering it
+                        # yet. Retrying like any other failure instead of
+                        # giving up on the first sighting gives that race a
+                        # chance to resolve before anything is decided.
+                        last_attempt = attempt == 6
+                        logging.warning(
+                            "[post_ui_init] STEP 6 — WebSocket connect attempt %d/6 "
+                            "failed (%s)%s.%s",
+                            attempt, e,
+                            " — invalid namespace" if invalid_namespace else "",
+                            " Giving up." if last_attempt else " Retrying in 3s...",
+                        )
+                        if not last_attempt:
+                            # No point sleeping after the sixth failure: the
+                            # loop is over, and the 3s only delayed the dialog
+                            # the user is waiting on by another cycle.
                             time.sleep(3.0)
 
-                if not ws_connected and not ("Invalid namespace" in locals().get("error_str", "") or "namespaces failed to connect" in locals().get("error_str", "")):
+                if not ws_connected and saw_invalid_namespace:
+                    # We have not connected even once this run (reuse_existing_ws
+                    # above would have returned early otherwise), so per the same
+                    # rule the rest of the app follows, an invalid namespace seen
+                    # at any point during the retries is not proof of an unlink —
+                    # show the pairing dialog but keep the local data.
+                    logging.info(
+                        "[post_ui_init] STEP 6 — WebSocket never connected and at "
+                        "least one attempt failed on an invalid namespace — "
+                        "showing pairing dialog WITHOUT wiping."
+                    )
+                    def _gui_logout():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(app_name=self.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                        self._on_disconnect(wipe=False)
+                    wx.CallAfter(_gui_logout)
+                elif not ws_connected:
                     self.error_sound.play()
                     def _gui_failed():
                         wx.MessageBox(
@@ -2150,9 +2256,21 @@ class MainWindow(wx.Frame):
         stays open (accounts run in the background, choice 1b)."""
         try:
             from account_launcher import switch_to_account
-            activated = switch_to_account(self.global_dir, account_id)
-            logging.info("[accounts] switch to %s -> %s", account_id,
-                         "activated existing process" if activated else "spawned new process")
+            result = switch_to_account(self.global_dir, account_id)
+            logging.info("[accounts] switch to %s -> %s", account_id, result)
+            if result == "failed":
+                # Before this, a spawn that raised or crashed immediately
+                # (missing DLL, corrupted install, blocked by antivirus)
+                # was indistinguishable from a normal spawn — the button
+                # just did nothing, with the switch never having actually
+                # happened and no indication why. Stay open and visible
+                # instead of hiding into a switch that never completed.
+                wx.MessageBox(
+                    self.i18n.t("account_switch_failed"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                return
             switch_behavior = "single"
             if getattr(self, "app_settings", None):
                 switch_behavior = self.app_settings.get("switch_behavior")
@@ -2238,7 +2356,21 @@ class MainWindow(wx.Frame):
             if result == account_ui.UnpairedStartDialog.RESULT_SWITCH and dlg.chosen_account_id:
                 logging.info("[accounts] unpaired start: switching to %s", dlg.chosen_account_id)
                 from account_launcher import switch_to_account
-                switch_to_account(self.global_dir, dlg.chosen_account_id)
+                switch_result = switch_to_account(self.global_dir, dlg.chosen_account_id)
+                if switch_result == "failed":
+                    # This path used to exit unconditionally right after —
+                    # a failed spawn (missing DLL, corrupted install,
+                    # blocked by antivirus) left the user with no WinZapp
+                    # process running at all, since this one was about to
+                    # quit into a switch that never actually happened.
+                    # Fall through to this account's own pairing flow
+                    # instead of exiting into nothing.
+                    wx.MessageBox(
+                        self.i18n.t("account_switch_failed"),
+                        self.i18n.t("error").format(app_name=self.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                    return False
                 wx.CallAfter(self.real_exit)
                 return True
             if result == account_ui.UnpairedStartDialog.RESULT_QUIT:
@@ -6621,9 +6753,6 @@ class MainWindow(wx.Frame):
                 stdout=log_fh,
                 stderr=log_fh,
             )
-            # Start of the window in which "notLogged"/"QRCODE" readings mean
-            # "still booting", not "unlinked" — see _logout_confirmed().
-            self._wpp_started_at = time.time()
             # Release Python's file handle now that node.exe has inherited it.
             # This avoids a double-lock on wppconnect.log so an update extraction
             # can overwrite the file once WinZapp exits (only node.exe holds a
@@ -8803,28 +8932,43 @@ class MainWindow(wx.Frame):
     # that a genuinely dead session eventually surfaces a QR the user can scan.
     _RESUME_FAIL_STRIKES = 20
 
-    # The unlinked state must ALSO have been continuously true for at least this
-    # long. Strike count alone is not a time guarantee — two callers can observe
-    # the same poll cycle, and the poll interval itself is not fixed.
-    _LOGOUT_CONFIRM_SECONDS = 180
+    # Consecutive times a confirmed-LOGOUT decision may be vetoed by
+    # _still_linked_on_server() before the veto itself stops being believed.
+    # The veto is a safety net against wiping a live session, but on its own it
+    # has no way out: every veto resets the tally, so a session that keeps
+    # answering host-device from a stale cache after a real unlink would park
+    # the app offline forever — never sending, never reaching the pairing
+    # dialog, with nothing in the log to distinguish it from a quiet outage.
+    # After this many in a row we stop arguing and fall back to
+    # _on_disconnect(wipe=False): the pairing dialog, history preserved, which
+    # is the safe outcome whichever side the probe got wrong. 5 vetoes is ~5
+    # confirmed logouts apart, i.e. many minutes of a session insisting it is
+    # both linked and unusable.
+    _STILL_LINKED_VETO_LIMIT = 5
 
-    # ...and WPPConnect must have been up for at least this long. Restoring a
-    # saved session means booting Node, launching Chrome, loading web.whatsapp.com
-    # and replaying IndexedDB; WhatsApp Web renders its QR canvas during part of
-    # that, so WPPConnect legitimately reports QRCODE/notLogged for a while on a
-    # cold start — longest right after a machine reboot, which is exactly when
-    # users reported being told they had been disconnected.
-    _LOGOUT_STARTUP_GRACE_SECONDS = 240
+    def _still_linked_on_server(self) -> str:
+        """Ask WPPConnect whether this session still holds a linked phone.
 
-    def _still_linked_on_server(self) -> bool:
-        """Positive proof the device is still linked, or False if unprovable.
+        Returns one of connection_state's LINK_PROBE_* outcomes: LINKED
+        (host-device answered with our own phone number), UNLINKED (it
+        answered, and holds none — including the missing-key shape a real
+        unlink produces, see below) or UNKNOWN (the probe itself failed — a
+        non-2xx answer, a network/transport error, or a body we could not
+        read).
 
-        Before wiping anything, ask WPPConnect for the host device: a session
-        that WhatsApp genuinely unlinked cannot answer with our own phone
-        number. This is the check that turns "we saw a status string we don't
-        like" into "WhatsApp really did drop us" — status-session alone is a
-        cached string produced by a browser that may simply still be restoring.
+        The three-way answer is the whole point. This runs as the last gate
+        before a destructive wipe, and the signal that gets it there is often
+        a local HTTP 401/403 — which this very probe is subject to as well,
+        since it goes out through the same local auth middleware that just
+        rejected the status poll. A boolean collapsed that self-inflicted
+        401 into "could not prove it is linked", i.e. into permission to
+        wipe: a Node restart under a rotated token produced 401s, four
+        strikes, a LOGOUT, then a 401 here too, and the database went anyway.
+        UNKNOWN keeps ambiguous evidence from ever being destructive — see
+        _act_on_unlink_decision(), which routes it to the pairing dialog with
+        the data intact.
         """
+        import connection_state as cs
         try:
             resp = api_get(
                 f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/host-device",
@@ -8833,95 +8977,181 @@ class MainWindow(wx.Frame):
                 timeout=10,
             )
         except Exception as exc:
-            logging.info("[_still_linked_on_server] host-device probe failed: %s", exc)
-            return False
+            # redact_credentials(): requests copies the failed URL verbatim
+            # into its own message, and this one carries the token in its
+            # path. This probe only started being called at all in this
+            # change, so the leak it would publish into the log.log users
+            # paste into bug reports is new even though the line is not.
+            logging.info(
+                "[_still_linked_on_server] host-device probe failed: %s: %s",
+                type(exc).__name__, redact_credentials(str(exc)),
+            )
+            return cs.LINK_PROBE_UNKNOWN
         if resp.status_code not in (200, 201):
-            return False
+            # Notably 401/403: our own middleware refused the probe, so it
+            # never reached WhatsApp and says nothing about the link at all.
+            logging.info(
+                "[_still_linked_on_server] host-device answered HTTP %s — the "
+                "probe proves nothing either way.", resp.status_code,
+            )
+            return cs.LINK_PROBE_UNKNOWN
         try:
-            phone = (resp.json().get("response") or {}).get("phoneNumber")
-        except Exception:
-            return False
+            body = resp.json().get("response")
+        except Exception as exc:
+            logging.info(
+                "[_still_linked_on_server] host-device body unreadable: %s", exc)
+            return cs.LINK_PROBE_UNKNOWN
+        if not isinstance(body, dict):
+            # No "response" object at all, or one that is not a mapping: a
+            # shape we do not understand, which may not be read as any verdict
+            # about the link.
+            logging.info(
+                "[_still_linked_on_server] host-device answered 2xx with no "
+                "readable response object — the probe proves nothing either way.")
+            return cs.LINK_PROBE_UNKNOWN
+        # Deliberately keyed on the VALUE being falsy, not on the key being
+        # absent, because absent is exactly the shape a real unlink produces:
+        # deviceController's host-device sends `{...hostDevice, phoneNumber}`
+        # with phoneNumber = getWid(), and getWid() is undefined once the
+        # session holds no linked user — JSON.stringify then drops the key
+        # entirely. Treating a missing key as "unreadable" would make
+        # LINK_PROBE_UNLINKED unreachable against the real payload, leaving
+        # the wipe branch dead code: an unlinked-then-repaired phone would
+        # sync a different account's chats straight into this one's database,
+        # which is the merge clear_local_data() exists to prevent. The other
+        # three UNKNOWN returns above still keep ambiguous evidence (a 401 on
+        # the probe itself, a transport failure, an unreadable body) away from
+        # the destructive path — that is where the three-way answer earns its
+        # keep, not here.
+        phone = body.get("phoneNumber", "")
         if isinstance(phone, dict):
             phone = phone.get("_serialized", "")
-        return bool(phone)
+        return cs.LINK_PROBE_LINKED if phone else cs.LINK_PROBE_UNLINKED
 
-    def _logout_confirmed(self, status: str) -> bool:
-        """True when an unlinked status has been seen often enough to act on it.
+    def _act_on_unlink_decision(self, decision: str, *, log_label: str) -> None:
+        """Common epilogue for connection_state.classify_unlinked()/
+        classify_unlink_candidate(): act on a LOGOUT / RESUME_FAILED /
+        RESUMING decision once the caller has already updated the strike
+        counters for this reading. Shared by the WPPConnect status-string
+        path (check_wa_connection_http()) and the local-401/403 path
+        (_handle_local_auth_rejected()) so a destructive wipe is decided in
+        exactly one place, with exactly one safety net — ``log_label`` is
+        only for logging (a WPPConnect status string, or an "HTTP 401"-style
+        label), the decision itself already reflects what it means.
 
-        Acting means _on_disconnect(), which drops the token AND calls
-        clear_local_data() — the whole local database, irreversibly, forcing a
-        full re-pairing. So this deliberately demands a lot before saying yes:
+        LOGOUT is the only outcome that can wipe data, and even then only
+        against a probe that positively answered "no linked phone":
+        _still_linked_on_server() asks WPPConnect directly for the host
+        device, and its three outcomes are acted on differently.
 
-        1. ``_LOGOUT_STARTUP_GRACE_SECONDS`` must have passed since WPPConnect
-           started. A cold start (worst right after a Windows reboot) spends
-           minutes booting Chrome and replaying the saved session, and WhatsApp
-           Web shows its QR canvas partway through — WPPConnect reports that as
-           QRCODE even though nothing is wrong.
-        2. ``_LOGOUT_CONFIRM_STRIKES`` consecutive unlinked readings, the tally
-           being reset by any other status in check_wa_connection_http().
-        3. The unlinked state must have held for ``_LOGOUT_CONFIRM_SECONDS``.
-        4. ``_still_linked_on_server()`` must NOT be able to prove the device is
-           still linked — a real unlink cannot return our own phone number.
+          * LINKED   — the session named our own phone number, so it was
+            never unlinked and whatever triggered this call was wrong. Veto:
+            reset the tally, touch nothing. This is the "minha conta foi
+            desconectada, mas o celular ainda mostra a sessão aberta"
+            report, a session wiped on a couple of transient readings.
+          * UNLINKED — the wipe goes ahead.
+          * UNKNOWN  — the probe itself failed and proves nothing. Fall back
+            to the pairing dialog WITHOUT wiping: on the 401/403 path this is
+            the common case, since the probe leaves through the same local
+            auth middleware that just rejected the status poll, and treating
+            that as permission to wipe is exactly the bug the gate exists to
+            stop.
 
-        This is the "minha conta foi desconectada, mas o celular ainda mostra a
-        sessão aberta" report: a session that was never unlinked at all, wiped
-        on the strength of two transient status strings.
+        A LINKED veto is also counted, and only tolerated
+        _STILL_LINKED_VETO_LIMIT times in a row — see that constant.
 
-        Only consulted on the *destructive* path, i.e. when the account was
-        actually paired and there is local history to lose. An account that was
-        never paired has an empty database and needs the pairing dialog now, not
-        a poll cycle later, so that path is never gated on this.
+        Must be called with self._unlink_decision_lock already held — both
+        callers acquire it before counting a strike, and the check-then-act
+        on _logout_handled below only stays atomic across threads if the
+        whole count-then-decide sequence is one critical section. This
+        method does not acquire the lock itself (it would deadlock re-taking
+        a plain, non-reentrant Lock the caller already holds).
         """
         import connection_state as cs
-        if status not in cs.UNLINKED_STATES:
-            self._logout_strikes = 0
-            self._logout_first_seen = None
-            return False
 
-        now = time.time()
-        started_at = getattr(self, "_wpp_started_at", None)
-        if started_at is not None and (now - started_at) < self._LOGOUT_STARTUP_GRACE_SECONDS:
-            logging.warning(
-                "[check_wa_connection_http] Saw unlinked state '%s' only %.0fs after "
-                "WPPConnect started — still within the %ds startup grace, ignoring.",
-                status, now - started_at, self._LOGOUT_STARTUP_GRACE_SECONDS,
+        def _logout_with_warning():
+            self.error_sound.play()
+            wx.MessageBox(
+                self.i18n.t("device_logged_out"),
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_ERROR,
             )
-            return False
+            self._on_disconnect()
 
-        if getattr(self, "_logout_first_seen", None) is None:
-            self._logout_first_seen = now
-        self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
-        held_for = now - self._logout_first_seen
-
-        if (self._logout_strikes < self._LOGOUT_CONFIRM_STRIKES
-                or held_for < self._LOGOUT_CONFIRM_SECONDS):
+        if decision == cs.LOGOUT and not getattr(self, "_logout_handled", False):
+            probe = self._still_linked_on_server()
+            if probe == cs.LINK_PROBE_LINKED:
+                vetoes = getattr(self, "_still_linked_vetoes", 0) + 1
+                self._still_linked_vetoes = vetoes
+                if vetoes < self._STILL_LINKED_VETO_LIMIT:
+                    logging.warning(
+                        "[_act_on_unlink_decision] %s confirmed by strikes, but "
+                        "host-device still reports a linked phone — NOT a logout "
+                        "(veto %d/%d). Resetting the tally.",
+                        log_label, vetoes, self._STILL_LINKED_VETO_LIMIT,
+                    )
+                    self._logout_strikes = 0
+                    self._resume_fail_strikes = 0
+                    self._last_strike_ts = 0.0
+                    return
+                # Out of patience: the session insists it is linked while
+                # nothing works. Stop vetoing, but still never wipe on
+                # evidence this contradictory — the same non-destructive
+                # landing RESUME_FAILED below uses gives the user a way out
+                # and keeps the history whichever side the probe got wrong.
+                self._logout_handled = True
+                logging.warning(
+                    "[_act_on_unlink_decision] %s confirmed by strikes and "
+                    "vetoed by host-device %d times in a row — the session "
+                    "claims to be linked but never recovers. Pairing dialog "
+                    "WITHOUT wiping.", log_label, vetoes,
+                )
+                wx.CallAfter(lambda: self._on_disconnect(wipe=False))
+                return
+            if probe == cs.LINK_PROBE_UNKNOWN:
+                # Ambiguous evidence must never be destructive: the probe
+                # failing is itself the expected outcome of the local-401
+                # path that most often gets here.
+                self._logout_handled = True
+                logging.warning(
+                    "[_act_on_unlink_decision] %s confirmed by strikes, but the "
+                    "host-device probe could not reach a verdict either way — "
+                    "pairing dialog WITHOUT wiping.", log_label,
+                )
+                wx.CallAfter(lambda: self._on_disconnect(wipe=False))
+                return
+            self._logout_handled = True
             logging.warning(
-                "[check_wa_connection_http] Saw unlinked state '%s' (strike %d/%d, held "
-                "%.0fs/%ds) — waiting for confirmation before wiping local data.",
-                status, self._logout_strikes, self._LOGOUT_CONFIRM_STRIKES,
-                held_for, self._LOGOUT_CONFIRM_SECONDS,
+                "[_act_on_unlink_decision] Confirmed logout (%s, %d strikes, "
+                "host-device answered with no linked phone) — disconnecting "
+                "and wiping.", log_label, self._logout_strikes,
             )
-            return False
-
-        if self._still_linked_on_server():
+            wx.CallAfter(_logout_with_warning)
+        elif decision == cs.RESUME_FAILED and not getattr(self, "_logout_handled", False):
+            self._logout_handled = True
             logging.warning(
-                "[check_wa_connection_http] status-session says '%s' but host-device "
-                "still reports a linked phone — NOT a logout. Resetting the tally.",
-                status,
+                "[_act_on_unlink_decision] Session did not resume after %d "
+                "%s readings — pairing dialog WITHOUT wiping.",
+                self._resume_fail_strikes, log_label,
             )
-            self._logout_strikes = 0
-            self._logout_first_seen = None
-            return False
-
-        if getattr(self, "_logout_handled", False):
-            return False
-        self._logout_handled = True
-        logging.warning(
-            "[check_wa_connection_http] Confirmed unlinked/logged out state: %s after "
-            "%d consecutive readings over %.0fs. Triggering disconnect.",
-            status, self._logout_strikes, held_for,
-        )
-        return True
+            wx.CallAfter(lambda: self._on_disconnect(wipe=False))
+        elif decision in (cs.LOGOUT, cs.RESUME_FAILED):
+            # Only reachable with _logout_handled already True: this reading
+            # DID call for an action, one just fired earlier this run and
+            # latched. Logged apart from the branch below because "data
+            # preserved" would read as a deliberate verdict on this reading,
+            # when the truth is that no verdict was reached at all — and
+            # log.log is the primary tool for reconstructing a lost session
+            # after the fact, where those two mean very different things.
+            logging.info(
+                "[_act_on_unlink_decision] Unlinked signal '%s' → %s — already "
+                "handled earlier this run, ignoring.", log_label, decision,
+            )
+        else:
+            logging.info(
+                "[_act_on_unlink_decision] Unlinked signal '%s' → %s — data "
+                "preserved.", log_label, decision,
+            )
 
     def _probe_whatsapp_host(self) -> bool:
         """True if WhatsApp's own servers answer over the network.
@@ -9196,6 +9426,92 @@ class MainWindow(wx.Frame):
         dial = getattr(self.connect, "connection_dial", None)
         return bool(dial) and dial.IsShown()
 
+    def _handle_local_auth_rejected(self, http_status: int) -> None:
+        """A /status-session poll came back 401/403 — our OWN local Node
+        server's auth middleware rejected the request.
+
+        This used to call _on_disconnect() (drop the token, wipe the whole
+        local database) the very first time this happened, with none of the
+        protection the sibling "unlinked status string" path below applies
+        (_auto_restart_grace_active(), several consecutive confirmations
+        spread over minutes, and the ever_connected split that keeps a run
+        which has never actually connected from ever wiping). A 401/403 here
+        is if anything WEAKER evidence of a real WhatsApp-side unlink than a
+        notLogged/QRCODE reading: it never even reaches WhatsApp, since our
+        own auth middleware refused the request before WPPConnect saw it —
+        which can just as easily mean the local session/secret-key state on
+        a freshly started or just-switched-to Node isn't ready yet. Reported
+        live: the app wiped a paired account before it had even loaded the
+        chat list on a cold start. Routing this through the exact same
+        grace/strike machinery the string-status path uses closes that gap.
+
+        Note what that costs the final gate on this path in particular:
+        _act_on_unlink_decision()'s host-device probe leaves through the very
+        middleware that is refusing us, so it usually comes back
+        LINK_PROBE_UNKNOWN rather than proving anything. That is why UNKNOWN
+        is not "could not prove it is linked, wipe anyway" — a Node restarted
+        under a rotated local token would otherwise reach the same full wipe
+        as before, merely a minute later.
+        """
+        import connection_state as cs
+        logging.warning(
+            "[check_wa_connection_http] status-session returned HTTP %s "
+            "(local auth rejected the request).", http_status,
+        )
+        # Through the funnel, not a bare flag write: _set_wa_connected() is
+        # what also engages _auto_offline, repaints the tray text and speaks
+        # the offline announcement. Writing _wa_connected directly stopped the
+        # MessageQueue (which reads it) while leaving the UI claiming to be
+        # connected, so typed messages sat in the queue looking sent and a
+        # screen-reader user was told nothing at all — for the ≥60s this takes
+        # to confirm, and far longer behind a veto. `confirmed` stays False on
+        # purpose: this whole method exists because a local 401 is exactly the
+        # kind of ambiguous negative the startup grace is for.
+        self._set_wa_connected(False, f"status-session HTTP {http_status}")
+        if not self.settings.get("privateinfo", {}).get("paired"):
+            # Not paired: there is nothing to lose, and _on_disconnect() is
+            # what puts the pairing dialog on screen.
+            wx.CallAfter(self._on_disconnect)
+            return
+
+        with self._unlink_decision_lock:
+            if self._auto_restart_grace_active():
+                logging.info(
+                    "[check_wa_connection_http] HTTP %s seen while an automatic "
+                    "session restart is still settling — not confirming a "
+                    "logout yet.", http_status,
+                )
+                self._logout_strikes = 0
+                self._resume_fail_strikes = 0
+                self._last_strike_ts = 0.0
+                # The restart breaks the veto run too: _STILL_LINKED_VETO_LIMIT
+                # counts consecutive vetoes, and a session torn down and rebuilt
+                # in between is not the same run of readings.
+                self._still_linked_vetoes = 0
+                return
+
+            now = time.time()
+            if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
+                logging.info(
+                    "[check_wa_connection_http] HTTP %s within strike interval — "
+                    "not counting; data preserved.", http_status,
+                )
+                return
+            self._last_strike_ts = now
+            ever = bool(getattr(self, "_wa_connect_announced", False))
+            if ever:
+                self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
+            else:
+                self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
+            decision = cs.classify_unlink_candidate(
+                ever_connected=ever,
+                logout_strikes=getattr(self, "_logout_strikes", 0),
+                resume_strikes=getattr(self, "_resume_fail_strikes", 0),
+                logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
+                resume_fail_strikes=self._RESUME_FAIL_STRIKES,
+            )
+            self._act_on_unlink_decision(decision, log_label=f"HTTP {http_status}")
+
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
         if self._is_pairing_dialog_active() or getattr(self, "_pairing_in_progress", False):
@@ -9230,16 +9546,7 @@ class MainWindow(wx.Frame):
             # outage is not applicable here.
             self._wa_http_fail_strikes = 0
             if response.status_code in (401, 403):
-                logging.warning("[check_wa_connection_http] Token is unauthorized (HTTP %s). Triggering logout.", response.status_code)
-                def _logout_with_warning_401():
-                    self.error_sound.play()
-                    wx.MessageBox(
-                        self.i18n.t("device_logged_out"),
-                        self.i18n.t("error").format(app_name=self.app_name),
-                        wx.OK | wx.ICON_ERROR,
-                    )
-                    self._on_disconnect()
-                wx.CallAfter(_logout_with_warning_401)
+                self._handle_local_auth_rejected(response.status_code)
                 return
 
             if response.status_code in (200, 201):
@@ -9262,10 +9569,20 @@ class MainWindow(wx.Frame):
                 # see _LOGOUT_CONFIRM_STRIKES.
                 import connection_state as cs
                 if status not in cs.UNLINKED_STATES:
-                    self._logout_strikes = 0
-                    self._resume_fail_strikes = 0
-                    self._last_strike_ts = 0.0
-                    self._logout_first_seen = None
+                    # Under the same lock the counting paths take: this writes
+                    # the very attributes their count-then-decide sequence
+                    # reads, and a reset landing in the middle of one would
+                    # decide on a tally half of which had just been cleared.
+                    # (Only ever clears, so the risk is a missed confirmation
+                    # rather than a spurious wipe — but the atomicity is the
+                    # property the tests assert, so make it real.)
+                    with self._unlink_decision_lock:
+                        self._logout_strikes = 0
+                        self._resume_fail_strikes = 0
+                        self._last_strike_ts = 0.0
+                        # A run of host-device vetoes only counts while it is
+                        # unbroken — see _STILL_LINKED_VETO_LIMIT.
+                        self._still_linked_vetoes = 0
 
                 # Robust check: Only call start-session if the instance is explicitly CLOSED, DESTROYED, or completely inactive.
                 # WPPConnect status values include: CONNECTED, open, INITIALIZING, QRCODE, PHONECODE, notLogged, inChat, PAIRED, etc.
@@ -9325,7 +9642,13 @@ class MainWindow(wx.Frame):
                                     pi["paired"] = True
                                     self.save_settings()
                     except Exception as e:
-                        logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
+                        # Same host-device URL, same token in its path — see
+                        # _still_linked_on_server() for why the exception has
+                        # to be redacted before it reaches log.log.
+                        logging.error(
+                            "[check_wa_connection_http] Failed to fetch host device JID: %s: %s",
+                            type(e).__name__, redact_credentials(str(e)),
+                        )
                 elif status in ("CLOSED", "DESTROYED", ""):
                     self._set_wa_connected(False, f"status-session {status or 'unknown'}")
                     # Status is CLOSED or unknown: safe to start a new session.
@@ -9372,33 +9695,7 @@ class MainWindow(wx.Frame):
                     if status in cs.UNLINKED_STATES:
                         self._wa_connected = False
 
-                        def _logout_with_warning():
-                            self.error_sound.play()
-                            wx.MessageBox(
-                                self.i18n.t("device_logged_out"),
-                                self.i18n.t("error").format(app_name=self.app_name),
-                                wx.OK | wx.ICON_ERROR,
-                            )
-                            self._on_disconnect()
-
                         if self.settings.get("privateinfo", {}).get("paired"):
-                            # An automatic _restart_wpp_session() (dead-browser
-                            # recovery) legitimately re-shows a fresh QR itself
-                            # whenever the stored token turns out to already be
-                            # bad — that is NOT a phone-side unlink, and must
-                            # never be confirmed as one (a real incident: it
-                            # wiped a user's local database).
-                            if self._auto_restart_grace_active():
-                                logging.info(
-                                    "[check_wa_connection_http] %s seen while an "
-                                    "automatic session restart is still settling — "
-                                    "not confirming a logout yet.", status,
-                                )
-                                self._logout_strikes = 0
-                                self._resume_fail_strikes = 0
-                                self._last_strike_ts = 0.0
-                                self._logout_first_seen = None
-                                return
                             # Destructive decisions go through the pure classifier
                             # (connection_state.classify_unlinked) so the "logout
                             # vs still-resuming vs resume-failed" rule is one
@@ -9409,53 +9706,56 @@ class MainWindow(wx.Frame):
                             # kept wiping accounts; a real log showed the server
                             # reaching 'inChat' the same second the client wiped).
                             import connection_state as cs
-                            ever = bool(getattr(self, "_wa_connect_announced", False))
-                            # Count at most one strike per STRIKE_MIN_INTERVAL so
-                            # the thresholds mean real elapsed time, not raw
-                            # reading count: tight poll loops (e.g. _run_sync's
-                            # 0.2s cadence) used to race through 20 unlinked
-                            # readings in ~6s and wipe a session WhatsApp had just
-                            # logged back in. A reading inside the interval is
-                            # still "resuming, data preserved" — never escalates.
-                            now = time.time()
-                            if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
-                                logging.info(
-                                    "[check_wa_connection_http] Unlinked '%s' "
-                                    "(ever_connected=%s) — within strike interval, "
-                                    "not counting; data preserved.", status, ever)
-                                return
-                            self._last_strike_ts = now
-                            if ever:
-                                self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
-                            else:
-                                self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
-                            decision = cs.classify_unlinked(
-                                status,
-                                ever_connected=ever,
-                                logout_strikes=getattr(self, "_logout_strikes", 0),
-                                resume_strikes=getattr(self, "_resume_fail_strikes", 0),
-                                logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
-                                resume_fail_strikes=self._RESUME_FAIL_STRIKES,
-                            )
-                            if decision == cs.LOGOUT and not getattr(self, "_logout_handled", False):
-                                self._logout_handled = True
-                                logging.warning(
-                                    "[check_wa_connection_http] Confirmed logout (%s, "
-                                    "%d strikes) — disconnecting and wiping.",
-                                    status, self._logout_strikes)
-                                wx.CallAfter(_logout_with_warning)
-                            elif decision == cs.RESUME_FAILED and not getattr(self, "_logout_handled", False):
-                                self._logout_handled = True
-                                logging.warning(
-                                    "[check_wa_connection_http] Session did not resume "
-                                    "after %d readings — pairing dialog WITHOUT wiping.",
-                                    self._resume_fail_strikes)
-                                wx.CallAfter(lambda: self._on_disconnect(wipe=False))
-                            else:
-                                logging.info(
-                                    "[check_wa_connection_http] Unlinked '%s' → %s "
-                                    "(ever_connected=%s) — data preserved.",
-                                    status, decision, ever)
+                            with self._unlink_decision_lock:
+                                # An automatic _restart_wpp_session() (dead-browser
+                                # recovery) legitimately re-shows a fresh QR itself
+                                # whenever the stored token turns out to already be
+                                # bad — that is NOT a phone-side unlink, and must
+                                # never be confirmed as one (a real incident: it
+                                # wiped a user's local database).
+                                if self._auto_restart_grace_active():
+                                    logging.info(
+                                        "[check_wa_connection_http] %s seen while an "
+                                        "automatic session restart is still settling — "
+                                        "not confirming a logout yet.", status,
+                                    )
+                                    self._logout_strikes = 0
+                                    self._resume_fail_strikes = 0
+                                    self._last_strike_ts = 0.0
+                                    # Same reasoning as the tally above: a
+                                    # restart in the middle breaks the veto
+                                    # run — see _STILL_LINKED_VETO_LIMIT.
+                                    self._still_linked_vetoes = 0
+                                    return
+                                ever = bool(getattr(self, "_wa_connect_announced", False))
+                                # Count at most one strike per STRIKE_MIN_INTERVAL so
+                                # the thresholds mean real elapsed time, not raw
+                                # reading count: tight poll loops (e.g. _run_sync's
+                                # 0.2s cadence) used to race through 20 unlinked
+                                # readings in ~6s and wipe a session WhatsApp had just
+                                # logged back in. A reading inside the interval is
+                                # still "resuming, data preserved" — never escalates.
+                                now = time.time()
+                                if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
+                                    logging.info(
+                                        "[check_wa_connection_http] Unlinked '%s' "
+                                        "(ever_connected=%s) — within strike interval, "
+                                        "not counting; data preserved.", status, ever)
+                                    return
+                                self._last_strike_ts = now
+                                if ever:
+                                    self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
+                                else:
+                                    self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
+                                decision = cs.classify_unlinked(
+                                    status,
+                                    ever_connected=ever,
+                                    logout_strikes=getattr(self, "_logout_strikes", 0),
+                                    resume_strikes=getattr(self, "_resume_fail_strikes", 0),
+                                    logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
+                                    resume_fail_strikes=self._RESUME_FAIL_STRIKES,
+                                )
+                                self._act_on_unlink_decision(decision, log_label=status)
                             return
                         else:
                             # Not paired: there is nothing to lose (the database
@@ -11256,11 +11556,21 @@ class MainWindow(wx.Frame):
                                     .get("records", []),
                                     server_val,
                                 )
-                                # Never resurrect unread count for the conversation the
-                                # user has open right now — mark_conversation_as_read()
-                                # already set it to 0 locally, and this snapshot can be
-                                # a few seconds stale relative to that. Same guard as
-                                # on_chat_unread_update()'s live-event path.
+                                # An open conversation is reconciled, not zeroed.
+                                # This used to be a bare `v = 0` under a comment
+                                # claiming parity with on_chat_unread_update() —
+                                # there was none. on_new_message() counts messages
+                                # that land in the open chat while the window is
+                                # hidden (Alt+F4 only hides to tray), so this
+                                # 60s-polled merge was wiping a real backlog: badge,
+                                # title counter and toast count all reset, and the
+                                # next arrival announcing "1 mensagem não lida" for a
+                                # conversation holding six. Both surfaces now share
+                                # reconcile_open_chat_unread(), so the parity the
+                                # comment asserts is a fact rather than a claim.
+                                # remote_read_confirmed is False here because
+                                # list-chats carries no previousUnreadCount — see the
+                                # helper for what that costs.
                                 _cp = getattr(self, "conversations_panel", None)
                                 open_now = (
                                     _cp is not None
@@ -11270,7 +11580,14 @@ class MainWindow(wx.Frame):
                                     ) == jid
                                 )
                                 if open_now:
-                                    v = 0
+                                    _local_new = getattr(
+                                        self, "_new_since_read", {}
+                                    ).get(jid, 0)
+                                    v, _clear_new = reconcile_open_chat_unread(
+                                        server_val, _local_new
+                                    )
+                                    if _clear_new:
+                                        getattr(self, "_new_since_read", {}).pop(jid, None)
                                 elif server_val < local_val:
                                     # WPPConnect's list-chats snapshot lagging behind
                                     # live on_new_message increments isn't just a
@@ -18161,19 +18478,11 @@ class MainWindow(wx.Frame):
             # below is unreachable here (this branch already matched), so the
             # same protection has to be spelled out on this side too.
             local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
-            if not local_new:
-                unread_count = 0
-            elif unread_count == 0 and not _remote_read:
-                # Server says zero and nothing says it was a real read: trust
-                # ourselves, exactly as the read-ack branch below does for the
-                # same event.
-                unread_count = local_new
-            elif unread_count == 0:
-                # A confirmed read elsewhere — the messages we counted really
-                # have been read, so the badge goes with them.
+            unread_count, _clear_new = reconcile_open_chat_unread(
+                unread_count, local_new, remote_read_confirmed=_remote_read
+            )
+            if _clear_new:
                 self._new_since_read.pop(normalized, None)
-            else:
-                unread_count = min(unread_count, local_new)
         elif read_at_t is None and unread_count < old_count and not _remote_read:
             # WA-JS fires chat.unread_count_changed (forwarded to us as
             # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
