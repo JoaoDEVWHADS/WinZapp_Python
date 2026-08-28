@@ -11592,7 +11592,10 @@ class MainWindow(wx.Frame):
                     try:
                         self.db.merge_or_rename_chat(cand_jid, my_jid)
                     except Exception as db_err:
-                        logging.error(f"[deduplicate_chats] Failed to merge/rename {cand_jid} to {my_jid} in DB: {db_err}")
+                        logging.error(
+                            "[deduplicate_chats] Failed to merge/rename self-chat artifact in DB (%s)",
+                            type(db_err).__name__,
+                        )
                 if my_jid in chats:
                     dst_records = (
                         chats[my_jid]
