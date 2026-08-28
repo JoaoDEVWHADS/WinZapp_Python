@@ -316,9 +316,10 @@ class TestLogoutCircuitBreaker:
         assert _LogoutStub()._logout_abandoned_session("s", token="t") is True
 
 
-class TestTheCleanupPassesTheStoredToken:
-    def test_the_call_site_forwards_the_entrys_token(self):
-        import inspect
-
-        source = inspect.getsource(MainWindow._cleanup_abandoned_sessions_worker)
-        assert 'token=s.get("token")' in source
+# The join — that _cleanup_abandoned_sessions_worker actually hands this
+# function the token off the store row — used to be asserted here by reading
+# the source for the literal `token=s.get("token")`. That passes for a line
+# that is present but wrong: a typo in the key, a token fetched from somewhere
+# else, or a call site that stops passing it while the string survives in a
+# comment. It is now driven for real, against a fake store and a fake HTTP
+# layer, in tests/test_cleanup_logs_out_with_own_token.py.
