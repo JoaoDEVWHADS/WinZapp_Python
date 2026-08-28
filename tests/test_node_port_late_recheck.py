@@ -147,5 +147,143 @@ class TestThePortIsSettledBeforeTheDialogSeesIt:
         off a port our own still-listening Node is on."""
         src = self._source()
         recheck = src.index("self._ensure_wpp_port_still_free()")
-        last_adopt = src.rindex("if self._is_wpp_running():", 0, recheck)
-        assert last_adopt < recheck
+        # Anchored on the reuse check's own log string, not on a count of
+        # `if self._is_wpp_running():` — there are three of those (the adopt,
+        # the background_mode poll loop, and this one), and a plain rindex()
+        # would still pass with the recheck moved ABOVE this one. That is the
+        # dangerous placement: with our own previous Node still listening,
+        # _is_port_free is False, so we would move to another port and then
+        # spawn a SECOND Node beside the old one.
+        assert src.index("already listening on %s — reusing it") < recheck
+
+
+class TestTheExhaustionErrorIsAboutThePortNotAboutTheNumberChanging:
+    """The ERROR must mean "the port we settled on is occupied", which is not
+    the same question as "did the number change?".
+
+    allocate_port_for_account() never raises: with its whole range busy it
+    returns deterministic_port(account_id) — a number that need not equal the
+    port we were escaping, so an equality test misses the real exhaustion. And
+    equality fires when nothing is wrong: node_port_lock is a cross-process
+    lock, so time passes between the pre-lock probe and the allocation, which
+    is exactly when our own dying Node releases the port and the allocator
+    hands the same number straight back.
+    """
+
+    def test_a_port_freed_in_the_meantime_is_not_an_error(self, tmp_path, caplog):
+        """The false positive. The port looks busy at the probe, is free by the
+        time the allocator asks, and the same number comes back — a healthy
+        startup that must not shout ERROR into a diagnostic log."""
+        class _TransientlyBusy(_Stub):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._probes = 0
+
+            def _is_port_free(self, port):
+                self._probes += 1
+                return self._probes > 1   # busy only on the very first probe
+
+        stub = _TransientlyBusy(wpp_port=6341, global_dir=str(tmp_path))
+
+        with caplog.at_level("INFO"):
+            stub._ensure_wpp_port_still_free()
+
+        assert stub.wpp_port == 6341
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert not errors, f"healthy startup logged an error: {[r.message for r in errors]}"
+
+    def test_a_genuinely_exhausted_range_is_an_error(self, tmp_path, caplog):
+        """The false negative. Saved port 6300, whole range busy: the allocator
+        returns deterministic_port('acc1') == 6341, a DIFFERENT number that is
+        equally unusable — so an equality test stays quiet and logs success."""
+        stub = _Stub(wpp_port=6300, global_dir=str(tmp_path),
+                     busy_ports=range(6300, 6350))
+
+        with caplog.at_level("INFO"):
+            stub._ensure_wpp_port_still_free()
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert errors, "an exhausted range must be diagnosable, not logged as success"
+        assert "will fail to bind" in errors[0].message
+
+    def test_an_ordinary_move_to_a_free_port_is_not_an_error(self, tmp_path, caplog):
+        stub = _Stub(wpp_port=6301, global_dir=str(tmp_path), busy_ports={6301})
+
+        with caplog.at_level("INFO"):
+            stub._ensure_wpp_port_still_free()
+
+        assert stub.wpp_port != 6301
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+class TestTheDialogIsHandedTheReResolvedPort:
+    """The behavioural counterpart of the source-reading tests above.
+
+    Those assert an ordering by matching strings, so they break on a harmless
+    rename and — worse — would keep passing if ApiStartupDialog started taking
+    the port some other way. This one drives ensure_wpp_running() for real and
+    checks the only thing that matters: the number the dialog was handed.
+    """
+
+    def test_the_dialog_receives_the_port_node_will_actually_bind(
+        self, monkeypatch, tmp_path
+    ):
+        import sys
+        import types
+
+        import main
+
+        captured = {}
+
+        class _FakeDialog:
+            def __init__(self, parent, port):
+                captured["port"] = port
+
+            def ShowModal(self):
+                import wx
+                return wx.ID_OK   # the API came up; take the success path
+
+            def Destroy(self):
+                pass
+
+        fake_mod = types.ModuleType("ui.dialogs.api_startup")
+        fake_mod.ApiStartupDialog = _FakeDialog
+        monkeypatch.setitem(sys.modules, "ui.dialogs.api_startup", fake_mod)
+        monkeypatch.setattr(main.os.path, "isfile", lambda *_a, **_k: True)
+        monkeypatch.setattr(main, "resource_path", lambda *parts: str(tmp_path / "x"))
+        monkeypatch.setattr(main.wx, "CallAfter", lambda fn, *a, **k: None)
+
+        class _RunStub:
+            ensure_wpp_running = MainWindow.ensure_wpp_running
+
+            def __init__(self):
+                self.background_mode = False
+                self.wpp_port = 6341
+                self.started = False
+
+            def _is_wpp_running(self):
+                return False
+
+            def _ensure_wpp_port_still_free(self):
+                # Stands in for the real re-check finding the port taken.
+                self.wpp_port = 6342
+
+            def _start_wpp_background(self):
+                self.started = True
+
+            def _register_node_lease(self):
+                pass
+
+            def _check_wpp_version_pin(self):
+                pass
+
+            def run_on_main_thread(self, fn, *a, **kw):
+                return fn(*a, **kw)
+
+        stub = _RunStub()
+        stub.ensure_wpp_running()
+
+        assert captured.get("port") == 6342, (
+            "the dialog polls the port it was constructed with — handing it the "
+            "pre-recheck one makes it watch a port Node will never bind"
+        )

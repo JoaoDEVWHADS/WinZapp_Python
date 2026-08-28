@@ -6590,13 +6590,21 @@ class MainWindow(wx.Frame):
                 logging.exception(
                     "[node-port] persisting re-resolved port failed (non-fatal)"
                 )
-        if new_port == self.wpp_port:
-            # allocate_port_for_account() never raises: with every port in its
-            # range busy it returns the deterministic start, which is by
-            # construction the occupied one we came here to escape. Say so, or
-            # this resurfaces as the same generic "API failed to start in time"
-            # the re-check exists to eliminate — the one case where the
-            # self-healing silently did not heal.
+        # Ask the question that matters — "is the port we settled on actually
+        # free?" — rather than "did it change?".
+        #
+        # allocate_port_for_account() never raises: with every port in its range
+        # busy it returns deterministic_port(account_id). That is NOT necessarily
+        # the port we came here to escape — a legacy install whose saved port is
+        # 6300 gets 6341 back, a different number that is equally occupied, so an
+        # equality test misses the exhaustion it was written for. And it fires
+        # when nothing is wrong: node_port_lock is a cross-process lock, so real
+        # time passes between the pre-lock probe and the allocation, which is
+        # exactly the window in which our own dying Node releases the port — the
+        # allocator then hands the same number back through its ordinary
+        # is_free() path, and an equality test calls a perfectly healthy startup
+        # a failure in a log users are asked to send in.
+        if not self._is_port_free(new_port):
             logging.error(
                 "[node-port] account %s: port %s is taken and no free port was "
                 "available — Node will fail to bind",
