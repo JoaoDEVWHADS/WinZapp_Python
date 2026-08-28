@@ -25,6 +25,11 @@ class _FakeConversationsPanel:
     def _mark_message_failed(self, local_id):
         self.marked_failed.append(local_id)
 
+    def _is_cancelled_pending(self, local_id):
+        # _on_message_failed() asks this first, to complete a cancellation the
+        # send outran (see tests/test_message_cancel_race.py).
+        return False
+
 
 class _FakeSound:
     def __init__(self):
@@ -36,6 +41,7 @@ class _FakeSound:
 
 class _Stub:
     _on_message_failed = MainWindow._on_message_failed
+    _is_cancelled_send = MainWindow._is_cancelled_send
 
     def __init__(self):
         self.conversations_panel = _FakeConversationsPanel()

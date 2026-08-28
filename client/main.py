@@ -1198,6 +1198,33 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
+        # Guards _lid_to_phone/_phone_to_lid — the @lid<->phone bridging
+        # state. (_extract_lid_mapping() also touches _message_pushname_cache
+        # and _chats_without_alt_jid inside the same section because it is
+        # already holding the lock there; their other writers, in
+        # find_name_through_messages() and _find_alt_jid_from_messages(), do
+        # a single atomic set/dict store each and nothing anywhere iterates
+        # them, so they do not need it.)
+        # _extract_lid_mapping() mutates these directly on the Socket.IO
+        # callback thread (see its own docstring for why it bypasses the
+        # usual wx.CallAfter dispatch), while the wx main thread does the
+        # same through on_new_message()'s own call into it and through
+        # _build_lid_to_phone_cache()'s full rebuilds from the sync thread.
+        # Every other writer of those two dicts takes it too —
+        # register_jid_mapping() (the sync thread's real writer, via
+        # _backfill_names -> resolve_lid_jids_via_api), resolve_self_lid()'s
+        # own thread, get_contact_profile(), get_remote_chats(),
+        # _load_local_lid_cache() and clear_local_data(). A writer left out
+        # is not merely a lost update: the two comprehensions in
+        # resolve_self_lid() iterate the live dicts, and one concurrent
+        # insert there raises "dictionary changed size during iteration".
+        # Blocking I/O (self.db goes through DatabaseBridge, which waits on
+        # the DB thread; HTTP calls; wx.CallAfter) must stay OUTSIDE the
+        # critical section — holding this while waiting on SQLite would
+        # stall the Socket.IO thread behind it.
+        # Reentrant because _extract_lid_mapping() can, in principle, be
+        # re-entered by code it itself triggers while still holding the lock.
+        self._lid_mapping_lock = threading.RLock()
         # Reactions made by WinZapp are rendered optimistically. Keep their
         # target/emoji briefly so the WebSocket client suppresses only that
         # echo, not a fromMe reaction made on the phone or another device.
@@ -10392,14 +10419,18 @@ class MainWindow(wx.Frame):
         self.chats = {}
         self.contacts = {}
         self._status_updates = {}
-        if hasattr(self, "_lid_to_phone"):
-            self._lid_to_phone.clear()
-        else:
-            self._lid_to_phone = {}
-        if hasattr(self, "_phone_to_lid"):
-            self._phone_to_lid.clear()
-        else:
-            self._phone_to_lid = {}
+        # Under the mapping lock: an in-flight Socket.IO event can be inside
+        # _extract_lid_mapping() right now, and clearing a dict it is
+        # iterating raises "dictionary changed size during iteration".
+        with self._lid_mapping_lock:
+            if hasattr(self, "_lid_to_phone"):
+                self._lid_to_phone.clear()
+            else:
+                self._lid_to_phone = {}
+            if hasattr(self, "_phone_to_lid"):
+                self._phone_to_lid.clear()
+            else:
+                self._phone_to_lid = {}
         if hasattr(self, "_unresolvable_lids"):
             self._unresolvable_lids.clear()
         else:
@@ -10723,24 +10754,25 @@ class MainWindow(wx.Frame):
                             remote = key.get("remoteJid", "")
                             alt = key.get("remoteJidAlt", "")
                             if remote and alt:
-                                if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
+                                # This runs on the sync thread while
+                                # _extract_lid_mapping() writes the same two
+                                # dicts from the Socket.IO one — same
+                                # check-then-set, same lock.
+                                with self._lid_mapping_lock:
                                     if not hasattr(self, "_lid_to_phone"):
                                         self._lid_to_phone = {}
                                     if not hasattr(self, "_phone_to_lid"):
                                         self._phone_to_lid = {}
-                                    if self._lid_to_phone.get(remote) != alt:
-                                        self._lid_to_phone[remote] = alt
-                                        self._phone_to_lid[alt] = remote
-                                        logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
-                                elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
-                                    if not hasattr(self, "_lid_to_phone"):
-                                        self._lid_to_phone = {}
-                                    if not hasattr(self, "_phone_to_lid"):
-                                        self._phone_to_lid = {}
-                                    if self._lid_to_phone.get(alt) != remote:
-                                        self._lid_to_phone[alt] = remote
-                                        self._phone_to_lid[remote] = alt
-                                        logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
+                                    if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
+                                        if self._lid_to_phone.get(remote) != alt:
+                                            self._lid_to_phone[remote] = alt
+                                            self._phone_to_lid[alt] = remote
+                                            logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
+                                    elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                                        if self._lid_to_phone.get(alt) != remote:
+                                            self._lid_to_phone[alt] = remote
+                                            self._phone_to_lid[remote] = alt
+                                            logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
 
                     # Skip status@broadcast — statuses are shown in the Status tab
                     if not jid or jid.endswith("@broadcast"):
@@ -11007,13 +11039,17 @@ class MainWindow(wx.Frame):
                     jid = self._normalize_jid(raw_jid)
                     if "muteExpiration" in chat:
                         mute_expiry = chat["muteExpiration"]
+                        mute_jids = self._mute_state_jids(jid)
                         if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
-                            if self._muted_chats.get(jid) != int(mute_expiry):
-                                self._muted_chats[jid] = int(mute_expiry)
-                                db_changed = True
-                        elif jid in self._muted_chats:
-                            del self._muted_chats[jid]
-                            db_changed = True
+                            for mute_jid in mute_jids:
+                                if self._muted_chats.get(mute_jid) != int(mute_expiry):
+                                    self._muted_chats[mute_jid] = int(mute_expiry)
+                                    db_changed = True
+                        else:
+                            for mute_jid in mute_jids:
+                                if mute_jid in self._muted_chats:
+                                    del self._muted_chats[mute_jid]
+                                    db_changed = True
 
                     # ── Archive state: two-way sync ──────────────────────────
                     # This used to be add-only (normalize_chats() could put a
@@ -11765,17 +11801,37 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.conversations_panel.update_conversation_name, jid, new_name)
 
-    def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
-        """
-        Handle a live group subject update received via the groups.update websocket event.
+    def _reconcile_group_info_name(self, jid: str, info: dict) -> None:
+        """Feed an authoritative /group-info name back into the chat list."""
+        if not isinstance(info, dict):
+            return
+        new_name = (info.get("subject") or info.get("name") or "").strip()
+        chat = self.chats.get(jid)
+        if not new_name or chat is None or chat.get("name") == new_name:
+            return
+        self._store_group_subject(jid, chat, new_name)
+        self._schedule_save(dirty_jid=jid)
+        wx.CallAfter(self._schedule_set_chats)
 
-        Note this path currently never fires: the Node layer emits no
-        'groups.update' Socket.IO event at all (WebSocketClient registers the
-        handler, but nothing on the server side sends it), so a rename only
-        reaches Python as the gp2 notification handled by
-        _apply_group_subject_change(). Kept wired for when that event does get
-        emitted — the work it does is the same either way.
-        """
+    def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
+        """Handle a live group subject update emitted from a gp2 notification."""
+        # See _live_events_ready() — this is the third live funnel, gated for
+        # the same reasons as on_new_message()/on_historical_message().
+        #
+        # It went ungated for as long as nothing emitted 'groups.update' at
+        # all, which this method used to document about itself.  The gap
+        # stopped being theoretical once createSessionUtil.ts started emitting
+        # the event for gp2/subject notifications, which is why the gate lands
+        # together with that.
+        #
+        # A rename dropped here is recovered by the same gp2 notification
+        # arriving again through history backfill (on_historical_message →
+        # _apply_group_subject_change), not by the sync: nothing re-fetches
+        # /group-info for a group that already has a name, and list-chats
+        # serialises WhatsApp Web's own store, which can still be holding the
+        # old subject (see _apply_group_subject_change's docstring).
+        if not self._live_events_ready():
+            return
         if remote_jid not in self.chats:
             return
 
@@ -12013,8 +12069,13 @@ class MainWindow(wx.Frame):
 
     def _load_local_lid_cache(self):
         try:
-            self._lid_to_phone = self.db.get_lid_mappings()
-            self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
+            # The DB read stays outside the lock — DatabaseBridge blocks this
+            # thread until the coroutine returns, and the Socket.IO thread
+            # must never wait on SQLite to record a mapping.
+            mappings = self.db.get_lid_mappings()
+            with self._lid_mapping_lock:
+                self._lid_to_phone = mappings
+                self._phone_to_lid = {v: k for k, v in mappings.items()}
             lids, names = self.db.get_unresolvable_lids()
             self._unresolvable_lids = lids
             self._unresolvable_names = names
@@ -12023,8 +12084,9 @@ class MainWindow(wx.Frame):
             return
         except Exception as e:
             logging.error(f"[LID Cache] Error loading JID mappings from database: {e}")
-        self._lid_to_phone = {}
-        self._phone_to_lid = {}
+        with self._lid_mapping_lock:
+            self._lid_to_phone = {}
+            self._phone_to_lid = {}
         self._unresolvable_lids = set()
         self._unresolvable_names = set()
 
@@ -12385,7 +12447,12 @@ class MainWindow(wx.Frame):
         # separate keys in self.chats, only render the one with more content
         # (prefer @lid since that's the active WPPConnect chat). Build a set of
         # phone JIDs that are already covered by a @lid entry so we can skip them.
-        lid_to_phone = getattr(self, "_lid_to_phone", {})
+        # Snapshot, not the live dict: this method runs on a background
+        # thread while _extract_lid_mapping() can be adding pairs on the
+        # Socket.IO one, and iterating the live dict raises "dictionary
+        # changed size during iteration". dict() copies in C under the GIL,
+        # so no lock is needed for a plain copy.
+        lid_to_phone = dict(getattr(self, "_lid_to_phone", {}))
         phone_to_lid = getattr(self, "_phone_to_lid", {})
         _covered_by_lid: set[str] = set()
         for lid_jid, phone_jid in lid_to_phone.items():
@@ -12861,7 +12928,12 @@ class MainWindow(wx.Frame):
         Both formats are handled here so the cache is populated regardless of
         which version of the API produced the stored messages.
         """
-        cache = getattr(self, "_lid_to_phone", {}).copy()
+        # The scan runs outside the lock: it is proportional to the total
+        # message count (unlike _extract_lid_mapping()'s per-message work),
+        # so holding the lock across it would stall the Socket.IO thread for
+        # seconds on a large account. It therefore builds its own dict and
+        # merges it in at the end — see below for why it must not replace.
+        cache = {}
         for chat in list(self.chats.values()):
             for msg in list(chat.get("messages", {}).get("messages", {}).get("records", [])):
                 key    = msg.get("key", {})
@@ -12888,8 +12960,19 @@ class MainWindow(wx.Frame):
                     # NEW format (post-swap): remoteJid=phone, remoteJidAlt=lid
                     cache[alt] = remote
 
-        self._lid_to_phone  = cache
-        self._phone_to_lid  = {v: k for k, v in cache.items()}
+        # Merge, never replace. A pair learned by _extract_lid_mapping() on
+        # the Socket.IO thread while the scan above was running exists only
+        # in the live dict — assigning the scan result over it would drop it,
+        # and since the pair is already saved in SQLite nothing would put it
+        # back until the next restart: that chat shows a raw @lid (or
+        # "Participante sem nome") for the rest of the session. The reverse
+        # map is rebuilt from the live dict, not from `cache`, for the same
+        # reason.
+        with self._lid_mapping_lock:
+            if not hasattr(self, "_lid_to_phone"):
+                self._lid_to_phone = {}
+            self._lid_to_phone.update(cache)
+            self._phone_to_lid  = {v: k for k, v in self._lid_to_phone.items()}
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
@@ -12924,17 +13007,6 @@ class MainWindow(wx.Frame):
         alt = key.get("remoteJidAlt", "")
         participant = key.get("participant", "")
 
-        # Invalidate the negative cache since a new message is added to this chat
-        if remote and hasattr(self, "_chats_without_alt_jid"):
-            self._chats_without_alt_jid.discard(remote)
-
-        # Cache pushName if present in the message
-        push_name = msg.get("pushName")
-        if push_name and remote and not remote.endswith("@g.us") and not is_phone_like(push_name):
-            if not hasattr(self, "_message_pushname_cache"):
-                self._message_pushname_cache = {}
-            self._message_pushname_cache[remote] = push_name
-
         # Guard against corrupt self-mappings: if any JID is ours, block cross-mapping with others
         if self._is_self_jid(remote) or self._is_self_jid(alt) or self._is_self_jid(participant):
             if alt and (self._is_self_jid(remote) != self._is_self_jid(alt)):
@@ -12950,56 +13022,82 @@ class MainWindow(wx.Frame):
         # LIDs did hundreds of synchronous writes on the wx main thread (this
         # runs off on_new_message, via wx.CallAfter) for one new pair.
         updated_pairs = []
-        # Initialize dictionary if not present
-        if not hasattr(self, "_lid_to_phone"):
-            self._lid_to_phone = {}
-        if not hasattr(self, "_phone_to_lid"):
-            self._phone_to_lid = {}
+        contacts_to_update = {}
 
-        if alt and alt.endswith("@s.whatsapp.net"):
-            if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
-                self._lid_to_phone[remote] = alt
-                self._phone_to_lid[alt] = remote
-                updated = True
-                updated_pairs.append((remote, alt))
-                logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
-        elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
-            if self._lid_to_phone.get(alt) != remote:
-                self._lid_to_phone[alt] = remote
-                self._phone_to_lid[remote] = alt
-                updated = True
-                updated_pairs.append((alt, remote))
-                logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
+        # Everything below that touches _lid_to_phone/_phone_to_lid/
+        # _message_pushname_cache/_chats_without_alt_jid is one critical
+        # section: this method runs unprotected on the Socket.IO callback
+        # thread (see the docstring above) while the wx main thread reaches
+        # the same dictionaries through on_new_message()'s own call into this
+        # method and through _build_lid_to_phone_cache()'s full rebuilds from
+        # the sync thread. Without a lock, two threads racing a
+        # check-then-set on the same key can lose one thread's update, and a
+        # concurrent discard()/rebuild during another thread's iteration can
+        # raise "set/dict changed size during iteration" outright.
+        with self._lid_mapping_lock:
+            # Invalidate the negative cache since a new message is added to this chat
+            if remote and hasattr(self, "_chats_without_alt_jid"):
+                self._chats_without_alt_jid.discard(remote)
 
-        # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
-        # ONLY if the message is NOT fromMe (if fromMe is True, participant is the user, and remote is the contact!)
-        if not key.get("fromMe", False):
-            if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
-                if self._lid_to_phone.get(remote) != participant:
-                    self._lid_to_phone[remote] = participant
-                    self._phone_to_lid[participant] = remote
+            # Cache pushName if present in the message
+            push_name = msg.get("pushName")
+            if push_name and remote and not remote.endswith("@g.us") and not is_phone_like(push_name):
+                if not hasattr(self, "_message_pushname_cache"):
+                    self._message_pushname_cache = {}
+                self._message_pushname_cache[remote] = push_name
+
+            # Initialize dictionary if not present
+            if not hasattr(self, "_lid_to_phone"):
+                self._lid_to_phone = {}
+            if not hasattr(self, "_phone_to_lid"):
+                self._phone_to_lid = {}
+
+            if alt and alt.endswith("@s.whatsapp.net"):
+                if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
+                    self._lid_to_phone[remote] = alt
+                    self._phone_to_lid[alt] = remote
                     updated = True
-                    updated_pairs.append((remote, participant))
-                    logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
-            elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
-                if self._lid_to_phone.get(participant) != remote:
-                    self._lid_to_phone[participant] = remote
-                    self._phone_to_lid[remote] = participant
+                    updated_pairs.append((remote, alt))
+                    logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
+            elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                if self._lid_to_phone.get(alt) != remote:
+                    self._lid_to_phone[alt] = remote
+                    self._phone_to_lid[remote] = alt
                     updated = True
-                    updated_pairs.append((participant, remote))
-                    logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
+                    updated_pairs.append((alt, remote))
+                    logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
+
+            # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
+            # ONLY if the message is NOT fromMe (if fromMe is True, participant is the user, and remote is the contact!)
+            if not key.get("fromMe", False):
+                if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
+                    if self._lid_to_phone.get(remote) != participant:
+                        self._lid_to_phone[remote] = participant
+                        self._phone_to_lid[participant] = remote
+                        updated = True
+                        updated_pairs.append((remote, participant))
+                        logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
+                elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
+                    if self._lid_to_phone.get(participant) != remote:
+                        self._lid_to_phone[participant] = remote
+                        self._phone_to_lid[remote] = participant
+                        updated = True
+                        updated_pairs.append((participant, remote))
+                        logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
+
+            if updated:
+                # Propagate contact details from phone contact to LID contact
+                # to make it immediately available — still under the lock
+                # since this iterates _lid_to_phone itself.
+                for lid, phone in list(self._lid_to_phone.items()):
+                    if phone in self.contacts and self.contacts[phone]:
+                        if lid not in self.contacts or self.contacts[lid].get("name") in (None, "", "Contato sem nome"):
+                            self.contacts[lid] = self.contacts[phone].copy()
+                            self.contacts[lid]["id"] = lid
+                            self.contacts[lid]["remoteJid"] = lid
+                            contacts_to_update[lid] = self.contacts[lid]
 
         if updated:
-            # Propagate contact details from phone contact to LID contact to make it immediately available
-            contacts_to_update = {}
-            for lid, phone in list(self._lid_to_phone.items()):
-                if phone in self.contacts and self.contacts[phone]:
-                    if lid not in self.contacts or self.contacts[lid].get("name") in (None, "", "Contato sem nome"):
-                        self.contacts[lid] = self.contacts[phone].copy()
-                        self.contacts[lid]["id"] = lid
-                        self.contacts[lid]["remoteJid"] = lid
-                        contacts_to_update[lid] = self.contacts[lid]
-
             # Save only the mapping(s) this call actually changed.
             try:
                 for lid, phone in updated_pairs:
@@ -16562,6 +16660,17 @@ class MainWindow(wx.Frame):
         went out as a plain send instead (see send_text_message's fallback) — the
         UI must then drop the reply contextInfo so the row stops reading as a reply.
         """
+        # The user deleted this message while it was still pending, but by then
+        # the worker had already taken it off the queue (message_queue.cancel()
+        # returned False, so it never even got the cancel flag) and the send went
+        # out anyway — its real ID only arrives here, after the row is gone.
+        # Marking a message the user just deleted as sent is not an option; the
+        # cancellation is completed instead.
+        if self._is_cancelled_send(local_id):
+            self._on_cancelled_message_delivered(
+                local_id, real_id, remote_jid, audio_path, quote_lost
+            )
+            return
         import time as _time
         logging.info("[VOICE_TIMING] _on_message_sent — message LEFT pending state. local_id=%s real_id=%s",
                      local_id, real_id)
@@ -16610,6 +16719,82 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_sent(local_id, real_id=real_id, quote_lost=quote_lost)
 
+    def _on_cancelled_message_delivered(self, local_id: str, real_id: str = None,
+                                        remote_jid: str = None, audio_path: str = None,
+                                        quote_lost: bool = False,
+                                        ambiguous: bool = False):
+        """Called on the main thread when a message the user cancelled turned out
+        to have reached WhatsApp anyway.
+
+        Cancelling an in-flight send is best-effort by nature: none of the send_*
+        calls can be interrupted once the request is on the wire, so the queue
+        can learn "delivered" for a message whose row the UI already removed.
+        Silently dropping it is the one outcome that is a lie — the message IS on
+        the recipient's phone. So the cancellation is completed the only way it
+        still can be, by revoking it for everyone, and if that revoke fails the
+        row comes back rather than the app claiming a deletion that never
+        happened (see ConversationsPanel.complete_cancelled_message_delivery()).
+        """
+        logging.warning(
+            "[_on_cancelled_message_delivered] local_id=%s real_id=%s jid=%s ambiguous=%s",
+            local_id, real_id, remote_jid, ambiguous,
+        )
+        # Same temporary WAV cleanup _on_message_sent() does — the recording's
+        # permanent copy is voice_messages/<local_id>.msv, which the panel
+        # renames or deletes depending on how the revoke goes.
+        self._discard_temp_recording(audio_path)
+        if not hasattr(self, "conversations_panel"):
+            # Nothing else can revoke it: the panel owns both the record this
+            # message is still held by and the API call. Loud, because it means
+            # a message the user cancelled stays on the recipient's phone.
+            logging.error(
+                "[_on_cancelled_message_delivered] no conversations panel — %s "
+                "(id=%s) stays delivered and unrevoked", local_id, real_id,
+            )
+            return
+        self.conversations_panel.complete_cancelled_message_delivery(
+            local_id, real_id, remote_jid, quote_lost, ambiguous
+        )
+
+    def _on_cancelled_message_dropped(self, local_id: str, audio_path: str = None):
+        """Called on the main thread when a cancelled message is confirmed to
+        have never reached WhatsApp.
+
+        The queue answers every message it had already claimed when the cancel
+        arrived (cancel() returned False), because the panel deliberately keeps
+        that message's record around as the anchor the WebSocket echo binds to.
+        This is what releases it when there will be no echo.
+        """
+        logging.info("[_on_cancelled_message_dropped] local_id=%s", local_id)
+        self._discard_temp_recording(audio_path)
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel.discard_cancelled_message(local_id)
+
+    def _is_cancelled_send(self, local_id: str) -> bool:
+        """True while a message the user deleted mid-send is still being resolved.
+
+        Every one of the queue's three ordinary outcome callbacks has to ask,
+        and each of them completes the cancellation instead of doing its usual
+        job. Two reasons, and the second is the one that bites: they report on a
+        row that is already gone (a send-failed dialog for an upload abandoned
+        on purpose, "envio não confirmado" spoken for a deleted message), and
+        they are the ONLY thing that still runs for a cancel that landed after
+        their own branch took the message off the queue — from that moment
+        cancel() answers False and the panel is holding this message's record,
+        waiting for a report that no worker will make.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        return panel is not None and panel._is_cancelled_pending(local_id)
+
+    @staticmethod
+    def _discard_temp_recording(audio_path: str):
+        """Delete the temporary WAV a voice recording was sent from."""
+        if audio_path and os.path.isfile(audio_path):
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
+
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
 
@@ -16621,6 +16806,14 @@ class MainWindow(wx.Frame):
         reads as sent, and that is exactly how a message that never left the
         browser passed for delivered.
         """
+        if self._is_cancelled_send(local_id):
+            # Deleted mid-send, and the outcome is unknown — which is neither
+            # "it never went out" (that is why this branch does not retry) nor
+            # "it did". ambiguous=True carries that third state through: the row
+            # goes back marked unconfirmed rather than sending, so it stops
+            # being a pending anchor the next message's echo would match first.
+            self._on_cancelled_message_delivered(local_id, ambiguous=True)
+            return
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_unconfirmed(local_id)
         if not self.background_mode:
@@ -16632,6 +16825,12 @@ class MainWindow(wx.Frame):
         Marks the virtual message as failed in the UI and, for media attachments,
         shows an error dialog so the user knows the file was not delivered.
         """
+        if self._is_cancelled_send(local_id):
+            # Deleted mid-send, and the send then definitively failed: no error
+            # dialog for an upload the user abandoned on purpose, and the record
+            # the panel is holding for the echo is released — no echo is coming.
+            self._on_cancelled_message_dropped(local_id)
+            return
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_failed(local_id)
         # _mark_message_failed() only updates the row inside the open
@@ -18494,6 +18693,19 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
+        self._sync_conversation_read_state(
+            remote_jid,
+            unread=False,
+            on_failure=lambda: wx.CallAfter(
+                self._restore_unread_after_send_seen_failure,
+                remote_jid,
+                unread,
+                int(chat.get("t", 0) or 0),
+            ),
+        )
+
+    def _sync_conversation_read_state(self, remote_jid: str, unread: bool, on_failure):
+        """Apply a read-state change remotely, trying the known JID aliases."""
         # Prefer @lid JID for WPPConnect if mapped
         target_phone = remote_jid
         if not target_phone.endswith("@lid"):
@@ -18509,7 +18721,11 @@ class MainWindow(wx.Frame):
         def _send_seen(phone: str, is_lid: bool) -> "requests.Response | None":
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-            payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
+            payload = {
+                "phone": phone,
+                "isGroup": phone.endswith("@g.us"),
+                "unread": unread,
+            }
             if is_lid:
                 payload["isLid"] = True
             return api_post(url, json=payload, headers=headers, timeout=10)
@@ -18544,11 +18760,18 @@ class MainWindow(wx.Frame):
                             )
                             continue
                         if resp.ok:
-                            success = True
-                            return
+                            try:
+                                results = resp.json().get("response", {}).get("data")
+                            except (AttributeError, TypeError, ValueError):
+                                results = None
+                            if isinstance(results, list) and results and all(
+                                result is True for result in results
+                            ):
+                                success = True
+                                return
                         logging.warning(
-                            "[mark_as_read] API response %s for %s (attempt %s): %s",
-                            resp.status_code, phone, attempt + 1, resp.text[:200],
+                            "[read_state] API response %s for %s (unread=%s, attempt %s): %s",
+                            resp.status_code, phone, unread, attempt + 1, resp.text[:200],
                         )
                     if attempt < 2:
                         time.sleep(attempt + 1)
@@ -18556,12 +18779,7 @@ class MainWindow(wx.Frame):
                 logging.exception("[mark_as_read] Unexpected send-seen failure")
             finally:
                 if not success:
-                    wx.CallAfter(
-                        self._restore_unread_after_send_seen_failure,
-                        remote_jid,
-                        unread,
-                        int(chat.get("t", 0) or 0),
-                    )
+                    on_failure()
         threading.Thread(target=_do_api, daemon=True).start()
 
     def _restore_unread_after_send_seen_failure(
@@ -18596,9 +18814,42 @@ class MainWindow(wx.Frame):
     def mark_conversation_as_unread(self, remote_jid: str):
         chat = self.chats.get(remote_jid)
         if chat is not None:
+            previous_unread = int(chat.get("unreadCount") or 0)
+            timestamp = int(chat.get("t", 0) or 0)
             chat["unreadCount"] = 1
-            self._schedule_save()
+            if hasattr(self, "_locally_read_at"):
+                self._locally_read_at.pop(remote_jid, None)
+                self._persist_locally_read_at()
+            if hasattr(self, "_new_since_read"):
+                self._new_since_read.pop(remote_jid, None)
+            self._schedule_save(dirty_jid=remote_jid)
             wx.CallAfter(self.set_chats)
+            self._sync_conversation_read_state(
+                remote_jid,
+                unread=True,
+                on_failure=lambda: wx.CallAfter(
+                    self._restore_unread_after_mark_unread_failure,
+                    remote_jid,
+                    previous_unread,
+                    timestamp,
+                ),
+            )
+
+    def _restore_unread_after_mark_unread_failure(
+        self, remote_jid: str, previous_unread: int, timestamp: int
+    ):
+        """Undo an optimistic mark-unread if no newer state replaced it."""
+        chat = self.chats.get(remote_jid)
+        if (
+            chat is None
+            or int(chat.get("t", 0) or 0) != timestamp
+            or int(chat.get("unreadCount") or 0) != 1
+        ):
+            return
+        chat["unreadCount"] = max(0, previous_unread)
+        self._schedule_save(dirty_jid=remote_jid)
+        self._refresh_chat_row_in_list(remote_jid)
+        self._schedule_set_chats()
 
     # ── WPPConnect — profile / group info ─────────────────────────────────
     
@@ -18653,52 +18904,87 @@ class MainWindow(wx.Frame):
                             self.db.set_metadata("my_lid", normalized_lid)
 
                         # Clean up any bad mappings where normalized_phone or normalized_lid were mapped to other contacts
-                        if hasattr(self, "_lid_to_phone"):
-                            # 1. If another LID was mapped to our phone, delete it (from memory and DB)
-                            bad_lids = [k for k, v in self._lid_to_phone.items() if v == normalized_phone and k != normalized_lid]
-                            for bad_lid in bad_lids:
-                                self._lid_to_phone.pop(bad_lid, None)
-                                self._phone_to_lid.pop(normalized_phone, None)
-                                try:
-                                    self.db.delete_lid_mapping(bad_lid)
-                                except Exception as _e:
-                                    pass
-                                logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: {bad_lid} was mapped to our phone {normalized_phone}")
+                        #
+                        # All four passes are one critical section, and the
+                        # two comprehensions are the reason: they iterate the
+                        # live dicts, which _extract_lid_mapping() writes to
+                        # from the Socket.IO thread. A message arriving
+                        # mid-comprehension raised "dictionary changed size
+                        # during iteration", the except below swallowed it,
+                        # and register_jid_mapping() at the end never ran —
+                        # the user's own LID<->phone pair went unregistered
+                        # for the whole session and their group messages
+                        # showed up without a name.
+                        #
+                        # The DB deletions are collected and executed after
+                        # the lock is released: DatabaseBridge blocks this
+                        # thread until the coroutine returns, and holding the
+                        # mapping lock across that would freeze the Socket.IO
+                        # thread with it.
+                        stale_mappings = []
+                        with self._lid_mapping_lock:
+                            if hasattr(self, "_lid_to_phone"):
+                                # 1. If another LID was mapped to our phone, delete it (from memory and DB)
+                                bad_lids = [k for k, v in self._lid_to_phone.items() if v == normalized_phone and k != normalized_lid]
+                                for bad_lid in bad_lids:
+                                    self._lid_to_phone.pop(bad_lid, None)
+                                    self._phone_to_lid.pop(normalized_phone, None)
+                                    stale_mappings.append(bad_lid)
+                                    logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: {bad_lid} was mapped to our phone {normalized_phone}")
 
-                            # 2. If our LID JID was mapped to another phone number, delete it
-                            old_phone = self._lid_to_phone.get(normalized_lid)
-                            if old_phone and old_phone != normalized_phone:
-                                self._lid_to_phone.pop(normalized_lid, None)
-                                self._phone_to_lid.pop(old_phone, None)
-                                try:
-                                    self.db.delete_lid_mapping(normalized_lid)
-                                except Exception as _e:
-                                    pass
-                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
-                            
-                            # 3. If another phone JID was mapped to our LID, delete it
-                            bad_phones = [k for k, v in self._phone_to_lid.items() if v == normalized_lid and k != normalized_phone]
-                            for bad_phone in bad_phones:
-                                self._phone_to_lid.pop(bad_phone, None)
-                                self._lid_to_phone.pop(normalized_lid, None)
-                                try:
-                                    self.db.delete_lid_mapping(normalized_lid)
-                                except Exception as _e:
-                                    pass
-                                logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: our LID {normalized_lid} was mapped to another phone {bad_phone}")
+                                # 2. If our LID JID was mapped to another phone number, delete it
+                                old_phone = self._lid_to_phone.get(normalized_lid)
+                                if old_phone and old_phone != normalized_phone:
+                                    self._lid_to_phone.pop(normalized_lid, None)
+                                    self._phone_to_lid.pop(old_phone, None)
+                                    stale_mappings.append(normalized_lid)
+                                    logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
 
-                            # 4. If our phone JID was mapped to another LID, delete it
-                            old_lid = self._phone_to_lid.get(normalized_phone)
-                            if old_lid and old_lid != normalized_lid:
-                                self._phone_to_lid.pop(old_lid, None)
-                                self._lid_to_phone.pop(old_lid, None)
-                                try:
-                                    self.db.delete_lid_mapping(old_lid)
-                                except Exception as _e:
-                                    pass
-                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_phone} was mapped to {old_lid}")
+                                # 3. If another phone JID was mapped to our LID, delete it
+                                bad_phones = [k for k, v in self._phone_to_lid.items() if v == normalized_lid and k != normalized_phone]
+                                for bad_phone in bad_phones:
+                                    self._phone_to_lid.pop(bad_phone, None)
+                                    self._lid_to_phone.pop(normalized_lid, None)
+                                    stale_mappings.append(normalized_lid)
+                                    logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: our LID {normalized_lid} was mapped to another phone {bad_phone}")
+
+                                # 4. If our phone JID was mapped to another LID, delete it
+                                old_lid = self._phone_to_lid.get(normalized_phone)
+                                if old_lid and old_lid != normalized_lid:
+                                    self._phone_to_lid.pop(old_lid, None)
+                                    self._lid_to_phone.pop(old_lid, None)
+                                    stale_mappings.append(old_lid)
+                                    logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_phone} was mapped to {old_lid}")
+
+                        # dict.fromkeys: passes 2 and 3 can both queue
+                        # normalized_lid, and every delete here is a blocking
+                        # DatabaseBridge round-trip — no point paying for it twice.
+                        for stale_lid in dict.fromkeys(stale_mappings):
+                            try:
+                                self.db.delete_lid_mapping(stale_lid)
+                            except Exception as _e:
+                                pass
 
                         self.register_jid_mapping(normalized_lid, normalized_phone)
+                        # ...and persist it unconditionally, which
+                        # register_jid_mapping() does not: it only writes to
+                        # SQLite when the in-memory pair actually changed.
+                        # Between releasing the lock above and finishing the
+                        # deletes, the Socket.IO thread can have learned this
+                        # very pair from an echo of one of our own messages
+                        # and written both memory and DB; the delete loop then
+                        # removes that just-written row, and
+                        # register_jid_mapping() sees nothing changed and
+                        # skips the rewrite — leaving the pair in memory but
+                        # not on disk. Harmless for the session (the display
+                        # is right) and self-healing on the next launch at the
+                        # cost of one pn-lid round-trip, but set_lid_mapping()
+                        # is an INSERT OR REPLACE, so writing every time is
+                        # cheaper than the divergence.
+                        try:
+                            self.db.set_lid_mapping(normalized_lid, normalized_phone)
+                        except Exception:
+                            pass
                         logging.info(f"[Self LID Resolution] Successfully resolved and registered own JID mapping: {normalized_lid} <-> {normalized_phone}")
             except Exception as e:
                 logging.error(f"[Self LID Resolution] Error resolving self LID: {e}")
@@ -18738,28 +19024,40 @@ class MainWindow(wx.Frame):
                 logging.warning(f"[LID Mapping] Blocked corrupt self-mapping attempt: {lid_jid} <-> {phone_jid}")
                 return
             
-        if not hasattr(self, "_lid_to_phone"):
-            self._lid_to_phone = {}
-        if not hasattr(self, "_phone_to_lid"):
-            self._phone_to_lid = {}
-            
-        current_phone = self._lid_to_phone.get(lid_jid)
-        if current_phone != phone_jid:
-            self._lid_to_phone[lid_jid] = phone_jid
-            self._phone_to_lid[phone_jid] = lid_jid
-            logging.info(f"[LID Mapping] Registered JID mapping: {lid_jid} <-> {phone_jid}")
-            
-            # If it was in the unresolvable set, remove it
-            if hasattr(self, "_unresolvable_lids") and lid_jid in self._unresolvable_lids:
-                self._unresolvable_lids.discard(lid_jid)
-            
-            # Update the contact name display mappings in contacts if possible
-            if phone_jid in self.contacts and self.contacts[phone_jid]:
-                if lid_jid not in self.contacts or self.contacts[lid_jid].get("name") in (None, "", "Contato sem nome"):
-                    self.contacts[lid_jid] = self.contacts[phone_jid].copy()
-                    self.contacts[lid_jid]["id"] = lid_jid
-                    self.contacts[lid_jid]["remoteJid"] = lid_jid
-            
+        # This is the mapping writer the sync thread actually uses
+        # (_backfill_names -> resolve_lid_jids_via_api -> here), racing
+        # _extract_lid_mapping() on the Socket.IO thread over the very same
+        # check-then-set. Only the in-memory update belongs in the critical
+        # section: the DB write and the UI refresh below stay outside it,
+        # because self.db blocks this thread until the coroutine returns —
+        # exactly what must not happen while the Socket.IO thread is waiting
+        # for the lock.
+        changed = False
+        with self._lid_mapping_lock:
+            if not hasattr(self, "_lid_to_phone"):
+                self._lid_to_phone = {}
+            if not hasattr(self, "_phone_to_lid"):
+                self._phone_to_lid = {}
+
+            current_phone = self._lid_to_phone.get(lid_jid)
+            if current_phone != phone_jid:
+                changed = True
+                self._lid_to_phone[lid_jid] = phone_jid
+                self._phone_to_lid[phone_jid] = lid_jid
+                logging.info(f"[LID Mapping] Registered JID mapping: {lid_jid} <-> {phone_jid}")
+
+                # If it was in the unresolvable set, remove it
+                if hasattr(self, "_unresolvable_lids") and lid_jid in self._unresolvable_lids:
+                    self._unresolvable_lids.discard(lid_jid)
+
+                # Update the contact name display mappings in contacts if possible
+                if phone_jid in self.contacts and self.contacts[phone_jid]:
+                    if lid_jid not in self.contacts or self.contacts[lid_jid].get("name") in (None, "", "Contato sem nome"):
+                        self.contacts[lid_jid] = self.contacts[phone_jid].copy()
+                        self.contacts[lid_jid]["id"] = lid_jid
+                        self.contacts[lid_jid]["remoteJid"] = lid_jid
+
+        if changed:
             if save:
                 # Save the mapping to SQLite incrementally
                 try:
@@ -19061,13 +19359,19 @@ class MainWindow(wx.Frame):
                     canonical_jid = self._normalize_jid(res_data.get("id", {}).get("_serialized") or res_data.get("id") or "")
                     if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                         logging.info(f"[get_contact_profile] SUCCESS: Mapped {original_jid} to {canonical_jid} via profile query")
-                        if not hasattr(self, "_lid_to_phone"):
-                            self._lid_to_phone = {}
-                        if not hasattr(self, "_phone_to_lid"):
-                            self._phone_to_lid = {}
-                        self._lid_to_phone[original_jid] = canonical_jid
-                        self._phone_to_lid[canonical_jid] = original_jid
-                        
+                        # This method runs on a background thread (see the
+                        # docstring), so the write shares the mapping lock
+                        # with the Socket.IO thread's own. The refresh and
+                        # the DB write below stay outside it — no blocking
+                        # call may run while holding this lock.
+                        with self._lid_mapping_lock:
+                            if not hasattr(self, "_lid_to_phone"):
+                                self._lid_to_phone = {}
+                            if not hasattr(self, "_phone_to_lid"):
+                                self._phone_to_lid = {}
+                            self._lid_to_phone[original_jid] = canonical_jid
+                            self._phone_to_lid[canonical_jid] = original_jid
+
                         # Trigger UI refresh and save mapped JIDs
                         wx.CallAfter(self._schedule_set_chats)
                         try:
@@ -19210,7 +19514,10 @@ class MainWindow(wx.Frame):
                 res_data = r.json() or {}
                 response = res_data.get("response") or {}
                 logging.info(f"[get_group_info] response type={type(response).__name__} keys={list(response.keys()) if isinstance(response, dict) else response}")
-                return response if isinstance(response, dict) else {}
+                if isinstance(response, dict):
+                    self._reconcile_group_info_name(jid, response)
+                    return response
+                return {}
         except Exception as e:
             logging.error(f"[get_group_info] error: {e}")
         return {}
@@ -19355,23 +19662,35 @@ class MainWindow(wx.Frame):
 
     # ── Mute ──────────────────────────────────────────────────────────────────
 
+    def _mute_state_jids(self, jid: str) -> set[str]:
+        """Return the canonical chat JID and any known phone/LID alias."""
+        normalized = self._normalize_jid(jid)
+        jids = {normalized}
+        if normalized.endswith("@lid"):
+            alternate = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+        else:
+            alternate = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+        if alternate:
+            jids.add(self._normalize_jid(alternate))
+        return jids
+
     def is_chat_muted(self, jid: str) -> bool:
-        expiry = self._muted_chats.get(jid)
-        if expiry is None:
-            return False
-        if expiry == -1:
-            return True  # permanent
-        return time.time() < expiry
+        for mute_jid in self._mute_state_jids(jid):
+            expiry = self._muted_chats.get(mute_jid)
+            if expiry == -1 or (expiry is not None and time.time() < expiry):
+                return True
+        return False
 
     def _apply_mute_state(self, jid: str, expiry):
         """Local-only half of mute/unmute: mutate _muted_chats, persist to
         DB metadata, and refresh the chat list. Split out from
         mute_chat()/unmute_chat() so _sync_mute_to_server() can call this
         again to roll back the optimistic change if WhatsApp rejects it."""
-        if expiry is None:
-            self._muted_chats.pop(jid, None)
-        else:
-            self._muted_chats[jid] = expiry
+        for mute_jid in self._mute_state_jids(jid):
+            if expiry is None:
+                self._muted_chats.pop(mute_jid, None)
+            else:
+                self._muted_chats[mute_jid] = expiry
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("muted_chats", self._muted_chats)
         self._schedule_set_chats()
@@ -19424,9 +19743,18 @@ class MainWindow(wx.Frame):
                     return api_post(url, json=payload, headers=headers, timeout=10)
 
                 def _accepted(resp) -> bool:
-                    return mute_response_accepted(
+                    accepted = mute_response_accepted(
                         bool(resp.ok), resp.text, duration_secs == 0
                     )
+                    if not accepted or not resp.ok:
+                        return accepted
+                    try:
+                        result = resp.json().get("response", {})
+                    except (AttributeError, TypeError, ValueError):
+                        return accepted
+                    if isinstance(result, dict) and "isMuted" in result:
+                        return bool(result["isMuted"]) is (duration_secs != 0)
+                    return accepted
 
                 # Prefer the @lid form when one is known — same preference
                 # delete_message_for_everyone()/forward_message() already
@@ -20975,6 +21303,14 @@ class MainWindow(wx.Frame):
         # records — so it "fixed itself" there for an unrelated reason, not
         # because this case was actually handled).
         if m.get("_send_failed"):
+            return False
+        # Same reasoning for a message the user deleted while it was still
+        # sending: its record is kept for a moment longer only so the WebSocket
+        # echo has something of the right type to bind to (see
+        # ConversationsPanel._cancel_pending_message()). The row is already gone
+        # from the conversation, so showing it as the chat's last message would
+        # put a message the user just deleted back in the list.
+        if m.get("_cancelled_awaiting_id"):
             return False
         m_type = m.get("messageType", "")
         if m_type not in cls._PREVIEW_MESSAGE_TYPES:

@@ -27,18 +27,32 @@ import threading
 import pytest
 
 from main import MainWindow
+from core.websocket_client import WebSocketClient
 
 
 class _MainWindowStub:
     _apply_group_subject_change = MainWindow._apply_group_subject_change
     _resolve_subject_change_async = MainWindow._resolve_subject_change_async
     _store_group_subject = MainWindow._store_group_subject
+    on_group_subject_updated = MainWindow.on_group_subject_updated
+    _reconcile_group_info_name = MainWindow._reconcile_group_info_name
+    # The real gate, not a stand-in: on_group_subject_updated is a live-event
+    # funnel and the tests below assert it drops events the same way
+    # on_new_message does.  See tests/test_live_event_gate.py for the gate itself.
+    _live_events_ready = MainWindow._live_events_ready
 
-    def __init__(self, group_info_name=""):
+    def __init__(self, group_info_name="", live_events_ready=True):
         self._group_info_name = group_info_name
         self.group_info_calls = []
         self.saved = []
         self.set_chats_calls = 0
+        self.chats = {}
+        # Default to "sync has started" so the tests that are about renaming
+        # don't all have to spell the gate's preconditions out.
+        self._ui_ready_event = threading.Event()
+        if live_events_ready:
+            self._ui_ready_event.set()
+        self._sync_ever_started = live_events_ready
 
     # Collaborators the methods under test reach for.
     def _fill_group_name(self, jid):
@@ -204,3 +218,136 @@ class TestNotificationWithoutTheNewName:
 
         assert mw.group_info_calls == []
         assert chat["name"] == "Grupo Novo"
+
+
+def test_groups_update_renames_and_persists_the_known_group():
+    mw = _MainWindowStub()
+    chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+    mw.chats["123@g.us"] = chat
+
+    mw.on_group_subject_updated("123@g.us", "Grupo Novo")
+
+    assert chat["name"] == "Grupo Novo"
+    assert mw.saved == ["123@g.us"]
+    assert mw.set_chats_calls == 1
+
+
+class TestTheRenameFunnelIsGatedLikeTheOtherTwo:
+    """on_group_subject_updated mutates self.chats and persists, so it needs
+    _live_events_ready() exactly like on_new_message/on_historical_message.
+
+    It went ungated for as long as nothing emitted 'groups.update' — the method
+    was documented as never firing.  Once createSessionUtil.ts began emitting
+    the event for gp2/subject notifications, a rename delivered over a reused
+    pairing socket could land before the sync that fetches the authoritative
+    name, renaming and persisting a chat that still held only its on-disk state.
+    """
+
+    def test_a_rename_arriving_before_any_sync_started_is_dropped(self):
+        mw = _MainWindowStub(live_events_ready=False)
+        chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+        mw.chats["123@g.us"] = chat
+
+        mw.on_group_subject_updated("123@g.us", "Grupo Novo")
+
+        assert chat["name"] == "Grupo Antigo"
+        assert mw.saved == []
+        assert mw.set_chats_calls == 0
+
+    def test_a_rename_arriving_before_the_ui_exists_is_dropped(self):
+        mw = _MainWindowStub()
+        mw._ui_ready_event.clear()
+        chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+        mw.chats["123@g.us"] = chat
+
+        mw.on_group_subject_updated("123@g.us", "Grupo Novo")
+
+        assert chat["name"] == "Grupo Antigo"
+        assert mw.saved == []
+        assert mw.set_chats_calls == 0
+
+    def test_the_gate_is_checked_before_self_chats_is_touched(self):
+        """The crash guard half: a socket reused from pairing can deliver this
+        before prepare_sync() has built self.chats at all, and `remote_jid not
+        in self.chats` would raise AttributeError rather than drop the event."""
+        mw = _MainWindowStub(live_events_ready=False)
+        del mw.chats
+
+        mw.on_group_subject_updated("123@g.us", "Grupo Novo")  # must not raise
+
+    def test_a_rename_once_the_sync_is_under_way_still_applies(self):
+        """The gate must not close the case it was never about."""
+        mw = _MainWindowStub()
+        chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+        mw.chats["123@g.us"] = chat
+
+        mw.on_group_subject_updated("123@g.us", "Grupo Novo")
+
+        assert chat["name"] == "Grupo Novo"
+        assert mw.saved == ["123@g.us"]
+
+
+def test_group_info_name_is_fed_back_into_the_conversation_list(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module.wx, "CallAfter", lambda fn, *args: fn(*args))
+    mw = _MainWindowStub()
+    chat = {"remoteJid": "123@g.us", "name": "Grupo Antigo"}
+    mw.chats["123@g.us"] = chat
+
+    mw._reconcile_group_info_name(
+        "123@g.us", {"subject": "Grupo Novo", "name": "Grupo Antigo"}
+    )
+
+    assert chat["name"] == "Grupo Novo"
+    assert mw._group_name_cache["123@g.us"] == "Grupo Novo"
+    assert mw.saved == ["123@g.us"]
+    assert mw.set_chats_calls == 1
+
+
+class _GroupUpdateMain:
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+
+    def __init__(self):
+        self.updates = []
+
+    def on_group_subject_updated(self, jid, subject):
+        self.updates.append((jid, subject))
+
+
+class _WebSocketStub:
+    on_groups_update = WebSocketClient.on_groups_update
+    _belongs_to_this_session = WebSocketClient._belongs_to_this_session
+    _clean_jid = WebSocketClient._clean_jid
+
+    def __init__(self):
+        self.instance_name = "session"
+        self.main_window = _GroupUpdateMain()
+
+
+def test_groups_update_accepts_wid_ids_and_trims_the_subject(monkeypatch):
+    import core.websocket_client as websocket_module
+
+    monkeypatch.setattr(websocket_module.wx, "CallAfter", lambda fn, *args: fn(*args))
+    ws = _WebSocketStub()
+
+    ws.on_groups_update({
+        "session": "session",
+        "data": [{
+            "id": {"_serialized": "123@g.us"},
+            "subject": "  Grupo Novo  ",
+        }],
+    })
+
+    assert ws.main_window.updates == [("123@g.us", "Grupo Novo")]
+
+
+def test_node_emits_group_updates_from_subject_notifications():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "client/api_patches/src/util/createSessionUtil.ts"
+    ).read_text(encoding="utf-8")
+
+    assert "message.type === 'gp2' && message.subtype === 'subject'" in source
+    assert "req.io.emit('groups.update'" in source
+    assert "await client.getChatById(groupId)" in source
