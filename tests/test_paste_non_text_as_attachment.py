@@ -17,7 +17,7 @@ _SENTINEL = object()
 
 class _Stub:
     _paste_clipboard_as_attachment = ConversationsPanel._paste_clipboard_as_attachment
-    _EXT_TYPE_MAP = ConversationsPanel._EXT_TYPE_MAP
+    _paste_from_messages_list = ConversationsPanel._paste_from_messages_list
 
     def __init__(self, conversation=_SENTINEL):
         self.conversation = (
@@ -25,10 +25,67 @@ class _Stub:
         )
         self._staged_attachments = []
         self.panel_shown_calls = 0
+        self.message_field = _FakeMessageField()
 
     def _show_attachment_panel(self):
         self.panel_shown_calls += 1
 
+
+
+
+class _FakeMessageField:
+    def __init__(self):
+        self.value = ""
+        self.focused = False
+
+    def SetFocus(self):
+        self.focused = True
+
+    def WriteText(self, text):
+        self.value += text
+
+
+class _FakeMessagesList:
+    def GetFocusedItem(self):
+        return 0
+
+    def GetItemCount(self):
+        return 1
+
+
+class _FakeMainWindow:
+    settings = {}
+
+
+class _FakeKeyEvent:
+    def __init__(self, key, ctrl=False, shift=False):
+        self._key = key
+        self._ctrl = ctrl
+        self._shift = shift
+        self.skipped = False
+
+    def GetKeyCode(self):
+        return self._key
+
+    def ControlDown(self):
+        return self._ctrl
+
+    def ShiftDown(self):
+        return self._shift
+
+    def Skip(self):
+        self.skipped = True
+
+
+class _MessagesListPasteStub(_Stub):
+    _on_messages_list_key_down = ConversationsPanel._on_messages_list_key_down
+
+    def __init__(self):
+        super().__init__()
+        self.messages_list = _FakeMessagesList()
+        self.main_window = _FakeMainWindow()
+        self._is_loading_more = False
+        self._messages_offset = 0
 
 def _set_clipboard_files(paths):
     if not wx.TheClipboard.Open():
@@ -66,6 +123,9 @@ def _set_clipboard_text(text):
     finally:
         wx.TheClipboard.Close()
     return True
+
+
+
 
 
 class TestPasteFiles:
@@ -148,3 +208,34 @@ class TestPasteTextIsUnaffected:
         assert handled is False
         assert stub._staged_attachments == []
         assert stub.panel_shown_calls == 0
+
+
+class TestPasteFromMessagesList:
+    def test_ctrl_v_text_moves_focus_to_composer_and_pastes(self, wx_app):
+        if not _set_clipboard_text("texto\u2029colado"):
+            pytest.skip("clipboard unavailable")
+
+        stub = _MessagesListPasteStub()
+        event = _FakeKeyEvent(ord("V"), ctrl=True)
+        stub._on_messages_list_key_down(event)
+
+        assert stub.message_field.focused is True
+        assert stub.message_field.value == "texto\ncolado"
+        assert event.skipped is False
+
+    def test_ctrl_v_copied_file_uses_attachment_not_text_path(self, wx_app, tmp_path):
+        file_path = tmp_path / "arquivo.pdf"
+        file_path.write_bytes(b"%PDF")
+        if not _set_clipboard_files([str(file_path)]):
+            pytest.skip("clipboard unavailable")
+
+        stub = _MessagesListPasteStub()
+        event = _FakeKeyEvent(ord("V"), ctrl=True)
+        stub._on_messages_list_key_down(event)
+
+        assert stub.panel_shown_calls == 1
+        assert stub._staged_attachments == [
+            {"path": str(file_path), "media_type": "document"}
+        ]
+        assert stub.message_field.value == ""
+        assert event.skipped is False
