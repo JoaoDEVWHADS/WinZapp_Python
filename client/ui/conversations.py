@@ -1442,7 +1442,7 @@ class ConversationsPanel(wx.Panel):
             self._add_attachment_btn.Enable()
             self._emoji_btn.Enable()
 
-    def refresh_composer_permissions(self, jid: str):
+    def refresh_composer_permissions(self, jid: str, transition: bool = True):
         """Re-apply the composer's writable/read-only state to the open
         conversation, after its group permissions changed under it.
 
@@ -1459,6 +1459,13 @@ class ConversationsPanel(wx.Panel):
         The transition is spoken because it is the accessibility-critical
         half of the bug: a message field that silently stops accepting text,
         with no announcement, is exactly the failure that was reported.
+
+        *transition* is what the announcement is worded from. The composer
+        also goes read-only the very first time a verdict lands for a group
+        that has been announcement-only for months — nothing changed there
+        except what WinZapp knows, so callers pass False and the wording drops
+        the "now". Only MainWindow can tell the two apart (it holds the
+        previous verdict), hence the argument rather than state kept here.
         """
         if not self.conversation or self.conversation.get("remoteJid") != jid:
             return
@@ -1474,9 +1481,9 @@ class ConversationsPanel(wx.Panel):
         )
         self.conversation_panel.Layout()
         if was_editable and not self.message_field.IsEditable():
-            self.main_window.output(
-                self.main_window.i18n.t("group_send_restricted_now")
-            )
+            self.main_window.output(self.main_window.i18n.t(
+                "group_send_restricted_now" if transition else "group_send_restricted"
+            ))
 
     def update_conversation_name(self, jid: str, new_name: str):
         """Apply a group rename to the conversation currently on screen.

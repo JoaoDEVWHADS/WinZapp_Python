@@ -12,6 +12,12 @@ group switched to announcement-only while the user sat in it kept a writable
 message field, with nothing spoken. refresh_composer_permissions() is the
 re-entry point for that, and its tests live here too.
 
+What it says when it does is a third defect pinned here: it announced "Agora
+somente admins podem enviar mensagens neste grupo" for every writable →
+read-only move, including the first time a verdict ever landed for a group
+that had been announcement-only for months. Nothing had changed there except
+what WinZapp knew, so "agora" was simply false.
+
 ConversationsPanel is a wx.Panel and cannot be instantiated without a running
 wx.App, so the method under test is bound to a small stub carrying only the
 widgets it touches — same approach as tests/test_conversation_name_update.py.
@@ -185,6 +191,17 @@ class TestLiveReapply:
         panel.main_window._restricted.add(_GROUP)
         panel.refresh_composer_permissions(_GROUP)
         assert panel.main_window.spoken == ["group_send_restricted_now"]
+
+    def test_a_first_ever_verdict_is_announced_without_saying_now(self):
+        # get_remote_chats() passes transition=False when it had no previous
+        # verdict for the group: the composer was writable only because
+        # nothing had answered yet, so the group did not just become
+        # announcement-only — it may have been for months.
+        panel = self._open_panel()
+        panel.main_window._restricted.add(_GROUP)
+        panel.refresh_composer_permissions(_GROUP, False)
+        assert panel.message_field.editable is False
+        assert panel.main_window.spoken == ["group_send_restricted"]
 
     def test_a_refresh_that_changes_nothing_says_nothing(self):
         panel = self._open_panel(restricted=[_GROUP])

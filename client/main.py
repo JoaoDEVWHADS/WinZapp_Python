@@ -847,6 +847,63 @@ def participant_digits(jid) -> str:
     return jid.rsplit("@", 1)[0].split(":")[0]
 
 
+def group_participant_is_me(participant, my_phone_digits, my_lid_digits,
+                            digits_equivalent) -> bool:
+    """True when this entry of a group's participants list is the current user.
+
+    Split out of group_participant_admin_flag() only because
+    set_group_participant_admin() has to find exactly the same entry in order
+    to rewrite it, and a second copy of the match would be one copy too many
+    already — ui/dialogs/conversation_data_dialog.py's _participant_is_me() is
+    the other, and it exists because it works on a bare JID rather than on a
+    participant dict.
+    """
+    if not isinstance(participant, dict):
+        return False
+    p_id = participant.get("id") or ""
+    if isinstance(p_id, dict):
+        p_id = p_id.get("_serialized", "")
+    p_digits = participant_digits(p_id)
+    if not p_digits:
+        return False
+    if my_phone_digits and digits_equivalent(p_digits, my_phone_digits):
+        return True
+    # @lid digits are an opaque device identifier, not a phone number, so no
+    # 8/9-digit tolerance applies to them.
+    return bool(my_lid_digits and p_digits == my_lid_digits)
+
+
+def set_group_participant_admin(participants, is_admin, my_phone_digits,
+                                my_lid_digits, digits_equivalent) -> bool:
+    """Write *is_admin* onto the current user's own entry of a live
+    *participants* list, returning whether that entry was found.
+
+    A promote/demote notification carries no participants of its own, so the
+    list sitting in self.chats still says whatever the last list-chats
+    snapshot said. group_send_permission_from_metadata() prefers a live
+    participants list over the persisted verdict — rightly, it is normally
+    the fresher of the two — so leaving the stale entry alone would let it
+    overrule the verdict the promotion just corrected, and the composer would
+    stay read-only exactly as it did before this was handled at all.
+
+    All three flags are written rather than just `admin`, because the reader
+    ORs admin/isAdmin/isSuperAdmin: clearing one of them on a demotion would
+    leave the user still reading as an admin through the other two.
+    """
+    if not isinstance(participants, list):
+        return False
+    for p in participants:
+        if not group_participant_is_me(p, my_phone_digits, my_lid_digits,
+                                       digits_equivalent):
+            continue
+        p["admin"] = "admin" if is_admin else None
+        p["isAdmin"] = is_admin
+        if not is_admin:
+            p["isSuperAdmin"] = False
+        return True
+    return False
+
+
 def group_participant_admin_flag(participants, my_phone_digits, my_lid_digits,
                                  digits_equivalent) -> "bool | None":
     """Whether the current user is an admin of the group whose *participants*
@@ -868,21 +925,8 @@ def group_participant_admin_flag(participants, my_phone_digits, my_lid_digits,
     if not isinstance(participants, list) or not participants:
         return None
     for p in participants:
-        if not isinstance(p, dict):
-            continue
-        p_id = p.get("id") or ""
-        if isinstance(p_id, dict):
-            p_id = p_id.get("_serialized", "")
-        p_digits = participant_digits(p_id)
-        if not p_digits:
-            continue
-        is_me = (
-            (my_phone_digits and digits_equivalent(p_digits, my_phone_digits))
-            # @lid digits are an opaque device identifier, not a phone number,
-            # so no 8/9-digit tolerance applies to them.
-            or (my_lid_digits and p_digits == my_lid_digits)
-        )
-        if is_me:
+        if group_participant_is_me(p, my_phone_digits, my_lid_digits,
+                                   digits_equivalent):
             return bool(p.get("admin") or p.get("isAdmin") or p.get("isSuperAdmin"))
     return None
 
@@ -924,6 +968,36 @@ def group_send_permission_from_metadata(chat, my_phone_digits, my_lid_digits,
     if announce and am_admin is None:
         return None
     return {"announce": announce, "am_admin": bool(am_admin)}
+
+
+def unexpired_group_send_verdict(stored, now, max_age_seconds):
+    """The persisted send-permission verdict *stored*, or None when it is
+    missing, malformed, or too old to still be trusted.
+
+    Nothing re-validates a stored verdict by itself. Its admin half can only
+    be refreshed by a list-chats snapshot that happens to carry
+    groupMetadata.participants — list-chats is called with
+    `ignoreGroupMetadata`, so WhatsApp Web supplies those only when it already
+    has them cached — or by a promote/demote notification naming a target we
+    can match. A member promoted to admin in an announcement group while
+    neither happens keeps ``{"announce": True, "am_admin": False}`` forever:
+    persisted, surviving restarts, composer read-only, screen reader
+    announcing "only admins can send" in a group the user *can* post in. That
+    is a lockout, the one direction this whole area is built never to fail
+    in, so an aged verdict goes back to being no answer at all.
+
+    A record with no usable "t" is treated as expired for the same reason
+    unresolvable_lids does: an entry of unknown age is better re-derived than
+    trusted.
+    """
+    if not isinstance(stored, dict):
+        return None
+    t = stored.get("t")
+    if isinstance(t, bool) or not isinstance(t, (int, float)) or t <= 0:
+        return None
+    if now - t > max_age_seconds:
+        return None
+    return stored
 
 
 class MainWindow(wx.Frame):
@@ -11836,7 +11910,14 @@ class MainWindow(wx.Frame):
                         continue
                     groups_with_verdict += 1
                     if (previous.get("announce") == current["announce"]
-                            and previous.get("am_admin") == current["am_admin"]):
+                            and previous.get("am_admin") == current["am_admin"]
+                            # A re-confirmed verdict whose freshness stamp was
+                            # rewritten (the stored one had expired) still has
+                            # to reach the DB: skipping the write here would
+                            # leave the persisted copy expired for good, and
+                            # every restart would fail open on a group whose
+                            # answer never changes.
+                            and previous.get("t") == current.get("t")):
                         continue
                     perms_changed = True
                     was_restricted = (bool(previous.get("announce"))
@@ -11854,7 +11935,15 @@ class MainWindow(wx.Frame):
                     if now_restricted != was_restricted:
                         cp = getattr(self, "conversations_panel", None)
                         if cp is not None:
-                            wx.CallAfter(cp.refresh_composer_permissions, jid)
+                            # An empty `previous` means this is the first
+                            # verdict ever seen for the group, not a change to
+                            # one: the composer was writable only because
+                            # there was no answer yet, so the spoken
+                            # announcement must not say the group has *just*
+                            # become announcement-only — it may have been for
+                            # months.
+                            wx.CallAfter(cp.refresh_composer_permissions, jid,
+                                         bool(previous))
                 if perms_changed:
                     self._persist_group_send_perms()
                 if groups_total:
@@ -12246,6 +12335,23 @@ class MainWindow(wx.Frame):
                 return gm_subject
         return ""
 
+    # How long a persisted send-permission verdict stays authoritative before
+    # it is treated as no answer at all — i.e. before this fails open again.
+    #
+    # Deliberately shorter than unresolvable_lids' week next door, because the
+    # two records cost opposite things when they are wrong. Re-deriving this
+    # verdict is free and constant: every list-chats snapshot that carries
+    # participants rewrites it and the refresh loop runs every 60s, so expiry
+    # only ever bites after a whole day in which not one decidable snapshot
+    # arrived. Dropping a verdict a little too early costs at most one send
+    # WhatsApp Web itself rejects; trusting one a little too long costs a user
+    # locked out of a group they can post in (promoted to admin, or the
+    # announce flag turned off, while WinZapp was closed or while no snapshot
+    # carried participants). A day still covers everything the persistence
+    # exists for: a cold start before the first list-chats lands, and a
+    # session spent offline.
+    _GROUP_SEND_PERMS_MAX_AGE_SECONDS = 24 * 3600
+
     def _is_group_send_restricted(self, chat: dict) -> bool:
         """True when `chat` is a WhatsApp group set to "only admins can send
         messages" (Baileys/WPPConnect's groupMetadata.announce) and the
@@ -12268,12 +12374,19 @@ class MainWindow(wx.Frame):
         startup — and permanently while offline or whenever the sync fails,
         which is exactly when an announcement group showed a writable
         message field to a member who cannot post in it.
+
+        That stored verdict expires (_GROUP_SEND_PERMS_MAX_AGE_SECONDS): it is
+        the one input here that can go silently wrong in the lockout
+        direction, because nothing re-validates it on its own — see
+        unexpired_group_send_verdict().
         """
         jid = chat.get("remoteJid", "")
         if not jid.endswith("@g.us"):
             return False
-        stored = getattr(self, "_group_send_perms", {}).get(jid)
-        if not isinstance(stored, dict):
+        stored = unexpired_group_send_verdict(
+            getattr(self, "_group_send_perms", {}).get(jid),
+            time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
+        if stored is None:
             stored = {}
         verdict = group_send_permission_from_metadata(
             chat,
@@ -12307,9 +12420,14 @@ class MainWindow(wx.Frame):
         """
         if not hasattr(self, "_group_send_perms"):
             self._group_send_perms = {}
-        previous = self._group_send_perms.get(jid)
-        if not isinstance(previous, dict):
-            previous = None
+        # An expired record counts as absent here too, and not only where it
+        # is read: reusing it as *previous* would let a snapshot that
+        # re-confirms it return early with the old "t" untouched, so the
+        # record would stay expired forever and every launch would fail open
+        # on a group whose verdict simply never changes.
+        previous = unexpired_group_send_verdict(
+            self._group_send_perms.get(jid),
+            time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
         verdict = group_send_permission_from_metadata(
             chat,
             participant_digits(getattr(self, "my_jid", "")),
@@ -12475,6 +12593,10 @@ class MainWindow(wx.Frame):
     # read-only over a change that has nothing to do with sending.
     _GROUP_ANNOUNCE_NOTIF_SUBTYPES = frozenset({"announce", "announcement", "restrict_messages"})
     _GROUP_RESTRICT_NOTIF_SUBTYPES = frozenset({"restrict", "locked", "settings"})
+    # Not a settings change, but the other half of the very same verdict:
+    # "only admins can send" is only a restriction for someone who is not an
+    # admin, and this is the only event that ever says that changed.
+    _GROUP_ADMIN_NOTIF_SUBTYPES = frozenset({"promote", "promotion", "demote", "demotion"})
 
     def _apply_group_settings_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
         """Apply a live "only admins can send / edit" notification to local
@@ -12494,7 +12616,16 @@ class MainWindow(wx.Frame):
         if msg.get("messageType") != "groupNotification":
             return
         notif = (msg.get("message") or {}).get("groupNotification") or {}
-        subtype = notif.get("subtype") or ""
+        # Lower-cased to match the timeline renderer's own reading of this same
+        # field (ui/conversations.py). The subtype sets are identical there;
+        # the normalisation was not, so a notification arriving as "Announce"
+        # rendered a correct timeline line and was silently dropped here —
+        # leaving a writable message field on a group that had just gone
+        # announcement-only.
+        subtype = (notif.get("subtype") or "").lower()
+        if subtype in self._GROUP_ADMIN_NOTIF_SUBTYPES:
+            self._apply_group_admin_change(remote_jid, chat, notif, subtype)
+            return
         is_announce = subtype in self._GROUP_ANNOUNCE_NOTIF_SUBTYPES
         if not is_announce and subtype not in self._GROUP_RESTRICT_NOTIF_SUBTYPES:
             return
@@ -12522,6 +12653,126 @@ class MainWindow(wx.Frame):
         if self._record_group_send_perms(remote_jid, chat) is not None:
             self._persist_group_send_perms()
         cp = getattr(self, "conversations_panel", None)
+        if cp is not None:
+            wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
+
+    def _group_admin_notif_targets_me(self, notif: dict) -> "bool | None":
+        """Whether a promote/demote notification names the current user —
+        None when its recipients cannot be judged either way.
+
+        The match goes through _is_self_jid(), the same helper the rest of the
+        app uses for "is this me": it strips Baileys' ":N" device suffix,
+        bridges an @lid through the resolution cache and tolerates the
+        Brazilian 8/9-digit variant. Writing a fresh comparison here would
+        make three copies of that rule.
+
+        Tri-state on purpose. _is_self_jid() answers False for everything it
+        cannot decide (no my_jid known yet, an @lid that is neither bridged
+        nor equal to a known my_lid), and a plain False here would read as
+        "somebody else was promoted, nothing to do" — which is precisely the
+        case that would keep a stale verdict locking the user out. Those
+        answer None so the caller can fail open instead.
+        """
+        targets = []
+        for raw in (notif.get("recipients") or []):
+            # WebSocketClient normalises these to plain strings, but a record
+            # saved by an older build can still hold a raw WPPConnect Wid.
+            if isinstance(raw, dict):
+                raw = raw.get("_serialized") or raw.get("id") or ""
+            if isinstance(raw, str) and raw:
+                targets.append(raw)
+        if not targets:
+            return None
+        if not getattr(self, "my_jid", ""):
+            return None
+        undecidable = False
+        for target in targets:
+            if self._is_self_jid(target):
+                return True
+            if (target.endswith("@lid")
+                    and target not in getattr(self, "_lid_to_phone", {})
+                    and not getattr(self, "my_lid", "")):
+                undecidable = True
+        return None if undecidable else False
+
+    def _apply_group_admin_change(self, remote_jid: str, chat: dict, notif: dict,
+                                  subtype: str) -> None:
+        """Apply a live promote/demote notification to the group's stored
+        send-permission verdict, when it is the current user being promoted
+        or demoted.
+
+        Nothing else ever refreshes the admin half of that verdict: it can
+        only come from a list-chats snapshot carrying
+        groupMetadata.participants, and list-chats is called with
+        `ignoreGroupMetadata`, so WhatsApp Web supplies those only when it
+        already has them cached. A member promoted to admin in an
+        announcement group therefore kept a persisted
+        ``{"announce": True, "am_admin": False}`` across restarts, with the
+        composer read-only and the screen reader announcing that only admins
+        may post — in a group they had just been given the right to post in.
+
+        Someone *else* being promoted changes nothing here and is ignored. A
+        notification whose target cannot be matched confidently drops the
+        stored verdict rather than guessing, which returns the composer to
+        fail-open until the next decidable snapshot — the same trade this
+        whole area makes everywhere else.
+        """
+        targets_me = self._group_admin_notif_targets_me(notif)
+        if targets_me is False:
+            return
+        if not hasattr(self, "_group_send_perms"):
+            self._group_send_perms = {}
+        cp = getattr(self, "conversations_panel", None)
+        if targets_me is None:
+            logging.info(
+                "[_apply_group_admin_change] %s notification named no target "
+                "this account can be matched against — dropping the stored "
+                "verdict so the composer fails open", subtype)
+            if self._group_send_perms.pop(remote_jid, None) is not None:
+                self._persist_group_send_perms()
+                if cp is not None:
+                    wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
+            return
+        is_admin = subtype in ("promote", "promotion")
+        group_meta = chat.get("groupMetadata")
+        if not isinstance(group_meta, dict):
+            group_meta = {}
+        set_group_participant_admin(
+            group_meta.get("participants") or chat.get("participants") or [],
+            is_admin,
+            participant_digits(getattr(self, "my_jid", "")),
+            participant_digits(getattr(self, "my_lid", "")),
+            self._phone_digits_equivalent,
+        )
+        # The notification says nothing about announce, so that half comes
+        # from the chat dict or, failing that, from the verdict already
+        # stored — its admin half is the part this event just contradicted,
+        # never its announce half.
+        announce = _parse_bool_flag(group_meta.get("announce"))
+        if announce is None:
+            announce = _parse_bool_flag(chat.get("announce"))
+        if announce is None:
+            stored = unexpired_group_send_verdict(
+                self._group_send_perms.get(remote_jid),
+                time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
+            announce = None if stored is None else bool(stored.get("announce"))
+        if announce is None:
+            # No announce answer anywhere: no verdict can be stated, and the
+            # stored one now carries an am_admin this notification just
+            # contradicted. Dropping it is the fail-open answer.
+            changed = self._group_send_perms.pop(remote_jid, None) is not None
+        else:
+            self._group_send_perms[remote_jid] = {
+                "announce": bool(announce),
+                "am_admin": is_admin,
+                "t": int(time.time()),
+            }
+            changed = True
+        if changed:
+            self._persist_group_send_perms()
+        # Refreshed even when the verdict itself did not move: the
+        # participants list above may have been what was answering for this
+        # group, and it just changed.
         if cp is not None:
             wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
 

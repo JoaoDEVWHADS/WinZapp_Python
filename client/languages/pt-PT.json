@@ -697,6 +697,7 @@
     "mention_all_label": "@todos — Mencionar todos",
     "channel_read_only": "Este canal é de apenas leitura",
     "group_admins_only": "Somente &admins podem enviar mensagens neste grupo",
+    "group_send_restricted": "Apenas os administradores podem enviar mensagens neste grupo. O campo de mensagem ficou apenas de leitura.",
     "group_send_restricted_now": "Agora apenas os administradores podem enviar mensagens neste grupo. O campo de mensagem ficou apenas de leitura.",
     "interactive_reply": "resposta interativa",
     "list_reply": "seleção de lista",
