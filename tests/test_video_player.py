@@ -25,7 +25,9 @@ audio device — frames/EOF are injected directly into the player's internal
 queue/flag instead.
 """
 
+import logging
 import queue
+import subprocess
 import time
 
 import pytest
@@ -569,3 +571,79 @@ class TestSetPositionDoesNotBlockTheCallingThread:
 
         # Let the background thread actually finish before the test exits.
         time.sleep(0.5)
+
+
+class TestKillFfmpegLogsFailures:
+    """Regression: both proc.kill() and proc.wait() failures were swallowed
+    by a bare `except Exception: pass` with nothing logged — a report of
+    ffmpeg.exe processes piling up over a long session had no trace in
+    log.log to explain why."""
+
+    class _FakeProcess:
+        def __init__(self, kill_exc=None, wait_exc=None):
+            self.pid = 4242
+            self._kill_exc = kill_exc
+            self._wait_exc = wait_exc
+            self.killed = False
+            self.waited = False
+
+        def kill(self):
+            self.killed = True
+            if self._kill_exc:
+                raise self._kill_exc
+
+        def wait(self, timeout=None):
+            self.waited = True
+            if self._wait_exc:
+                raise self._wait_exc
+
+    def test_a_kill_failure_is_logged(self, wx_app, caplog):
+        player = _make_player(wx_app)
+        proc = self._FakeProcess(kill_exc=ProcessLookupError("no such process"))
+        player._ffmpeg_proc = proc
+
+        with caplog.at_level(logging.WARNING):
+            player._kill_ffmpeg_locked()
+
+        assert "failed to signal ffmpeg" in caplog.text
+        assert "4242" in caplog.text
+
+    def test_a_wait_timeout_is_logged(self, wx_app, caplog):
+        player = _make_player(wx_app)
+        proc = self._FakeProcess(
+            wait_exc=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=2)
+        )
+        player._ffmpeg_proc = proc
+
+        with caplog.at_level(logging.WARNING):
+            player._kill_ffmpeg_locked()
+
+        assert "did not exit within 2s" in caplog.text
+        assert "4242" in caplog.text
+
+    def test_no_log_when_kill_and_wait_both_succeed(self, wx_app, caplog):
+        player = _make_player(wx_app)
+        proc = self._FakeProcess()
+        player._ffmpeg_proc = proc
+
+        with caplog.at_level(logging.WARNING):
+            player._kill_ffmpeg_locked()
+
+        assert proc.killed and proc.waited
+        assert "video_player" not in caplog.text
+
+    def test_clears_the_tracked_process_regardless_of_failures(self, wx_app):
+        player = _make_player(wx_app)
+        player._ffmpeg_proc = self._FakeProcess(
+            kill_exc=Exception("boom"), wait_exc=Exception("boom too"),
+        )
+
+        player._kill_ffmpeg_locked()
+
+        assert player._ffmpeg_proc is None
+
+    def test_no_process_tracked_is_a_no_op(self, wx_app):
+        player = _make_player(wx_app)
+        player._ffmpeg_proc = None
+
+        player._kill_ffmpeg_locked()  # must not raise
