@@ -5144,14 +5144,13 @@ class MainWindow(wx.Frame):
                     ).start()
             else:
                 # Scenario 2: message in a DIFFERENT conversation (window active)
-                # Play foreground sound only when not in quiet hours/DND, speak "Nova mensagem de X: body"
-                # via AO2 only when speak_other_conv_messages is on and quiet hours is not active.
-                if not is_quiet_hours_active():
-                    self.message_foreground_sound.play()
-                    if speech.get("speak_other_conv_messages", True):
-                        title = format_notification_title(msg, self, self.i18n)
-                        spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
-                        self.output(spoken)
+                # Play foreground sound (always), speak "Nova mensagem de X: body"
+                # via AO2 only when speak_other_conv_messages is on.
+                self.message_foreground_sound.play()
+                if speech.get("speak_other_conv_messages", True):
+                    title = format_notification_title(msg, self, self.i18n)
+                    spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+                    self.output(spoken)
             return  # never send system toast when window is active
 
         # Window is not focused: a muted chat is never "open" from here, so
@@ -5640,11 +5639,9 @@ class MainWindow(wx.Frame):
                     return
                 if is_current_conv:
                     self.message_current_sound.play()
-                    self.output(f"{title}: {body}")
                 else:
-                    if not is_quiet_hours_active():
-                        self.message_foreground_sound.play()
-                        self.output(f"{title}: {body}")
+                    self.message_foreground_sound.play()
+                self.output(f"{title}: {body}")
                 return
 
             if muted or archived:
