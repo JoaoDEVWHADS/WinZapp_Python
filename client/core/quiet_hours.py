@@ -1,24 +1,20 @@
-"""Windows Focus Assist, Do Not Disturb ("Não incomodar"), and Notifications detection.
+"""Windows notification-suppression detection for background sounds.
 
-Detects when Windows suppresses toast notifications and sounds:
-1. Windows 11 "Não Incomodar" (Do Not Disturb) and Focus Assist via:
-   - WNF (Windows Notification Facility) real-time state: WNF_SHEL_QUIETHOURS_ACTIVE & WNF_SHEL_DESKTOP_APPLICATION_FOCUS_MODE
-   - WinRT ToastNotificationManagerPolicy / ToastNotifier settings
-   - Windows Registry (FocusAssistMode / QuietHours / CloudStore binary)
-2. Windows Notifications Disabled globally ("Obter notificações de apps e outros remetentes" desativado) via:
-   - HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications (ToastEnabled == 0)
-   - HKCU/HKLM Group Policy (NoToastApplicationNotification == 1)
-   - Notification Settings (NOC_GLOBAL_SETTING_TOASTS_ENABLED == 0)
-   - WinRT ToastNotificationManagerPolicy (status == Disabled)
-3. Fullscreen DirectX games, presentation mode, or busy state via:
-   - Win32 SHQueryUserNotificationState (shell32)
+WinZapp plays its background message sound itself, outside the Windows toast
+audio pipeline. Before doing that it must mirror the Windows notification state:
 
-Deliberately NOT applied to message_current_sound (a message arriving in the
-conversation the user already has open and focused) or to incoming-call
-alerts — Focus Assist / DND is about notifications competing for attention while
-the user is doing something else.
+* Windows 11 Do Not Disturb / Focus Assist: WNF active quiet-hours profile,
+  current CloudStore profile, and SHQueryUserNotificationState fallbacks.
+* Global/app notification blocking: ToastNotifier.setting plus registry/policy
+  fallbacks for the Windows Notifications switches.
+* Full-screen, presentation, and busy states: SHQueryUserNotificationState.
+
+This gate is deliberately limited to background notification sounds. Sounds for
+the currently focused conversation and incoming-call alerts are separate UX and
+are not changed here.
 """
 
+import importlib
 import logging
 import sys
 from typing import Optional
@@ -40,6 +36,18 @@ _SUPPRESSED_STATES = {
     _QUNS_BUSY, _QUNS_RUNNING_D3D_FULL_SCREEN,
     _QUNS_PRESENTATION_MODE, _QUNS_QUIET_TIME,
 }
+
+# WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED
+#
+# This is the state Windows Shell updates when the active Focus Assist / Do
+# Not Disturb profile changes. Its DWORD payload is the restriction level:
+# 0 = unrestricted/off, non-zero = a restrictive profile is active.
+#
+# WNF is an undocumented Windows implementation detail, so this remains a
+# best-effort fallback. The state name and NtQueryWnfStateData ABI are stable
+# across the Windows 10/11 builds WinZapp targets, and unlike the old values
+# below they actually describe the active quiet-hours profile.
+_WNF_QUIET_HOURS_ACTIVE_PROFILE = (0xA3BF1C75, 0x0D83063E)
 
 
 def should_suppress_notification_sound(state: int) -> bool:
@@ -73,33 +81,42 @@ def _query_wnf_state(low: int, high: int) -> Optional[int]:
         return None
     try:
         import ctypes
-        from ctypes import wintypes
-        ntdll = getattr(ctypes.windll, "ntdll", None)
-        if not ntdll or not hasattr(ntdll, "RtlQueryWnfStateData"):
+
+        ntdll = ctypes.WinDLL("ntdll")
+        query = getattr(ntdll, "NtQueryWnfStateData", None)
+        if query is None:
             return None
 
         class WNF_STATE_NAME(ctypes.Structure):
             _fields_ = [("Data", ctypes.c_uint32 * 2)]
 
         state_name = WNF_STATE_NAME((ctypes.c_uint32 * 2)(low, high))
-        change_stamp = wintypes.DWORD(0)
-        buffer = (ctypes.c_byte * 256)()
-        buffer_size = wintypes.ULONG(256)
+        change_stamp = ctypes.c_uint32(0)
+        value = ctypes.c_uint32(0)
+        buffer_size = ctypes.c_uint32(ctypes.sizeof(value))
 
-        status = ntdll.RtlQueryWnfStateData(
+        query.argtypes = (
+            ctypes.POINTER(WNF_STATE_NAME),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        query.restype = ctypes.c_int32
+
+        status = query(
             ctypes.byref(state_name),
             None,
             None,
             ctypes.byref(change_stamp),
-            ctypes.byref(buffer),
+            ctypes.byref(value),
             ctypes.byref(buffer_size),
         )
-        if status == 0 and buffer_size.value > 0:
-            if buffer_size.value >= 4:
-                return ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD)).contents.value
-            return buffer[0]
-    except Exception:
-        pass
+        if status == 0 and buffer_size.value >= ctypes.sizeof(value):
+            return int(value.value)
+    except Exception as exc:
+        logging.debug("[quiet_hours] WNF query failed: %s", exc)
     return None
 
 
@@ -107,43 +124,42 @@ def _query_wnf_quiet_hours() -> Optional[bool]:
     """Query Windows Notification Facility (WNF) for real-time Focus Assist /
     Do Not Disturb state in Windows 10 (1803+) and Windows 11.
 
-    WNF_SHEL_QUIETHOURS_ACTIVE = 0x0D83063EA3B64835 (low=0xA3B64835, high=0x0D83063E)
-    WNF_SHEL_DESKTOP_APPLICATION_FOCUS_MODE = 0x0D83063EA3B54835 (low=0xA3B54835, high=0x0D83063E)
-    Values: 0 = Off, 1 = Priority only (suppressed), 2 = Alarms only / DND (suppressed)
+    WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED = 0x0D83063EA3BF1C75
+    Values: 0 = Off/unrestricted; non-zero = a restrictive profile is active.
     """
     if sys.platform != "win32":
         return None
-    try:
-        # WNF_SHEL_QUIETHOURS_ACTIVE
-        val1 = _query_wnf_state(0xA3B64835, 0x0D83063E)
-        if val1 is not None and val1 > 0:
-            return True
+    low, high = _WNF_QUIET_HOURS_ACTIVE_PROFILE
+    value = _query_wnf_state(low, high)
+    if value is None:
+        return None
+    return value > 0
 
-        # WNF_SHEL_DESKTOP_APPLICATION_FOCUS_MODE
-        val2 = _query_wnf_state(0xA3B54835, 0x0D83063E)
-        if val2 is not None and val2 > 0:
-            return True
 
-        if val1 == 0 or val2 == 0:
-            return False
-    except Exception:
-        pass
+def _parse_cloudstore_quiet_hours(data) -> Optional[bool]:
+    """Parse the named quiet-hours profile from a Windows 11 CloudStore blob."""
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+
+    profiles = {
+        "Microsoft.QuietHoursProfile.PriorityOnly": True,
+        "Microsoft.QuietHoursProfile.AlarmsOnly": True,
+        "Microsoft.QuietHoursProfile.Unrestricted": False,
+    }
+    raw = bytes(data)
+    for profile, is_restricted in profiles.items():
+        if profile.encode("utf-16-le") in raw or profile.encode("utf-8") in raw:
+            return is_restricted
     return None
 
 
 def _query_registry_notifications_disabled() -> bool:
-    """Check Windows registry for whether notifications are disabled globally
-    or in 'Não incomodar' / Focus Assist mode:
-    1. 'Obter notificações de apps e outros remetentes' disabled:
-       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications -> ToastEnabled == 0
-    2. Group Policy:
-       HKCU/HKLM\\Software\\Policies\\Microsoft\\Windows\\CurrentVersion\\PushNotifications -> NoToastApplicationNotification == 1
-    3. Action Center global toasts disabled:
-       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings -> NOC_GLOBAL_SETTING_TOASTS_ENABLED == 0
-    4. Focus Assist / DND registry values:
-       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\FocusAssist -> FocusAssistMode > 0
-       HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\QuietHours -> Profile > 0 or Enabled == 1
-    5. CloudStore focusassistsettings binary Data.
+    """Registry fallbacks for Windows notification blocking and DND.
+
+    The primary WinRT/WNF checks are preferred, but registry fallbacks cover
+    systems where those APIs are unavailable to the Python runtime. Windows 11
+    stores the current DND profile in CloudStore; that payload is parsed by
+    profile name rather than by guessing byte offsets.
     """
     if sys.platform != "win32":
         return False
@@ -219,21 +235,23 @@ def _query_registry_notifications_disabled() -> bool:
         except OSError:
             pass
 
-        # 7. CloudStore focusassistsettings Data binary
-        try:
-            cloud_path = (
-                r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
-                r"\default$windows.data.notifications.focusassistsettings"
-                r"\windows.data.notifications.focusassistsettings"
-            )
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cloud_path) as k:
-                data, _ = winreg.QueryValueEx(k, "Data")
-                if isinstance(data, (bytes, bytearray)) and len(data) >= 0x40:
-                    for offset in range(0x38, min(len(data), 0x48)):
-                        if data[offset] in (1, 2):
-                            return True
-        except OSError:
-            pass
+        # 7. Windows 11 DND profile in CloudStore.
+        cloud_paths = (
+            r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+            r"\$$windows.data.notifications.quiethourssettings\Current",
+            r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current"
+            r"\default$windows.data.notifications.quiethourssettings"
+            r"\windows.data.notifications.quiethourssettings",
+        )
+        for cloud_path in cloud_paths:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cloud_path) as k:
+                    data, _ = winreg.QueryValueEx(k, "Data")
+            except OSError:
+                continue
+            cloud_state = _parse_cloudstore_quiet_hours(data)
+            if cloud_state is not None:
+                return cloud_state
 
     except Exception:
         pass
@@ -241,35 +259,49 @@ def _query_registry_notifications_disabled() -> bool:
 
 
 def _query_winrt_notification_policy() -> Optional[bool]:
-    """Query WinRT ToastNotificationManagerPolicy / ToastNotifier if available on Windows 10/11.
-    Values of ToastNotificationMode:
-      0 = Unrestricted (allowed)
-      1 = PriorityOnly (suppressed)
-      2 = AlarmsOnly (suppressed)
-      3 = DoNotDisturb (suppressed)
-      4 = Disabled (suppressed)
+    """Return whether WinRT says WinZapp toast notifications are blocked.
+
+    ``ToastNotifier.setting`` is the supported Windows API for app/user/system
+    notification blocking. 0 means Enabled; any non-zero NotificationSetting
+    means notifications are disabled for the app, the user, by policy, or by
+    the manifest.
+
+    Do Not Disturb itself is intentionally detected through WNF above because
+    DND can still allow priority applications, so ToastNotifier.setting may
+    remain Enabled while the shell suppresses ordinary notification banners.
     """
     if sys.platform != "win32":
         return None
-    try:
+    for module_name in (
+        "winrt.windows.ui.notifications",
+        "winsdk.windows.ui.notifications",
+    ):
         try:
-            from winsdk.windows.ui.notifications import ToastNotificationManagerPolicy, ToastNotificationManager
-            policy = ToastNotificationManagerPolicy.get_default()
-            if policy is not None and int(policy.notification_status) != 0:
-                return True
-            notifier = ToastNotificationManager.create_toast_notifier("WinZapp")
-            if notifier is not None and int(notifier.setting) != 0:
-                return True
-        except ImportError:
-            from winrt.windows.ui.notifications import ToastNotificationManagerPolicy, ToastNotificationManager
-            policy = ToastNotificationManagerPolicy.get_default()
-            if policy is not None and int(policy.notification_status) != 0:
-                return True
-            notifier = ToastNotificationManager.create_toast_notifier("WinZapp")
-            if notifier is not None and int(notifier.setting) != 0:
-                return True
-    except Exception:
-        pass
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            logging.debug(
+                "[quiet_hours] WinRT notifications module unavailable via %s: %s",
+                module_name,
+                exc,
+            )
+            continue
+
+        manager = getattr(module, "ToastNotificationManager", None)
+        if manager is None:
+            continue
+        try:
+            notifier = manager.create_toast_notifier("WinZapp")
+            if notifier is None:
+                continue
+            setting = notifier.setting
+            setting_value = getattr(setting, "value", setting)
+            return int(setting_value) != 0
+        except Exception as exc:
+            logging.debug(
+                "[quiet_hours] WinRT notification setting query failed via %s: %s",
+                module_name,
+                exc,
+            )
     return None
 
 
@@ -288,18 +320,14 @@ def is_quiet_hours_active() -> bool:
         return True
 
     # 2. Check WNF state for real-time Windows 10/11 Do Not Disturb / Focus Assist
-    wnf_state = _query_wnf_quiet_hours()
-    if wnf_state is not None:
-        if wnf_state is True:
-            logging.debug("[quiet_hours] Suppressed via WNF state (Focus Assist / DND active)")
-            return True
+    if _query_wnf_quiet_hours() is True:
+        logging.debug("[quiet_hours] Suppressed via WNF state (Focus Assist / DND active)")
+        return True
 
-    # 3. Check WinRT notification policy / notifier setting (if accessible)
-    winrt_policy = _query_winrt_notification_policy()
-    if winrt_policy is not None:
-        if winrt_policy is True:
-            logging.debug("[quiet_hours] Suppressed via WinRT notification policy")
-            return True
+    # 3. Check the supported WinRT ToastNotifier setting.
+    if _query_winrt_notification_policy() is True:
+        logging.debug("[quiet_hours] Suppressed via WinRT ToastNotifier setting")
+        return True
 
     # 4. Check legacy Win32 SHQueryUserNotificationState (fullscreen games, presentation mode)
     state = _query_notification_state()

@@ -91,3 +91,111 @@ class TestQueryFunctionsOffWindows:
         assert quiet_hours._query_wnf_quiet_hours() is None
         assert quiet_hours._query_registry_notifications_disabled() is False
         assert quiet_hours._query_winrt_notification_policy() is None
+
+
+class TestWnfQuietHours:
+    def test_queries_the_active_quiet_hours_profile(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        monkeypatch.setattr(
+            quiet_hours,
+            "_query_wnf_state",
+            lambda low, high: seen.append((low, high)) or 1,
+        )
+
+        assert quiet_hours._query_wnf_quiet_hours() is True
+        assert seen == [(0xA3BF1C75, 0x0D83063E)]
+
+    def test_zero_profile_means_dnd_is_off(self, monkeypatch):
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        monkeypatch.setattr(quiet_hours, "_query_wnf_state", lambda *_: 0)
+        assert quiet_hours._query_wnf_quiet_hours() is False
+
+    def test_nt_query_wnf_state_data_uses_six_argument_abi(self, monkeypatch):
+        import ctypes
+
+        calls = []
+
+        class FakeQuery:
+            argtypes = None
+            restype = None
+
+            def __call__(self, state, type_id, scope, stamp, buffer, size):
+                calls.append((type_id, scope))
+                ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint32)).contents.value = 2
+                ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32)).contents.value = 4
+                return 0
+
+        class FakeNtdll:
+            NtQueryWnfStateData = FakeQuery()
+
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        monkeypatch.setattr(ctypes, "WinDLL", lambda *_: FakeNtdll(), raising=False)
+
+        assert quiet_hours._query_wnf_state(0xA3BF1C75, 0x0D83063E) == 2
+        assert calls == [(None, None)]
+
+
+class TestWinRtNotificationSetting:
+    @staticmethod
+    def _module_with_setting(value):
+        class Setting:
+            def __init__(self, setting_value):
+                self.value = setting_value
+
+        class Notifier:
+            setting = Setting(value)
+
+        class Manager:
+            @staticmethod
+            def create_toast_notifier(app_id):
+                assert app_id == "WinZapp"
+                return Notifier()
+
+        class Module:
+            ToastNotificationManager = Manager
+
+        return Module()
+
+    def test_global_or_user_block_suppresses_sound(self, monkeypatch):
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        module = self._module_with_setting(2)
+        monkeypatch.setattr(quiet_hours.importlib, "import_module", lambda *_: module)
+        assert quiet_hours._query_winrt_notification_policy() is True
+
+    def test_enabled_notifications_do_not_suppress_sound(self, monkeypatch):
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        module = self._module_with_setting(0)
+        monkeypatch.setattr(quiet_hours.importlib, "import_module", lambda *_: module)
+        assert quiet_hours._query_winrt_notification_policy() is False
+
+    def test_falls_back_to_winsdk_module(self, monkeypatch):
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        module = self._module_with_setting(1)
+        imported = []
+
+        def fake_import(name):
+            imported.append(name)
+            if name.startswith("winrt."):
+                raise ImportError(name)
+            return module
+
+        monkeypatch.setattr(quiet_hours.importlib, "import_module", fake_import)
+        assert quiet_hours._query_winrt_notification_policy() is True
+        assert imported == [
+            "winrt.windows.ui.notifications",
+            "winsdk.windows.ui.notifications",
+        ]
+
+
+class TestCloudStoreQuietHours:
+    def test_priority_only_is_suppressed(self):
+        data = b"prefix" + "Microsoft.QuietHoursProfile.PriorityOnly".encode("utf-16-le")
+        assert quiet_hours._parse_cloudstore_quiet_hours(data) is True
+
+    def test_unrestricted_is_not_suppressed(self):
+        data = "Microsoft.QuietHoursProfile.Unrestricted".encode("utf-16-le")
+        assert quiet_hours._parse_cloudstore_quiet_hours(data) is False
+
+    def test_unknown_blob_is_inconclusive(self):
+        assert quiet_hours._parse_cloudstore_quiet_hours(b"\x02\x00unknown") is None
