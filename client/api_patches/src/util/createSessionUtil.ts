@@ -592,9 +592,11 @@ export default class CreateSessionUtil {
                 // _reset_credentials_and_show_pairing(), which wipes the
                 // WA_token, drops `paired`, and runs clear_local_data() over
                 // the whole local database. One event, no confirmation — none
-                // of the four safeguards main.py's _logout_confirmed() applies
-                // (startup grace, consecutive strikes, a 180s dwell, and
-                // _still_linked_on_server() proof) are on that path.
+                // of the safeguards main.py's _act_on_unlink_decision() applies
+                // (never before the session has connected this run, several
+                // consecutive strikes spaced by real wall-clock time, and a
+                // _still_linked_on_server() probe that must positively answer
+                // "no linked phone" before anything is wiped) are on that path.
                 //
                 // But `disconnectedMobile` does not mean "unlinked". WPPConnect
                 // documents it as "Client has disconnected to the mobile
