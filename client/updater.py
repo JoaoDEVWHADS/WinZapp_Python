@@ -1206,10 +1206,6 @@ class WppUpdateChecker:
     """
 
     _RETRY_INTERVAL = 12 * 60 * 60  # 12 hours
-    # Used only when a check completed but pairing was underway, so the prompt
-    # was held back. Much shorter than the periodic interval: nothing failed
-    # here and an update IS waiting — the user just shouldn't be interrupted
-    # mid-pairing. Twelve hours would effectively drop it for the session.
     _PAIRING_RETRY_INTERVAL = 5 * 60  # 5 minutes
 
     def __init__(self, main_window):
@@ -1289,12 +1285,6 @@ class WppUpdateChecker:
         wx.CallAfter(self._prompt_update, installed, remote_version, tag)
 
     def _prompt_update(self, installed: str, remote_version: str, tag: str):
-        # Re-checked here, not just before _check_once() was scheduled: the
-        # check itself runs on a background thread and hits the network, so
-        # the user can perfectly well have started pairing in between. Saying
-        # yes to this prompt stops the running API session, which would pull
-        # the server out from under that pairing flow. Defer instead — the
-        # release is not going anywhere.
         if not self._mw.wpp_update_may_run_now():
             logging.info(
                 "[WppUpdateChecker] Pairing in progress — not prompting for "
@@ -1352,9 +1342,6 @@ class WppUpdateChecker:
         """
         if interval is None:
             interval = self._RETRY_INTERVAL
-        # Replace rather than stack: _check_once() can reach this more than
-        # once (a failed fetch, then a deferred prompt), and two live timers
-        # would double the check rate from then on.
         if self._retry_timer is not None:
             self._retry_timer.cancel()
         self._retry_timer = threading.Timer(interval, self._check_once)

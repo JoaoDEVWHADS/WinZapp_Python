@@ -136,14 +136,6 @@ class WebSocketClient:
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
 
-        # Why the last pairing-code request failed, if one did — set by
-        # on_wpp_phone_code_error() and read by connect.py's _bg_pairing_flow()
-        # only after its wait has actually timed out. Deliberately NOT paired
-        # with a _phone_code_event.set(): host.layer.js retries on its own 60s
-        # cooldown, so a first failure inside the 90s window may still be
-        # followed by a code that works. Recording it without cutting the wait
-        # short keeps that retry alive and still lets the timeout report the
-        # real reason instead of the generic "no pairing code received".
         self._phone_code_error: str = ""
 
         # Debounce timer for on_disconnect() — see that method.
@@ -1398,15 +1390,8 @@ class WebSocketClient:
                 return
             name = str(data.get("name") or "Error")
             message = str(data.get("message") or "")
-            # WhatsApp's own errors are frequently name-only (the message is
-            # the class name again) — don't render "CompanionHelloError:
-            # CompanionHelloError" at the user.
             detail = name if (not message or message == name) else f"{name}: {message}"
             self._phone_code_error = detail
-            # attempt/retryInSeconds come from the host.layer.js backoff (v5).
-            # Logged but deliberately kept out of the user-facing message: the
-            # reason is what they can act on, the retry schedule is for
-            # diagnosing a run from log.log afterwards.
             attempt = data.get("attempt")
             retry_in = data.get("retryInSeconds")
             if attempt and retry_in:
@@ -1418,12 +1403,6 @@ class WebSocketClient:
                 logging.warning(
                     "[WebSocketClient] pairing-code request failed: %s", detail
                 )
-            # CompanionHelloError comes from WhatsApp Web's own bundle, not
-            # from any code shipped here — its class name is the whole of what
-            # used to survive. The page-context stack names the module that
-            # threw, and `details` carries every other own property the error
-            # had (a refusal code, if there is one, can only be in there).
-            # Both go to log.log because there is nowhere else to read them.
             stack = data.get("stack")
             if stack:
                 logging.warning(
@@ -2086,27 +2065,6 @@ class WebSocketClient:
             if not is_forwarded:
                 is_forwarded = bool(ctx_info.get("isForwarded"))
 
-        # A leftover debug hook used to sit here: it logged the ENTIRE raw
-        # WPPConnect payload at INFO whenever the message body was literally
-        # ".." or "oi". Removed, not downgraded to DEBUG, because the problem
-        # was never the level.
-        #
-        # "oi" is the commonest Portuguese greeting, so this fired constantly
-        # on real installs — 61 times in a single afternoon on one account. Each
-        # line carried the message text, both parties' @lid and @c.us JIDs, the
-        # sender's real name, and messageSecret: the per-message 32-byte key,
-        # printed as a decimal array.
-        #
-        # message_json is Fernet-encrypted at rest precisely because message
-        # content is sensitive (see CLAUDE.md). This wrote the same content in
-        # the clear, into log.log, in the same folder — and log.log is the file
-        # CLAUDE.md tells anyone diagnosing a problem to ask the user for. Being
-        # triggered by message content, it was invisible in testing and
-        # unbounded in production.
-        #
-        # If a raw payload is ever needed again, log the SHAPE (keys and value
-        # types, as get_remote_chats does for @lid chats) or a specific field
-        # chosen deliberately — never the whole dict.
 
         # Determine if there is any quoted context
         has_quote = False

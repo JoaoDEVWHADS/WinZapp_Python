@@ -298,8 +298,6 @@ class DatabaseManager:
             return
         log.info("[connect] Upgrading unresolvable_lids to the expiring schema.")
         await self._conn.execute("DROP TABLE IF EXISTS unresolvable_lids")
-        # Every other statement in the schema is CREATE ... IF NOT EXISTS, so
-        # replaying the whole script only recreates the table just dropped.
         await self._conn.executescript(_SCHEMA_SQL)
 
     async def close(self) -> None:
@@ -1286,12 +1284,6 @@ class DatabaseManager:
                     total += 1
 
                 # ── Unresolvable LIDs / names ─────────────────────────────
-                # OR IGNORE, so a save_full_state() pass (the debounced save
-                # sends the whole in-memory set every time) never restarts the
-                # retry clock of an entry already on disk. Rows that reach here
-                # for the first time keep recorded_at = 0 and expire on the
-                # next sweep — the dict shape carries no timestamps, and a
-                # blacklist entry of unknown age is better retried than trusted.
                 for lid in data.get("unresolvable_lids", []):
                     await conn.execute(
                         "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'lid')",

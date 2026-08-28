@@ -868,8 +868,6 @@ def group_participant_is_me(participant, my_phone_digits, my_lid_digits,
         return False
     if my_phone_digits and digits_equivalent(p_digits, my_phone_digits):
         return True
-    # @lid digits are an opaque device identifier, not a phone number, so no
-    # 8/9-digit tolerance applies to them.
     return bool(my_lid_digits and p_digits == my_lid_digits)
 
 
@@ -1484,10 +1482,6 @@ class MainWindow(wx.Frame):
                     except Exception:
                         logging.exception("[accounts] pending→paired transition failed")
 
-        # False until retrieve_token() has run its once-per-launch tail (the
-        # STARTUP audit line + the abandoned-session cleanup). Set here, on the
-        # main thread, strictly before the only other caller's thread is
-        # started — see retrieve_token() for why a plain bool is enough.
         self._startup_token_tail_done = False
 
         logging.info("MainWindow: Retrieving token...")
@@ -1570,12 +1564,6 @@ class MainWindow(wx.Frame):
                         logging.info("[post_ui_init] STEP 1b — pairing completed via dialog.")
                         self._just_paired = True
 
-                # STEP 1b above may have re-paired into a brand-new session, so
-                # the token has to be re-read here. __init__ already called
-                # retrieve_token() once; its once-per-launch tail (STARTUP audit
-                # line + abandoned-session cleanup) is skipped on this second
-                # call — see the guard in retrieve_token() for the doubled
-                # STARTUP evidence behind it.
                 logging.info("[post_ui_init] STEP 2 — retrieving token...")
                 self.retrieve_token()
                 logging.info("[post_ui_init] STEP 2 — token retrieved: %s", bool(self.token))
@@ -1611,12 +1599,6 @@ class MainWindow(wx.Frame):
                 logging.info("[post_ui_init] STEP 5 — check_wa_connection_http() done.")
 
                 if reuse_existing_ws:
-                    # self.ws is already the live connection from pairing —
-                    # connect_websocket() itself unconditionally disconnects
-                    # before reconnecting, which is exactly the premature
-                    # disconnect this whole path exists to avoid (see the
-                    # "Initialize websocket" comment in __init__). Nothing
-                    # else to do.
                     logging.info("[post_ui_init] STEP 6 — Skipping WebSocket reconnect — already connected from pairing.")
                     return
 
@@ -3190,21 +3172,6 @@ class MainWindow(wx.Frame):
             session_name[:12], timeout,
         )
         self._kill_orphaned_chrome_for_session(session_name)
-        # The kill is asynchronous from Chrome's point of view; give it a
-        # moment rather than handing a still-dying profile to start-session.
-        #
-        # Bounded by a wall-clock deadline and not just by the poll count: the
-        # "10 x 0.5 s = 5 s" this loop reads as is only true if the polls
-        # themselves were free, and they are not. Each one spawns a PowerShell
-        # Get-CimInstance measured at 0.57 s on this machine (so ~11 s in
-        # practice), and each carries its own 15 s subprocess timeout — with
-        # PowerShell stalled by antivirus or load, this loop alone could run
-        # ~150 s *after* the timeout above had already elapsed. Callers budget
-        # for timeout + this grace and nothing more (Connect.on_continue's
-        # close_done.wait(timeout=45); _stop_wpp_server blocking the WPPConnect
-        # update on it), so that has to be the real ceiling. The deadline can
-        # only be checked once a poll has returned, so the honest worst case is
-        # this grace plus ONE stalled poll — not ten of them.
         grace_deadline = time.monotonic() + 5.0
         for _ in range(10):
             if not self._chrome_pids_owning_session(session_name):
@@ -3271,14 +3238,6 @@ class MainWindow(wx.Frame):
         # Drop the stale lockfile so a relaunch is not refused even if the
         # process was already gone but left the file behind.
         try:
-            # resource_path("api", ...) is how every other api/ path in this
-            # file is built (the Node dir, dist/server.js, start.js, .cache).
-            # This used to hand-roll the walk from data_path("settings.json")
-            # with two "..", which lands on <data>/api/userDataDir — a
-            # directory that does not exist, since data_path() already returns
-            # <data>/accounts/<account_id>/. Nothing here reported that: the
-            # loop below only removes files that exist, so a wrong root was
-            # indistinguishable from "no stale lockfiles to clean".
             udd = resource_path("api", "userDataDir", session_name)
             for name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"):
                 p = os.path.join(udd, name)
@@ -3581,13 +3540,6 @@ class MainWindow(wx.Frame):
         # Nothing to do only when the flag *and* the derived offline state are
         # both already consistent with `connected`.
         if connected == was and self._auto_offline == (not connected):
-            # …with one exception: a WPPConnect update engages offline mode
-            # without announcing it (see the _wpp_updating branch below), so
-            # the state is *already* offline by the time the update ends. If
-            # the server never came back, the health check that finally
-            # notices would match this guard and return, leaving a genuine
-            # outage silent for the rest of the session with the status text
-            # stuck on "conectando". Fall through once, to say it.
             still_owed = (
                 not connected
                 and not getattr(self, "_wpp_updating", False)
@@ -3608,8 +3560,6 @@ class MainWindow(wx.Frame):
             self._dead_browser_strikes = 0
             self._auto_repair_dialog_shown = False
             self._auto_offline = False
-            # The update ended with the connection back: the announcement it
-            # suppressed is moot now, nothing is owed.
             self._offline_announce_deferred = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
@@ -3666,44 +3616,6 @@ class MainWindow(wx.Frame):
 
         self._wa_offline_strikes += 1
 
-        # A WPPConnect update is not an outage. _update_wpp_server() stops the
-        # server on purpose, so the socket drops and every probe fails until the
-        # reinstall finishes and it comes back — perhaps two or three minutes.
-        # Announcing "desconectado do WhatsApp" through that window is simply
-        # wrong, and it frightens people: two field reports describe the update
-        # as leaving the app "flipping between offline and normal", which is the
-        # message, not the mechanism. Show "conectando" instead, which is what is
-        # actually happening and a state users already understand.
-        #
-        # Guarded here rather than at the callers because there are two of them
-        # and only one was covered: the health checker already consulted
-        # _wpp_updating, but WebSocketClient's confirmed-socket-drop path did
-        # not, and that is the one that fired — observed at 17:48:26 during a
-        # real 2.10.6 -> 2.10.10 update, seconds after the server was stopped
-        # deliberately. One guard at the single place that decides the message
-        # cannot be half-applied like that again.
-        #
-        # Deliberately no sound and no speech, and the status text stays
-        # "conectando": the announcement is the only thing that was ever wrong
-        # here. Nothing is being hidden — the update has its own progress
-        # dialog, and a genuine outage that outlives the update is still
-        # announced, through the fall-through in the early-return guard at the
-        # top of this method once _update_wpp_server's finally clears the flag.
-        #
-        # Offline mode itself IS engaged, exactly as a real outage engages it.
-        # This branch used to return before the _auto_offline /
-        # _apply_offline_state() below, leaving self.offline_mode False — and
-        # MessageQueue._run holds sends only while that is True. A message sent
-        # moments before the user accepted the update therefore went out against
-        # the already-stopped server, raised requests.exceptions.ConnectionError,
-        # and _classify_send_exception classified that as ambiguous (a timeout
-        # can mean WhatsApp Web took the message into its own outbox, where a
-        # resend would duplicate it), so the queue dropped it without resending:
-        # the pending bubble resolved to nothing and the message never arrived.
-        # That ambiguity does not hold here — _stop_wpp_server() has just killed
-        # Node and Chrome, so nothing holds the message. Offline mode parks it in
-        # the queue instead, and _apply_offline_state()'s flush sends it once the
-        # server is back.
         if getattr(self, "_wpp_updating", False):
             logging.info(
                 "[connection] WPPConnect update in progress (%s) — engaging "
@@ -3753,9 +3665,6 @@ class MainWindow(wx.Frame):
                 return
 
         self._auto_offline = True
-        # Cleared here rather than after the announcement below: this is the
-        # one path that actually says it, and clearing it before the early
-        # return can match again is what keeps it from being said twice.
         self._offline_announce_deferred = False
         self._apply_offline_state()
         logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
@@ -3966,9 +3875,6 @@ class MainWindow(wx.Frame):
             if self._is_pairing_dialog_active():
                 return False
         except Exception:
-            # Called from a background thread during teardown, when
-            # self.connect may already be gone — treat "can't tell" as
-            # "don't touch the session".
             return False
         return not getattr(self, "_pairing_in_progress", False)
 
@@ -3978,9 +3884,6 @@ class MainWindow(wx.Frame):
         updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
         if not updates_enabled and not force:
             return
-        # A forced check is a deliberate user action from the Help menu, so it
-        # runs regardless; the periodic one waits until pairing is out of the
-        # way rather than interrupting it.
         if not force and not self.wpp_update_may_run_now():
             logging.info(
                 "[wpp_update] Pairing in progress — deferring the WPPConnect "
@@ -4031,12 +3934,6 @@ class MainWindow(wx.Frame):
         and a screen-reader user is simply left with a UI that stopped
         answering, seconds after accepting a prompt.
         """
-        # Re-entrancy guard. Now that the stop no longer blocks the message
-        # loop, Ajuda > Forçar reinstalação da WPPConnect (and a second update
-        # prompt) stay reachable while the first stop is still running, and two
-        # of these flows would fight over the same Node process and the same
-        # install directory. The blocking version was protected from that only
-        # by accident.
         if getattr(self, "_wpp_updating", False):
             logging.info("[wpp_update] An update is already running — ignoring "
                          "the request to update to %s.", target_tag)
@@ -4058,46 +3955,12 @@ class MainWindow(wx.Frame):
                 self._stop_wpp_server()
                 self.wpp_process = None
 
-                # Make sure nothing is still holding this session's Chrome profile
-                # before the server comes back up.
-                #
-                # _stop_wpp_server() force-kills the Node process tree, but a
-                # chrome.exe can outlive that — the same way a hibernation-suspended
-                # one does, which is what _kill_orphaned_chrome_for_session() was
-                # written for. If one survives, the restarted server's
-                # /start-session hits "The browser is already running for
-                # ...\\userDataDir\\<session>", the session dies on the spot, the
-                # health check starts another, and the app alternates between
-                # offline and connecting indefinitely. Reported twice from the field
-                # as "after accepting the WPP update it just keeps syncing forever,
-                # flipping between offline and normal", with the workaround being to
-                # wipe the account's data folder — which works only because it forces
-                # a NEW session name, and therefore a profile nothing holds a lock
-                # on. The update itself preserves userDataDir/ and tokens/ (see
-                # ApiSetupDialog._KEEP_RUNTIME), so the install was never the
-                # problem; the abandoned lock was.
-                #
-                # Safe to call unconditionally: it only touches a chrome.exe whose
-                # --user-data-dir carries THIS session name
-                # (connection_state.chrome_cmdline_owns_session), and it also drops
-                # the stale lockfile the dead process left behind.
                 self._kill_orphaned_chrome_for_session()
             except Exception:
-                # Caught rather than left to kill the worker: an exception
-                # escaping here would strand _wpp_updating at True (nothing
-                # else clears it) AND leave the server half-stopped with
-                # nothing on screen to say so. Both branches below end in
-                # ensure_wpp_running(), and ApiSetupDialog reports its own
-                # failure, so carrying on is the recoverable choice.
                 logging.exception("[wpp_update] Stopping the server before the "
                                   "update failed — reinstalling anyway, which is "
                                   "what the user asked for")
             finally:
-                # Scheduled unconditionally, including after an exception:
-                # _after_stop() is what clears _wpp_updating (in its own
-                # finally), and a flag left True silences every genuine
-                # disconnection for the rest of the session — see
-                # _set_wa_connected(), which consults it.
                 try:
                     wx.CallAfter(_after_stop)
                 except Exception:
@@ -4126,35 +3989,12 @@ class MainWindow(wx.Frame):
                         wx.OK | wx.ICON_ERROR,
                         self,
                     )
-                    # Whatever is left on disk (the previous install if the failure
-                    # happened before ApiSetupDialog's cleanup step, nothing at all if
-                    # it happened after) — ensure_wpp_running() already knows how to
-                    # handle both: start what's there, or silently do nothing if the
-                    # required files are missing.
                     self.ensure_wpp_running()
                     return
 
                 logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
                 self.ensure_wpp_running()
 
-                # ensure_wpp_running() only confirms the new WPPConnect HTTP API
-                # answers — killing the old node.exe process to update it also
-                # dropped the Socket.IO connection this app uses for live
-                # messages/presence, and nothing else here re-establishes it or
-                # tells the new process to resume the WhatsApp session. Left
-                # alone, python-socketio's own auto-reconnect (see
-                # WebSocketClient.__init__) eventually notices and retries on its
-                # own, but with up to a 60 s backoff and no guarantee the
-                # WhatsApp session itself gets told to restart — reported live as
-                # the app sitting in offline/disconnected mode until the whole
-                # program was restarted. Force it explicitly instead of waiting
-                # on the passive health checker to get around to it; a
-                # successful reconnect's on_connect() handler already re-checks
-                # HTTP status and retriggers a sync on its own — but check and
-                # trigger a sync explicitly here too, the same recovery sequence
-                # _recover_from_suspend() uses, as a fallback in case the socket
-                # was already connected (so on_connect() never fires again) or
-                # the reconnect itself is slow.
                 def _recover_after_update():
                     try:
                         self._reconnect_websocket_now()
@@ -4164,22 +4004,6 @@ class MainWindow(wx.Frame):
                         logging.exception("[wpp_update] Post-update reconnection failed")
                 threading.Thread(target=_recover_after_update, daemon=True).start()
 
-                # If the window was hidden (minimized to tray) when the update
-                # was requested, bring it back — the update can run for minutes
-                # and finishes with the API restarting, which is exactly the
-                # kind of state change the user needs to see.
-                #
-                # _window_hidden is only set once __init__ reaches its own
-                # "window lifecycle" setup — but WppUpdateChecker's first check
-                # is scheduled via wx.CallLater(90000, ...) very early in
-                # __init__, well before that point, and its own check can take
-                # longer still. If the initial pairing dialog is still on
-                # screen 90+ seconds after launch (completely normal — that's a
-                # human reading/scanning a QR code) and the user accepts an
-                # update from it, _update_wpp_server() runs before
-                # self._window_hidden exists at all — getattr() instead of a
-                # bare attribute access is what keeps that a no-op instead of
-                # an AttributeError crash right after the very first pairing.
                 if getattr(self, "_window_hidden", False) and not self.background_mode:
                     wx.CallAfter(self.restore_window)
 
@@ -4290,8 +4114,6 @@ class MainWindow(wx.Frame):
         if not token:
             return
         if not getattr(self, "_wa_connected", False):
-            # Nothing to advertise presence on. Not an error worth a warning —
-            # this is the normal state while pairing or between reconnects.
             logging.debug(
                 "[presence] skipping '%s' — no live WhatsApp connection", presence
             )
@@ -4306,8 +4128,6 @@ class MainWindow(wx.Frame):
             resp = api_post(
                 url, json={"isOnline": is_online}, headers=headers, timeout=5
             )
-            # The response used to be discarded outright, so a presence that
-            # never once succeeded looked exactly like one that always did.
             status = getattr(resp, "status_code", None)
             if status is not None and status >= 400:
                 logging.warning(
@@ -5062,34 +4882,6 @@ class MainWindow(wx.Frame):
             return
 
         # ── Guard against self-chat multi-device-sync artifacts ─────────────
-        # WPPConnect/Baileys occasionally reports one of our own sends (seen
-        # with self-chat text, audio and documents) tagged with an identity
-        # that isn't our real phone JID, in one of two shapes:
-        #
-        #  (a) "participant" (the actual sender/author, per wa-js semantics)
-        #      has the same digits as "remoteJid" (the chat). For a real
-        #      GROUP, remoteJid is the group's own independently-allocated
-        #      ID, never equal to any participant's JID — so this overlap
-        #      alone proves it's not a real group, regardless of whatever
-        #      fromMe flag WPPConnect attached to the sync echo (observed:
-        #      it can arrive as fromMe=False, producing a bogus "new message
-        #      from an unnamed participant" notification). For a bare,
-        #      not-yet-resolved @lid or @s.whatsapp.net remoteJid, the same
-        #      overlap is only unambiguous when fromMe is already True —
-        #      for a real 1:1 chat, an incoming (fromMe=False) message's
-        #      participant legitimately mirrors remoteJid (the sender IS
-        #      the chat), so that combination must NOT be redirected.
-        #
-        #  (b) remoteJid is suffixed "@g.us" but its digits are simply our
-        #      own phone number (with the Brazilian 9th-digit variant) — no
-        #      real group JID is ever shaped like a plain phone number.
-        #
-        # Either shape otherwise spawns an unnamed phantom "group"/duplicate
-        # chat that (1) duplicates a message already stored under "Eu" and
-        # (2) can't be cleanly identified/deleted afterwards. Redirect to
-        # the real self-chat, and opportunistically learn my_lid from case
-        # (a) so later messages resolve immediately via _is_self_jid()
-        # without waiting on resolve_self_lid()'s async API round-trip.
         participant_raw = key.get("participant") or ""
         remote_digits = remote_jid.split("@", 1)[0]
         part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
@@ -5152,15 +4944,6 @@ class MainWindow(wx.Frame):
             and remote_jid.endswith("@s.whatsapp.net")
             and self._is_self_jid(remote_jid)
         ):
-            # Plain self-chat message, no group/participant artifact involved
-            # — just WhatsApp reporting our own number in the "other" digit
-            # variant for this particular event (with vs. without the
-            # Brazilian 9th digit). _is_self_jid() already tolerates that
-            # when deciding it's self, but without canonicalizing remote_jid
-            # here too, each variant kept its own separate chat entry —
-            # e.g. sending a photo to yourself as a document created one
-            # "Eu" chat for the (9-digit) document echo and a second "Eu"
-            # chat for the (8-digit) sync-artifact echo of the same send.
             remote_jid = my_jid
 
         # Learn/update presence pushName map from incoming message
@@ -5299,9 +5082,6 @@ class MainWindow(wx.Frame):
         # does not — see _apply_group_subject_change).
         self._apply_group_subject_change(remote_jid, chat, msg, live=True)
         self._refresh_mention_cache_on_membership_change(remote_jid, msg)
-        # Live only: a settings change from the history backfill is by
-        # definition superseded by the current list-chats snapshot, and
-        # replaying it would flip the composer over a months-old event.
         self._apply_group_settings_change(remote_jid, chat, msg)
 
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
@@ -5726,15 +5506,6 @@ class MainWindow(wx.Frame):
                 ppm[target] = push
                 changed = True
         if changed:
-            # A pushName is a real name, so the "no name resolvable" verdict
-            # recorded for this sender was simply wrong — lift it in memory and
-            # on disk. Nothing removed a _unresolvable_names entry before, not
-            # even in memory, so a participant blacklisted once was never asked
-            # about again on this or any later launch and stayed "Contato sem
-            # nome" for good. The DB call blocks this thread (this runs per
-            # message on the Socket.IO thread), which is only acceptable
-            # because it can only fire for a JID still in the set, and the
-            # discard just above takes it out.
             unresolvable = getattr(self, "_unresolvable_names", None)
             for target in targets:
                 if not unresolvable or target not in unresolvable:
@@ -6820,19 +6591,6 @@ class MainWindow(wx.Frame):
         try:
             from app_paths import log_path
             self._wpp_log_path = log_path("wppconnect.log")
-            # Keep the PREVIOUS run's Node log as wppconnect.log.1 before
-            # truncating. Like log.log, this file was opened "w" and so only
-            # ever held the current run — which is the wrong run for the
-            # question people actually bring: a session that worked, was closed,
-            # and came back dead. The evidence of what WhatsApp Web was doing
-            # lives in the run that ended, and reopening the app to look
-            # destroyed it. That cost two separate investigations before anyone
-            # noticed the file could not answer.
-            #
-            # One generation only: these logs reach several MB on a busy
-            # account, and the run before last has never been the interesting
-            # one. shutdown_audit.log stays the append-only record of endings;
-            # this is the detail behind them.
             try:
                 if os.path.exists(self._wpp_log_path):
                     prev = self._wpp_log_path + ".1"
@@ -6840,7 +6598,6 @@ class MainWindow(wx.Frame):
                         os.remove(prev)
                     os.replace(self._wpp_log_path, prev)
             except Exception as e:
-                # Never let log housekeeping stop the server from starting.
                 logging.info("[startup] could not rotate wppconnect.log: %s", e)
             log_fh = open(self._wpp_log_path, "w",
                           encoding="utf-8", errors="replace")
@@ -7225,27 +6982,6 @@ class MainWindow(wx.Frame):
                     "running under it) — the graceful close-session above didn't confirm "
                     "success, so its profile may not have finished flushing."
                 )
-            # Give Chrome time to finish writing its profile before the tree
-            # kill takes it down with the Node.
-            #
-            # The CLOSED poll above is a WPPConnect-level state, not a promise
-            # that the browser has flushed leveldb to disk — the same
-            # distinction that made status-session the wrong signal to gate
-            # /start-session on. `taskkill /F /T` then kills the whole tree,
-            # Chrome included, and /F gives it no chance to finish.
-            #
-            # This replaced a fixed sleep(2) precisely because the kill was
-            # landing mid-flush and corrupting leveldb ("Session Unpaired" on
-            # the next launch) — but swapping the sleep for a CLOSED poll fixed
-            # the timing only by accident. A user's shutdown_audit.log showed
-            # the whole clean sequence (pre_close_status='CONNECTED', flush poll
-            # #1 CLOSED in 0.2s, FLUSH OK, taskkill — all in the same second)
-            # and the session still came back dead, with the phone still
-            # listing the device under Linked Devices. Server-side the link was
-            # intact; it was the local profile that had not survived.
-            #
-            # Waiting on the process itself is the signal that actually means
-            # "nothing is writing to that profile any more".
             if session_name:
                 if self.wait_for_profile_release(session_name, timeout=15.0):
                     self._shutdown_audit("Chrome released the profile before the kill")
@@ -8435,14 +8171,6 @@ class MainWindow(wx.Frame):
                     for s in store.list():
                         if s.get("status") == "active" and s.get("name") != new_name:
                             store.set_status(s["name"], "abandoned")
-                    # Store the token verbatim. The "/"->"_" "+"->"-" pass this
-                    # used to apply is a no-op: WPPConnect's encryptSession
-                    # already URL-safes the bcrypt hash before returning it
-                    # (see its `hash.replace(/\//g, '_')`), so the token never
-                    # contains either character by the time it reaches here.
-                    # Dropping it is a simplification, not a fix. The stored
-                    # copy exists to authenticate this session's later
-                    # logout-session call; nothing else reads this field.
                     store.register(new_name, token=token, status="active")
                 if gd:
                     try:
@@ -8499,11 +8227,6 @@ class MainWindow(wx.Frame):
             gd = getattr(self, "global_dir", None)
 
             def _commit():
-                # Keep the token: it is the only credential WPPConnect will
-                # accept for this session's logout-session call, which is what
-                # deregisters the companion device at WhatsApp. Registering it
-                # without one leaves a row the cleanup can delete locally but
-                # never actually unlink — see _logout_abandoned_session().
                 store.register(name, token=token, status="abandoned")
                 logging.info(
                     "[sessions] registered failed pairing session %s as abandoned "
@@ -8511,9 +8234,6 @@ class MainWindow(wx.Frame):
                     name[:12],
                 )
 
-            # Same locking rule as _set_wa_token above: never write outside the
-            # lock, and a busy lock is survivable (the entry is re-derivable on
-            # a later attempt) rather than worth blocking a failure path on.
             if gd:
                 try:
                     with sessions_lock(gd):
@@ -8608,33 +8328,6 @@ class MainWindow(wx.Frame):
                 store.ensure_from_legacy_token(self.token.split(":")[0], self.token)
         except Exception:
             logging.exception("[sessions] seeding session store failed (non-fatal)")
-        # ── once-per-launch tail ────────────────────────────────────────────
-        # Everything below this point must run EXACTLY ONCE per launch, and it
-        # did not: retrieve_token() has two unguarded call sites — MainWindow.
-        # __init__ (main thread; it must run there because self.token is passed
-        # straight into WebSocketClient() and prepare_sync() a few lines later)
-        # and _post_ui_init() STEP 2 (worker thread; it re-reads the token
-        # because its own STEP 1b can re-show the pairing dialog and pair into a
-        # NEW session). Evidence that both fire on every ordinary launch: one
-        # machine's shutdown_audit.log held 50 STARTUP lines across 25 launches
-        # — always exactly two per launch, 0-1 s apart, on every build over a
-        # week. The doubled audit line was only the visible half. The real
-        # hazard was _cleanup_abandoned_sessions() below, which unconditionally
-        # spawns a 'session-cleanup' daemon thread: two of them ran
-        # concurrently, both issuing logout POSTs and shutil.rmtree'ing Chrome
-        # profile dirs under api/userDataDir/ — the code path that has
-        # historically deleted the wrong profile. They serialize on
-        # sessions_lock(gd) with a protected set rebuilt fresh under it, so it
-        # is believed safe today, but that safety is incidental, not designed.
-        #
-        # The guard sits here rather than at the second call site because the
-        # token read/refresh above genuinely has to run twice — after a STEP 1b
-        # re-pair, self.token must reflect the session that was just paired.
-        # Do NOT "simplify" this by deleting either call.
-        #
-        # A plain bool needs no lock: the flag is set in __init__ on the main
-        # thread, and the only other caller is the _post_ui_init thread, which
-        # init_UI() starts long afterwards — the thread start is the barrier.
         if self._startup_token_tail_done:
             logging.info("[retrieve_token] Token refreshed; startup audit and "
                          "session cleanup already done this launch — skipping.")
@@ -8726,18 +8419,6 @@ class MainWindow(wx.Frame):
             gd = getattr(self, "global_dir", None)
             if not gd:
                 return
-            # Same fix as _kill_orphaned_chrome_for_session above: this used to
-            # walk up from data_path("settings.json") with two "..", which
-            # resolves to <data>/api/userDataDir — a directory that does not
-            # exist, since data_path() already returns
-            # <data>/accounts/<account_id>/. The consequence was worse
-            # here than a silent no-op: safe_session_dir_to_delete() is purely
-            # lexical and never checks existence, so os.path.isdir(target) was
-            # False (nothing deleted), os.path.exists(target) was also False
-            # (read as "confirmed gone"), and store.remove(name) then dropped
-            # the row while logging "cleaned abandoned session". Every profile
-            # it claimed to remove is still on disk — 12 directories and 754 MB
-            # of them when this was found.
             udd_root = os.path.abspath(resource_path("api", "userDataDir"))
             node_down = False  # circuit breaker: stop retrying logout once refused
             # Whole scan -> validate -> rmtree runs under the shared sessions_lock
@@ -8769,9 +8450,6 @@ class MainWindow(wx.Frame):
                             logging.warning("[sessions] refusing unsafe session name for cleanup")
                             continue
                         try:
-                            # s is a decorated store entry, so it already
-                            # carries this session's own decrypted token —
-                            # the only one WPPConnect will accept for it.
                             node_down = not self._logout_abandoned_session(
                                 name, token=s.get("token"), skip=node_down)
                             # Delete then CONFIRM gone before dropping the store row.
@@ -8816,23 +8494,11 @@ class MainWindow(wx.Frame):
         if skip or not name:
             return not skip
         if not token:
-            # Without the session's own token there is no authenticated way to
-            # deregister it. Say so rather than firing a request that can only
-            # 401, and let the caller still reclaim the local profile.
             logging.info(
                 "[sessions] no stored token for %s — cannot deregister it at "
                 "WhatsApp; removing its local profile only", name[:12],
             )
             return True
-        # Send ONLY the bcrypt signature, not the whole "<session>:<signature>"
-        # token. WPPConnect's verifyToken reads the signature out of the URL's
-        # session parameter first and only falls back to the Authorization
-        # header when the URL has no ":<signature>" — which is exactly this
-        # call, since the name alone goes in the path. That fallback ends in
-        # `bcrypt.compare(session + secretKey, headerValue)`, so a header
-        # carrying "<session>:<signature>" can never match. Passing the whole
-        # token is what produced `POST /logout-session -> 401 in 3ms` on every
-        # cleanup run.
         signature = token.split(":", 1)[1] if ":" in token else token
         try:
             api_post(
@@ -8970,15 +8636,6 @@ class MainWindow(wx.Frame):
             for k, v in dict(self.db.get_metadata_json("locally_read_at", {})).items()
         }
 
-        # 9. group_send_perms — {group jid: {"announce", "am_admin", "t"}}, the
-        # "only admins can send messages" verdict get_remote_chats() derives
-        # whenever a list-chats snapshot carries groupMetadata. The chats
-        # table stores no group metadata at all, so the groups get_chats()
-        # rehydrates a few lines below arrive with none of it and
-        # _is_group_send_restricted() had nothing to read: an announcement
-        # group presented a writable message field to a member who cannot
-        # post in it for the whole of startup — and permanently offline, or
-        # whenever the sync keeps failing.
         self._group_send_perms = {
             k: v
             for k, v in dict(self.db.get_metadata_json("group_send_perms", {})).items()
@@ -10937,9 +10594,6 @@ class MainWindow(wx.Frame):
             return getattr(self, "_sync_completed", False)
 
         if _already_syncing():
-            # Sync is already running or completed — clear "preparing" status
-            # if it was left visible because the sync finished before this
-            # fallback thread checked in.
             if getattr(self, "_sync_completed", False):
                 wx.CallAfter(self._set_status, "")
             return True
@@ -10952,11 +10606,6 @@ class MainWindow(wx.Frame):
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json",
             }
-            # Same reason as in get_remote_chats(): without this flag the
-            # probe kicks off WPP.chat.list()'s serial per-group metadata
-            # fetch inside the page.  Our 5 s timeout doesn't cancel it,
-            # so a probe that "failed" still leaves that loop running and
-            # competing with the real chat-list fetch that follows.
             r = api_post(
                 url,
                 json={"ignoreGroupMetadata": True},
@@ -10967,23 +10616,6 @@ class MainWindow(wx.Frame):
                 self.messages_set_completed = True
                 self._try_start_sync_thread()
                 return True
-            # HTTP 404 {"status": "Disconnected"} is statusConnection.ts
-            # answering for a session with no live WhatsApp client — the same
-            # signal get_remote_chats() and _run_sync() already bail out on at
-            # first sight.  This probe was the only list-chats consumer that
-            # didn't: a real user's log shows all 13 probes taking that 404,
-            # 5 s apart, and the poll then force-starting a full sync against
-            # the very session that had just refused thirteen times.  Stop
-            # here instead — _check_wa_connection_closed() has already flagged
-            # the connection down and scheduled check_wa_connection_http(), so
-            # recovery is covered without this thread: session-logged sets
-            # messages_set_completed and starts the sync when WhatsApp comes
-            # back, and failing that the health checker
-            # (_HEALTH_CHECK_INTERVAL, 30 s) calls trigger_sync_if_needed()
-            # for the rest of the session, which needs only _wa_connected and
-            # an incomplete sync.  Deliberately neither force-starting nor
-            # setting messages_set_completed: both assert that WhatsApp Web's
-            # chat store is loaded, which is exactly what this 404 disproves.
             if self._check_wa_connection_closed(r):
                 logging.warning(
                     "[wait_messages_set] list-chats answered Disconnected (HTTP %s) — "
@@ -11021,9 +10653,6 @@ class MainWindow(wx.Frame):
 
             # 60 s elapsed and sync still hasn't started — start it unconditionally
             # so the program never stays stuck on "preparando para sincronizar".
-            # Only silence reaches here: a probe that got a definite
-            # "Disconnected" answer ended the poll above, precisely so this
-            # force-start never fires against a session known to be dead.
             self.messages_set_completed = True
             self._try_start_sync_thread()
         threading.Thread(target=_fallback, daemon=True).start()
@@ -11419,18 +11048,6 @@ class MainWindow(wx.Frame):
 
                     self._lift_contact_identity(chat)
 
-                # Diagnostic: what SHAPE does an @lid chat arrive in? Key names
-                # and value types answer that; the values themselves do not.
-                #
-                # This used to also log the whole first @lid chat object, which
-                # meant contact names, pushnames, LIDs and profile-photo URLs
-                # went into log.log — 42 chat objects in one ordinary session.
-                # CLAUDE.md tells anyone diagnosing a problem to ask the user
-                # for that exact file, so every such request was also asking
-                # them to hand over a slice of their address book. The shape is
-                # the part that was ever actually useful for debugging LID
-                # handling; a specific value can be logged deliberately, and
-                # narrowly, when a specific question needs it.
                 lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
                 if lid_chats:
                     shape = {k: type(v).__name__ for k, v in lid_chats[0].items()}
@@ -11865,19 +11482,6 @@ class MainWindow(wx.Frame):
                 if archive_changed and hasattr(self, "db") and self.db is not None:
                     self.db.set_metadata_json("archived_chats", list(self._archived_chats))
 
-                # ── Group send permissions ("only admins can send") ──────────
-                # This is the only place the announce flag ever reaches Python:
-                # it rides on groupMetadata here and is stored nowhere else, so
-                # without recording the verdict the composer had no idea a
-                # group was restricted until the first successful list-chats
-                # merge of the session landed.
-                #
-                # The counters are a diagnostic, not bookkeeping: list-chats is
-                # called with `ignoreGroupMetadata` and WhatsApp Web hydrates
-                # group metadata lazily anyway, so it is genuinely unknown how
-                # often `groupMetadata`/`announce` arrive at all. Shape and
-                # counts only — never a JID, name or message — since this
-                # lands in a log file users attach to bug reports.
                 perms_changed = False
                 groups_total = groups_with_metadata = 0
                 groups_with_announce = groups_with_verdict = 0
@@ -11898,12 +11502,6 @@ class MainWindow(wx.Frame):
                         groups_with_announce += 1
                     else:
                         continue
-                    # Compared verdict-to-verdict rather than by re-running
-                    # _is_group_send_restricted() before and after: the merge
-                    # loop above has already copied this snapshot's
-                    # groupMetadata into chats[jid], so a "before" reading
-                    # taken here would already see the new value and the
-                    # change would never be detected.
                     previous = dict(getattr(self, "_group_send_perms", {}).get(jid) or {})
                     current = self._record_group_send_perms(jid, chat)
                     if current is None:
@@ -11911,12 +11509,6 @@ class MainWindow(wx.Frame):
                     groups_with_verdict += 1
                     if (previous.get("announce") == current["announce"]
                             and previous.get("am_admin") == current["am_admin"]
-                            # A re-confirmed verdict whose freshness stamp was
-                            # rewritten (the stored one had expired) still has
-                            # to reach the DB: skipping the write here would
-                            # leave the persisted copy expired for good, and
-                            # every restart would fail open on a group whose
-                            # answer never changes.
                             and previous.get("t") == current.get("t")):
                         continue
                     perms_changed = True
@@ -11924,24 +11516,9 @@ class MainWindow(wx.Frame):
                                       and not bool(previous.get("am_admin")))
                     now_restricted = (bool(current.get("announce"))
                                       and not bool(current.get("am_admin")))
-                    # The verdict moved. _apply_composer_permissions() only
-                    # ever runs when a conversation is opened, and opening the
-                    # one already on screen early-returns — so a group switched
-                    # to announcement-only while the user sat in it kept a
-                    # writable message field until they went elsewhere and came
-                    # back. The very first verdict for a group counts as a move
-                    # too: until it lands the composer is showing the fail-open
-                    # writable state.
                     if now_restricted != was_restricted:
                         cp = getattr(self, "conversations_panel", None)
                         if cp is not None:
-                            # An empty `previous` means this is the first
-                            # verdict ever seen for the group, not a change to
-                            # one: the composer was writable only because
-                            # there was no answer yet, so the spoken
-                            # announcement must not say the group has *just*
-                            # become announcement-only — it may have been for
-                            # months.
                             wx.CallAfter(cp.refresh_composer_permissions, jid,
                                          bool(previous))
                 if perms_changed:
@@ -12335,21 +11912,6 @@ class MainWindow(wx.Frame):
                 return gm_subject
         return ""
 
-    # How long a persisted send-permission verdict stays authoritative before
-    # it is treated as no answer at all — i.e. before this fails open again.
-    #
-    # Deliberately shorter than unresolvable_lids' week next door, because the
-    # two records cost opposite things when they are wrong. Re-deriving this
-    # verdict is free and constant: every list-chats snapshot that carries
-    # participants rewrites it and the refresh loop runs every 60s, so expiry
-    # only ever bites after a whole day in which not one decidable snapshot
-    # arrived. Dropping a verdict a little too early costs at most one send
-    # WhatsApp Web itself rejects; trusting one a little too long costs a user
-    # locked out of a group they can post in (promoted to admin, or the
-    # announce flag turned off, while WinZapp was closed or while no snapshot
-    # carried participants). A day still covers everything the persistence
-    # exists for: a cold start before the first list-chats lands, and a
-    # session spent offline.
     _GROUP_SEND_PERMS_MAX_AGE_SECONDS = 24 * 3600
 
     def _is_group_send_restricted(self, chat: dict) -> bool:
@@ -12420,11 +11982,6 @@ class MainWindow(wx.Frame):
         """
         if not hasattr(self, "_group_send_perms"):
             self._group_send_perms = {}
-        # An expired record counts as absent here too, and not only where it
-        # is read: reusing it as *previous* would let a snapshot that
-        # re-confirms it return early with the old "t" untouched, so the
-        # record would stay expired forever and every launch would fail open
-        # on a group whose verdict simply never changes.
         previous = unexpired_group_send_verdict(
             self._group_send_perms.get(jid),
             time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
@@ -12585,17 +12142,8 @@ class MainWindow(wx.Frame):
             daemon=True,
         ).start()
 
-    # Group-settings notification subtypes that change who may SEND
-    # (announce), as opposed to who may edit the group's info (restrict).
-    # Only the first group decides whether the composer is writable — the two
-    # sets mirror the branches _get_message_content() renders these under
-    # (ui/conversations.py), and conflating them would make the message field
-    # read-only over a change that has nothing to do with sending.
     _GROUP_ANNOUNCE_NOTIF_SUBTYPES = frozenset({"announce", "announcement", "restrict_messages"})
     _GROUP_RESTRICT_NOTIF_SUBTYPES = frozenset({"restrict", "locked", "settings"})
-    # Not a settings change, but the other half of the very same verdict:
-    # "only admins can send" is only a restriction for someone who is not an
-    # admin, and this is the only event that ever says that changed.
     _GROUP_ADMIN_NOTIF_SUBTYPES = frozenset({"promote", "promotion", "demote", "demotion"})
 
     def _apply_group_settings_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
@@ -12616,12 +12164,6 @@ class MainWindow(wx.Frame):
         if msg.get("messageType") != "groupNotification":
             return
         notif = (msg.get("message") or {}).get("groupNotification") or {}
-        # Lower-cased to match the timeline renderer's own reading of this same
-        # field (ui/conversations.py). The subtype sets are identical there;
-        # the normalisation was not, so a notification arriving as "Announce"
-        # rendered a correct timeline line and was silently dropped here —
-        # leaving a writable message field on a group that had just gone
-        # announcement-only.
         subtype = (notif.get("subtype") or "").lower()
         if subtype in self._GROUP_ADMIN_NOTIF_SUBTYPES:
             self._apply_group_admin_change(remote_jid, chat, notif, subtype)
@@ -12631,11 +12173,6 @@ class MainWindow(wx.Frame):
             return
         value = group_setting_notif_value(notif)
         if value is None:
-            # Never guess here. Assuming "on" makes the composer read-only off
-            # a notification that never said so (the fail-closed direction);
-            # assuming "off" re-opens the composer of a group an admin just
-            # restricted. Leaving the last known verdict alone is correct in
-            # both directions.
             logging.info(
                 "[_apply_group_settings_change] %s notification stated no value "
                 "(keys: %s) — local state left untouched", subtype, sorted(notif.keys()))
@@ -12647,9 +12184,6 @@ class MainWindow(wx.Frame):
         group_meta["announce" if is_announce else "restrict"] = value
         if not is_announce:
             return
-        # The notification carries no participants, so the admin half of the
-        # verdict comes from the last snapshot that did — see
-        # group_send_permission_from_metadata's known_am_admin.
         if self._record_group_send_perms(remote_jid, chat) is not None:
             self._persist_group_send_perms()
         cp = getattr(self, "conversations_panel", None)
@@ -12675,8 +12209,6 @@ class MainWindow(wx.Frame):
         """
         targets = []
         for raw in (notif.get("recipients") or []):
-            # WebSocketClient normalises these to plain strings, but a record
-            # saved by an older build can still hold a raw WPPConnect Wid.
             if isinstance(raw, dict):
                 raw = raw.get("_serialized") or raw.get("id") or ""
             if isinstance(raw, str) and raw:
@@ -12744,10 +12276,6 @@ class MainWindow(wx.Frame):
             participant_digits(getattr(self, "my_lid", "")),
             self._phone_digits_equivalent,
         )
-        # The notification says nothing about announce, so that half comes
-        # from the chat dict or, failing that, from the verdict already
-        # stored — its admin half is the part this event just contradicted,
-        # never its announce half.
         announce = _parse_bool_flag(group_meta.get("announce"))
         if announce is None:
             announce = _parse_bool_flag(chat.get("announce"))
@@ -12757,9 +12285,6 @@ class MainWindow(wx.Frame):
                 time.time(), self._GROUP_SEND_PERMS_MAX_AGE_SECONDS)
             announce = None if stored is None else bool(stored.get("announce"))
         if announce is None:
-            # No announce answer anywhere: no verdict can be stated, and the
-            # stored one now carries an am_admin this notification just
-            # contradicted. Dropping it is the fail-open answer.
             changed = self._group_send_perms.pop(remote_jid, None) is not None
         else:
             self._group_send_perms[remote_jid] = {
@@ -12770,9 +12295,6 @@ class MainWindow(wx.Frame):
             changed = True
         if changed:
             self._persist_group_send_perms()
-        # Refreshed even when the verdict itself did not move: the
-        # participants list above may have been what was answering for this
-        # group, and it just changed.
         if cp is not None:
             wx.CallAfter(cp.refresh_composer_permissions, remote_jid)
 
@@ -13090,16 +12612,6 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[maintenance] VACUUM failed: %s", exc)
 
-    # How long a LID stays blacklisted before WinZapp is willing to ask about
-    # it again. The unresolvable_lids table only ever exists to stop a tight
-    # re-query loop after a resolution attempt came back empty (see
-    # resolve_lid_jids_via_api) — it is not a verdict. Nothing expired it
-    # before, so a contact recorded once as having no resolvable name kept
-    # reading as "Contato sem nome" on every future launch even after WhatsApp
-    # had learned the real name, and a screen reader announced that
-    # placeholder aloud every time they spoke in a group. A week means a
-    # genuinely unresolvable LID costs one query per week (during the sync's
-    # own throttled backfill batch), not one per render.
     _UNRESOLVABLE_MAX_AGE_SECONDS = 7 * 24 * 3600
 
     def _load_local_lid_cache(self):
@@ -13111,10 +12623,6 @@ class MainWindow(wx.Frame):
             with self._lid_mapping_lock:
                 self._lid_to_phone = mappings
                 self._phone_to_lid = {v: k for k, v in mappings.items()}
-            # Sweep before loading, so the in-memory sets below never carry an
-            # entry old enough to deserve another attempt. Isolated from the
-            # outer try: a failed sweep only means "no retries this launch",
-            # which must not cost us the mappings already read above.
             try:
                 cutoff = int(time.time()) - self._UNRESOLVABLE_MAX_AGE_SECONDS
                 expired = self.db.delete_expired_unresolvable(cutoff)
@@ -20108,14 +19616,6 @@ class MainWindow(wx.Frame):
 
         if changed:
             if was_unresolvable:
-                # The discard above is in memory only, and the row it leaves
-                # behind outlives the session: _load_local_lid_cache() read it
-                # straight back on the next launch and the LID we had just
-                # bridged was blacklisted all over again. Deliberately outside
-                # `if save:` — the batch callers that pass save=False persist
-                # the mapping themselves right after, so the stale blacklist
-                # row has to go either way. Outside the lock too: self.db
-                # blocks this thread until the coroutine returns.
                 try:
                     self.db.delete_unresolvable_lid(lid_jid)
                 except Exception as exc:

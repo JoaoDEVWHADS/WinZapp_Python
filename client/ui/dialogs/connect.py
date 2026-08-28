@@ -909,9 +909,6 @@ class Connect:
             wx.GetApp = lambda: app
 
         def _bg_pairing_flow():
-            # The token this attempt ends up using, whether freshly minted or
-            # reused. Bound here so the except handler below can always read it,
-            # and empty until there is genuinely something to record.
             _attempt_token = ""
             try:
                 # Capture the old token to close it, preventing conflict
@@ -948,11 +945,6 @@ class Connect:
                     except Exception:
                         self.main_window.token = raw_token
 
-                # From here on this attempt owns a session name. If it fails, the
-                # name must reach the SessionStore as 'abandoned' or its
-                # userDataDir is orphaned — see
-                # MainWindow._register_abandoned_session(). A reused token is
-                # captured too; the helper refuses to abandon a still-active one.
                 _attempt_token = self.main_window.token or ""
 
                 # Terminate any existing session running on the server. If a session is already
@@ -977,32 +969,8 @@ class Connect:
                         )
                         api_post(close_url, headers=_close_headers, timeout=10)
                         logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code: %s", _session_name)
-                        # close-session answers 200 as soon as it has ASKED the
-                        # session to close — Chrome is still shutting down and
-                        # still owns the lock on userDataDir/<session>. Waiting
-                        # on the HTTP call alone therefore waited about 60 ms,
-                        # and the /start-session that followed hit
-                        # "The browser is already running for
-                        # ...\\userDataDir\\<session>", killed the new session,
-                        # and left the pairing code never to arrive — the Python
-                        # side then sat out its full 90-second wait and reported
-                        # the generic failure. Poll for the session to actually
-                        # report CLOSED instead of guessing at a delay.
-                        #
-                        # Reuses the shutdown path's poller, which exists for the
-                        # same reason (a blind sleep(2) landed mid-flush and
-                        # corrupted the profile's leveldb). It polls every 0.3 s
-                        # for up to 15 s and treats a connection error as closed.
                         if _old_token:
                             self.main_window._wait_for_session_flushed(_old_token)
-                        # ...and then wait for the BROWSER, which is a different
-                        # claim. Measured: the CLOSED poll above confirmed in
-                        # 0.1 s, start-session went out 118 ms later, and Chrome
-                        # — still exiting — refused it with "The browser is
-                        # already running for ...\\userDataDir\\<session>". The
-                        # session died on the spot and no pairing code was ever
-                        # produced. Session status says nothing about who owns
-                        # the profile lock; only the process does.
                         self.main_window.wait_for_profile_release(_session_name, timeout=15.0)
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
@@ -1011,10 +979,6 @@ class Connect:
 
                 threading.Thread(target=_close_and_signal, daemon=True).start()
 
-                # Bounded by the poll above; the timeout here is only a backstop
-                # for a Node that never answers at all. Overshooting it is much
-                # cheaper than the alternative: starting a session whose profile
-                # is still locked loses the whole attempt.
                 close_done.wait(timeout=45)
 
                 if my_attempt != self._pairing_attempt_id:
@@ -1088,10 +1052,6 @@ class Connect:
                     # this attempt's token/settings or pop up pairing_dial
                     # behind whatever the user is now looking at.
                     logging.info("[_bg_pairing_flow] Attempt %d superseded after phoneCode wait — discarding result.", my_attempt)
-                    # /start-session already ran for this attempt, so WPPConnect
-                    # has created a Chrome profile for it. Nothing else will ever
-                    # mention this session name again, so record it now or its
-                    # userDataDir is orphaned for good.
                     self.main_window._register_abandoned_session(_attempt_token)
                     return
 
@@ -1105,23 +1065,14 @@ class Connect:
                 else:
                     # No code received — clear any partially-saved token so next
                     # launch shows the connection dialog instead of acting connected.
-                    # Record the session first: _set_wa_token("") returns before
-                    # its own SessionStore block, so clearing is precisely the
-                    # path that used to lose the name and orphan its profile.
                     self.main_window._register_abandoned_session(_attempt_token)
                     self.main_window._set_wa_token("")
                     self.main_window.save_settings()
-                    # If WhatsApp actually refused the request (rather than the
-                    # code simply never arriving), the reason is waiting here —
-                    # report that instead of the generic "no code received".
                     reason = getattr(self.main_window.ws, "_phone_code_error", "")
                     wx.CallAfter(self._on_pairing_code_error, reason)
 
             except Exception as exc:
                 # On any unexpected error, clear the token so next launch works correctly.
-                # _attempt_token is "" if the failure happened before a token was
-                # minted — nothing was created in that case, and the helper
-                # returns immediately on an empty token.
                 self.main_window._register_abandoned_session(_attempt_token)
                 self.main_window._set_wa_token("")
                 self.main_window.save_settings()

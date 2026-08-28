@@ -1470,9 +1470,6 @@ class ConversationsPanel(wx.Panel):
         if not self.conversation or self.conversation.get("remoteJid") != jid:
             return
 
-        # The chat-list entry is the dict MainWindow just wrote the new
-        # groupMetadata into; self.conversation is usually the same object,
-        # but not guaranteed to be after a re-sync replaced the entry.
         conversation = self.main_window.chats.get(jid) or self.conversation
         was_editable = self.message_field.IsEditable()
         self._apply_composer_permissions(jid, conversation)

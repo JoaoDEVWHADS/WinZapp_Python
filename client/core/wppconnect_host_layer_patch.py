@@ -179,20 +179,6 @@ V2_CHECK_QR_CODE = (
     "    }\n"
 )
 
-# v3 — v2 plus a `catch` around loginByCode(). v2 awaits loginByCode() inside a
-# try/finally with no catch, so a rejection propagates straight out of
-# checkQrCode() — and checkQrCode() is called fire-and-forget (`this.checkQrCode()`
-# at the end of host.layer.js's own initialize path, and via the exposed
-# `conn.auth_code_change` handler), with nobody awaiting or catching it. A failing
-# genLinkDeviceCodeForPhoneNumber() therefore surfaced only as a bare
-# "Unhandled Rejection: t: t" in wppconnect.log, killed that checkQrCode() tick
-# before it could do anything else, and left the Python side to sit through its
-# full 90-second _phone_code_event wait and report the generic "no pairing code
-# received" — with nothing whatsoever in log.log to say why.
-#
-# Catching it keeps v2's self-recovery intact (linkCodeIssuedAt is still only set
-# on success, so the next auth_code_change tick retries) while making the failure
-# visible and non-fatal.
 V3_CHECK_QR_CODE = (
     "    async checkQrCode() {\n"
     "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
@@ -244,19 +230,6 @@ V3_CHECK_QR_CODE = (
 )
 
 
-# v4 — v3 plus a `catchLinkCodeError` hook, so the failure reaches the user
-# instead of only wppconnect.log. v3 made the error real and non-fatal, but the
-# person actually trying to pair still saw nothing but the generic "no pairing
-# code received" after a 90-second wait — the whole point of knowing the error
-# is being able to say what it was.
-#
-# The hook is read off `this.options` rather than a dedicated instance field
-# because that needs no change to initializer.js: `create()` builds the client as
-# `new Whatsapp(page, session, mergedOptions)` with
-# `mergedOptions = { ...defaultOptions, ...options }`, a plain spread, so an
-# option key WPPConnect itself knows nothing about survives untouched into
-# `this.options`. createSessionUtil.ts passes it in (see that file's own patch);
-# the `?.` chain keeps this a silent no-op wherever it isn't.
 V4_CHECK_QR_CODE = (
     "    async checkQrCode() {\n"
     "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
@@ -313,25 +286,6 @@ V4_CHECK_QR_CODE = (
 )
 
 
-# v5 — v4 plus a backoff between failed attempts.
-#
-# The 60-second cooldown v2 introduced only ever gates a SUCCESS:
-# `linkCodeIssuedAt` is written when a code is actually produced, so through a
-# run of failures it stays 0 and `if (this.linkCodeIssuedAt && ...)` never
-# fires. Every `conn.auth_code_change` tick therefore went straight back into
-# genLinkDeviceCodeForPhoneNumber(). Measured on a real failing run: nine
-# attempts, a steady one every 20 seconds, with no end in sight — that is
-# WhatsApp's own auth-code rotation rate, and nothing was pacing us but it.
-#
-# That is bad on its own, and probably worse than it looks: CompanionHelloError
-# (the failure that exposed this) is plausibly WhatsApp rate-limiting the
-# link-device request, in which case hammering it three times a minute is a
-# feedback loop that keeps the block alive. Backing off is what lets it clear.
-#
-# Doubling from 20s to a 5-minute ceiling, counted in consecutive failures and
-# reset on any success. Deliberately never gives up: whatever the cause, the
-# user may well resolve it (wait out a limit, fix connectivity) and pairing
-# should then recover on its own rather than needing a restart.
 PATCHED_CHECK_QR_CODE = (
     "    async checkQrCode() {\n"
     "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
@@ -403,23 +357,6 @@ PATCHED_CHECK_QR_CODE = (
 )
 
 
-# ── loginByCode: real error detail instead of minified "t: t" ────────────────
-#
-# Same root cause, and same fix, as the sendFile() error-detail patch in
-# wppconnect_sender_layer_patch.py — see that module's docstring for the full
-# explanation. In short: WPP.conn.genLinkDeviceCodeForPhoneNumber() throws INSIDE
-# the Puppeteer page, and what wa-js's minified bundle throws there is not a
-# standard Error. Puppeteer serializes a page-context exception across the CDP
-# boundary via Runtime.evaluate's `exceptionDetails`, which for a non-standard
-# thrown value reliably carries only a className/description — so the whole
-# failure reaches Node as the useless single-letter "t: t" seen in wppconnect.log.
-#
-# Fixed the same way: catch the exception INSIDE the page, where the real Error
-# object still exists, and RETURN it as plain data. page.evaluate()'s return value
-# goes through ordinary structured cloning, which preserves plain string
-# properties, unlike its exception path. The Node side then reconstructs a real
-# Error and throws that, so both wppconnect.log and (via the catch added to
-# checkQrCode above) the operator finally get real text.
 ORIGINAL_LOGIN_BY_CODE = (
     "    async loginByCode(phone) {\n"
     "        const code = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
@@ -488,34 +425,6 @@ LEGACY_LOGIN_BY_CODE_RAW = (
 )
 
 
-# ── loginByCode: use wa-js's managed linking lifecycle ───────────────────────
-#
-# wppconnect calls the low-level `WPP.conn.genLinkDeviceCodeForPhoneNumber()`
-# directly. wa-js 4.6.0 also ships a managed flow — `startLinkDeviceCodeForPhoneNumber`
-# / `refreshLinkDeviceCode` / `cancelLinkDeviceCode`, plus the events
-# `conn.link_code_change` and `conn.link_code_error` — whose own documentation
-# describes exactly the behaviour every generation of the checkQrCode patch above
-# has been hand-rolling since issue #8:
-#
-#   "Unlike genLinkDeviceCodeForPhoneNumber, repeated calls for the same phone
-#    number reuse the active code. New codes are emitted through
-#    conn.link_code_change only when WhatsApp requests a refresh or the current
-#    code expires."
-#
-# That is the "explicit expiry/refresh signal from wa-js" this module's own
-# docstring records as not existing yet (wa-js PR #3554). It exists now.
-#
-# The immediate reason for switching, though, is a failure seen live: on a fresh
-# Chrome profile the raw call threw `Invariant Violation: Minified invariant
-# #56367` with `messageParams: [""]`. An invariant is an internal assertion, not
-# a server refusal — it fires when a function is reached in a state it did not
-# expect. The managed entry point is what installs the listeners and state the
-# linking flow needs, and calling the low-level function around it is a plausible
-# way to land in exactly that state.
-#
-# Falls back to the raw call when the managed API is absent, so an older
-# @wppconnect/wa-js keeps working, and reports which path ran so a log can say
-# which one produced a given code or failure.
 PATCHED_LOGIN_BY_CODE = (
     "    async loginByCode(phone) {\n"
     "        const outcome = await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
@@ -596,7 +505,6 @@ def patch_host_layer_source(content: str):
     """
     notes = []
 
-    # checkQrCode: migrate whichever generation is installed up to v3.
     if PATCHED_CHECK_QR_CODE in content:
         notes.append("checkQrCode: already at v5.")
     elif V4_CHECK_QR_CODE in content:
@@ -630,7 +538,6 @@ def patch_host_layer_source(content: str):
     else:
         notes.append("checkQrCode: DID NOT MATCH any known source text — left untouched.")
 
-    # loginByCode: real browser-side error detail instead of minified "t: t".
     if PATCHED_LOGIN_BY_CODE in content:
         notes.append("loginByCode: already on the managed wa-js linking API.")
     elif LEGACY_LOGIN_BY_CODE_RAW in content:
