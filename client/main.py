@@ -6669,6 +6669,26 @@ class MainWindow(wx.Frame):
     _SHUTDOWN_FLUSH_TIMEOUT = 15.0
     _SHUTDOWN_FLUSH_POLL = 0.3
 
+    # Total budget for the teardown when WINDOWS is shutting us down, as opposed
+    # to the user quitting. The two are not the same deadline at all.
+    #
+    # On a normal quit nothing is racing us, so the generous per-phase timeouts
+    # above are free: they only ever elapse when something is genuinely wrong.
+    # On WM_ENDSESSION we are on a clock we do not control. _on_query_end_session
+    # registers a ShutdownBlockReason but still lets the shutdown proceed
+    # (event.Skip() answers TRUE to WM_QUERYENDSESSION — registering a reason
+    # without ALSO vetoing buys no extra time; see that method), so what we
+    # really have is Windows' hung-app timeout, ~5s by default.
+    #
+    # Left unbounded, the phases below sum to ~40s (10 POST + 15 flush + 15
+    # profile release). Windows would cut that off partway — which is the very
+    # mid-write kill the whole routine exists to prevent, now with a frozen UI
+    # on the way out. Every shutdown_audit.log from the field completes the
+    # clean path inside one second, so 4s is the real case with room to spare;
+    # the cases that would need longer are a suspended chrome.exe that is not
+    # writing anyway, and that the OS is about to kill regardless.
+    _WINDOWS_SHUTDOWN_BUDGET = 4.0
+
     def _shutdown_audit(self, msg: str):
         """Append one line to a PERSISTENT shutdown-audit log that (unlike
         log.log, opened mode='w') survives across launches, so the teardown of
@@ -6683,13 +6703,17 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def _wait_for_session_flushed(self, token: str) -> bool:
-        """Poll status-session until the session reports CLOSED (browser down,
-        auth flushed) or the timeout elapses. Returns True if it confirmed
-        CLOSED, False on timeout. See connection_state.session_closed_after_flush
-        for why a blind sleep was not enough."""
+    def _wait_for_session_flushed(self, token: str, timeout: float = None) -> bool:
+        """Poll status-session until WPPConnect reports the session closed, or
+        the timeout elapses. Returns True if it confirmed, False on timeout.
+
+        This confirms only the SERVER's half of the teardown — see
+        connection_state.session_closed_after_flush for what it does and does
+        not promise, and why the caller also waits on the Chrome process."""
         import connection_state as cs
-        deadline = time.monotonic() + self._SHUTDOWN_FLUSH_TIMEOUT
+        if timeout is None:
+            timeout = self._SHUTDOWN_FLUSH_TIMEOUT
+        deadline = time.monotonic() + timeout
         headers = {"Authorization": f"Bearer {token}"}
         url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/status-session"
         started = time.monotonic()
@@ -6716,14 +6740,27 @@ class MainWindow(wx.Frame):
                 return True
             time.sleep(self._SHUTDOWN_FLUSH_POLL)
         self._shutdown_audit(
-            f"flush TIMEOUT after {polls} polls / {self._SHUTDOWN_FLUSH_TIMEOUT}s "
+            f"flush TIMEOUT after {polls} polls / {timeout:.1f}s "
             "— never saw CLOSED")
         return False
 
     def _on_query_end_session(self, event):
-        """Windows is asking whether it may shut down. Always say yes, but ask
-        for extra time first so _on_end_session() can close WPPConnect cleanly
-        instead of Chrome being killed mid-write (see _WPP_GRACEFUL_STOP_SECONDS)."""
+        """Windows is asking whether it may shut down. We say yes.
+
+        The ShutdownBlockReason registered here does NOT buy extra time, and it
+        is important not to believe otherwise: Windows only holds a shutdown for
+        an app that ALSO answers FALSE to WM_QUERYENDSESSION, and `event.Skip()`
+        below answers TRUE. All the reason string does is name us on the
+        blocking-apps screen if something else vetoes. It is kept for that, and
+        because _on_end_session has to destroy it either way.
+
+        So the real deadline for _on_end_session is Windows' hung-app timeout,
+        ~5s — which is why it passes _WINDOWS_SHUTDOWN_BUDGET rather than
+        letting the teardown's own ~40s of per-phase timeouts run. Vetoing to
+        claim the full budget was considered and rejected: it needs the teardown
+        moved off this thread (a blocked message pump reads as hung, defeating
+        the point), and the cases that would actually use the extra time are a
+        suspended chrome.exe that is not writing anyway."""
         try:
             import ctypes
             ctypes.windll.user32.ShutdownBlockReasonCreate(
@@ -6739,7 +6776,14 @@ class MainWindow(wx.Frame):
         logging.warning("[_on_end_session] Windows is ending the session — stopping WPPConnect.")
         self._shutting_down = True
         try:
-            self._stop_wpp_server()
+            # Bounded, and deliberately still on this thread: when this handler
+            # returns, Windows terminates the process, so a background thread
+            # doing the teardown would be killed mid-flush — the exact damage
+            # being avoided. See _on_query_end_session for where the 4s comes
+            # from, and why we do not veto to ask for more.
+            self._shutdown_audit(
+                f"WM_ENDSESSION — teardown capped at {self._WINDOWS_SHUTDOWN_BUDGET}s")
+            self._stop_wpp_server(budget=self._WINDOWS_SHUTDOWN_BUDGET)
         except Exception:
             logging.exception("[_on_end_session] Failed to stop WPPConnect cleanly")
         try:
@@ -6764,13 +6808,24 @@ class MainWindow(wx.Frame):
     # anything, keeps listing the session as active. That is precisely the
     # reported symptom.
     #
-    # A 200 response from /close-session (which the server only sends after
-    # `await`ing client.close()) is trusted directly as proof Chrome is down,
-    # and the budget below is the request's own timeout.
+    # The budget below is only this request's own timeout. A 200 from
+    # /close-session is NOT proof Chrome is down, and used to be treated as
+    # such: wppconnect's own close() (node_modules, api/whatsapp.js) returns
+    # true without closing anything when the page is already closed, and wraps
+    # both page.close() and browser.close() in `.catch(() => null)`, so a
+    # failure or a timeout also reports success. That is why the caller waits
+    # on two further signals — the CLOSING→CLOSED transition, then the Chrome
+    # process itself releasing userDataDir — instead of the HTTP status.
     _WPP_GRACEFUL_STOP_SECONDS = 10
 
-    def _stop_wpp_server(self):
+    def _stop_wpp_server(self, budget: float = None):
         """Terminate the WPPConnect Server process and all its children.
+
+        `budget` caps the WHOLE teardown, in seconds, by shrinking each phase's
+        own timeout to whatever is left. Pass it only when something else owns
+        the deadline — Windows during WM_ENDSESSION (_WINDOWS_SHUTDOWN_BUDGET).
+        A normal quit passes nothing and keeps the generous per-phase timeouts,
+        which only ever elapse when something is genuinely wrong.
 
         Ordering matters (multi-account): FIRST gracefully close THIS account's
         own WhatsApp session (browser.close() → WhatsApp Web flushes its session
@@ -6793,6 +6848,17 @@ class MainWindow(wx.Frame):
         # STEP 1: gracefully close our own session so its state is persisted,
         # regardless of whether we go on to stop the Node or leave it up. This
         # must happen for EVERY closing process, not just the last one.
+        deadline = (time.monotonic() + budget) if budget else None
+
+        def _phase_timeout(default: float) -> float:
+            """This phase's timeout, clipped to what the overall budget has
+            left. Never returns 0: every phase must get at least one real
+            attempt, otherwise a tight budget silently degrades into the
+            no-wait kill this routine exists to avoid."""
+            if deadline is None:
+                return default
+            return max(0.5, min(default, deadline - time.monotonic()))
+
         token = getattr(self, "token", "")
         proc = getattr(self, "wpp_process", None)
         browser_closed_cleanly = False
@@ -6817,24 +6883,23 @@ class MainWindow(wx.Frame):
                 resp = api_post(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
-                    timeout=self._WPP_GRACEFUL_STOP_SECONDS,
+                    timeout=_phase_timeout(self._WPP_GRACEFUL_STOP_SECONDS),
                 )
                 if resp.status_code == 200:
-                    browser_closed_cleanly = True
-                    logging.info("[_stop_wpp_server] WPPConnect closed the session's browser gracefully.")
+                    logging.info("[_stop_wpp_server] WPPConnect accepted the close-session.")
                 else:
                     logging.warning(
                         "[_stop_wpp_server] close-session returned HTTP %s — "
                         "Chrome may not have closed cleanly.",
                         resp.status_code,
                     )
-                # Wait for WhatsApp Web to actually shut its browser down and
-                # flush auth state to userDataDir BEFORE we taskkill the Node.
-                # A fixed sleep(2) was too short for a large profile: the kill
-                # landed mid-flush, corrupting leveldb -> "Session Unpaired" on
-                # next launch (a big account came back to a pairing screen after
-                # a normal quit). Poll the real CLOSED signal instead.
-                if self._wait_for_session_flushed(token):
+                # Wait for WPPConnect to finish its own teardown before we
+                # taskkill the Node. This is the first of TWO gates — the second
+                # (wait_for_profile_release, further down) is the one that says
+                # Chrome stopped writing. Neither substitutes for the other.
+                if self._wait_for_session_flushed(
+                    token, timeout=_phase_timeout(self._SHUTDOWN_FLUSH_TIMEOUT)
+                ):
                     browser_closed_cleanly = True
                     logging.info("[shutdown] session flushed cleanly (CLOSED)")
                     self._shutdown_audit("FLUSH OK — session reached CLOSED")
@@ -6897,7 +6962,9 @@ class MainWindow(wx.Frame):
                     "success, so its profile may not have finished flushing."
                 )
             if session_name:
-                if self.wait_for_profile_release(session_name, timeout=15.0):
+                if self.wait_for_profile_release(
+                    session_name, timeout=_phase_timeout(15.0)
+                ):
                     self._shutdown_audit("Chrome released the profile before the kill")
                 else:
                     self._shutdown_audit(

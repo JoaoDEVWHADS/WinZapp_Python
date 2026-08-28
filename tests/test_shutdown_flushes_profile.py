@@ -49,8 +49,10 @@ class TestTheKillWaitsForChrome:
         teardown, the process check means the browser did. Dropping the first
         would kill a session mid-close."""
         source = _source()
-        flush = source.index("_wait_for_session_flushed")
-        wait = source.index("wait_for_profile_release")
+        # Anchor on the calls, not on bare names: the comments in between now
+        # discuss both waits by name, which made a plain index() compare prose.
+        flush = source.index("self._wait_for_session_flushed(")
+        wait = source.index("self.wait_for_profile_release(")
         assert flush < wait
 
     def test_both_outcomes_are_recorded_in_the_audit(self):
@@ -73,10 +75,10 @@ class TestTheKillWaitsForChrome:
         """Shutdown must not hang: a profile that never releases still gets
         killed, it just gets said out loud."""
         source = _source()
-        wait_line = next(
-            line for line in source.splitlines() if "self.wait_for_profile_release" in line
-        )
-        assert "timeout=" in wait_line
+        # The call spans lines now, so look at its argument list rather than a
+        # single source line.
+        call_at = source.index("self.wait_for_profile_release(")
+        assert "timeout=" in source[call_at:call_at + 200]
 
 
 class TestWppconnectLogKeepsOneGeneration:
