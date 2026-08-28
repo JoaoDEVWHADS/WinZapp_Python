@@ -1,11 +1,32 @@
 """Tests for core.database.DatabaseManager — async edition."""
 
 import json
+import time
 from typing import Any
 
 import anyio
 import pytest
 from cryptography.fernet import Fernet
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    """Pin the clock core.database stamps blacklist entries with.
+
+    The only way to age an unresolvable_lids row without waiting a week.
+    core.database uses `time` for nothing else (see add_unresolvable_lid).
+    """
+    class _Clock:
+        now = 0
+
+        def time(self):
+            return self.now
+
+    from core import database
+
+    clock = _Clock()
+    monkeypatch.setattr(database, "time", clock)
+    return clock
 
 
 # =============================================================================
@@ -574,6 +595,73 @@ class TestLidMappings:
         lids, _ = await in_memory_db.get_unresolvable_lids()
         assert len(lids) == 1
 
+    async def test_both_marks_survive_for_the_same_jid(self, in_memory_db):
+        """Under the old jid-only primary key the second INSERT was silently
+        dropped, so one of the two marks was gone after a restart."""
+        await in_memory_db.add_unresolvable_lid("both@lid")
+        await in_memory_db.add_unresolvable_name("both@lid")
+        lids, names = await in_memory_db.get_unresolvable_lids()
+        assert "both@lid" in lids
+        assert "both@lid" in names
+
+    async def test_delete_unresolvable_lid(self, in_memory_db):
+        await in_memory_db.add_unresolvable_lid("bad@lid")
+        await in_memory_db.delete_unresolvable_lid("bad@lid")
+        lids, _ = await in_memory_db.get_unresolvable_lids()
+        assert lids == set()
+
+    async def test_delete_unresolvable_lid_keeps_the_name_mark(self, in_memory_db):
+        """Learning the phone number says nothing about the name."""
+        await in_memory_db.add_unresolvable_lid("both@lid")
+        await in_memory_db.add_unresolvable_name("both@lid")
+        await in_memory_db.delete_unresolvable_lid("both@lid")
+        lids, names = await in_memory_db.get_unresolvable_lids()
+        assert lids == set()
+        assert names == {"both@lid"}
+
+    async def test_delete_unresolvable_name(self, in_memory_db):
+        await in_memory_db.add_unresolvable_name("no_name@lid")
+        await in_memory_db.delete_unresolvable_name("no_name@lid")
+        _, names = await in_memory_db.get_unresolvable_lids()
+        assert names == set()
+
+    async def test_delete_expired_unresolvable_keeps_fresh_entries(self, in_memory_db):
+        await in_memory_db.add_unresolvable_lid("bad@lid")
+        deleted = await in_memory_db.delete_expired_unresolvable(int(time.time()) - 3600)
+        assert deleted == 0
+        lids, _ = await in_memory_db.get_unresolvable_lids()
+        assert lids == {"bad@lid"}
+
+    async def test_delete_expired_unresolvable_drops_old_entries(self, in_memory_db, frozen_clock):
+        """The whole point of the change: a blacklist entry gets a way out."""
+        frozen_clock.now = 1_700_000_000
+        await in_memory_db.add_unresolvable_lid("bad@lid")
+        await in_memory_db.add_unresolvable_name("bad@lid")
+        deleted = await in_memory_db.delete_expired_unresolvable(
+            frozen_clock.now + 7 * 24 * 3600)
+        assert deleted == 2
+        lids, names = await in_memory_db.get_unresolvable_lids()
+        assert lids == set()
+        assert names == set()
+
+    async def test_re_recording_restarts_the_retry_clock(self, in_memory_db, frozen_clock):
+        """A LID retried and found unresolvable again must not stay
+        stale-dated, or it would be retried on every launch from then on."""
+        frozen_clock.now = 1_700_000_000
+        await in_memory_db.add_unresolvable_lid("bad@lid")
+        frozen_clock.now += 8 * 24 * 3600
+        await in_memory_db.add_unresolvable_lid("bad@lid")
+        deleted = await in_memory_db.delete_expired_unresolvable(
+            frozen_clock.now - 7 * 24 * 3600)
+        assert deleted == 0
+
+    async def test_imported_entries_expire_on_the_first_sweep(self, in_memory_db):
+        """import_from_dict carries no timestamps (neither did the pre-expiry
+        schema), and an entry of unknown age is better retried than trusted."""
+        await in_memory_db.import_from_dict({"unresolvable_lids": ["old@lid"]})
+        deleted = await in_memory_db.delete_expired_unresolvable(1)
+        assert deleted == 1
+
 
 # =============================================================================
 #  Status Updates
@@ -897,3 +985,50 @@ class TestMaintenance:
         async with DatabaseManager(db_path, fernet_key) as db2:
             chats = await db2.get_chats()
             assert "jid@w" in chats
+
+    async def test_connect_upgrades_a_pre_expiry_unresolvable_table(
+        self, tmp_path, fernet_key
+    ):
+        """The old table had jid as its sole primary key and no recorded_at,
+        neither of which ALTER TABLE can add. Opening such a database must not
+        raise, and must leave a table that holds both marks for one JID."""
+        import aiosqlite
+
+        from core.database import DatabaseManager
+
+        db_path = str(tmp_path / "old.db")
+        async with aiosqlite.connect(db_path) as raw:
+            await raw.execute(
+                "CREATE TABLE unresolvable_lids ("
+                "jid TEXT PRIMARY KEY, type TEXT DEFAULT 'lid')"
+            )
+            await raw.execute(
+                "INSERT INTO unresolvable_lids (jid, type) VALUES ('old@lid', 'lid')"
+            )
+            await raw.commit()
+
+        async with DatabaseManager(db_path, fernet_key) as db:
+            # Old rows are dropped, not copied: they carry no timestamp, so
+            # they would count as expired on the first sweep anyway. That one
+            # retry is exactly what unsticks the contacts blacklisted forever.
+            lids, _names = await db.get_unresolvable_lids()
+            assert lids == set()
+
+            await db.add_unresolvable_lid("both@lid")
+            await db.add_unresolvable_name("both@lid")
+            lids, names = await db.get_unresolvable_lids()
+            assert lids == {"both@lid"}
+            assert names == {"both@lid"}
+
+    async def test_the_upgrade_runs_only_once(self, tmp_path, fernet_key):
+        """Re-running the rebuild on every launch would silently mean "retry
+        every blacklisted LID, always" — the loop the table exists to stop."""
+        from core.database import DatabaseManager
+
+        db_path = str(tmp_path / "keep.db")
+        async with DatabaseManager(db_path, fernet_key) as db1:
+            await db1.add_unresolvable_lid("bad@lid")
+
+        async with DatabaseManager(db_path, fernet_key) as db2:
+            lids, _ = await db2.get_unresolvable_lids()
+            assert lids == {"bad@lid"}
