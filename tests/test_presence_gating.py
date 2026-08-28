@@ -12,7 +12,11 @@ reached its controller without the `statusConnection` middleware, so
 `req.client` was undefined, `req.client.setOnlinePresence()` threw a TypeError,
 and the controller's blanket catch reported it as a server error rather than
 the 404 `{status: 'Disconnected'}` most routes return. The adjacent
-`subscribe-presence` had the same gap and is fixed with it.
+`subscribe-presence` was given the same middleware at the time and had to have
+it taken back off: unlike set-online-presence it does send a phone, so the
+middleware's contact-validation pass 400s any contact WhatsApp's directory
+cannot resolve, silently disabling presence for that chat (see
+TestOnlyTheKeepAliveRouteGuardsTheConnection below).
 
 Other upstream POST routes are also unguarded (start-all, restore-sessions,
 reconnect-socket-stream, get-media-by-message, chatwoot). Some of those are
@@ -138,11 +142,9 @@ class TestTheResponseIsNoLongerDiscarded:
         _Stub(connected=True)._send_presence("available")  # must not raise
 
 
-class TestBothPresenceRoutesGuardTheConnection:
+class TestOnlyTheKeepAliveRouteGuardsTheConnection:
     """Source-level check on the patched WPPConnect route table, in the style
-    this suite already uses for the node_modules patches. Both presence
-    controllers dereference req.client unconditionally, so reaching them
-    without a live session can only throw."""
+    this suite already uses for the node_modules patches."""
 
     @staticmethod
     def _routes_source():
@@ -153,14 +155,31 @@ class TestBothPresenceRoutesGuardTheConnection:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
 
-    @pytest.mark.parametrize(
-        "route", ["set-online-presence", "subscribe-presence"]
-    )
-    def test_the_route_declares_status_connection(self, route):
-        source = self._routes_source()
+    @classmethod
+    def _route_block(cls, route):
+        source = cls._routes_source()
         start = source.index(f"'/api/:session/{route}'")
-        block = source[start : source.index(");", start)]
-        assert "statusConnection" in block, (
-            f"{route} reaches its controller without statusConnection, so a "
-            f"missing session becomes a 500 instead of a 404 Disconnected"
+        return source[start : source.index(");", start)]
+
+    def test_set_online_presence_declares_status_connection(self):
+        """setOnlinePresence dereferences req.client unconditionally, so
+        reaching it without a live session can only throw — and the 20-second
+        keep-alive did exactly that, forever."""
+        assert "statusConnection" in self._route_block("set-online-presence"), (
+            "set-online-presence reaches its controller without "
+            "statusConnection, so a missing session becomes a 500 instead of "
+            "a 404 Disconnected"
+        )
+
+    def test_subscribe_presence_does_not_declare_status_connection(self):
+        """It looks like the inconsistent one, so state the reason here as
+        well as in the route file: subscribe_presence() posts a phone, which
+        makes the middleware's contact-validation pass run for real. A 1:1
+        contact WhatsApp's directory does not resolve — including one whose
+        checkNumberStatus() merely throws, since that call is `.catch()`ed to
+        undefined — gets a 400 and no presence subscription at all."""
+        assert "statusConnection" not in self._route_block("subscribe-presence"), (
+            "subscribe-presence sends req.body.phone, so statusConnection's "
+            "checkNumberStatus() pass 400s any unresolvable contact and "
+            "silently disables typing/online indicators for that chat"
         )
