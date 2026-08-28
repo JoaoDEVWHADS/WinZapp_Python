@@ -3118,9 +3118,25 @@ class MainWindow(wx.Frame):
         self._kill_orphaned_chrome_for_session(session_name)
         # The kill is asynchronous from Chrome's point of view; give it a
         # moment rather than handing a still-dying profile to start-session.
+        #
+        # Bounded by a wall-clock deadline and not just by the poll count: the
+        # "10 x 0.5 s = 5 s" this loop reads as is only true if the polls
+        # themselves were free, and they are not. Each one spawns a PowerShell
+        # Get-CimInstance measured at 0.57 s on this machine (so ~11 s in
+        # practice), and each carries its own 15 s subprocess timeout — with
+        # PowerShell stalled by antivirus or load, this loop alone could run
+        # ~150 s *after* the timeout above had already elapsed. Callers budget
+        # for timeout + this grace and nothing more (Connect.on_continue's
+        # close_done.wait(timeout=45); _stop_wpp_server blocking the WPPConnect
+        # update on it), so that has to be the real ceiling. The deadline can
+        # only be checked once a poll has returned, so the honest worst case is
+        # this grace plus ONE stalled poll — not ten of them.
+        grace_deadline = time.monotonic() + 5.0
         for _ in range(10):
             if not self._chrome_pids_owning_session(session_name):
                 return True
+            if time.monotonic() >= grace_deadline:
+                break
             time.sleep(0.5)
         logging.warning(
             "[profile-lock] %s is STILL held after the kill — starting the "
@@ -3885,10 +3901,33 @@ class MainWindow(wx.Frame):
     def _update_wpp_server(self, target_tag: str):
         """
         Stop the running WPPConnect Server, reinstall it at *target_tag* and
-        restart it. Must run on the wx main thread (creates modal dialogs);
-        both WppUpdateChecker call sites already dispatch here via
-        wx.CallAfter, so this can call ShowModal() directly.
+        restart it. Entered on the wx main thread — the modal dialogs below
+        need it, and both WppUpdateChecker call sites already dispatch here via
+        wx.CallAfter — but it returns immediately: the *stop* runs on a worker
+        thread and everything after it resumes from _after_stop().
+
+        That split is not cosmetic. _stop_wpp_server()'s own docstring says it
+        must not be called on the wx main thread, and it has since grown a
+        wait_for_profile_release() call on top of its close-session grace (10 s)
+        and CLOSED flush poll (15 s): another 15 s, plus a post-kill grace whose
+        nominal 0.5 s polls each spawn a PowerShell Get-CimInstance measured at
+        0.57 s. That is ~45 s in which the message loop does not pump, so
+        Windows paints the window "Not Responding" — the exact symptom
+        real_exit()'s docstring records as already reported live for "Sair" —
+        and a screen-reader user is simply left with a UI that stopped
+        answering, seconds after accepting a prompt.
         """
+        # Re-entrancy guard. Now that the stop no longer blocks the message
+        # loop, Ajuda > Forçar reinstalação da WPPConnect (and a second update
+        # prompt) stay reachable while the first stop is still running, and two
+        # of these flows would fight over the same Node process and the same
+        # install directory. The blocking version was protected from that only
+        # by accident.
+        if getattr(self, "_wpp_updating", False):
+            logging.info("[wpp_update] An update is already running — ignoring "
+                         "the request to update to %s.", target_tag)
+            return
+
         logging.info("[wpp_update] Stopping WPPConnect Server before update to %s...", target_tag)
         if not self.background_mode:
             self.output(self.i18n.t("wpp_update_in_progress"), interrupt=True)
@@ -3898,114 +3937,145 @@ class MainWindow(wx.Frame):
         # status-session probe, and declare the app offline/disconnected even
         # though the actual WhatsApp session never dropped.
         self._wpp_updating = True
-        try:
-            self._stop_wpp_server()
-            self.wpp_process = None
 
-            # Make sure nothing is still holding this session's Chrome profile
-            # before the server comes back up.
-            #
-            # _stop_wpp_server() force-kills the Node process tree, but a
-            # chrome.exe can outlive that — the same way a hibernation-suspended
-            # one does, which is what _kill_orphaned_chrome_for_session() was
-            # written for. If one survives, the restarted server's
-            # /start-session hits "The browser is already running for
-            # ...\\userDataDir\\<session>", the session dies on the spot, the
-            # health check starts another, and the app alternates between
-            # offline and connecting indefinitely. Reported twice from the field
-            # as "after accepting the WPP update it just keeps syncing forever,
-            # flipping between offline and normal", with the workaround being to
-            # wipe the account's data folder — which works only because it forces
-            # a NEW session name, and therefore a profile nothing holds a lock
-            # on. The update itself preserves userDataDir/ and tokens/ (see
-            # ApiSetupDialog._KEEP_RUNTIME), so the install was never the
-            # problem; the abandoned lock was.
-            #
-            # Safe to call unconditionally: it only touches a chrome.exe whose
-            # --user-data-dir carries THIS session name
-            # (connection_state.chrome_cmdline_owns_session), and it also drops
-            # the stale lockfile the dead process left behind.
-            self._kill_orphaned_chrome_for_session()
+        def _stop_phase():
+            """The blocking half, on a worker thread. Touches no wx control."""
+            try:
+                self._stop_wpp_server()
+                self.wpp_process = None
 
-            from ui.dialogs.api_setup import ApiSetupDialog
-            dlg = ApiSetupDialog(
-                self,
-                title_override=self.i18n.t("api_update_dialog_title"),
-                forced_tag=target_tag,
-            )
-            result = dlg.ShowModal()
-            dlg.Destroy()
-
-            if result != wx.ID_OK:
-                logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
-                self.error_sound.play()
-                wx.MessageBox(
-                    self.i18n.t("wpp_update_failed_msg"),
-                    self.i18n.t("update_error_title"),
-                    wx.OK | wx.ICON_ERROR,
-                    self,
-                )
-                # Whatever is left on disk (the previous install if the failure
-                # happened before ApiSetupDialog's cleanup step, nothing at all if
-                # it happened after) — ensure_wpp_running() already knows how to
-                # handle both: start what's there, or silently do nothing if the
-                # required files are missing.
-                self.ensure_wpp_running()
-                return
-
-            logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
-            self.ensure_wpp_running()
-
-            # ensure_wpp_running() only confirms the new WPPConnect HTTP API
-            # answers — killing the old node.exe process to update it also
-            # dropped the Socket.IO connection this app uses for live
-            # messages/presence, and nothing else here re-establishes it or
-            # tells the new process to resume the WhatsApp session. Left
-            # alone, python-socketio's own auto-reconnect (see
-            # WebSocketClient.__init__) eventually notices and retries on its
-            # own, but with up to a 60 s backoff and no guarantee the
-            # WhatsApp session itself gets told to restart — reported live as
-            # the app sitting in offline/disconnected mode until the whole
-            # program was restarted. Force it explicitly instead of waiting
-            # on the passive health checker to get around to it; a
-            # successful reconnect's on_connect() handler already re-checks
-            # HTTP status and retriggers a sync on its own — but check and
-            # trigger a sync explicitly here too, the same recovery sequence
-            # _recover_from_suspend() uses, as a fallback in case the socket
-            # was already connected (so on_connect() never fires again) or
-            # the reconnect itself is slow.
-            def _recover_after_update():
+                # Make sure nothing is still holding this session's Chrome profile
+                # before the server comes back up.
+                #
+                # _stop_wpp_server() force-kills the Node process tree, but a
+                # chrome.exe can outlive that — the same way a hibernation-suspended
+                # one does, which is what _kill_orphaned_chrome_for_session() was
+                # written for. If one survives, the restarted server's
+                # /start-session hits "The browser is already running for
+                # ...\\userDataDir\\<session>", the session dies on the spot, the
+                # health check starts another, and the app alternates between
+                # offline and connecting indefinitely. Reported twice from the field
+                # as "after accepting the WPP update it just keeps syncing forever,
+                # flipping between offline and normal", with the workaround being to
+                # wipe the account's data folder — which works only because it forces
+                # a NEW session name, and therefore a profile nothing holds a lock
+                # on. The update itself preserves userDataDir/ and tokens/ (see
+                # ApiSetupDialog._KEEP_RUNTIME), so the install was never the
+                # problem; the abandoned lock was.
+                #
+                # Safe to call unconditionally: it only touches a chrome.exe whose
+                # --user-data-dir carries THIS session name
+                # (connection_state.chrome_cmdline_owns_session), and it also drops
+                # the stale lockfile the dead process left behind.
+                self._kill_orphaned_chrome_for_session()
+            except Exception:
+                # Caught rather than left to kill the worker: an exception
+                # escaping here would strand _wpp_updating at True (nothing
+                # else clears it) AND leave the server half-stopped with
+                # nothing on screen to say so. Both branches below end in
+                # ensure_wpp_running(), and ApiSetupDialog reports its own
+                # failure, so carrying on is the recoverable choice.
+                logging.exception("[wpp_update] Stopping the server before the "
+                                  "update failed — reinstalling anyway, which is "
+                                  "what the user asked for")
+            finally:
+                # Scheduled unconditionally, including after an exception:
+                # _after_stop() is what clears _wpp_updating (in its own
+                # finally), and a flag left True silences every genuine
+                # disconnection for the rest of the session — see
+                # _set_wa_connected(), which consults it.
                 try:
-                    self._reconnect_websocket_now()
-                    self.check_wa_connection_http()
-                    self.trigger_sync_if_needed()
+                    wx.CallAfter(_after_stop)
                 except Exception:
-                    logging.exception("[wpp_update] Post-update reconnection failed")
-            threading.Thread(target=_recover_after_update, daemon=True).start()
+                    logging.exception("[wpp_update] Could not resume the update "
+                                      "on the wx main thread")
+                    self._wpp_updating = False
 
-            # If the window was hidden (minimized to tray) when the update
-            # was requested, bring it back — the update can run for minutes
-            # and finishes with the API restarting, which is exactly the
-            # kind of state change the user needs to see.
-            #
-            # _window_hidden is only set once __init__ reaches its own
-            # "window lifecycle" setup — but WppUpdateChecker's first check
-            # is scheduled via wx.CallLater(90000, ...) very early in
-            # __init__, well before that point, and its own check can take
-            # longer still. If the initial pairing dialog is still on
-            # screen 90+ seconds after launch (completely normal — that's a
-            # human reading/scanning a QR code) and the user accepts an
-            # update from it, _update_wpp_server() runs before
-            # self._window_hidden exists at all — getattr() instead of a
-            # bare attribute access is what keeps that a no-op instead of
-            # an AttributeError crash right after the very first pairing.
-            if getattr(self, "_window_hidden", False) and not self.background_mode:
-                wx.CallAfter(self.restore_window)
+        def _after_stop():
+            """Back on the wx main thread: the modal dialogs and the restart."""
+            try:
+                from ui.dialogs.api_setup import ApiSetupDialog
+                dlg = ApiSetupDialog(
+                    self,
+                    title_override=self.i18n.t("api_update_dialog_title"),
+                    forced_tag=target_tag,
+                )
+                result = dlg.ShowModal()
+                dlg.Destroy()
 
-            if not self.background_mode:
-                self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
-        finally:
-            self._wpp_updating = False
+                if result != wx.ID_OK:
+                    logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
+                    self.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("wpp_update_failed_msg"),
+                        self.i18n.t("update_error_title"),
+                        wx.OK | wx.ICON_ERROR,
+                        self,
+                    )
+                    # Whatever is left on disk (the previous install if the failure
+                    # happened before ApiSetupDialog's cleanup step, nothing at all if
+                    # it happened after) — ensure_wpp_running() already knows how to
+                    # handle both: start what's there, or silently do nothing if the
+                    # required files are missing.
+                    self.ensure_wpp_running()
+                    return
+
+                logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
+                self.ensure_wpp_running()
+
+                # ensure_wpp_running() only confirms the new WPPConnect HTTP API
+                # answers — killing the old node.exe process to update it also
+                # dropped the Socket.IO connection this app uses for live
+                # messages/presence, and nothing else here re-establishes it or
+                # tells the new process to resume the WhatsApp session. Left
+                # alone, python-socketio's own auto-reconnect (see
+                # WebSocketClient.__init__) eventually notices and retries on its
+                # own, but with up to a 60 s backoff and no guarantee the
+                # WhatsApp session itself gets told to restart — reported live as
+                # the app sitting in offline/disconnected mode until the whole
+                # program was restarted. Force it explicitly instead of waiting
+                # on the passive health checker to get around to it; a
+                # successful reconnect's on_connect() handler already re-checks
+                # HTTP status and retriggers a sync on its own — but check and
+                # trigger a sync explicitly here too, the same recovery sequence
+                # _recover_from_suspend() uses, as a fallback in case the socket
+                # was already connected (so on_connect() never fires again) or
+                # the reconnect itself is slow.
+                def _recover_after_update():
+                    try:
+                        self._reconnect_websocket_now()
+                        self.check_wa_connection_http()
+                        self.trigger_sync_if_needed()
+                    except Exception:
+                        logging.exception("[wpp_update] Post-update reconnection failed")
+                threading.Thread(target=_recover_after_update, daemon=True).start()
+
+                # If the window was hidden (minimized to tray) when the update
+                # was requested, bring it back — the update can run for minutes
+                # and finishes with the API restarting, which is exactly the
+                # kind of state change the user needs to see.
+                #
+                # _window_hidden is only set once __init__ reaches its own
+                # "window lifecycle" setup — but WppUpdateChecker's first check
+                # is scheduled via wx.CallLater(90000, ...) very early in
+                # __init__, well before that point, and its own check can take
+                # longer still. If the initial pairing dialog is still on
+                # screen 90+ seconds after launch (completely normal — that's a
+                # human reading/scanning a QR code) and the user accepts an
+                # update from it, _update_wpp_server() runs before
+                # self._window_hidden exists at all — getattr() instead of a
+                # bare attribute access is what keeps that a no-op instead of
+                # an AttributeError crash right after the very first pairing.
+                if getattr(self, "_window_hidden", False) and not self.background_mode:
+                    wx.CallAfter(self.restore_window)
+
+                if not self.background_mode:
+                    self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
+            finally:
+                self._wpp_updating = False
+
+        threading.Thread(target=_stop_phase, daemon=True,
+                         name="winzapp-wpp-update-stop").start()
 
     # ── Tray / window lifecycle ───────────────────────────────────────────────
 
