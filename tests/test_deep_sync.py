@@ -86,6 +86,10 @@ class _MessagesStub:
 
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _needs_display_page_refill = staticmethod(MainWindow._needs_display_page_refill)
+    _backfill_state_guard = MainWindow._backfill_state_guard
+    _canonical_backfill_jid = MainWindow._canonical_backfill_jid
+    _counts_as_last_message = MainWindow._counts_as_last_message
+    _PREVIEW_MESSAGE_TYPES = MainWindow._PREVIEW_MESSAGE_TYPES
 
     def __init__(self, get_urls):
         self.get_urls = get_urls
@@ -100,6 +104,11 @@ class _MessagesStub:
         self.db = _FakeDb()
         self._sync_failures_lock = threading.Lock()
         self._sync_failed_chats = set()
+        self._backfill_state_lock = threading.RLock()
+        self._history_gap_jids = set()
+        self._partial_history_counts = {}
+        self._chats_awaiting_messages = set()
+        self._message_retry_jids = set()
 
     def _extract_lid_mapping(self, msg):
         pass
@@ -111,6 +120,15 @@ class _MessagesStub:
         return False
 
     def _note_backfill_state(self, remote_jid, chat, api_ok):
+        pass
+
+    def _is_backfill_pending(self, remote_jid):
+        return False
+
+    def _persist_history_gap_jids(self):
+        pass
+
+    def _persist_backfill_pending_state(self):
         pass
 
     def _refresh_open_conversation_after_sync(self, remote_jid, chat):
