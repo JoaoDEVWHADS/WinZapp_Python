@@ -446,6 +446,7 @@ class TestOnFrameSizeCallback:
     def test_fires_once_with_the_scaled_size_when_the_frame_needs_shrinking(self, wx_app):
         calls = []
         player = _make_player(wx_app, on_frame_size=lambda w, h: calls.append((w, h)), box_size=(320, 240))
+        player.is_playing = True
         # 400x100 into 320x240: ratio = min(320/400, 240/100) = 0.8 -> (320, 80).
         frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
         player._frame_queue.put(frame)
@@ -460,6 +461,7 @@ class TestOnFrameSizeCallback:
         not stay at the oversized placeholder."""
         calls = []
         player = _make_player(wx_app, on_frame_size=lambda w, h: calls.append((w, h)), box_size=(320, 240))
+        player.is_playing = True
         frame = _real_jpeg_bytes_sized(wx_app, 40, 30)
         player._frame_queue.put(frame)
 
@@ -473,6 +475,7 @@ class TestOnFrameSizeCallback:
         than the blank-gap bug this is fixing."""
         calls = []
         player = _make_player(wx_app, on_frame_size=lambda w, h: calls.append((w, h)), box_size=(320, 240))
+        player.is_playing = True
         frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
         player._frame_queue.put(frame)
         player._frame_queue.put(frame)
@@ -498,6 +501,7 @@ class TestOnFrameSizeCallback:
         ConversationsPanel._start_video_playback() — which is a UI concern
         this module has no part of.)"""
         player = _make_player(wx_app, on_frame_size=lambda w, h: None, box_size=(320, 240))
+        player.is_playing = True
         frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
         player._frame_queue.put(frame)
         player._on_timer(None)
