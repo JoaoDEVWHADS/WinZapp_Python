@@ -673,6 +673,7 @@
     "tab_speech_content": "Spoken content",
     "speech_announce_typing_label": "Announce when a contact is typing in a chat",
     "speech_announce_recording_label": "Announce when a contact is recording an audio message in a chat",
+    "speech_announce_conversations_update_label": "Announce when chats update is complete",
     "speech_speak_active_conv_label": "Automatically speak messages in the active conversation",
     "speech_speak_other_conv_label": "Automatically speak messages in other conversations while the program is open",
     "speech_silence_while_recording_label": "Mute spoken content announcements and the Send button while recording a voice message",

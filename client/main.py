@@ -10966,12 +10966,14 @@ class MainWindow(wx.Frame):
                     self.sync_complete_sound.play()
                     if not self.background_mode:
                         self.output(self.i18n.t("sync_complete"))
-                elif (full_target_count or incremental_target_count) and not self.background_mode:
-                    # A warm refresh is deliberately not presented as a full
-                    # synchronization: no sync tone and no "conversas
-                    # sincronizadas" announcement when all we did was merge a
-                    # handful of changed chats.
-                    self.output(self.i18n.t("conversations_update_complete"), interrupt=False)
+                elif not self.background_mode:
+                    announce_tts = bool(
+                        self.settings.get("speech_content", {}).get(
+                            "announce_conversations_update_complete", True
+                        )
+                    )
+                    if announce_tts:
+                        self.output(self.i18n.t("conversations_update_complete"), interrupt=False)
         wx.CallAfter(_announce_messages_synced)
 
         # Mark sync as done for this session so late-arriving messages.set
