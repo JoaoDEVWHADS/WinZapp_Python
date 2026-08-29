@@ -10399,8 +10399,10 @@ class MainWindow(wx.Frame):
                         self.output(self.i18n.t("synchronization_started"), interrupt=True)
                 return
             self._set_status(self.i18n.t("updating_conversations"))
-            if self._announce_sync_events_enabled() and not self.background_mode:
-                self.output(self.i18n.t("conversations_update_started"), interrupt=False)
+            if self._announce_sync_events_enabled():
+                self.synchronizing_sound.play()
+                if not self.background_mode:
+                    self.output(self.i18n.t("conversations_update_started"), interrupt=False)
         wx.CallAfter(_announce_sync_stage)
 
         # After first pairing the API may need a few seconds to populate chats.
@@ -10962,8 +10964,8 @@ class MainWindow(wx.Frame):
             # the sync restarted itself.
             if (chat_list_ok and chat_list_settled and message_sync_ok
                     and self._announce_sync_events_enabled()):
+                self.sync_complete_sound.play()
                 if effective_full:
-                    self.sync_complete_sound.play()
                     if not self.background_mode:
                         self.output(self.i18n.t("sync_complete"))
                 elif not self.background_mode:
