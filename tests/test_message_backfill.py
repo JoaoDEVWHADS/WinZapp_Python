@@ -208,6 +208,7 @@ class TestShortOfAPage:
         s._history_gap_jids = {"a@lid"}
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
         assert s._chats_awaiting_messages == {"a@lid"}
+        s._history_gap_jids.discard("a@lid")
         s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
