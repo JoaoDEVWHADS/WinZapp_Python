@@ -283,6 +283,7 @@ class TestBackfillKeepsGapChats:
         s = _BackfillStub(gap_jids={"g@g.us"})
         s._note_backfill_state("g@g.us", _chat_with(PAGE), api_ok=True)
         assert s._chats_awaiting_messages == {"g@g.us"}
+        s._history_gap_jids.clear()
         s._note_backfill_state("g@g.us", _chat_with(PAGE), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
