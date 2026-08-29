@@ -647,41 +647,16 @@ class ConversationsPanel(wx.Panel):
         )
         conv_sizer.Add(self.messages_label, 0, wx.LEFT | wx.TOP, 5)
 
-        # The messages list control type is configurable: the classic
-        # wx.ListCtrl (default — works with the OS native ListView, but
-        # truncates each row's accessible text to ~512 characters) or
-        # CompatListBoxMessagesCtrl (full message text via a native
-        # wx.ListBox, which isn't subject to that truncation and — unlike
-        # the DataView-based control this replaced — is natively accessible).
+        # The messages list control type is configurable and can also be
+        # switched live from Settings. Keep creation/bindings in one helper so
+        # startup and runtime replacement always expose the same behaviour.
         message_list_mode = self.main_window.settings.get("user_interface", {}).get(
             "message_list_mode", "classic"
         )
-        # "dataview" was the old (now-removed) alternative mode name — treat
-        # it as "listbox" so settings saved before the switch still resolve
-        # to the equivalent current option.
         if message_list_mode == "dataview":
             message_list_mode = "listbox"
         self._message_list_mode = message_list_mode
-        if message_list_mode == "listbox":
-            self.messages_list = CompatListBoxMessagesCtrl(self.conversation_panel)
-        else:
-            self.messages_list = wx.ListCtrl(
-                self.conversation_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
-            )
-        # i18n "messages" carries a "&" mnemonic for the StaticText label above
-        # the list; list-column headers and accessible names don't interpret
-        # "&" as a mnemonic, so it must be stripped there to avoid a stray "&"
-        # being shown/spoken.
-        self.messages_list.InsertColumn(0, i18n.t("messages").replace("&", ""), width=360)
-        self._messages_list_accessible = AccessibleMessagesListControl(i18n.t("messages").replace("&", ""))
-        self.messages_list.SetAccessible(self._messages_list_accessible)
-        self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
-        self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
-        self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
-        self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
-        self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
-        if isinstance(self.messages_list, CompatListBoxMessagesCtrl):
-            self.messages_list.set_key_down_handler(self._on_messages_list_key_down)
+        self.messages_list = self._create_messages_list_control(message_list_mode)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── "Ler mais" button (classic ListCtrl only) ─────────────────────────
@@ -1036,6 +1011,89 @@ class ConversationsPanel(wx.Panel):
         outer_sizer.Add(self.conversation_panel, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(outer_sizer)
+
+    def _create_messages_list_control(self, mode: str):
+        """Create and fully wire one messages-list control for *mode*."""
+        if mode == "listbox":
+            control = CompatListBoxMessagesCtrl(self.conversation_panel)
+        else:
+            control = wx.ListCtrl(
+                self.conversation_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
+            )
+
+        label = self.main_window.i18n.t("messages").replace("&", "")
+        control.InsertColumn(0, label, width=360)
+        self._messages_list_accessible = AccessibleMessagesListControl(label)
+        control.SetAccessible(self._messages_list_accessible)
+        control.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
+        control.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
+        control.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
+        control.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
+        control.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
+        if isinstance(control, CompatListBoxMessagesCtrl):
+            control.set_key_down_handler(self._on_messages_list_key_down)
+        return control
+
+    def _rerender_messages_list_rows(self):
+        """Refresh row text without rebuilding pagination or changing focus."""
+        total = len(getattr(self, "_sorted_messages", ()))
+        count = min(total, self.messages_list.GetItemCount())
+        self.messages_list.Freeze()
+        try:
+            for index in range(count):
+                self.messages_list.SetItemText(
+                    index,
+                    self._render_message_line(
+                        self._sorted_messages[index], index=index, total=total
+                    ),
+                )
+        finally:
+            self.messages_list.Thaw()
+
+    def apply_message_list_mode(self, mode: str):
+        """Switch ListCtrl/ListBox immediately while preserving the current row."""
+        mode = "listbox" if mode in ("listbox", "dataview") else "classic"
+        if mode == getattr(self, "_message_list_mode", "classic"):
+            self._rerender_messages_list_rows()
+            return
+
+        old_list = self.messages_list
+        focused = old_list.GetFocusedItem()
+        had_focus = wx.Window.FindFocus() is old_list
+        sizer = self.conversation_panel.GetSizer()
+        new_list = self._create_messages_list_control(mode)
+
+        if not sizer.Replace(old_list, new_list):
+            new_list.Destroy()
+            return
+
+        self.messages_list = new_list
+        self._message_list_mode = mode
+        old_list.Hide()
+
+        total = len(getattr(self, "_sorted_messages", ()))
+        new_list.Freeze()
+        try:
+            for index, msg in enumerate(getattr(self, "_sorted_messages", ())):
+                new_list.Append((self._render_message_line(msg, index=index, total=total),))
+            if total and focused >= 0:
+                focused = min(focused, total - 1)
+                new_list.Focus(focused)
+                new_list.Select(focused)
+                new_list.EnsureVisible(focused)
+        finally:
+            new_list.Thaw()
+
+        if mode == "listbox":
+            self._read_more_btn.Hide()
+            self._read_more_remainder = ""
+        elif total and focused >= 0:
+            self._update_read_more_button(focused)
+
+        if had_focus:
+            new_list.SetFocus()
+        old_list.Destroy()
+        self.conversation_panel.Layout()
 
     # ── Accelerators ────────────────────────────────────────────────────────
 
@@ -1975,8 +2033,6 @@ class ConversationsPanel(wx.Panel):
         if self._is_recording:
             self._send_voice_message(event)
         elif not self._recording_starting:
-            self._recording_start_timestamp = time.monotonic()
-            self._silence_send_voice_focus_if_enabled()
             self._start_voice_recording()
 
     # ── Text message sending ─────────────────────────────────────────────────
@@ -2709,49 +2765,28 @@ class ConversationsPanel(wx.Panel):
     # ── Voice recording ──────────────────────────────────────────────────────
 
     def _silence_send_voice_focus_if_enabled(self):
-        """When Settings > Conteúdo Falado's "silence while recording" toggle
-        is on, cut off the screen reader's own focus announcement for the
-        Enviar/Descartar button right after SetFocus() moves to it.
+        """Mute only the automatic focus announcement during voice recording.
 
-        This is the second line of defense, not the first: AccessibleSendVoiceMessage
-        / AccessibleDiscardVoiceMessage (ui/accessible.py) already blank out the
-        button's accessible *name* while the toggle is on, which stops most of the
-        announcement's content from ever being generated in the first place — the
-        screen reader queries the name synchronously while handling the focus
-        WinEvent, so an empty name usually means there is nothing to speak at all.
-        This method only mops up whatever slips through anyway (e.g. a bare role
-        announcement, or a screen reader whose synthesizer — SAPI5 under NVDA is
-        the reported case — has already started speaking before the empty name is
-        read back).
-
-        A silence() call issued synchronously right after SetFocus() is too
-        early: on Windows the focus WinEvent is dispatched to the screen
-        reader's hook synchronously, but the screen reader itself (NVDA, ...)
-        queues and speaks the announcement asynchronously on its own thread,
-        so calling silence() immediately can run before that speech has even
-        been queued and end up cancelling nothing. Firing once immediately
-        (covers a screen reader that does speak synchronously) and once again
-        a beat later via wx.CallLater (covers the common async case) catches
-        the announcement whichever way the screen reader schedules it —
-        silence() is idempotent, so calling it twice is harmless.
+        The button keeps its native accessible name and shortcut at all times.
+        Suppression is requested when the dedicated spoken-content setting is
+        enabled, or when extended screen-reader compatibility is disabled.
         """
-        # Keyed ONLY on the "silence while recording" toggle. It used to also
-        # fire when extended_sr_compat_enabled was OFF — i.e. exactly when the
-        # user had told WinZapp never to talk to their screen reader, the app
-        # started interrupting it instead. Nothing about that switch asks for
-        # other applications' speech to be cut off.
-        if not self.main_window.settings.get("speech_content", {}).get(
+        settings = self.main_window.settings
+        silence_while_recording = settings.get("speech_content", {}).get(
             "silence_while_recording", False
-        ):
+        )
+        extended_enabled = settings.get("accessibility", {}).get(
+            "extended_sr_compat_enabled", True
+        )
+        if not silence_while_recording and extended_enabled:
             return
-        if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
-            # Immediately, plus two follow-ups — which is what the docstring
-            # above describes. It was a burst of eight up to 500ms, half a
-            # second of repeated cancels that also swallow any unrelated
-            # announcement landing in that window.
-            self.main_window.speak_output.silence()
-            for delay in (50, 150):
-                wx.CallLater(delay, self.main_window.speak_output.silence)
+        speak_output = getattr(self.main_window, "speak_output", None)
+        silence_focus = getattr(speak_output, "silence_screen_reader_focus", None)
+        if not callable(silence_focus):
+            return
+        silence_focus()
+        wx.CallAfter(silence_focus)
+        wx.CallLater(80, silence_focus)
 
     def _start_voice_recording(self):
         """
@@ -3092,9 +3127,6 @@ class ConversationsPanel(wx.Panel):
         """Pause or resume the ongoing recording."""
         if not self._is_recording:
             return
-        import time
-        self._pause_toggle_timestamp = time.monotonic()
-        self._silence_send_voice_focus_if_enabled()
         self.main_window.voicemsg_pauserecording_sound.play()
         self._recording_paused = not self._recording_paused
         label_key = "resume_recording" if self._recording_paused else "pause_recording"

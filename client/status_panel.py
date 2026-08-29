@@ -2392,9 +2392,6 @@ class StatusPanel(wx.Panel):
     def _on_record_voice_button(self, event):
         if not self._is_recording:
             if not self._recording_starting:
-                import time
-                self._recording_start_timestamp = time.monotonic()
-                self._silence_send_voice_focus_if_enabled()
                 self._start_voice_recording()
         else:
             self._on_send_voice_status(event)
@@ -2544,30 +2541,26 @@ class StatusPanel(wx.Panel):
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 
     def _silence_send_voice_focus_if_enabled(self):
-        # Keyed ONLY on the "silence while recording" toggle. It used to also
-        # fire when extended_sr_compat_enabled was OFF — i.e. exactly when the
-        # user had told WinZapp never to talk to their screen reader, the app
-        # started interrupting it instead. Nothing about that switch asks for
-        # other applications' speech to be cut off.
-        if not self.main_window.settings.get("speech_content", {}).get(
+        settings = self.main_window.settings
+        silence_while_recording = settings.get("speech_content", {}).get(
             "silence_while_recording", False
-        ):
+        )
+        extended_enabled = settings.get("accessibility", {}).get(
+            "extended_sr_compat_enabled", True
+        )
+        if not silence_while_recording and extended_enabled:
             return
-        if hasattr(self.main_window, "speak_output") and hasattr(self.main_window.speak_output, "silence"):
-            # Immediately, plus two follow-ups — which is what the docstring
-            # above describes. It was a burst of eight up to 500ms, half a
-            # second of repeated cancels that also swallow any unrelated
-            # announcement landing in that window.
-            self.main_window.speak_output.silence()
-            for delay in (50, 150):
-                wx.CallLater(delay, self.main_window.speak_output.silence)
+        speak_output = getattr(self.main_window, "speak_output", None)
+        silence_focus = getattr(speak_output, "silence_screen_reader_focus", None)
+        if not callable(silence_focus):
+            return
+        silence_focus()
+        wx.CallAfter(silence_focus)
+        wx.CallLater(80, silence_focus)
 
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:
             return
-        import time
-        self._pause_toggle_timestamp = time.monotonic()
-        self._silence_send_voice_focus_if_enabled()
         self._recording_paused = not self._recording_paused
         if hasattr(self.main_window, "voicemsg_pauserecording_sound"):
             try:
