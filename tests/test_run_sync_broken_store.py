@@ -74,6 +74,7 @@ class _Stub:
         self._lid_to_phone = {}
         self._history_still_landing = False
         self._history_gap_jids = set()
+        self._message_retry_jids = set()
         self._phone_to_lid = {}
         self._force_full_sync = False
         self._last_sync_state = {}
@@ -173,6 +174,7 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
                  "_attempts_needed_to_confirm",
                  "_settle_deadline_decision", "history_page_target",
                  "_normalize_jid", "_jid_address_forms",
+                 "_server_claims_content",
                  "_capture_chat_sync_baseline", "_baseline_marker_for_jid",
                  "_plan_message_sync"):
         raw = MainWindow.__dict__[name]
