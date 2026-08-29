@@ -1,0 +1,249 @@
+# ── WinZapp: project-specific ignores ────────────────────────────────────────
+
+# User data / secrets (generated at runtime, never committed)
+# Bare data/ (repo root, not client/data/) covers dev-mode runs launched
+# from the repo root instead of client/ — app_paths.data_path() resolves
+# against the current working directory in dev mode, so which one gets
+# used depends on where the process was actually started from.
+data/
+client/data/media_failed.json
+client/data/messages.db
+client/data/messages.db-shm
+client/data/messages.db-wal
+client/data/settings.json
+client/data/settings_default.json
+client/data/secret.key
+client/data/media/
+client/data/voice_messages/
+client/data/log/
+# Per-account and install-global runtime data (multi-account: one subfolder per
+# account id holding its own media/voice_messages/db/token — never committed)
+client/WinZapp.spec
+client/data/accounts/
+client/data/global/
+client/logs/
+/log/
+
+
+# Bundled Node.js runtime (binary distribution, ~50 MB)
+# The zip pattern is deliberately version-agnostic: it used to name one exact
+# file (node-v24.15.0-win-x64.zip), which stopped covering anything the moment
+# the version moved — node_download.py pins 22.22.2, and the CI cache key names
+# v24.15.0. Any hand-downloaded zip of a version other than the one hardcoded
+# here was not ignored at all, leaving a ~30 MB binary one `git add .` away
+# from the history.
+/client/node/
+/client/node*.zip
+
+# WPPConnect Server runtime (downloaded dynamically via setup_api.py)
+/client/api/
+
+# Permanent, always-tracked mirror of the same custom patch files above —
+# the single source of truth setup_api.py / ApiSetupDialog restore from
+# after a clone/re-clone, independent of whatever (if anything) happens to
+# still be on disk in client/api/ at that moment. Before this existed, a
+# clean re-clone (or the user deleting client/api/ before reinstalling —
+# reported live as regressing to a version of these patches from months
+# earlier, silently, with no error) had nothing reliable to restore from:
+# the "stash whatever's currently in client/api/src/ before wiping it"
+# fallback is worthless when client/api/ was already gone. NEVER add a
+# pattern above that would catch this path — it must always be tracked.
+!/client/api_patches/
+/client/api_patches/dist/
+/build/
+/dist/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+client/__pycache__/
+client/core/__pycache__/
+client/ui/__pycache__/
+client/ui/dialogs/__pycache__/
+*.py[codz]
+*$py.class
+node_modules/
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre / pytype
+.pyre/
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Ruff
+.ruff_cache/
+
+# pdm / pixi
+.pdm-python
+.pdm-build/
+.pixi
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# PyPI config
+.pypirc
+
+# ── Windows / C build ────────────────────────────────────────────────────────
+
+# PyInstaller / Windows manifests
+# *.manifest is kept generic to ignore Nuitka/PyInstaller output, but the
+# hand-written installer manifest must stay tracked.
+*.manifest
+!installer/installer.manifest
+
+# Compiled object files and binaries produced by build.py
+*.o
+*.exe
+*.pdb
+
+# ── Editors / IDEs ───────────────────────────────────────────────────────────
+
+# VS Code local settings (share .vscode/extensions.json if desired)
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Cursor
+.cursorignore
+.cursorindexingignore
+
+# JetBrains / PyCharm
+.idea/
+
+# VS Code / Cursor local history
+.history/
+
+# Abstra
+.abstra/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+
+# Logs (general)
+*.log
+*.logg
+
+
+# SQLite
+db.sqlite3
+db.sqlite3-journal
+
+# Jupyter
+.ipynb_checkpoints
+
+wppconnect_repos/
+
+# Windows build scaffolding (local only)
+/venv_build/
+/_build_*.bat
+/_py313.exe
+/_diag_*.py
+/_verify_*.py
+/_evtlog.ps1
+/_backup_stare_dane/
+/boot_trace.log
+node-v*.zip
+*.bat
+# Claude Code / agentes de IA
+# settings.local.json é o allowlist PESSOAL de permissões de cada dev (o sufixo
+# .local significa exatamente isso). Ficou versionado por engano desde abril,
+# acumulando caminhos absolutos de uma máquina só e gerando conflito de merge
+# a cada aprovação de comando. O que vale para o time inteiro fica em
+# .claude/settings.json, esse sim versionado.
+.claude/settings.local.json
+
+<<<<<<< HEAD
+# Local native DLLs
+client/lib/*.dll
+*.dll
+
+# Local debug & forensics scripts
+fast_forensics.sh
+fast_forensics.py
+
+=======
+# Logs de usuario enviados para diagnostico — nunca versionar
+logs.zip
+logs/
+log.log
+shutdown_audit.log
+
+# Worktrees temporarios de agentes
+.claude/worktrees/
+>>>>>>> upstream/main
