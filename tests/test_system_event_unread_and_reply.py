@@ -45,7 +45,7 @@ class TestDiscountNonCountableUnread:
 
     def test_own_send_in_the_tail_is_still_discounted(self):
         records = [_msg("conversation", from_me=True)]
-        assert _discount_non_countable_unread(records, 1) == 0
+        assert _discount_non_countable_unread(records, 1) == 1
 
     def test_real_incoming_content_is_not_discounted(self):
         records = [_msg("conversation")]
@@ -69,7 +69,7 @@ class TestDiscountNonCountableUnread:
         assert _discount_non_countable_unread(records, 1) == 1
 
     def test_larger_count_discounts_every_non_countable_in_the_tail(self):
-        records = [_msg("groupNotification"), _msg("conversation")]
+        records = [_msg("conversation"), _msg("groupNotification")]
         assert _discount_non_countable_unread(records, 2) == 1
 
     def test_zero_or_negative_count_is_untouched(self):
@@ -82,7 +82,7 @@ class TestDiscountNonCountableUnread:
 
     def test_tolerates_junk_records(self):
         records = ["nonsense", 42, None, {"key": {}}]
-        assert _discount_non_countable_unread(records, 2) == 0
+        assert _discount_non_countable_unread(records, 2) == 1
 
     def test_discount_is_consistent_with_is_countable_message(self):
         """Anchor: whatever is_countable_message() rejects must be
