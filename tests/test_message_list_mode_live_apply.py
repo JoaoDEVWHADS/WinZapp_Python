@@ -51,20 +51,21 @@ def test_apply_persists_then_switches_message_list_without_requesting_restart():
     )
 
 
-def test_live_switch_replaces_the_control_and_preserves_the_active_mode():
+def test_live_switch_uses_persistent_controls_without_destroying_windows():
     method = _method_source(
         CONVERSATIONS_SOURCE, "ConversationsPanel", "apply_message_list_mode"
     )
-    assert "sizer.Replace(old_list, new_list)" in method
+    assert "self._message_list_controls[mode]" in method
     assert "self._message_list_mode = mode" in method
-    assert "old_list.Destroy()" in method
+    assert "old_list.Hide()" in method
+    assert "new_list.Show()" in method
+    assert ".Destroy()" not in method
+    assert "sizer.Replace" not in method
     assert "self._rerender_messages_list_rows()" in method
 
 
-def test_live_switch_reuses_the_same_control_factory_as_startup():
+def test_both_message_list_controls_are_created_once_at_startup():
     init_ui = _method_source(CONVERSATIONS_SOURCE, "ConversationsPanel", "init_UI")
-    switch = _method_source(
-        CONVERSATIONS_SOURCE, "ConversationsPanel", "apply_message_list_mode"
-    )
-    assert "self._create_messages_list_control(message_list_mode)" in init_ui
-    assert "self._create_messages_list_control(mode)" in switch
+    assert '"classic": self._create_messages_list_control("classic")' in init_ui
+    assert '"listbox": self._create_messages_list_control("listbox")' in init_ui
+    assert "self.messages_list = self._message_list_controls[message_list_mode]" in init_ui
