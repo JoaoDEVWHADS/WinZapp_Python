@@ -272,7 +272,31 @@ class MyStatusDialog(wx.Dialog):
         self._mw       = main_window
         self._statuses = my_statuses
         self._current  = 0
+        self._is_closed = False
+        self._owned_temp_paths: set[str] = set()
+        self._download_generation = 0
         self._init_ui()
+
+    def _cleanup(self):
+        if getattr(self, "_is_closed", False):
+            return
+        self._is_closed = True
+        self._download_generation += 1
+        if hasattr(self, "_video_player"):
+            try:
+                self._video_player.stop()
+            except Exception:
+                pass
+        for path in list(self._owned_temp_paths):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        self._owned_temp_paths.clear()
+
+    def Destroy(self):
+        self._cleanup()
+        return super().Destroy()
 
     # ── UI build ──────────────────────────────────────────────────────────
 
@@ -454,21 +478,33 @@ class MyStatusDialog(wx.Dialog):
                 self.Layout()
             self._video_player.load_and_play(self._video_local_path)
             return
+        self._download_generation += 1
+        generation = self._download_generation
         threading.Thread(
             target=self._download_and_play_video,
-            args=(status, status_id, msg_type),
+            args=(status, status_id, msg_type, generation),
             daemon=True,
         ).start()
 
-    def _download_and_play_video(self, status, status_id: str, msg_type: str):
+    def _download_and_play_video(self, status, status_id: str, msg_type: str, generation: int):
         suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
             content = _download_status_media(self._mw, status)
+            if getattr(self, "_is_closed", False):
+                return
             tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
-            wx.CallAfter(self._start_downloaded_video, tmp.name, status_id, msg_type)
+            if getattr(self, "_is_closed", False):
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+                return
+            wx.CallAfter(self._start_downloaded_video, tmp.name, status_id, msg_type, generation)
         except Exception as exc:
+            if getattr(self, "_is_closed", False):
+                return
             wx.CallAfter(
                 wx.MessageBox,
                 f"{self._mw.i18n.t('status_video_open_error')} ({exc})",
@@ -476,8 +512,24 @@ class MyStatusDialog(wx.Dialog):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    def _start_downloaded_video(self, path: str, status_id: str, msg_type: str):
+    def _start_downloaded_video(self, path: str, status_id: str, msg_type: str, generation: int):
+        if getattr(self, "_is_closed", False) or not bool(self):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            return
+        if generation != self._download_generation:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            return
         if not self._statuses:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
             return
         current_id = self._statuses[self._current].get("key", {}).get("id", "")
         if current_id != status_id:
@@ -486,24 +538,26 @@ class MyStatusDialog(wx.Dialog):
             except Exception:
                 pass
             return
+        self._owned_temp_paths.add(path)
         self._video_local_path = path
         self._video_download_status_id = status_id
-        if msg_type == "videoMessage":
-            self._video_bitmap.Show()
-            self.Layout()
-        self._video_player.load_and_play(path)
+        try:
+            if msg_type == "videoMessage":
+                self._video_bitmap.Show()
+                self.Layout()
+            self._video_player.load_and_play(path)
+        except (RuntimeError, wx.wxAssertionError, Exception) as exc:
+            logging.warning("[MyStatusDialog] _start_downloaded_video error: %s", exc)
 
     def _on_close(self, event):
-        if hasattr(self, "_video_player"):
-            self._video_player.stop()
+        self._cleanup()
         event.Skip()
 
     # ── Actions ───────────────────────────────────────────────────────────
 
     def _on_add_status(self, event):
         """Close the dialog signalling that the caller should open the add-flow."""
-        if hasattr(self, "_video_player"):
-            self._video_player.stop()
+        self._cleanup()
         self.EndModal(MyStatusDialog.RC_ADD_STATUS)
 
 
@@ -1960,11 +2014,21 @@ class StatusPanel(wx.Panel):
         suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
             content = _download_status_media(mw, status)
+            if not bool(self):
+                return
             tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
+            if not bool(self):
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+                return
             wx.CallAfter(self._start_downloaded_video, tmp.name, status_id, msg_type)
         except Exception:
+            if not bool(self):
+                return
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_video_open_error"),
@@ -1973,6 +2037,12 @@ class StatusPanel(wx.Panel):
             )
 
     def _start_downloaded_video(self, path: str, status_id: str, msg_type: str = "videoMessage"):
+        if not bool(self):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            return
         # The user may have navigated to a different status while this was
         # downloading — don't start playback for a status that isn't the
         # one currently shown.
@@ -1985,11 +2055,14 @@ class StatusPanel(wx.Panel):
             return
         self._video_local_path = path
         self._video_download_status_id = status_id
-        if msg_type == "videoMessage":
-            self._video_bitmap.Show()
-            self.Layout()
-        self._video_player.load_and_play(path)
-        self._update_play_pause_label()
+        try:
+            if msg_type == "videoMessage":
+                self._video_bitmap.Show()
+                self.Layout()
+            self._video_player.load_and_play(path)
+            self._update_play_pause_label()
+        except (RuntimeError, wx.wxAssertionError, Exception) as exc:
+            logging.warning("[StatusPanel] _start_downloaded_video error: %s", exc)
 
     def _update_play_pause_label(self):
         # Single toggle label ("Reproduzir/Pausar status"), same convention

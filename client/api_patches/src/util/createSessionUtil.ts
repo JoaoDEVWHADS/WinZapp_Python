@@ -1633,8 +1633,6 @@ export default class CreateSessionUtil {
     // that was already built for exactly this — it just never received a
     // live edit event to actually detect until now.
     await client.onMessageEdit(async (eventOrChat: any, _id?: string, legacyMessage?: any) => {
-      // Current WPPConnect emits one { chat, id, msg } object even though its
-      // public type still declares the legacy three-argument callback.
       //
       // The last fallback is a SHAPE check, not a bare `?? eventOrChat`. The
       // guard below exists precisely for the case where a wrapper arrives

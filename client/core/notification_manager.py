@@ -571,6 +571,9 @@ def announce_background_message(main_window, i18n, title: str, body: str) -> Non
     Safe to call from any thread: the AO2 call is marshalled onto the wx main
     thread.
     """
+    from core.quiet_hours import is_quiet_hours_active
+    if is_quiet_hours_active():
+        return
     try:
         speech = getattr(main_window, "settings", {}).get("speech_content", {})
         if not speech.get("speak_other_conv_messages", True):
@@ -883,7 +886,9 @@ class NotificationManager:
             # between hearing the notification and seeing the banner. Not
             # perfect — Windows' own toast pipeline still isn't instant — but
             # this removes the part of the delay that was our own doing.
-            wx.CallAfter(self._play_sound, remote_jid)
+            from core.quiet_hours import is_quiet_hours_active
+            if not is_quiet_hours_active():
+                wx.CallAfter(self._play_sound, remote_jid)
 
             # Clear whatever WinZapp notification is currently on screen (or
             # waiting to be shown) before posting the new one.  This is what
@@ -1028,6 +1033,9 @@ class NotificationManager:
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
     def _play_sound(self, remote_jid: str = ""):
+        from core.quiet_hours import is_quiet_hours_active
+        if is_quiet_hours_active():
+            return
         if hasattr(self.main_window, "play_background_notification_sound"):
             self.main_window.play_background_notification_sound(remote_jid)
         elif hasattr(self.main_window, "message_background_sound"):

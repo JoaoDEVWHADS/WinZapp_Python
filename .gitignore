@@ -228,6 +228,14 @@ node-v*.zip
 # .claude/settings.json, esse sim versionado.
 .claude/settings.local.json
 
+# Local native DLLs
+client/lib/*.dll
+*.dll
+
+# Local debug & forensics scripts
+fast_forensics.sh
+fast_forensics.py
+
 # Logs de usuario enviados para diagnostico — nunca versionar
 logs.zip
 logs/
@@ -236,3 +244,4 @@ shutdown_audit.log
 
 # Worktrees temporarios de agentes
 .claude/worktrees/
+

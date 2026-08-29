@@ -25,6 +25,7 @@ from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
 from core.audio_transcode import transcode_audio_to_wav
+from core.attachment_types import classify_attachment_media_type
 from core.sound_system import load_sound
 from core.link_preview import find_first_url, fetch_link_preview
 from ui.accessible import (
@@ -4871,6 +4872,37 @@ class ConversationsPanel(wx.Panel):
             return  # consume — the native paste must not run on top of this
         event.Skip()
 
+    def _paste_from_messages_list(self) -> bool:
+        """Paste clipboard content while the message history has focus.
+
+        File/image clipboard formats keep their attachment semantics; text is
+        inserted into the composer at its current caret position. This avoids
+        Windows exposing a copied Explorer file as a text path and makes Ctrl+V
+        behave consistently whether focus is in the history or the composer.
+        """
+        if self.conversation is None:
+            return False
+
+        if not wx.TheClipboard.Open():
+            self.message_field.SetFocus()
+            return True
+
+        text = None
+        try:
+            if self._paste_clipboard_as_attachment():
+                return True
+            if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_UNICODETEXT)):
+                data = wx.TextDataObject()
+                if wx.TheClipboard.GetData(data):
+                    text = normalize_line_separators(data.GetText())
+        finally:
+            wx.TheClipboard.Close()
+
+        self.message_field.SetFocus()
+        if text is not None:
+            self.message_field.WriteText(text)
+        return True
+
     def _paste_clipboard_as_attachment(self) -> bool:
         """Ctrl+V of non-text clipboard content (files copied in Explorer, or
         an image copied from a browser/screenshot tool) attaches it directly
@@ -4893,10 +4925,11 @@ class ConversationsPanel(wx.Panel):
                 paths = [p for p in data.GetFilenames() if os.path.isfile(p)]
                 if paths:
                     for path in paths:
-                        ext = os.path.splitext(path)[1].lower()
-                        media_type = self._EXT_TYPE_MAP.get(ext, "document")
                         self._staged_attachments.append(
-                            {"path": path, "media_type": media_type}
+                            {
+                                "path": path,
+                                "media_type": classify_attachment_media_type(path),
+                            }
                         )
                     self._show_attachment_panel()
                     return True
@@ -5628,6 +5661,10 @@ class ConversationsPanel(wx.Panel):
         idx = self.messages_list.GetFocusedItem()
         total = self.messages_list.GetItemCount()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
+
+        if ctrl and not shift and key == ord("V"):
+            if self._paste_from_messages_list():
+                return
 
         ui_cfg = self.main_window.settings.get("user_interface", {})
         raw_step = ui_cfg.get("page_jump_size", ui_cfg.get("page_up_down_step", 15))
@@ -11996,18 +12033,6 @@ class ConversationsPanel(wx.Panel):
 
     # ── Attachment handling ──────────────────────────────────────────────────
 
-    _PHOTO_VIDEO_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp",
-                        ".mp4", ".avi", ".mov", ".mkv", ".3gp"}
-    _AUDIO_EXT       = {".mp3", ".ogg", ".wav", ".m4a", ".aac", ".flac"}
-    _EXT_TYPE_MAP    = {
-        ".jpg": "image", ".jpeg": "image", ".png": "image",
-        ".gif": "image", ".webp": "image",
-        ".mp4": "video", ".avi": "video", ".mov": "video",
-        ".mkv": "video", ".3gp": "video",
-        ".mp3": "audio", ".ogg": "audio", ".wav": "audio",
-        ".m4a": "audio", ".aac": "audio", ".flac": "audio",
-    }
-
     def on_add_attachment(self, event=None):
         """Open a popup menu to choose the attachment type."""
         if self.conversation is None:
@@ -12040,8 +12065,9 @@ class ConversationsPanel(wx.Panel):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             for path in dlg.GetPaths():
-                ext      = os.path.splitext(path)[1].lower()
-                mtype    = self._EXT_TYPE_MAP.get(ext, "image")
+                mtype = classify_attachment_media_type(path)
+                if mtype not in {"image", "video"}:
+                    mtype = "document"
                 self._staged_attachments.append({"path": path, "media_type": mtype})
         if self._staged_attachments:
             self._show_attachment_panel()

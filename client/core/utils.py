@@ -378,8 +378,6 @@ DEFAULT_SETTINGS = {
         "notifications_enabled": True,
         "keep_muted_chats_silent_when_open": True,
         "updates_enabled": True,
-        # Alpha channel (one build per commit on main) — opt-in, see
-        # client/updater.py's select_release().
         "alpha_updates_enabled": False,
         "noise_reduction_enabled": False,
         "first_run": True,
@@ -445,6 +443,8 @@ DEFAULT_SETTINGS = {
     "speech_content": {
         "announce_typing": True,
         "announce_recording": True,
+        "announce_conversations_update_start": True,
+        "announce_conversations_update_complete": True,
         "speak_active_conv_messages": True,
         "speak_other_conv_messages": True,
         "silence_while_recording": False
