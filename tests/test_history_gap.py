@@ -279,10 +279,11 @@ class TestBackfillKeepsGapChats:
 
     def test_a_queued_gap_chat_that_stops_growing_is_dropped(self):
         """Termination: WhatsApp Web may simply never hold the missing
-        stretch, and the queue has to drain anyway."""
+        stretch, and the queue has to drain anyway once the gap is closed."""
         s = _BackfillStub(gap_jids={"g@g.us"})
         s._note_backfill_state("g@g.us", _chat_with(PAGE), api_ok=True)
         assert s._chats_awaiting_messages == {"g@g.us"}
+        s._history_gap_jids.discard("g@g.us")
         s._note_backfill_state("g@g.us", _chat_with(PAGE), api_ok=True)
         assert s._chats_awaiting_messages == set()
 
