@@ -366,6 +366,7 @@ class TestDispatchLatency:
         """The whole point of the reorder: by the time show_toast() has even
         been called, the sound must already be queued."""
         calls = []
+        monkeypatch.setattr("core.quiet_hours.is_quiet_hours_active", lambda: False)
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: calls.append("sound"))
         toaster = _FakeToaster()
         real_show = toaster.show_toast
