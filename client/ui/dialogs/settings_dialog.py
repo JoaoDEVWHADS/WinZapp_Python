@@ -567,6 +567,11 @@ class SettingsDialog(wx.Dialog):
         )
         speech_sizer.Add(self._announce_recording_check, 0, wx.ALL, 8)
 
+        self._announce_conversations_update_start_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_announce_conversations_update_start_label")
+        )
+        speech_sizer.Add(self._announce_conversations_update_start_check, 0, wx.ALL, 8)
+
         self._announce_conversations_update_check = wx.CheckBox(
             self._speech_page, label=i18n.t("speech_announce_conversations_update_label")
         )
@@ -1077,6 +1082,9 @@ class SettingsDialog(wx.Dialog):
         speech = self.main_window.settings.get("speech_content", {})
         self._announce_typing_check.SetValue(speech.get("announce_typing", True))
         self._announce_recording_check.SetValue(speech.get("announce_recording", True))
+        self._announce_conversations_update_start_check.SetValue(
+            speech.get("announce_conversations_update_start", True)
+        )
         self._announce_conversations_update_check.SetValue(
             speech.get("announce_conversations_update_complete", True)
         )
@@ -1849,6 +1857,9 @@ class SettingsDialog(wx.Dialog):
             "announce_recording"
         ] = self._announce_recording_check.GetValue()
         self.main_window.settings.setdefault("speech_content", {})[
+            "announce_conversations_update_start"
+        ] = self._announce_conversations_update_start_check.GetValue()
+        self.main_window.settings.setdefault("speech_content", {})[
             "announce_conversations_update_complete"
         ] = self._announce_conversations_update_check.GetValue()
         self.main_window.settings.setdefault("speech_content", {})[
@@ -2145,6 +2156,9 @@ class SettingsDialog(wx.Dialog):
         self._selected_announce_end_rb.SetLabel(i18n.t("ui_selected_announce_position_end"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
+        self._announce_conversations_update_start_check.SetLabel(
+            i18n.t("speech_announce_conversations_update_start_label")
+        )
         self._announce_conversations_update_check.SetLabel(
             i18n.t("speech_announce_conversations_update_label")
         )

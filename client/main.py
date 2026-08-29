@@ -10402,7 +10402,13 @@ class MainWindow(wx.Frame):
             if self._announce_sync_events_enabled():
                 self.synchronizing_sound.play()
                 if not self.background_mode:
-                    self.output(self.i18n.t("conversations_update_started"), interrupt=False)
+                    announce_start_tts = bool(
+                        self.settings.get("speech_content", {}).get(
+                            "announce_conversations_update_start", True
+                        )
+                    )
+                    if announce_start_tts:
+                        self.output(self.i18n.t("conversations_update_started"), interrupt=False)
         wx.CallAfter(_announce_sync_stage)
 
         # After first pairing the API may need a few seconds to populate chats.
