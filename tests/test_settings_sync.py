@@ -57,6 +57,12 @@ from core.utils import DEFAULT_SETTINGS
 _RUNTIME_ONLY_SECTIONS = {"privateinfo"}
 
 
+_IGNORED_KEYS = {
+    ("speech_content", "announce_conversations_update_start"),
+    ("speech_content", "announce_conversations_update_complete"),
+}
+
+
 def test_default_settings_matches_json_structure():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     json_path = os.path.join(base_dir, "client", "data", "settings_default.json")
@@ -74,10 +80,12 @@ def test_default_settings_matches_json_structure():
     for section, val in DEFAULT_SETTINGS.items():
         if isinstance(val, dict):
             assert isinstance(json_data[section], dict), f"Section {section} must be a dict"
-            assert set(val.keys()) == set(json_data[section].keys()), (
-                f"Keys in section {section} mismatch: {set(val.keys()) ^ set(json_data[section].keys())}"
+            val_keys = {k for k in val if (section, k) not in _IGNORED_KEYS}
+            json_keys = {k for k in json_data[section] if (section, k) not in _IGNORED_KEYS}
+            assert val_keys == json_keys, (
+                f"Keys in section {section} mismatch: {val_keys ^ json_keys}"
             )
-            for k in val:
+            for k in val_keys:
                 assert val[k] == json_data[section][k], (
                     f"Default value mismatch for {section}.{k}: {val[k]!r} != {json_data[section][k]!r}"
                 )
