@@ -656,8 +656,15 @@ class ConversationsPanel(wx.Panel):
         if message_list_mode == "dataview":
             message_list_mode = "listbox"
         self._message_list_mode = message_list_mode
-        self.messages_list = self._create_messages_list_control(message_list_mode)
-        conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
+        self._messages_list_accessibles = {}
+        self._message_list_controls = {
+            "classic": self._create_messages_list_control("classic"),
+            "listbox": self._create_messages_list_control("listbox"),
+        }
+        self.messages_list = self._message_list_controls[message_list_mode]
+        for mode, control in self._message_list_controls.items():
+            conv_sizer.Add(control, 1, wx.EXPAND | wx.ALL, 5)
+            control.Show(mode == message_list_mode)
 
         # ── "Ler mais" button (classic ListCtrl only) ─────────────────────────
         # SysListView32 truncates each row's accessible text to ~512 characters,
@@ -1023,8 +1030,10 @@ class ConversationsPanel(wx.Panel):
 
         label = self.main_window.i18n.t("messages").replace("&", "")
         control.InsertColumn(0, label, width=360)
-        self._messages_list_accessible = AccessibleMessagesListControl(label)
-        control.SetAccessible(self._messages_list_accessible)
+        accessible = AccessibleMessagesListControl(label)
+        control.SetAccessible(accessible)
+        if hasattr(self, "_messages_list_accessibles"):
+            self._messages_list_accessibles[mode] = accessible
         control.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         control.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         control.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
@@ -1051,7 +1060,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.Thaw()
 
     def apply_message_list_mode(self, mode: str):
-        """Switch ListCtrl/ListBox immediately while preserving the current row."""
+        """Switch the persistent ListCtrl/ListBox without restarting the app."""
         mode = "listbox" if mode in ("listbox", "dataview") else "classic"
         if mode == getattr(self, "_message_list_mode", "classic"):
             self._rerender_messages_list_rows()
@@ -1060,29 +1069,30 @@ class ConversationsPanel(wx.Panel):
         old_list = self.messages_list
         focused = old_list.GetFocusedItem()
         had_focus = wx.Window.FindFocus() is old_list
-        sizer = self.conversation_panel.GetSizer()
-        new_list = self._create_messages_list_control(mode)
-
-        if not sizer.Replace(old_list, new_list):
-            new_list.Destroy()
-            return
+        new_list = self._message_list_controls[mode]
 
         self.messages_list = new_list
         self._message_list_mode = mode
-        old_list.Hide()
 
-        total = len(getattr(self, "_sorted_messages", ()))
+        total = len(getattr(self, "_sorted_messages", ())) if self.conversation is not None else 0
         new_list.Freeze()
         try:
-            for index, msg in enumerate(getattr(self, "_sorted_messages", ())):
-                new_list.Append((self._render_message_line(msg, index=index, total=total),))
-            if total and focused >= 0:
-                focused = min(focused, total - 1)
-                new_list.Focus(focused)
-                new_list.Select(focused)
-                new_list.EnsureVisible(focused)
+            new_list.DeleteAllItems()
+            if total:
+                for index, msg in enumerate(self._sorted_messages):
+                    new_list.Append((self._render_message_line(msg, index=index, total=total),))
         finally:
             new_list.Thaw()
+
+        old_list.Hide()
+        new_list.Show()
+        self.conversation_panel.Layout()
+
+        if total and focused >= 0:
+            focused = min(focused, total - 1)
+            new_list.Focus(focused)
+            new_list.Select(focused)
+            new_list.EnsureVisible(focused)
 
         if mode == "listbox":
             self._read_more_btn.Hide()
@@ -1092,8 +1102,6 @@ class ConversationsPanel(wx.Panel):
 
         if had_focus:
             new_list.SetFocus()
-        old_list.Destroy()
-        self.conversation_panel.Layout()
 
     # ── Accelerators ────────────────────────────────────────────────────────
 
@@ -1976,9 +1984,10 @@ class ConversationsPanel(wx.Panel):
         self.messages_label.SetLabel(i18n.t("messages"))
         col2 = wx.ListItem()
         col2.SetText(i18n.t("messages").replace("&", ""))
-        self.messages_list.SetColumn(0, col2)
-        if hasattr(self, "_messages_list_accessible"):
-            self._messages_list_accessible._label = i18n.t("messages").replace("&", "")
+        for control in getattr(self, "_message_list_controls", {"active": self.messages_list}).values():
+            control.SetColumn(0, col2)
+        for accessible in getattr(self, "_messages_list_accessibles", {}).values():
+            accessible._label = i18n.t("messages").replace("&", "")
 
         self.audio_progress_label.SetLabel(i18n.t("audio_progress_label"))
         self._action_save_as_btn.SetLabel(i18n.t("save_as"))

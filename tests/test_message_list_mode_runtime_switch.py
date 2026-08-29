@@ -1,8 +1,8 @@
-"""Runtime replacement of the messages-list control.
+"""Runtime switching between the two persistent messages-list controls.
 
-Switching Settings > User Interface between Classic and List box must replace
-the native wx control immediately without rebuilding pagination, losing the
-focused row, or leaving the old control alive behind the new one.
+Both native controls are created at panel startup. Settings only changes which
+one is active, so a later conversation open cannot inherit a destroyed/replaced
+wx control from the settings dialog.
 """
 
 import pytest
@@ -11,39 +11,35 @@ wx = pytest.importorskip("wx")
 from ui.conversations import ConversationsPanel
 
 
-class _OldList:
-    def __init__(self, focused=1):
+class _List:
+    def __init__(self, focused=-1):
         self.focused = focused
-        self.hidden = False
-        self.destroyed = False
+        self.rows = []
+        self.shown = True
+        self.visible = -1
+        self.selected = -1
+        self.focus_calls = 0
 
     def GetFocusedItem(self):
         return self.focused
 
-    def Hide(self):
-        self.hidden = True
-
-    def Destroy(self):
-        self.destroyed = True
-
-
-class _NewList:
-    def __init__(self):
-        self.rows = []
-        self.focused = -1
-        self.selected = -1
-        self.visible = -1
-        self.frozen = False
-        self.focus_calls = 0
-
     def Freeze(self):
-        self.frozen = True
+        pass
 
     def Thaw(self):
-        self.frozen = False
+        pass
+
+    def DeleteAllItems(self):
+        self.rows.clear()
 
     def Append(self, entry):
         self.rows.append(entry[0])
+
+    def Hide(self):
+        self.shown = False
+
+    def Show(self):
+        self.shown = True
 
     def Focus(self, row):
         self.focused = row
@@ -58,22 +54,9 @@ class _NewList:
         self.focus_calls += 1
 
 
-class _Sizer:
-    def __init__(self):
-        self.replacements = []
-
-    def Replace(self, old, new):
-        self.replacements.append((old, new))
-        return True
-
-
 class _Panel:
-    def __init__(self, sizer):
-        self.sizer = sizer
+    def __init__(self):
         self.layouts = 0
-
-    def GetSizer(self):
-        return self.sizer
 
     def Layout(self):
         self.layouts += 1
@@ -91,19 +74,18 @@ class _Stub:
     apply_message_list_mode = ConversationsPanel.apply_message_list_mode
 
     def __init__(self):
+        classic = _List(focused=1)
+        listbox = _List()
+        listbox.shown = False
+        self._message_list_controls = {"classic": classic, "listbox": listbox}
         self._message_list_mode = "classic"
-        self.messages_list = _OldList(focused=1)
+        self.messages_list = classic
         self._sorted_messages = ["first", "second", "third"]
-        self.sizer = _Sizer()
-        self.conversation_panel = _Panel(self.sizer)
+        self.conversation = {"remoteJid": "chat@c.us"}
+        self.conversation_panel = _Panel()
         self._read_more_btn = _ReadMore()
         self._read_more_remainder = "tail"
-        self.created = None
         self.rerendered = 0
-
-    def _create_messages_list_control(self, mode):
-        self.created = _NewList()
-        return self.created
 
     def _render_message_line(self, msg, index=None, total=None):
         return f"{msg}:{index + 1}/{total}"
@@ -115,23 +97,47 @@ class _Stub:
         pass
 
 
-def test_switch_replaces_control_and_keeps_the_current_row(monkeypatch):
+def test_switch_uses_persistent_control_and_keeps_current_row(monkeypatch):
     stub = _Stub()
     monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: None))
-    old = stub.messages_list
+    classic = stub._message_list_controls["classic"]
+    listbox = stub._message_list_controls["listbox"]
 
     stub.apply_message_list_mode("listbox")
 
+    assert stub.messages_list is listbox
     assert stub._message_list_mode == "listbox"
-    assert stub.sizer.replacements == [(old, stub.created)]
-    assert stub.created.rows == ["first:1/3", "second:2/3", "third:3/3"]
-    assert stub.created.focused == 1
-    assert stub.created.selected == 1
-    assert stub.created.visible == 1
-    assert old.hidden is True
-    assert old.destroyed is True
+    assert classic.shown is False
+    assert listbox.shown is True
+    assert listbox.rows == ["first:1/3", "second:2/3", "third:3/3"]
+    assert listbox.focused == 1
+    assert listbox.selected == 1
+    assert listbox.visible == 1
     assert stub._read_more_btn.hidden is True
     assert stub._read_more_remainder == ""
+
+
+def test_switch_while_no_conversation_does_not_copy_stale_rows(monkeypatch):
+    stub = _Stub()
+    monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: None))
+    stub.conversation = None
+
+    stub.apply_message_list_mode("listbox")
+
+    assert stub.messages_list.rows == []
+
+
+def test_switching_back_reuses_original_control(monkeypatch):
+    stub = _Stub()
+    monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: None))
+    original = stub.messages_list
+
+    stub.apply_message_list_mode("listbox")
+    stub.apply_message_list_mode("classic")
+
+    assert stub.messages_list is original
+    assert original.shown is True
+    assert stub._message_list_controls["listbox"].shown is False
 
 
 def test_same_mode_only_rerenders_rows_in_place(monkeypatch):
@@ -141,4 +147,3 @@ def test_same_mode_only_rerenders_rows_in_place(monkeypatch):
     stub.apply_message_list_mode("classic")
 
     assert stub.rerendered == 1
-    assert stub.created is None
