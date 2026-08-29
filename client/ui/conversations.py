@@ -2776,18 +2776,32 @@ class ConversationsPanel(wx.Panel):
     def _silence_send_voice_focus_if_enabled(self):
         """Mute only the automatic focus announcement during voice recording.
 
-        The button keeps its native accessible name and shortcut at all times.
-        Suppression is requested when the dedicated spoken-content setting is
-        enabled, or when extended screen-reader compatibility is disabled.
+        The button keeps its native accessible name and shortcut at all times —
+        blanking the name out was tried and removed: it stripped the control's
+        identity from the accessibility tree for every consumer, not just from
+        the one announcement we wanted gone. Cancelling the announcement after
+        SetFocus() is the whole mechanism now.
+
+        A silence() call issued synchronously right after SetFocus() is too
+        early on its own: on Windows the focus WinEvent reaches the screen
+        reader's hook synchronously, but the screen reader itself (NVDA, ...)
+        queues and speaks the announcement asynchronously on its own thread, so
+        an immediate call can run before that speech has even been queued and
+        cancel nothing. Firing immediately (covers a screen reader that speaks
+        synchronously), again on the next wx idle turn, and once more a beat
+        later catches it whichever way the screen reader schedules it — the call
+        is idempotent, so the repeats are harmless.
         """
+        # Keyed ONLY on the "silence while recording" toggle. It used to also
+        # fire when extended_sr_compat_enabled was OFF — i.e. exactly when the
+        # user had told WinZapp never to talk to their screen reader, the app
+        # started interrupting it instead. That switch stops WinZapp's own AO2
+        # announcements; nothing about it asks for other applications' speech
+        # to be cut off.
         settings = self.main_window.settings
-        silence_while_recording = settings.get("speech_content", {}).get(
+        if not settings.get("speech_content", {}).get(
             "silence_while_recording", False
-        )
-        extended_enabled = settings.get("accessibility", {}).get(
-            "extended_sr_compat_enabled", True
-        )
-        if not silence_while_recording and extended_enabled:
+        ):
             return
         speak_output = getattr(self.main_window, "speak_output", None)
         silence_focus = getattr(speak_output, "silence_screen_reader_focus", None)

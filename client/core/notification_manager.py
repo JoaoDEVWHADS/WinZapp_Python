@@ -571,6 +571,13 @@ def announce_background_message(main_window, i18n, title: str, body: str) -> Non
     Safe to call from any thread: the AO2 call is marshalled onto the wx main
     thread.
     """
+    # Do Not Disturb silences the spoken announcement as well as the sound.
+    # For a user on a screen reader this announcement *is* the notification —
+    # honouring DND for the sound alone would have left the app talking over a
+    # Do Not Disturb the user had deliberately turned on. Both halves are
+    # gated, and only here, on the background path: main.py returns before
+    # reaching any of this while the window is active, so a message in the open
+    # conversation still speaks under DND.
     from core.quiet_hours import is_quiet_hours_active
     if is_quiet_hours_active():
         return
@@ -886,9 +893,7 @@ class NotificationManager:
             # between hearing the notification and seeing the banner. Not
             # perfect — Windows' own toast pipeline still isn't instant — but
             # this removes the part of the delay that was our own doing.
-            from core.quiet_hours import is_quiet_hours_active
-            if not is_quiet_hours_active():
-                wx.CallAfter(self._play_sound, remote_jid)
+            wx.CallAfter(self._play_sound, remote_jid)
 
             # Clear whatever WinZapp notification is currently on screen (or
             # waiting to be shown) before posting the new one.  This is what
@@ -1033,6 +1038,10 @@ class NotificationManager:
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
     def _play_sound(self, remote_jid: str = ""):
+        # WinZapp plays this itself, outside the Windows toast audio pipeline,
+        # so nothing else honours Do Not Disturb for it. Single decision point
+        # for the sound half of a background notification — see
+        # announce_background_message() for the spoken half.
         from core.quiet_hours import is_quiet_hours_active
         if is_quiet_hours_active():
             return

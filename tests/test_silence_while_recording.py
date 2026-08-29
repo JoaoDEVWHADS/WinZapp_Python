@@ -236,9 +236,23 @@ class TestSilenceSendVoiceFocusIfEnabled:
             func()
         assert stub.main_window.speak_output.focus_silence_calls == 3
 
-    def test_fires_when_extended_compat_is_off_even_if_silence_setting_is_off(self, monkeypatch):
+    def test_does_not_fire_merely_because_extended_sr_compat_is_off(self, monkeypatch):
+        """Turning extended screen-reader compatibility OFF means "stop talking
+        to my screen reader", not "start interrupting it". Only the dedicated
+        silence-while-recording toggle may cancel the focus announcement."""
         deferred = self._capture_deferred_calls(monkeypatch)
         stub = self._make_stub(silence_enabled=False, extended_enabled=False)
+
+        stub._silence_send_voice_focus_if_enabled()
+
+        assert stub.main_window.speak_output.focus_silence_calls == 0
+        assert deferred == []
+
+    def test_fires_on_the_silence_toggle_even_with_extended_compat_off(self, monkeypatch):
+        """The two settings are independent: the silence toggle is what arms
+        this, whatever extended compatibility is set to."""
+        deferred = self._capture_deferred_calls(monkeypatch)
+        stub = self._make_stub(silence_enabled=True, extended_enabled=False)
 
         stub._silence_send_voice_focus_if_enabled()
 

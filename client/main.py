@@ -524,14 +524,12 @@ def _discount_non_countable_unread(records: list, unread_count: int) -> int:
     """
     if unread_count <= 0 or not records:
         return unread_count
-    discount = 0
-    for m in reversed(records):
-        if discount >= unread_count:
-            break
-        if isinstance(m, dict) and not is_countable_message(m):
-            discount += 1
-        else:
-            break
+    tail = records[-unread_count:] if unread_count <= len(records) else records
+    discount = sum(
+        1 for m in tail
+        if (isinstance(m, dict) and (m.get("key") or {}).get("fromMe"))
+        or not is_countable_message(m)
+    )
     return max(0, unread_count - discount)
 
 
@@ -542,6 +540,12 @@ _media_not_in_store_lock = threading.Lock()
 _media_not_in_store = 0
 # How often the running total is repeated once the first one has been reported.
 _MEDIA_MISSING_LOG_EVERY = 25
+
+# How many consecutive rounds an incremental delta may come back empty for a
+# chat whose activity marker moved before the marker is accepted anyway. See
+# sync_chat_messages(): a bump with nothing fetchable behind it is a permanent
+# state for some chats, so this has to terminate.
+_MAX_EMPTY_DELTA_RETRIES = 3
 
 
 def _report_media_fetch_failure(msg_id: str, status_code: int, body: str) -> bool:
@@ -1226,6 +1230,13 @@ class MainWindow(wx.Frame):
         # hold hundreds of local messages and still miss the newest one if the
         # one delta request that should fetch it times out.
         self._message_retry_jids = set()
+        # Chats whose incremental delta came back 200-but-empty this round.
+        # Deliberately NOT the same thing as a failed fetch: the server
+        # answered, so there is no I/O problem to report and the run is still a
+        # clean one — see sync_chat_messages() for why an empty delta is worth
+        # one more look anyway, and why that look is bounded.
+        self._delta_unsatisfied_chats = set()
+        self._delta_unsatisfied_attempts = {}
         self._chats_awaiting_messages = set()
         self._partial_history_counts = {}
         self._history_gap_jids = set()
@@ -11342,6 +11353,8 @@ class MainWindow(wx.Frame):
         with self._sync_failures_lock:
             self._message_retry_jids.clear()
             self._sync_failed_chats.clear()
+            self._delta_unsatisfied_chats.clear()
+            self._delta_unsatisfied_attempts.clear()
         self._persist_backfill_pending_state()
         self._persist_history_gap_jids()
         self._persist_message_retry_jids()
@@ -15030,11 +15043,22 @@ class MainWindow(wx.Frame):
                 }
                 failed_jids.update(jid for jid in normalized_legacy_failed if jid in target_ids)
                 successful_jids.difference_update(failed_jids)
+                # Chats whose delta was empty this round: worth one more look,
+                # but the server answered, so they are not failures and must
+                # not reach the caller's message_sync_ok. Folded into the
+                # durable retry list only — see sync_chat_messages().
+                unsatisfied = {
+                    normalize_jid(jid) or jid
+                    for jid in (getattr(self, "_delta_unsatisfied_chats", set()) or set())
+                }
+                unsatisfied = {jid for jid in unsatisfied if jid in target_ids}
+                successful_jids.difference_update(unsatisfied)
                 retry_jids = getattr(self, "_message_retry_jids", None)
                 if retry_jids is None:
                     retry_jids = self._message_retry_jids = set()
                 retry_jids.difference_update(successful_jids)
                 retry_jids.update(failed_jids)
+                retry_jids.update(unsatisfied)
 
         persist_retries = getattr(self, "_persist_message_retry_jids", None)
         if callable(persist_retries):
@@ -15413,12 +15437,43 @@ class MainWindow(wx.Frame):
             gap = any(form in gaps for form in forms)
             if gap:
                 # A known disjoint block is not "complete" merely because the
-                # local union already contains >= one visible page. Keep it on
-                # the repair queue until sync_chat_messages() proves overlap or
-                # the phone definitively says there is no older history.
+                # local union already contains >= one visible page: keep it on
+                # the repair queue while there is any reason to think another
+                # pass can close the hole.
+                #
+                # "Any reason" has to be a finite condition, and the growth rule
+                # the general path below already uses is the one available.
+                # Queueing gap chats unconditionally — until overlap is proven
+                # or the phone says there is no older history — sounds stricter
+                # but has no third outcome: WhatsApp Web routinely never
+                # decodes a middle stretch for a large group, and neither of
+                # those two exits ever fires. That chat then sits in
+                # _history_gap_jids (persisted, so it survives restarts) and in
+                # the pending queue forever, and _plan_message_sync() reads
+                # either set as repair_needed → a FULL re-sync of the single
+                # most expensive conversation on the account, every round of
+                # every session. The incremental sync this whole change exists
+                # for would never apply to it again.
+                #
+                # So: a pass that adds nothing is the answer. Drop the repair
+                # marker with the queue slot — a later live message or a real
+                # growth signal re-detects the gap through history_gap_detected()
+                # the same way it was found the first time.
+                previous_values = [counts[f] for f in forms if f in counts]
+                previous = max(previous_values) if previous_values else None
+                grew = previous is not None and count > previous
+                first_sighting = previous is None
+                still_landing = getattr(self, "_history_still_landing", False)
                 _done()
-                counts[canonical] = count
-                pending.add(canonical)
+                if grew or first_sighting or still_landing:
+                    counts[canonical] = count
+                    pending.add(canonical)
+                    return
+                self._history_gap_jids.difference_update(forms)
+                logging.info(
+                    "[history-gap] %s: repair pass added nothing (%d records) — "
+                    "releasing it from the repair queue.", canonical, count,
+                )
                 return
             if count >= self.history_page_target():
                 _done()
@@ -16907,7 +16962,21 @@ class MainWindow(wx.Frame):
         # Now it can.
         apply_history_sync_unread_correction(remote_jid, chat)
 
-        # Update lastMessage and 't' on chat if countable messages are present
+        # Update lastMessage from the newest displayable message, so the chat
+        # list preview matches what opening the conversation actually shows.
+        #
+        # `t` is only ever raised here, never lowered to the message's own
+        # timestamp. The two are not the same clock: `t` is the server's
+        # activity marker, and it legitimately sits ABOVE the newest displayable
+        # message whenever the latest thing that happened in the chat was a
+        # system event — a group join, a settings change, a revoke — which
+        # _counts_as_last_message() excludes from `candidates` by design.
+        # Overwriting `t` downward in that case costs twice: the conversation
+        # sorts to a position that contradicts the server's own ordering, and
+        # _capture_chat_sync_baseline() then stores a marker that can never
+        # match the next list-chats snapshot, so chat_sync_marker_changed()
+        # reports a change on every round and that chat is never skipped again —
+        # the one outcome the incremental planner exists to produce.
         candidates = [m for m in all_messages if self._counts_as_last_message(m)]
         if candidates:
             def _get_m_ts(m):
@@ -16915,7 +16984,13 @@ class MainWindow(wx.Frame):
                 return val // 1000 if val > 1_000_000_000_000 else val
             last_m = max(candidates, key=_get_m_ts)
             chat["lastMessage"] = last_m
-            chat["t"] = _get_m_ts(last_m)
+            last_ts = _get_m_ts(last_m)
+            try:
+                current_t = int(chat.get("t") or 0)
+            except (TypeError, ValueError):
+                current_t = 0
+            if last_ts > current_t:
+                chat["t"] = last_ts
 
         self.chats[remote_jid] = chat
         pending_before = self._is_backfill_pending(remote_jid)
@@ -16952,7 +17027,48 @@ class MainWindow(wx.Frame):
         # advanced, so keep that chat on the durable retry list. Full/new-chat
         # rounds retain the historical behaviour where an empty store page can
         # be provisional and is handled by the short-history backfill.
+        #
+        # Bounded, and separated from real failures, because neither property is
+        # optional here. The server answered 200 — there is no I/O fault to
+        # report — but "activity advanced" and "the delta is empty" is a state
+        # WhatsApp Web reaches routinely and permanently: a reaction, a
+        # groupNotification, any event _normalize_fetched_messages() filters out
+        # entirely will bump `t` and yield nothing to fetch, forever. Treated as
+        # a failure, one such chat was enough to hold message_sync_ok False,
+        # which keeps _sync_completed False, which (a) never commits the
+        # list-chats snapshot of unread/pin/archive for EVERY chat, (b) leaves
+        # the health checker resyncing — announcing itself — on every cooldown,
+        # and (c) makes the live-event gate drop every chats.update unread event
+        # for the rest of the session. So: look again a couple of times in case
+        # the store was merely slow, then accept the marker and move on.
         incremental_satisfied = not incremental or fetched_payload_has_messages
+        if api_ok:
+            # getattr-guarded like every other lazily-present sync attribute
+            # here: the test stubs that bind this method carry only what the
+            # path under test touches.
+            attempts_by_jid = getattr(self, "_delta_unsatisfied_attempts", None)
+            if attempts_by_jid is None:
+                attempts_by_jid = self._delta_unsatisfied_attempts = {}
+            unsatisfied_jids = getattr(self, "_delta_unsatisfied_chats", None)
+            if unsatisfied_jids is None:
+                unsatisfied_jids = self._delta_unsatisfied_chats = set()
+            if incremental_satisfied:
+                attempts_by_jid.pop(remote_jid, None)
+                unsatisfied_jids.discard(remote_jid)
+            else:
+                attempts = attempts_by_jid.get(remote_jid, 0) + 1
+                if attempts >= _MAX_EMPTY_DELTA_RETRIES:
+                    attempts_by_jid.pop(remote_jid, None)
+                    unsatisfied_jids.discard(remote_jid)
+                    incremental_satisfied = True
+                    logging.info(
+                        "[sync_chat_messages] %s: delta still empty after %d "
+                        "attempts — accepting the activity marker.",
+                        remote_jid, attempts,
+                    )
+                else:
+                    attempts_by_jid[remote_jid] = attempts
+                    unsatisfied_jids.add(remote_jid)
         message_fetch_satisfied = bool(api_ok and incremental_satisfied)
 
         # Incremental DB save: write only this chat + its messages. The chat-list
@@ -16974,7 +17090,11 @@ class MainWindow(wx.Frame):
             logging.warning("[sync_chat_messages] incremental DB save failed for %s: %s",
                             remote_jid, exc)
 
-        return bool(message_fetch_satisfied and persist_ok)
+        # Reports whether this chat's sync FAILED, which an empty delta did
+        # not: the retry for that is carried by _delta_unsatisfied_chats, which
+        # sync_remote_chats() folds into the durable retry list without letting
+        # it count as a failed run.
+        return bool(api_ok and persist_ok)
 
     # ── Phone-side deletions/clears — active conversation only ──────────────
     # sync_chat_messages() above deliberately never removes anything: its
@@ -19186,12 +19306,18 @@ class MainWindow(wx.Frame):
         # after opening the app. The list-chats merge in get_remote_chats()
         # is the authoritative source for the real counts; ignore live
         # chats.update while it (or the initial sync) is still running.
-        if not getattr(self, "_sync_completed", False):
+        # Both halves are load-bearing and neither implies the other. F5's
+        # _run_sync() sets _initial_sync_running before it waits on ui_ready
+        # (up to 5s) and only clears _sync_completed after that wait returns —
+        # so for that window a resync is demonstrably in flight while
+        # _sync_completed is still True, and a chats.update arriving there would
+        # be accepted mid-resync, which is exactly what this gate forbids.
+        if getattr(self, "_initial_sync_running", False) or not getattr(self, "_sync_completed", False):
             logging.info(
-                "[unread] %s: dropped, sync gate (completed=%s, "
+                "[unread] %s: dropped, sync gate (running=%s, completed=%s, "
                 "unread=%s, previous=%s).",
-                normalized, getattr(self, "_sync_completed", False),
-                unread_count, previous_unread,
+                normalized, getattr(self, "_initial_sync_running", False),
+                getattr(self, "_sync_completed", False), unread_count, previous_unread,
             )
             return
         old_count = int(chat.get("unreadCount") or 0)

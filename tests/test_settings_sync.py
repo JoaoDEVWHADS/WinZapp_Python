@@ -74,10 +74,12 @@ def test_default_settings_matches_json_structure():
     for section, val in DEFAULT_SETTINGS.items():
         if isinstance(val, dict):
             assert isinstance(json_data[section], dict), f"Section {section} must be a dict"
-            for k, v in json_data[section].items():
-                assert k in val, f"Key {k} in section {section} missing from DEFAULT_SETTINGS"
-                assert val[k] == v, (
-                    f"Default value mismatch for {section}.{k}: {val[k]!r} != {v!r}"
+            assert set(val.keys()) == set(json_data[section].keys()), (
+                f"Keys in section {section} mismatch: {set(val.keys()) ^ set(json_data[section].keys())}"
+            )
+            for k in val:
+                assert val[k] == json_data[section][k], (
+                    f"Default value mismatch for {section}.{k}: {val[k]!r} != {json_data[section][k]!r}"
                 )
 
 
