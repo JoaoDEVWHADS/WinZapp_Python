@@ -371,10 +371,21 @@ def _query_winrt_notification_policy() -> Optional[bool]:
 
 
 def _compute_quiet_hours_active() -> bool:
-    """Uncached probe sequence behind is_quiet_hours_active(). See that."""
+    """Uncached probe sequence behind is_quiet_hours_active(). See that.
+
+    Every "suppressed" branch logs at INFO, not DEBUG, and that level is
+    deliberate: log.log runs at INFO, so a decision taken here is otherwise
+    invisible in the only artefact a user sends when reporting a problem. What
+    this gate silences is a background notification's sound AND its spoken
+    announcement — for a user on a screen reader, the whole notification — and
+    two of the probes below read undocumented Windows state (the WNF state name
+    and its value semantics are reverse-engineered). A misreading therefore
+    presents as "WinZapp stopped telling me messages arrive", with no visible
+    cause. One line in the log is the difference between diagnosing that in
+    minutes and not diagnosing it at all."""
     # 1. Documented Windows notification switches (global, policy, per-app).
     if _query_registry_notifications_disabled():
-        logging.debug("[quiet_hours] Suppressed via registry check (notifications disabled)")
+        logging.info("[quiet_hours] Suppressed via registry check (notifications disabled)")
         return True
 
     # 2. WNF: the state the shell itself updates when the active quiet-hours
@@ -384,21 +395,21 @@ def _compute_quiet_hours_active() -> bool:
     #    the live state saying Do Not Disturb is off.
     wnf_state = _query_wnf_quiet_hours()
     if wnf_state is True:
-        logging.debug("[quiet_hours] Suppressed via WNF state (Focus Assist / DND active)")
+        logging.info("[quiet_hours] Suppressed via WNF state (Focus Assist / DND active)")
         return True
     if wnf_state is None and _query_registry_dnd_active() is True:
-        logging.debug("[quiet_hours] Suppressed via registry DND fallback (WNF unavailable)")
+        logging.info("[quiet_hours] Suppressed via registry DND fallback (WNF unavailable)")
         return True
 
     # 3. WinRT ToastNotifier setting (user-wide / group policy only).
     if _query_winrt_notification_policy() is True:
-        logging.debug("[quiet_hours] Suppressed via WinRT ToastNotifier setting")
+        logging.info("[quiet_hours] Suppressed via WinRT ToastNotifier setting")
         return True
 
     # 4. Legacy Win32 state: fullscreen game, presentation mode, quiet time.
     state = _query_notification_state()
     if state is not None and should_suppress_notification_sound(state):
-        logging.debug("[quiet_hours] Suppressed via SHQueryUserNotificationState: %d", state)
+        logging.info("[quiet_hours] Suppressed via SHQueryUserNotificationState: %d", state)
         return True
 
     return False

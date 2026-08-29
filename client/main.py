@@ -17046,29 +17046,36 @@ class MainWindow(wx.Frame):
             # getattr-guarded like every other lazily-present sync attribute
             # here: the test stubs that bind this method carry only what the
             # path under test touches.
-            attempts_by_jid = getattr(self, "_delta_unsatisfied_attempts", None)
-            if attempts_by_jid is None:
-                attempts_by_jid = self._delta_unsatisfied_attempts = {}
-            unsatisfied_jids = getattr(self, "_delta_unsatisfied_chats", None)
-            if unsatisfied_jids is None:
-                unsatisfied_jids = self._delta_unsatisfied_chats = set()
-            if incremental_satisfied:
-                attempts_by_jid.pop(remote_jid, None)
-                unsatisfied_jids.discard(remote_jid)
-            else:
-                attempts = attempts_by_jid.get(remote_jid, 0) + 1
-                if attempts >= _MAX_EMPTY_DELTA_RETRIES:
+            # Under _sync_failures_lock, the same lock clear_local_data() holds
+            # while emptying these: F5 can land between the read and the write
+            # here and leave a jid from the discarded run behind — one wasted
+            # get-messages, but the asymmetry is the kind that reads as a bug
+            # to whoever touches this next. The lock is not reentrant and this
+            # block calls nothing that takes it.
+            with self._sync_failures_lock:
+                attempts_by_jid = getattr(self, "_delta_unsatisfied_attempts", None)
+                if attempts_by_jid is None:
+                    attempts_by_jid = self._delta_unsatisfied_attempts = {}
+                unsatisfied_jids = getattr(self, "_delta_unsatisfied_chats", None)
+                if unsatisfied_jids is None:
+                    unsatisfied_jids = self._delta_unsatisfied_chats = set()
+                if incremental_satisfied:
                     attempts_by_jid.pop(remote_jid, None)
                     unsatisfied_jids.discard(remote_jid)
-                    incremental_satisfied = True
-                    logging.info(
-                        "[sync_chat_messages] %s: delta still empty after %d "
-                        "attempts — accepting the activity marker.",
-                        remote_jid, attempts,
-                    )
                 else:
-                    attempts_by_jid[remote_jid] = attempts
-                    unsatisfied_jids.add(remote_jid)
+                    attempts = attempts_by_jid.get(remote_jid, 0) + 1
+                    if attempts >= _MAX_EMPTY_DELTA_RETRIES:
+                        attempts_by_jid.pop(remote_jid, None)
+                        unsatisfied_jids.discard(remote_jid)
+                        incremental_satisfied = True
+                        logging.info(
+                            "[sync_chat_messages] %s: delta still empty after %d "
+                            "attempts — accepting the activity marker.",
+                            remote_jid, attempts,
+                        )
+                    else:
+                        attempts_by_jid[remote_jid] = attempts
+                        unsatisfied_jids.add(remote_jid)
         message_fetch_satisfied = bool(api_ok and incremental_satisfied)
 
         # Incremental DB save: write only this chat + its messages. The chat-list

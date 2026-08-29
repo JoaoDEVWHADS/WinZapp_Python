@@ -248,3 +248,81 @@ class TestTheActivityMarkerIsNeverLowered:
     def test_the_preview_still_follows_the_newest_displayable_message(self, monkeypatch):
         chat = self._sync_with_message_at(monkeypatch, message_ts=100, server_t=500)
         assert chat["lastMessage"]["key"]["id"] == "m1"
+
+
+class _RoundStub:
+    """Stand-in for sync_remote_chats() — the level where an unsatisfied delta
+    used to become a failed sync run."""
+
+    def __init__(self, chats, unsatisfied=(), failing=()):
+        self.chats = {c["remoteJid"]: c for c in chats}
+        self.settings = {"user_interface": {"messages_page_size": 200}}
+        self._sync_failures_lock = threading.Lock()
+        self._sync_failed_chats = set()
+        self._delta_unsatisfied_chats = set(unsatisfied)
+        self._delta_unsatisfied_attempts = {}
+        self._message_retry_jids = set()
+        self._history_still_landing = False
+        self._failing = set(failing)
+
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+
+    def history_page_target(self):
+        return 200
+
+    def sync_chat_messages(self, chat, expected_run_id=None, sync_mode="full"):
+        return chat.get("remoteJid") not in self._failing
+
+    def _persist_message_retry_jids(self):
+        pass
+
+    def _persist_backfill_pending_state(self):
+        pass
+
+    def _persist_history_gap_jids(self):
+        pass
+
+
+A = "5511900000000@s.whatsapp.net"
+B = "5511911111111@s.whatsapp.net"
+
+
+class TestAnUnsatisfiedDeltaDoesNotFailTheRound:
+    """The whole point of separating the two. sync_remote_chats()'s return is
+    what _run_sync() reads as message_sync_ok, and message_sync_ok False keeps
+    _sync_completed False — which never commits the list-chats snapshot of
+    unread/pin/archive for EVERY chat, leaves the health checker resyncing on
+    every cooldown, and drops every live chats.update unread event for the rest
+    of the session. One chat with a reaction-only bump was enough.
+    """
+
+    def test_the_round_reports_no_failures(self):
+        stub = _RoundStub(
+            [{"remoteJid": A, "t": 100}, {"remoteJid": B, "t": 90}],
+            unsatisfied={A},
+        )
+        assert MainWindow.sync_remote_chats(stub, incremental=True) == set()
+
+    def test_but_the_chat_stays_on_the_durable_retry_list(self):
+        stub = _RoundStub(
+            [{"remoteJid": A, "t": 100}, {"remoteJid": B, "t": 90}],
+            unsatisfied={A},
+        )
+        MainWindow.sync_remote_chats(stub, incremental=True)
+        assert stub._message_retry_jids == {A}
+
+    def test_a_real_failure_is_still_returned_as_one(self):
+        stub = _RoundStub(
+            [{"remoteJid": A, "t": 100}, {"remoteJid": B, "t": 90}],
+            failing={B},
+        )
+        assert MainWindow.sync_remote_chats(stub, incremental=True) == {B}
+        assert stub._message_retry_jids == {B}
+
+    def test_a_satisfied_chat_leaves_the_retry_list(self):
+        """Termination at the round level: once the delta lands, the latch has
+        to drain or the chat is re-fetched forever."""
+        stub = _RoundStub([{"remoteJid": A, "t": 100}])
+        stub._message_retry_jids = {A}
+        MainWindow.sync_remote_chats(stub, incremental=True)
+        assert stub._message_retry_jids == set()
