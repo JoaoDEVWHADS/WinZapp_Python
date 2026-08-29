@@ -11838,6 +11838,8 @@ class MainWindow(wx.Frame):
                         for k, v in chat.items():
                             if k in ("messages", "remoteJid"):
                                 continue
+                            if k == "lastMessage" and not v:
+                                continue
                             if k == "pushName" and jid.endswith("@g.us"):
                                 continue
                             if k == "name" and jid.endswith("@g.us") and not v:
@@ -16894,6 +16896,16 @@ class MainWindow(wx.Frame):
         # conversation had been fetched, so its own discount could not run.
         # Now it can.
         apply_history_sync_unread_correction(remote_jid, chat)
+
+        # Update lastMessage and 't' on chat if countable messages are present
+        candidates = [m for m in all_messages if self._counts_as_last_message(m)]
+        if candidates:
+            def _get_m_ts(m):
+                val = int(m.get("messageTimestamp") or m.get("timestamp") or m.get("t") or 0)
+                return val // 1000 if val > 1_000_000_000_000 else val
+            last_m = max(candidates, key=_get_m_ts)
+            chat["lastMessage"] = last_m
+            chat["t"] = _get_m_ts(last_m)
 
         self.chats[remote_jid] = chat
         pending_before = self._is_backfill_pending(remote_jid)
@@ -22982,8 +22994,6 @@ class MainWindow(wx.Frame):
             inner_wrapper = records_wrapper.get("messages") or {}
             if isinstance(inner_wrapper, dict):
                 records = list(inner_wrapper.get("records") or [])
-        if not records:
-            return ""
 
         # Shared with _chat_last_ts() so the preview and the ordering can never
         # disagree about which record is a chat's last message.
@@ -22995,14 +23005,20 @@ class MainWindow(wx.Frame):
             val = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
             return val // 1000 if val > 1_000_000_000_000 else val
 
-        try:
-            last = max(
-                (m for m in records if is_displayable(m)),
-                key=_get_ts,
-                default=None,
-            )
-        except Exception:
-            last = None
+        last = None
+        if records:
+            try:
+                last = max(
+                    (m for m in records if is_displayable(m)),
+                    key=_get_ts,
+                    default=None,
+                )
+            except Exception:
+                last = None
+        if last is None:
+            candidate = chat.get("lastMessage")
+            if isinstance(candidate, dict) and is_displayable(candidate):
+                last = candidate
 
         i18n = self.i18n
 

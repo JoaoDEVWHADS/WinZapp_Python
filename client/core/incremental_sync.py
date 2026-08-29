@@ -64,8 +64,13 @@ def chat_sync_marker(chat: dict) -> dict:
         activity = int((chat or {}).get("t", 0) or 0)
     except (TypeError, ValueError, AttributeError):
         activity = 0
+    try:
+        unread = int((chat or {}).get("unreadCount", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        unread = 0
     return {
         "activity": activity,
+        "unread_count": unread,
         "last_received_id": chat_last_received_id(chat),
         "last_message_id": chat_last_message_id(chat),
         "newest_local_id": message_id(newest),
@@ -91,6 +96,13 @@ def chat_sync_marker_changed(chat: dict, baseline: dict) -> bool:
     except (TypeError, ValueError, AttributeError):
         previous_activity = 0
     if current["activity"] > previous_activity:
+        return True
+
+    current_unread = int(current.get("unread_count", 0) or 0)
+    previous_unread = int(baseline.get("unread_count", 0) or 0)
+    if current_unread > 0 and (current_unread != previous_unread or current["activity"] != previous_activity):
+        return True
+    if current_unread > previous_unread:
         return True
 
     newest_local_id = str(baseline.get("newest_local_id") or "")

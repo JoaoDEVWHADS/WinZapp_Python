@@ -36,6 +36,7 @@ class TestChatSyncMarker:
         )
         assert marker == {
             "activity": 30,
+            "unread_count": 0,
             "last_received_id": "SERVER3",
             "last_message_id": "SERVER4",
             "newest_local_id": "LOCAL2",
@@ -51,6 +52,12 @@ class TestChatSyncMarker:
             records=[_message("M2", 30)],
         )
         assert chat_sync_marker_changed(chat, chat_sync_marker(chat)) is False
+
+    def test_unread_count_change_requires_incremental_refresh(self):
+        old = _chat(t=30, last_received="M2", records=[_message("M2", 30)])
+        new = _chat(t=30, last_received="M2", records=[_message("M2", 30)])
+        new["unreadCount"] = 2
+        assert chat_sync_marker_changed(new, chat_sync_marker(old)) is True
 
     def test_newer_activity_requires_incremental_refresh(self):
         old = _chat(t=30, last_received="M2", records=[_message("M2", 30)])
