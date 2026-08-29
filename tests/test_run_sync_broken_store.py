@@ -74,6 +74,7 @@ class _Stub:
         self._lid_to_phone = {}
         self._history_still_landing = False
         self._history_gap_jids = set()
+        self._message_retry_jids = set()
         self._phone_to_lid = {}
         self._force_full_sync = False
         self._last_sync_state = {}
