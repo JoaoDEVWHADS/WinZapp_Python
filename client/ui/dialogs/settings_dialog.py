@@ -211,10 +211,10 @@ class SettingsDialog(wx.Dialog):
         self._general_page = wx.Panel(self._notebook)
         gen_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        gen_sizer.Add(
-            wx.StaticText(self._general_page, label=i18n.t("language_label")),
-            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
-        )
+        # Kept on self so _refresh_dialog_labels() can re-translate it after
+        # Apply; an inline StaticText can never be relabelled.
+        self._language_label = wx.StaticText(self._general_page, label=i18n.t("language_label"))
+        gen_sizer.Add(self._language_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
         self._lang_combo = wx.ComboBox(
             self._general_page,
             style=wx.CB_READONLY,
@@ -350,17 +350,20 @@ class SettingsDialog(wx.Dialog):
         self._ui_page = wx.Panel(self._notebook)
         ui_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        ui_sizer.Add(
-            wx.StaticText(self._ui_page, label=i18n.t("ui_messages_page_size_label")),
-            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        # Both labels are kept on self: they name the edit fields below them
+        # for the screen reader, and an inline StaticText stayed in the
+        # previous language after Apply (reported live, English -> pt-BR).
+        self._messages_page_size_label = wx.StaticText(
+            self._ui_page, label=i18n.t("ui_messages_page_size_label")
         )
+        ui_sizer.Add(self._messages_page_size_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
         self._messages_page_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         ui_sizer.Add(self._messages_page_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
-        ui_sizer.Add(
-            wx.StaticText(self._ui_page, label=i18n.t("ui_page_jump_size_label")),
-            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        self._page_jump_size_label = wx.StaticText(
+            self._ui_page, label=i18n.t("ui_page_jump_size_label")
         )
+        ui_sizer.Add(self._page_jump_size_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
         self._page_jump_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         ui_sizer.Add(self._page_jump_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -2522,6 +2525,17 @@ class SettingsDialog(wx.Dialog):
 
         return True
 
+    @staticmethod
+    def _set_list_column_label(list_ctrl, text):
+        """Re-translate a single-column ListCtrl's header. NVDA reads it when
+        column headers are announced, and SetItem() on the rows leaves it
+        alone. Same `&` stripping as the InsertColumn() that created it, and
+        the same wx.ListItem/SetColumn() form conversations.py and
+        status_panel.py already use for their own headers."""
+        column = wx.ListItem()
+        column.SetText(text.replace("&", ""))
+        list_ctrl.SetColumn(0, column)
+
     def _refresh_dialog_labels(self):
         """Update this dialog's own title and notebook tab captions after a language change."""
         i18n = self.main_window.i18n
@@ -2576,6 +2590,15 @@ class SettingsDialog(wx.Dialog):
         self._updates_check.SetLabel(i18n.t("updates_label"))
         self._alpha_updates_check.SetLabel(i18n.t("alpha_updates_label"))
         self._alpha_updates_check.SetToolTip(i18n.t("alpha_updates_tooltip"))
+        self._language_label.SetLabel(i18n.t("language_label"))
+        self._switch_behavior_box.SetLabel(i18n.t("acc_switch_behavior_label"))
+        self._switch_behavior_single_rb.SetLabel(i18n.t("acc_switch_behavior_single"))
+        self._switch_behavior_keep_open_rb.SetLabel(i18n.t("acc_switch_behavior_keep_open"))
+        self._messages_page_size_label.SetLabel(i18n.t("ui_messages_page_size_label"))
+        self._page_jump_size_label.SetLabel(i18n.t("ui_page_jump_size_label"))
+        self._extended_sr_compat_check.SetLabel(i18n.t("accessibility_extended_sr_compat_label"))
+        self._sapi_fallback_check.SetLabel(i18n.t("accessibility_sapi_fallback_label"))
+        self._probe_video_duration_check.SetLabel(i18n.t("probe_video_duration_on_download_label"))
         self._focus_box.SetLabel(i18n.t("ui_focus_label"))
         self._focus_message_field_rb.SetLabel(i18n.t("ui_focus_message_field"))
         self._focus_unread_or_last_rb.SetLabel(i18n.t("ui_focus_unread_or_last"))
@@ -2602,6 +2625,9 @@ class SettingsDialog(wx.Dialog):
         self._group_media_types_label.SetLabel(
             i18n.t("ui_group_media_default_types_label")
         )
+        self._set_list_column_label(
+            self._group_media_types_list, i18n.t("ui_group_media_default_types_label")
+        )
         for _idx, _key in enumerate(GROUP_MEDIA_TYPES):
             self._group_media_types_list.SetItem(
                 _idx, 0, i18n.t(f"group_media_type_{_key}")
@@ -2611,6 +2637,9 @@ class SettingsDialog(wx.Dialog):
         )
         self._auto_download_types_label.SetLabel(
             i18n.t("storage_auto_download_media_types_label")
+        )
+        self._set_list_column_label(
+            self._auto_download_types_list, i18n.t("storage_auto_download_media_types_label")
         )
         for _idx, _key in enumerate(AUTO_DOWNLOAD_MEDIA_TYPES):
             self._auto_download_types_list.SetItem(
@@ -2730,6 +2759,11 @@ class SettingsDialog(wx.Dialog):
             self._maybe_warn_restart_required()
             self._dirty = False
             self._apply_btn.Hide()
+            # The notebook keeps its size, so the pages' own sizers would not
+            # recalculate on their own: a checkbox whose label got longer in
+            # the new language would stay at its old width, visibly cut off.
+            for _page in range(self._notebook.GetPageCount()):
+                self._notebook.GetPage(_page).Layout()
             self.Layout()
 
     def _mark_dirty(self, event=None):

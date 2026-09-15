@@ -8,7 +8,7 @@ NOVIDADES
 
 CORREÇÕES
 
-- A opção "Mostrar mensagens do dia anterior com data omitida (ontem)", nas Definições, muda agora de idioma juntamente com o resto quando troca a língua do programa. Antes continuava no idioma anterior até fechar e voltar a abrir as Definições.
+- Mudar o idioma nas Definições e carregar em Aplicar traduz agora todas as opções. Algumas continuavam no idioma anterior até fechar e voltar a abrir as Definições, como "Ao iniciar uma conversa, apresentar este número de mensagens" e "Mensagens a saltar ao pressionar PageUp / PageDown".
 
 V1.1.1.0
 

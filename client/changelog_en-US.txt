@@ -8,7 +8,7 @@ WHAT'S NEW
 
 FIXES
 
-- The "Show yesterday's messages with the date omitted (yesterday)" option in Settings now changes language along with everything else when you switch the app's language. It used to stay in the previous language until Settings was closed and opened again.
+- Changing the language in Settings and pressing Apply now translates every option. Some stayed in the previous language until Settings was closed and opened again, such as "When opening a chat, show up to this many messages" and "Messages to skip when pressing Page Up / Page Down".
 
 V1.1.1.0
 
