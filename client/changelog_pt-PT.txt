@@ -12,6 +12,10 @@ CORREÇÕES
 
 - A velocidade predefinida de reprodução de áudio já não volta sozinha a 1x. Ao abrir as Definições, o campo do separador Reprodução de áudio aparecia vazio, qualquer que fosse a velocidade guardada, e carregar em Aplicar e depois em OK gravava 1x por cima dela. Agora a velocidade guardada aparece selecionada e é mantida.
 
+- As mensagens já não desaparecem sozinhas de uma conversa aberta. Quando o WhatsApp Web descarregava parte do histórico ou voltava de uma recuperação de perfil com menos mensagens, o WinZapp tratava as que já não estavam carregadas como eliminadas no telemóvel e removia-as, por vezes centenas de uma vez.
+
+- Depois de o WinZapp recuperar o perfil do navegador, as conversas com mensagens não lidas já não aparecem como lidas.
+
 V1.1.1.0
 
 Esta versão é sobre manter a sua conta ligada. O WinZapp passou a guardar uma cópia de segurança do perfil do navegador — que é onde a sua ligação ao WhatsApp fica realmente guardada — e a restaurá-la sozinho quando ela deixa de ser aceite, avisando o que aconteceu. Com ela vieram as correções das situações que quebravam a sessão e faziam o programa pedir para emparelhar de novo: desligar o computador, suspender e retomar, e o próprio programa a reiniciar a ligação. Chegaram também a verificação ortográfica no campo de mensagem e as ações sobre ligações.

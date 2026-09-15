@@ -267,9 +267,13 @@ class _ReconcileStub:
         self._schedule_set_chats_calls = 0
         self.settings = {}
 
-    # Stubbed instead of hitting the network.
-    def _fetch_remote_message_ids(self, remote_jid):
-        return self._remote_ids
+    # Stubbed instead of hitting the network. Every fixture message carries
+    # messageTimestamp=1000 (see _msg); a non-empty answer is stated to start
+    # just before that, so all of them fall inside the period it covers.
+    def _fetch_remote_message_window(self, remote_jid):
+        if self._remote_ids is None:
+            return None
+        return set(self._remote_ids), (999 if self._remote_ids else 0)
 
     def clear_chat_messages_local(self, jid, record_cutoff=True):
         self.clear_calls.append((jid, record_cutoff))

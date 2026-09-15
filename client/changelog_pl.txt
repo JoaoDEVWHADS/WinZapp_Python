@@ -12,6 +12,10 @@ POPRAWKI
 
 - Domyślna prędkość odtwarzania dźwięku nie wraca już sama do 1x. Po otwarciu Ustawień pole na karcie Odtwarzanie audio było puste niezależnie od zapisanej prędkości, a naciśnięcie Zastosuj, a potem OK zapisywało 1x w jej miejsce. Teraz zapisana prędkość jest zaznaczona i zachowywana.
 
+- Wiadomości nie znikają już same z otwartego czatu. Gdy WhatsApp Web zwalniał część historii albo wracał po odzyskaniu profilu z mniejszą liczbą wiadomości, WinZapp traktował te, których już nie miał wczytanych, jako usunięte na telefonie i je usuwał, czasem setki naraz.
+
+- Po odzyskaniu profilu przeglądarki przez WinZapp czaty z nieprzeczytanymi wiadomościami nie są już pokazywane jako przeczytane.
+
 V1.1.1.0
 
 Ta wersja dotyczy utrzymania połączenia z Twoim kontem. WinZapp zapisuje teraz kopię zapasową profilu przeglądarki — to w nim faktycznie przechowywane jest Twoje połączenie z WhatsApp — i sam ją przywraca, gdy przestaje być akceptowana, informując o tym, co się stało. Razem z nią pojawiają się poprawki sytuacji, które przerywały sesję i zmuszały do ponownego parowania: wyłączenie komputera, wstrzymanie i wznowienie oraz samo ponowne uruchamianie połączenia przez program. Doszły również sprawdzanie pisowni w polu wiadomości i akcje na odnośnikach.

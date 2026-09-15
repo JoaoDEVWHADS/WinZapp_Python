@@ -168,9 +168,9 @@ class _ReconcileStub:
             ]}}
         }
 
-    def _fetch_remote_message_ids(self, remote_jid):
+    def _fetch_remote_message_window(self, remote_jid):
         self.fetched.append(remote_jid)
-        return set()          # the rolled-back store knows nothing
+        return set(), 0       # the rolled-back store knows nothing
 
 
 class TestARolledBackStoreIsNotADeletion:

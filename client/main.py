@@ -56,7 +56,14 @@ from core.message_edit import (
 )
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
+from core.remote_reconcile import (
+    MAX_MIRRORED_DELETIONS as _MAX_MIRRORED_DELETIONS,
+    deletions_within_remote_window as _deletions_within_remote_window,
+    remote_window_oldest as _remote_window_oldest,
+)
 from core.incremental_sync import (
+    chat_activity_floor as _chat_activity_floor,
+    timestamp_seconds as _timestamp_seconds,
     chat_message_records as _chat_message_records,
     chat_sync_marker as _chat_sync_marker,
     classify_chat_sync as _classify_chat_sync,
@@ -16345,11 +16352,28 @@ class MainWindow(wx.Frame):
                         chats[jid] = chat
                     else:
                         local_activity_t = int(chats[jid].get("t", 0) or 0)
+                        # A snapshot can be BEHIND the messages we already
+                        # hold: a restored browser profile comes back with every
+                        # chat's `t` from its snapshot, up to a day old. Copying
+                        # that down lowered the local marker, and the next round
+                        # reconcile_snapshot_unread() saw the snapshot as current
+                        # and took its unread counts — putting the list back to
+                        # whatever the snapshot had (near zero, for one taken
+                        # after a mass mark-as-read). `t` is never lowered below
+                        # the newest stored message that counts as the chat's
+                        # last one, the same rule sync_chat_messages() applies
+                        # when it raises `t` itself. See chat_activity_floor().
+                        activity_floor = _chat_activity_floor(
+                            chats[jid], MainWindow._counts_as_last_message,
+                            now=int(time.time()))
                         for k, v in chat.items():
                             if k in ("messages", "remoteJid"):
                                 continue
                             if k == "lastMessage" and not v:
                                 continue
+                            if (k == "t" and activity_floor
+                                    and _timestamp_seconds(v) < activity_floor):
+                                v = activity_floor
                             if k == "pushName" and jid.endswith("@g.us"):
                                 continue
                             if k == "name" and jid.endswith("@g.us"):
@@ -22502,12 +22526,17 @@ class MainWindow(wx.Frame):
     # payoff (not staring at a message that no longer exists, or a "cleared"
     # conversation that stays full until F5) is worth it.
 
-    def _fetch_remote_message_ids(self, remote_jid: str) -> "set[str] | None":
-        """Best-effort GET of the message IDs WPPConnect currently has for
-        remote_jid. Returns None on ANY failure/ambiguity — a failed fetch
-        must never be read as "the phone deleted everything". IDs are
-        extracted via the same _normalize_wpp_message() sync_chat_messages()
-        uses, so they compare equal to what's stored in key.id locally.
+    def _fetch_remote_message_window(self, remote_jid: str) -> "tuple[set[str], int] | None":
+        """Best-effort GET of what WPPConnect currently has for remote_jid:
+        (message ids, oldest timestamp in seconds among them — 0 when none).
+
+        Returns None on ANY failure/ambiguity — a failed fetch must never be
+        read as "the phone deleted everything". IDs are extracted via the same
+        _normalize_wpp_message() sync_chat_messages() uses, so they compare
+        equal to what's stored in key.id locally. The oldest timestamp is what
+        bounds which local messages the answer can say anything about: only
+        the ones WhatsApp Web has loaded, never older history (see
+        core/remote_reconcile.py).
         """
         if not self.ws:
             return None
@@ -22530,6 +22559,7 @@ class MainWindow(wx.Frame):
             if not isinstance(wpp_messages, list):
                 return None
             ids = set()
+            normalized_messages = []
             for wm in wpp_messages:
                 if not isinstance(wm, dict):
                     continue
@@ -22540,9 +22570,10 @@ class MainWindow(wx.Frame):
                 mid = normalized.get("key", {}).get("id", "")
                 if mid:
                     ids.add(mid)
-            return ids
+                    normalized_messages.append(normalized)
+            return ids, _remote_window_oldest(normalized_messages)
         except Exception as e:
-            logging.warning(f"[_fetch_remote_message_ids] failed for {remote_jid}: {e}")
+            logging.warning(f"[_fetch_remote_message_window] failed for {remote_jid}: {e}")
             return None
 
     # Consecutive polls a conversation must look fully cleared server-side
@@ -22573,7 +22604,7 @@ class MainWindow(wx.Frame):
         if not chat:
             return
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
-        # _fetch_remote_message_ids() only asks WhatsApp Web for its last
+        # _fetch_remote_message_window() only asks WhatsApp Web for its last
         # `limit` messages (same messages_page_size setting) — comparing the
         # FULL local history against that limited remote window meant any
         # older local message, once a busy conversation pushed it past the
@@ -22602,34 +22633,59 @@ class MainWindow(wx.Frame):
                 ts //= 1000
             return bool(ts) and ts < _stable_cutoff
 
-        local_ids = {
-            r.get("key", {}).get("id") for r in recent_records
+        candidates = [
+            r for r in recent_records
             if isinstance(r, dict) and not r.get("_local_pending")
             and r.get("key", {}).get("id") and _is_stable(r)
-        }
+        ]
+        local_ids = {r.get("key", {}).get("id") for r in candidates}
         # Too little history for "the server has fewer messages" to mean
         # anything other than "this is just a short conversation".
         if len(local_ids) < 2:
             return
-        remote_ids = self._fetch_remote_message_ids(remote_jid)
-        if remote_ids is None:
+        remote = self._fetch_remote_message_window(remote_jid)
+        if remote is None:
             return
-        missing_ids = local_ids - remote_ids
-        if not missing_ids:
+        remote_ids, remote_oldest_ts = remote
+        if remote_ids:
+            # get-messages only returns what WhatsApp Web has LOADED for the
+            # chat, and that window moves by itself — it unloads older
+            # messages, and a restored profile comes back holding only its
+            # snapshot. So only a local message inside the period the answer
+            # covers can be judged deleted; one older than anything returned
+            # is merely not loaded. Diffing all of them used to mirror a
+            # shrunken window as mass deletions: 199 messages removed at once
+            # from an open group on 2026-09-15, from the only copy that still
+            # had them. See core/remote_reconcile.py.
             self._remote_clear_strikes.pop(remote_jid, None)
+            missing_ids = _deletions_within_remote_window(
+                candidates, remote_ids, remote_oldest_ts)
+            if len(missing_ids) > _MAX_MIRRORED_DELETIONS:
+                logging.warning(
+                    "[_reconcile_active_conversation_with_remote] %s: %d message(s) "
+                    "look deleted at once — not mirroring (limit %d); more likely "
+                    "a misread loaded window than a phone-side deletion.",
+                    remote_jid, len(missing_ids), _MAX_MIRRORED_DELETIONS,
+                )
+                return
+            if missing_ids:
+                wx.CallAfter(self._mirror_remote_deletions, remote_jid, missing_ids)
             return
-        if missing_ids == local_ids:
-            # Every local message is gone server-side — a clear, not a
-            # handful of individually deleted messages. Require this to hold
-            # for _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls before
-            # actually wiping anything: _fetch_remote_message_ids() returning
-            # a valid-but-empty list (as opposed to None, which already bails
-            # out above) is indistinguishable from a real clear, but can also
-            # come from a transient server-side hiccup — reported live as an
-            # actively-open group conversation briefly clearing to "no
-            # messages available" mid-read, only to "recover" once a new
-            # live message forced a repaint. A single bad read must never be
-            # enough to nuke a conversation's entire visible history.
+        if not remote_ids:
+            # The answer is empty — every local message is gone server-side,
+            # which is what a clear looks like. Require this to hold for
+            # _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls before actually
+            # wiping anything: a valid-but-empty answer (as opposed to None,
+            # which already bails out above) is indistinguishable from a real
+            # clear, but can also come from a transient server-side hiccup —
+            # reported live as an actively-open group conversation briefly
+            # clearing to "no messages available" mid-read, only to "recover"
+            # once a new live message forced a repaint. A single bad read must
+            # never be enough to nuke a conversation's entire visible history.
+            #
+            # Only an EMPTY answer counts now. A non-empty one that shares no
+            # id with local history used to count too, and that is exactly the
+            # shape of a window that shrank to a few new messages.
             strikes = self._remote_clear_strikes.get(remote_jid, 0) + 1
             self._remote_clear_strikes[remote_jid] = strikes
             if strikes < self._REMOTE_CLEAR_CONFIRM_STRIKES:
@@ -22641,9 +22697,6 @@ class MainWindow(wx.Frame):
                 return
             self._remote_clear_strikes.pop(remote_jid, None)
             wx.CallAfter(self._mirror_remote_clear, remote_jid)
-        else:
-            self._remote_clear_strikes.pop(remote_jid, None)
-            wx.CallAfter(self._mirror_remote_deletions, remote_jid, missing_ids)
 
     def _mirror_remote_clear(self, remote_jid: str):
         """Mirror a conversation cleared on the phone. Runs on the main thread."""
