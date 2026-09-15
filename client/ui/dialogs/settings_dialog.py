@@ -1085,6 +1085,47 @@ class SettingsDialog(wx.Dialog):
         self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
         self._call_alerts_check.Bind(wx.EVT_CHECKBOX, self._on_call_alerts_toggle)
 
+        # ── Profile backup tab ───────────────────────────────────────────────
+        # When the restore point of the Chrome profile that carries the
+        # WhatsApp login is refreshed (core/profile_backup.py). Appended last,
+        # so no hardcoded SetSelection() index of an earlier tab moves.
+        self._profile_backup_page = wx.Panel(self._notebook)
+        backup_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._close_snapshot_hours_label = wx.StaticText(
+            self._profile_backup_page, label=i18n.t("profile_backup_close_hours_label")
+        )
+        backup_sizer.Add(self._close_snapshot_hours_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._close_snapshot_hours_field = wx.TextCtrl(
+            self._profile_backup_page, style=wx.TE_DONTWRAP
+        )
+        backup_sizer.Add(self._close_snapshot_hours_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        # A live profile cannot be copied, so this closes the session for the
+        # copy: a short disconnection each time, off by default.
+        self._live_snapshot_check = wx.CheckBox(
+            self._profile_backup_page, label=i18n.t("profile_backup_live_label")
+        )
+        backup_sizer.Add(self._live_snapshot_check, 0, wx.ALL, 8)
+
+        self._live_snapshot_hours_label = wx.StaticText(
+            self._profile_backup_page, label=i18n.t("profile_backup_live_hours_label")
+        )
+        backup_sizer.Add(self._live_snapshot_hours_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._live_snapshot_hours_field = wx.TextCtrl(
+            self._profile_backup_page, style=wx.TE_DONTWRAP
+        )
+        backup_sizer.Add(self._live_snapshot_hours_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._live_snapshot_confirm_check = wx.CheckBox(
+            self._profile_backup_page, label=i18n.t("profile_backup_live_confirm_label")
+        )
+        backup_sizer.Add(self._live_snapshot_confirm_check, 0, wx.ALL, 8)
+
+        self._profile_backup_page.SetSizer(backup_sizer)
+        self._notebook.AddPage(self._profile_backup_page, i18n.t("tab_profile_backup"))
+        self._live_snapshot_check.Bind(wx.EVT_CHECKBOX, self._on_live_snapshot_toggle)
+
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("ok"))
@@ -1138,6 +1179,15 @@ class SettingsDialog(wx.Dialog):
         self._call_alerts_check.SetValue(call_settings.get("alerts_enabled", True))
         self._call_popup_check.SetValue(call_settings.get("popup_enabled", True))
         self._update_call_fields_state()
+
+        profile_backup = self.main_window.settings.get("profile_backup", {})
+        self._close_snapshot_hours_field.SetValue(
+            str(profile_backup.get("close_snapshot_min_hours", 24)))
+        self._live_snapshot_check.SetValue(profile_backup.get("live_snapshot_enabled", False))
+        self._live_snapshot_hours_field.SetValue(
+            str(profile_backup.get("live_snapshot_interval_hours", 24)))
+        self._live_snapshot_confirm_check.SetValue(profile_backup.get("live_snapshot_confirm", True))
+        self._update_live_snapshot_fields()
 
         files_settings = self.main_window.settings.get(save_location.SECTION, {})
         self._save_folder_radio.SetSelection(
@@ -1831,6 +1881,33 @@ class SettingsDialog(wx.Dialog):
         """A popup is meaningful only while incoming-call alerts are enabled."""
         self._call_popup_check.Enable(self._call_alerts_check.GetValue())
 
+    def _on_live_snapshot_toggle(self, event):
+        self._update_live_snapshot_fields()
+        event.Skip()
+
+    def _update_live_snapshot_fields(self):
+        """The interval and the confirmation only mean something while the
+        backup with WinZapp open is on. Hidden rather than disabled, so Tab
+        and the screen reader do not walk through options that do nothing."""
+        show = self._live_snapshot_check.GetValue()
+        for control in (self._live_snapshot_hours_label,
+                        self._live_snapshot_hours_field,
+                        self._live_snapshot_confirm_check):
+            control.Show(show)
+        self._profile_backup_page.Layout()
+
+    def _live_snapshot_hours_value(self, stored: dict) -> int:
+        """The live interval to save. While the option is off its field is
+        hidden and not validated, so an unusable value there keeps the stored
+        one instead of failing Apply over a field nobody can see."""
+        try:
+            hours = int(self._live_snapshot_hours_field.GetValue().strip())
+        except ValueError:
+            hours = 0
+        if hours >= 1:
+            return hours
+        return stored.get("live_snapshot_interval_hours", DEFAULT_SETTINGS["profile_backup"]["live_snapshot_interval_hours"])
+
     def _validate(self) -> bool:
         """Return True if all values are valid; show an error and return False otherwise."""
         # Custom save folder: only meaningful when that mode is the one
@@ -1959,6 +2036,37 @@ class SettingsDialog(wx.Dialog):
             )
             self._media_max_mb_field.SetFocus()
             return False
+
+        # Profile backup: 0 hours is the documented "every clean close"; the
+        # live interval has no such sentinel, since 0 would close the session
+        # on every poll — and it is only checked while its field is visible.
+        try:
+            if int(self._close_snapshot_hours_field.GetValue().strip()) < 0:
+                raise ValueError
+        except ValueError:
+            self._notebook.SetSelection(self._notebook.FindPage(self._profile_backup_page))
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_profile_backup_close_hours"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._close_snapshot_hours_field.SetFocus()
+            return False
+        if self._live_snapshot_check.GetValue():
+            try:
+                if int(self._live_snapshot_hours_field.GetValue().strip()) < 1:
+                    raise ValueError
+            except ValueError:
+                self._notebook.SetSelection(self._notebook.FindPage(self._profile_backup_page))
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_profile_backup_live_hours"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                self._live_snapshot_hours_field.SetFocus()
+                return False
 
         # Sound events: an ENABLED event's override path, if the user set one,
         # must point to a real file. An empty override is always fine — it
@@ -2358,6 +2466,13 @@ class SettingsDialog(wx.Dialog):
         calls = self.main_window.settings.setdefault("calls", {})
         calls["alerts_enabled"] = self._call_alerts_check.GetValue()
         calls["popup_enabled"] = self._call_popup_check.GetValue()
+
+        profile_backup = self.main_window.settings.setdefault("profile_backup", {})
+        profile_backup["close_snapshot_min_hours"] = int(
+            self._close_snapshot_hours_field.GetValue().strip())
+        profile_backup["live_snapshot_enabled"] = self._live_snapshot_check.GetValue()
+        profile_backup["live_snapshot_interval_hours"] = self._live_snapshot_hours_value(profile_backup)
+        profile_backup["live_snapshot_confirm"] = self._live_snapshot_confirm_check.GetValue()
         if not calls["alerts_enabled"]:
             stop_alerts = getattr(self.main_window, "stop_all_incoming_call_alerts", None)
             if stop_alerts is not None:
@@ -2560,6 +2675,11 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(9, i18n.t("tab_files_saving"))
         self._notebook.SetPageText(10, i18n.t("tab_audio_playback"))
         self._notebook.SetPageText(11, i18n.t("tab_calls"))
+        self._notebook.SetPageText(12, i18n.t("tab_profile_backup"))
+        self._close_snapshot_hours_label.SetLabel(i18n.t("profile_backup_close_hours_label"))
+        self._live_snapshot_check.SetLabel(i18n.t("profile_backup_live_label"))
+        self._live_snapshot_hours_label.SetLabel(i18n.t("profile_backup_live_hours_label"))
+        self._live_snapshot_confirm_check.SetLabel(i18n.t("profile_backup_live_confirm_label"))
         self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
         self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
         self._audio_effects_label.SetLabel(i18n.t("audio_effects_output_device_label"))

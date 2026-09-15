@@ -8,6 +8,8 @@ NOWOŚCI
 
 - Potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane. Polecenie najpierw pyta, z domyślną odpowiedzią Nie, aby przypadkowe naciśnięcie Alt, a potem Enter, nie oznaczyło wszystkiego jako przeczytane, także na telefonie. Pytanie ma opcję „Nie pokazuj ponownie": zaznaczona i potwierdzona przyciskiem Tak sprawia, że kolejne razy oznaczają wszystko od razu. Aby pytanie wróciło, użyj opcji „Pytaj o potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane" na karcie Interfejs użytkownika w Ustawieniach.
 
+- Kopia zapasowa profilu w Ustawieniach. Nowa karta Kopia zapasowa określa, jak często WinZapp przy zamykaniu odnawia kopię profilu przeglądarki, z której odzyskuje połączenie — domyślnie co 24 godziny. Kopię można też tworzyć przy otwartym WinZapp, w wybranym odstępie: WhatsApp jest wtedy rozłączony, co może potrwać kilka minut, a WinZapp może pytać przed każdą kopią. Nowa kopia zastępuje poprzednią dopiero wtedy, gdy WhatsApp ponownie się z nią połączy.
+
 POPRAWKI
 
 - Gdy WhatsApp odrzucał połączenie tuż po uruchomieniu programu, kopia zapasowa profilu przeglądarki w ogóle nie była przywracana: jeśli kody parowania zaczynały napływać w pierwszych sekundach, WinZapp zamykał sesję i kazał sparować konto od nowa, mimo że zapisana była dobra kopia. Teraz przywraca kopię, gdy tylko pojawi się pierwszy kod, i prosi o parowanie dopiero wtedy, gdy przywrócenie nie pomoże.

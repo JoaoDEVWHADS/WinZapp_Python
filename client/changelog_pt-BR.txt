@@ -8,6 +8,8 @@ NOVIDADES
 
 - Confirmação ao marcar todas as conversas como lidas. O comando agora pergunta antes, com Não como padrão, para que um Alt seguido de Enter por engano não marque tudo como lido, também no celular. A pergunta tem a opção "Não mostrar novamente": marcada e confirmada com Sim, as próximas vezes marcam direto. Para voltar a ser perguntado, use a opção "Pedir confirmação ao marcar todas as conversas como lidas", na aba Interface do usuário das Configurações.
 
+- Cópia de segurança do perfil nas Configurações. A nova aba Cópia de segurança define de quanto em quanto tempo o WinZapp renova, ao ser fechado, a cópia do perfil do navegador que usa para recuperar a conexão, com padrão de 24 horas. A cópia também pode ser feita com o WinZapp aberto, no intervalo escolhido: o WhatsApp fica desconectado enquanto ela é feita, o que pode levar alguns minutos, e o WinZapp pode perguntar antes de cada vez. A nova cópia só substitui a anterior depois que o WhatsApp volta a conectar com ela.
+
 CORREÇÕES
 
 - Quando o WhatsApp recusava a conexão logo ao abrir o programa, a cópia de segurança do perfil não chegava a ser restaurada: se os códigos de pareamento começavam a aparecer nos primeiros segundos, o WinZapp encerrava a sessão e mandava parear de novo mesmo com uma cópia boa guardada. Agora ele restaura a cópia assim que o primeiro código aparece, e só pede para parear quando a restauração não resolve.

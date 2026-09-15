@@ -160,6 +160,17 @@ SCENARIOS = {
         and d._alert_private_custom_field.GetValue().endswith("private.wav")
         and d._alert_group_custom_field.GetValue().endswith("group.wav"),
     ),
+    "profile_backup_intervals": dict(
+        saves={("profile_backup", "close_snapshot_min_hours"): 6,
+               ("profile_backup", "live_snapshot_interval_hours"): 3},
+        set=lambda d, t: (d._close_snapshot_hours_field.SetValue("6"),
+                          d._live_snapshot_check.SetValue(True),
+                          d._update_live_snapshot_fields(),
+                          d._live_snapshot_hours_field.SetValue("3")),
+        shows=lambda d, t: (d._close_snapshot_hours_field.GetValue(),
+                            d._live_snapshot_hours_field.GetValue()) == ("6", "3")
+        and d._live_snapshot_hours_field.IsShown(),
+    ),
 }
 
 #: Every (section, key) some scenario saves — read by the static wiring test.
@@ -281,6 +292,47 @@ def test_every_scenario_applied_together(make_dialog, tmp_path):
     settings = dialog.main_window.settings
     wrong = {f"{s}.{k}": _stored(settings, (s, k)) for (s, k), v in expected.items() if _stored(settings, (s, k)) != v}
     assert wrong == {}
+
+
+def _live_backup_options(dialog):
+    return (dialog._live_snapshot_hours_label, dialog._live_snapshot_hours_field,
+            dialog._live_snapshot_confirm_check)
+
+
+def test_the_live_backup_options_follow_their_checkbox(make_dialog):
+    """The interval and the confirmation appear only while "back up with
+    WinZapp open" is ticked — both when the user ticks it and when the dialog
+    opens on a saved "on"."""
+    import wx
+
+    dialog = make_dialog({})
+    assert not any(c.IsShown() for c in _live_backup_options(dialog))
+
+    check = dialog._live_snapshot_check
+    check.SetValue(True)
+    event = wx.CommandEvent(wx.wxEVT_CHECKBOX, check.GetId())
+    event.SetEventObject(check)
+    event.SetInt(1)
+    check.GetEventHandler().ProcessEvent(event)
+    assert all(c.IsShown() for c in _live_backup_options(dialog))
+
+    check.SetValue(False)
+    event.SetInt(0)
+    check.GetEventHandler().ProcessEvent(event)
+    assert not any(c.IsShown() for c in _live_backup_options(dialog))
+
+    reopened = make_dialog({"profile_backup": {"live_snapshot_enabled": True}})
+    assert all(c.IsShown() for c in _live_backup_options(reopened))
+
+
+def test_a_hidden_unusable_interval_keeps_the_stored_one(make_dialog):
+    """While the option is off its field is hidden and not validated: garbage
+    left there must neither fail Apply nor overwrite the saved interval."""
+    dialog = make_dialog({"profile_backup": {"live_snapshot_interval_hours": 5}})
+    dialog._live_snapshot_hours_field.SetValue("abc")
+
+    assert dialog._apply_values() is True
+    assert dialog.main_window.settings["profile_backup"]["live_snapshot_interval_hours"] == 5
 
 
 def test_ok_without_changes_resets_nothing(make_dialog, tmp_path):

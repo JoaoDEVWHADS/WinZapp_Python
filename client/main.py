@@ -84,6 +84,11 @@ from core.wpp_runtime import (
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults, auto_download_allows, migrate_voice_messages_media_types, migrate_voice_message_mode_default, migrate_spell_check_mode
 from core.utils import clear_chat_keep_starred_echo
 from ui.dialogs.checkbox_confirm import confirm_with_checkbox
+from core.profile_backup import (
+    close_snapshot_max_age as _close_snapshot_max_age,
+    live_snapshot_due as _live_snapshot_due,
+    live_snapshot_policy as _live_snapshot_policy,
+)
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core import browser_payload
@@ -5318,6 +5323,8 @@ class MainWindow(wx.Frame):
         # holding a system-global hotkey is only acceptable while this window
         # really is the active one (see _set_bookmark_zero_hotkey).
         active = bool(event.GetActive())
+        # Read by _window_can_ask() from the poll thread, which cannot ask wx.
+        self._main_window_active = active
         self._set_bookmark_zero_hotkey(active)
         if active:
             # Disabling the popup means "do not interrupt what I am doing",
@@ -9989,9 +9996,11 @@ class MainWindow(wx.Frame):
     def _capture_profile_snapshot(self, session_name, browser_closed_cleanly, budget):
         """Keep a restore point for this session's Chrome profile.
 
-        Called from exactly one place and it has to stay that way: right after
+        Called only from _stop_wpp_server(), right after
         wait_for_profile_release() confirmed Chrome let go, on a close that
-        WPPConnect acknowledged. That is the only moment WinZapp can prove the
+        WPPConnect acknowledged. (_refresh_profile_snapshot_live() is the one
+        other place a snapshot is taken, behind the same gates, and it calls
+        capture_snapshot() itself.) That is the only moment WinZapp can prove the
         profile is both quiescent and completely written — see
         core/profile_recovery.py for why a snapshot of a live profile is worse
         than no snapshot at all.
@@ -10038,8 +10047,17 @@ class MainWindow(wx.Frame):
             return
         try:
             from core import profile_recovery
-            if profile_recovery.capture_snapshot(global_dir, session_name):
+            # How old the snapshot may be before a clean close refreshes it is
+            # the user's choice (Settings > Cópia de segurança), 24 h by default.
+            if profile_recovery.capture_snapshot(
+                    global_dir, session_name,
+                    max_age=_close_snapshot_max_age(getattr(self, "settings", {})),
+                    lock_wait=2.0):
                 self._shutdown_audit("profile snapshot refreshed")
+            # A copy staged by a backup with WinZapp open that never got to be
+            # confirmed (the app is closing) is dead weight the size of the
+            # profile; nothing will promote it any more.
+            profile_recovery.discard_pending_snapshot(global_dir, session_name)
         except Exception:
             logging.exception("[profile-snapshot] failed (non-fatal)")
 
@@ -13333,9 +13351,19 @@ class MainWindow(wx.Frame):
     #: a browser resumed from a long suspend, which took 20 s to let go.
     _RESTART_PROFILE_RELEASE_WAIT = 25.0
 
-    def _restart_wpp_session(self):
+    def _restart_wpp_session(self, on_profile_released=None, reason=None):
         """Recreate the WPPConnect Chrome session in place (close-session +
         start-session), without touching the Node process or WinZapp itself.
+
+        `on_profile_released`, when given, runs between the close and the
+        start — only once the session reached CLOSED AND Chrome released the
+        profile, the two gates a restore point needs (see
+        _refresh_profile_snapshot_live()). If Chrome never lets go it is not
+        run, and the session starts again either way. `reason` is only logged.
+
+        Returns True once start-session was requested, False when it bailed
+        out before that (cooldown, re-entry, no CLOSED, a restore or a
+        shutdown taking over). Existing callers ignore it.
 
         Used automatically when the Puppeteer page has structurally died
         (detached frame after a suspend/resume cycle — see
@@ -13372,11 +13400,11 @@ class MainWindow(wx.Frame):
         # expired window and treat a QRCODE reading as confirmable.
         self._auto_session_restart_ts = time.time()
         if getattr(self, "_restarting_wpp_session", False):
-            return
+            return False
         now = time.time()
         last = getattr(self, "_last_wpp_session_restart_ts", 0)
         if now - last < self._WPP_SESSION_RESTART_COOLDOWN:
-            return
+            return False
         # Deliberately does NOT also set _recovery_restart_active, even though
         # that is the flag check_wa_connection_http()'s CLOSED branch reads
         # first: _force_whatsapp_session_restart() owns that one for the whole
@@ -13394,11 +13422,16 @@ class MainWindow(wx.Frame):
         self._restarting_wpp_session = True
         self._last_wpp_session_restart_ts = now
         try:
-            logging.warning(
-                "[_restart_wpp_session] Browser page appears dead (detached "
-                "frame) after suspend/resume — restarting the WPPConnect "
-                "session in place."
-            )
+            if reason:
+                logging.warning(
+                    "[_restart_wpp_session] Restarting the WPPConnect session "
+                    "in place: %s.", reason)
+            else:
+                logging.warning(
+                    "[_restart_wpp_session] Browser page appears dead (detached "
+                    "frame) after suspend/resume — restarting the WPPConnect "
+                    "session in place."
+                )
             headers = {"Authorization": f"Bearer {self.token}"}
             close_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/close-session"
             close_accepted = False
@@ -13440,7 +13473,7 @@ class MainWindow(wx.Frame):
                     close_accepted,
                     closed_status or "?",
                 )
-                return
+                return False
 
             # CLOSED is the FIRST of two gates and never the second. It says
             # WPPConnect's own state machine finished; it says nothing about
@@ -13474,10 +13507,12 @@ class MainWindow(wx.Frame):
             # did before, and createSessionUtil's stale-lock recovery is the
             # net under it.
             session_name = (getattr(self, "token", "") or "").split(":")[0]
+            released = False
             if session_name:
-                if not self.wait_for_profile_release(
+                released = self.wait_for_profile_release(
                     session_name, timeout=self._RESTART_PROFILE_RELEASE_WAIT
-                ):
+                )
+                if not released:
                     logging.warning(
                         "[_restart_wpp_session] Chrome still holds %s after %ss "
                         "— starting anyway; the stale-lock recovery is the net.",
@@ -13489,15 +13524,268 @@ class MainWindow(wx.Frame):
                 # during the close or the release wait owns the profile now.
                 logging.info("[_restart_wpp_session] a profile restore took "
                              "the session over — not starting it.")
-                return
+                return False
+
+            if on_profile_released is not None:
+                if released:
+                    try:
+                        on_profile_released()
+                    except Exception:
+                        logging.exception("[_restart_wpp_session] the step between "
+                                          "close and start failed (%s)", reason)
+                else:
+                    logging.warning("[_restart_wpp_session] not running %s: Chrome "
+                                    "did not release the profile.", reason)
+                if getattr(self, "_profile_restore_in_flight", False):
+                    logging.info("[_restart_wpp_session] a profile restore took "
+                                 "the session over during %s — not starting it.",
+                                 reason)
+                    return False
+            if getattr(self, "_shutting_down", False) or getattr(self, "_wpp_updating", False):
+                # WinZapp began closing (or WPPConnect updating) while this
+                # waited or copied. A browser opened now would be killed by
+                # the teardown's taskkill mid-write — how profiles break.
+                logging.info("[_restart_wpp_session] WinZapp is closing or "
+                             "WPPConnect is updating — not starting a browser "
+                             "under the teardown.")
+                return False
             start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
             try:
                 api_post(start_url, json={"waitQrCode": False}, headers=headers, timeout=15)
                 logging.info("[_restart_wpp_session] start-session requested.")
             except Exception as exc:
                 logging.warning("[_restart_wpp_session] start-session failed: %s", exc)
+            return True
         finally:
             self._restarting_wpp_session = False
+
+    # ── Profile backup while WinZapp is open (Settings > Cópia de segurança) ──
+    # A restore point of the Chrome profile can only be copied from a profile
+    # Chrome has released (core/profile_recovery.py), and the one thing the age
+    # of that copy decides is how much WhatsApp Web forgets if it is ever put
+    # back. Refreshing it only at close leaves an app that stays open for days
+    # with an old copy, so this optionally closes the session on a schedule,
+    # copies, and starts it again.
+
+    # The copy is roughly a gigabyte; the one at close is capped at 25 s
+    # because the user is waiting for the app to exit. Here the user chose (or
+    # agreed to) the disconnection, and a cap that a slow disk always exceeds
+    # would mean the backup never happens. Past it the attempt is abandoned and
+    # the previous snapshot kept. It must stay well inside
+    # _AUTO_RESTART_LOGOUT_GRACE_SECONDS: that grace starts with the restart,
+    # and a QRCODE reading after it expires counts toward a real logout.
+    _LIVE_SNAPSHOT_BUDGET_SECONDS = 180.0
+
+    # A copy only becomes the restore point once the session restarted on those
+    # exact bytes reaches CONNECTED and is still CONNECTED a little later. A
+    # clean close is no evidence the profile will be accepted (see
+    # previous_snapshot_dir()), and a copy WhatsApp then refuses must not push
+    # the known-good generation out of `.prev`. The rejection signature lands
+    # ~7 s into the page load, so the stability wait covers it.
+    _LIVE_SNAPSHOT_CONFIRM_SECONDS = 120.0
+    _LIVE_SNAPSHOT_STABLE_SECONDS = 30.0
+
+    def _live_snapshot_cancelled(self) -> bool:
+        """Stop the copy: WinZapp is closing or WPPConnect is updating."""
+        return bool(getattr(self, "_shutting_down", False)
+                    or getattr(self, "_wpp_updating", False))
+
+    def _window_can_ask(self) -> bool:
+        """Whether a confirmation would be seen and heard: the main window is
+        the active one. A modal over a window in the tray, or behind another
+        app, is not announced — and would hold every later backup until
+        someone found and answered it.
+
+        Reads the flag _on_window_activate() keeps, never IsActive(): this runs
+        on the poll thread, where Windows answers "no active window" for a
+        thread that owns none — which made the question never appear at all.
+        """
+        return bool(getattr(self, "_main_window_active", False))
+
+    def _live_snapshot_session_accepted(self) -> bool:
+        """After the restart: did the session come back on the copied bytes?"""
+        import connection_state as cs
+        settled = self._wait_for_status(
+            cs.recovery_settled, self._LIVE_SNAPSHOT_CONFIRM_SECONDS,
+            stop_when_connected=False)
+        if not cs.recovery_connected(settled):
+            logging.warning("[profile-backup] the session did not come back "
+                            "connected (%s) — the copy is not kept.", settled or "?")
+            return False
+        time.sleep(self._LIVE_SNAPSHOT_STABLE_SECONDS)
+        if self._live_snapshot_cancelled() or getattr(self, "_profile_restore_in_flight", False):
+            return False
+        status = self._raw_session_status()
+        if not cs.recovery_connected(status):
+            logging.warning("[profile-backup] the session connected and then left "
+                            "(%s) — the copy is not kept.", status or "?")
+            return False
+        return True
+
+    def _live_snapshot_session(self):
+        """(global_dir, session_name), or (None, None) when there is none."""
+        session_name = (getattr(self, "token", "") or "").split(":")[0]
+        global_dir = getattr(self, "global_dir", None)
+        if not session_name or not global_dir:
+            return None, None
+        return global_dir, session_name
+
+    def _live_snapshot_blocked_reason(self) -> str:
+        """'' when the session may be closed for a backup right now, else why not.
+
+        Every refusal is a "not now", never a "no": the next poll asks again.
+        """
+        if not getattr(self, "_wa_connected", False):
+            return "WhatsApp is not connected"
+        if self._live_snapshot_session() == (None, None):
+            return "no session"
+        if getattr(self, "_initial_sync_running", False):
+            return "the initial sync is running"
+        if getattr(self, "_media_sync_running", False):
+            return "a media sync is running"
+        if self._self_inflicted_teardown_expected() or self._session_restart_owned():
+            return "another close/start cycle owns the session"
+        if (time.time() - getattr(self, "_last_wpp_session_restart_ts", 0)
+                < self._WPP_SESSION_RESTART_COOLDOWN):
+            return "the session was restarted moments ago"
+        if getattr(self, "_pairing_in_progress", False) or self._is_pairing_dialog_active():
+            return "pairing is in progress"
+        tracker = getattr(self, "_profile_health", None)
+        if tracker is not None and not tracker.ever_connected():
+            # Same refusal as _capture_profile_snapshot(): a profile that never
+            # authenticated this run may be the broken one.
+            return "this run never reached CONNECTED"
+        return ""
+
+    def _maybe_refresh_profile_snapshot_live(self, now=None):
+        """Once per periodic poll: start (or ask about) a backup when it is due.
+
+        The interval counts from the last attempt, and the first call only
+        starts the clock, so nothing closes the session right after launch.
+        """
+        now = time.monotonic() if now is None else now
+        last = getattr(self, "_live_snapshot_last_attempt", None)
+        if last is None:
+            self._live_snapshot_last_attempt = now
+            return
+        enabled, interval, confirm = _live_snapshot_policy(getattr(self, "settings", {}))
+        if not enabled or getattr(self, "_live_snapshot_pending", False):
+            return
+        global_dir, session_name = self._live_snapshot_session()
+        if session_name is None:
+            return
+        from core import profile_recovery
+        age = profile_recovery.snapshot_age_seconds(global_dir, session_name)
+        if not _live_snapshot_due(enabled, interval, now - last, age):
+            return
+        reason = self._live_snapshot_blocked_reason()
+        if reason:
+            logging.info("[profile-backup] a backup is due but not now: %s.", reason)
+            return
+        if confirm and not self._window_can_ask():
+            # Not consumed: asked at the next poll with the window in front.
+            logging.info("[profile-backup] a backup is due; waiting for the "
+                         "WinZapp window to be active to ask about it.")
+            return
+        self._live_snapshot_last_attempt = now
+        self._live_snapshot_pending = True
+        if confirm:
+            wx.CallAfter(self._ask_live_profile_snapshot)
+        else:
+            self._start_live_snapshot_worker()
+
+    def _ask_live_profile_snapshot(self):
+        """Main thread. The same dialog as marking every chat as read: No is
+        the default, because it pops up over whatever the user is doing and a
+        habitual Enter must not disconnect WhatsApp. "Don't ask again" only
+        counts together with Yes; the settings tab turns asking back on."""
+        try:
+            t = self.i18n.t
+            confirmed, dont_ask_again = confirm_with_checkbox(
+                self,
+                t("profile_backup_live_confirm"),
+                t("profile_backup_live_confirm_title"),
+                t("profile_backup_live_dont_ask_again"),
+                yes_label=t("yes_button"),
+                no_label=t("no_button"),
+                checked=False,
+                default_yes=False,
+            )
+        except Exception:
+            logging.exception("[profile-backup] could not ask about the backup")
+            self._live_snapshot_pending = False
+            return
+        if not confirmed:
+            # Asked again after another interval, not at the next poll.
+            logging.info("[profile-backup] the user postponed the backup.")
+            self._live_snapshot_pending = False
+            return
+        if dont_ask_again:
+            self.settings.setdefault("profile_backup", {})["live_snapshot_confirm"] = False
+            self.save_settings()
+        self._start_live_snapshot_worker()
+
+    def _start_live_snapshot_worker(self):
+        threading.Thread(target=self._refresh_profile_snapshot_live, daemon=True).start()
+
+    def _refresh_profile_snapshot_live(self):
+        """Worker thread: close the session, copy the released profile, start it.
+
+        Goes through _restart_wpp_session(), so it inherits every gate that
+        path already has — CLOSED, then the profile release, the restore
+        ownership check, and _restarting_wpp_session, which keeps the health
+        loop from starting a competing session and the disconnection from
+        being announced as a real one.
+        """
+        from core import profile_recovery
+        global_dir, session_name = self._live_snapshot_session()
+        staged = {}
+        try:
+            if not _live_snapshot_policy(getattr(self, "settings", {}))[0]:
+                return
+            reason = self._live_snapshot_blocked_reason()
+            if reason:
+                # The situation changed while the question was on screen.
+                logging.info("[profile-backup] not backing up after all: %s.", reason)
+                return
+
+            def _copy_released_profile():
+                # Announced here, not before the restart: a restart held back
+                # by its own cooldown or re-entry guard disconnects nothing,
+                # and must not be announced as a backup that then "failed".
+                staged["announced"] = True
+                wx.CallAfter(self.output, self.i18n.t("profile_backup_live_started"),
+                             interrupt=False)
+                # Staged, not in place: see _LIVE_SNAPSHOT_CONFIRM_SECONDS.
+                staged["copy"] = profile_recovery.capture_snapshot(
+                    global_dir, session_name,
+                    budget=self._LIVE_SNAPSHOT_BUDGET_SECONDS, max_age=0,
+                    cancel=self._live_snapshot_cancelled, stage_only=True)
+
+            restarted = self._restart_wpp_session(on_profile_released=_copy_released_profile,
+                                                  reason="profile backup")
+            if (restarted and staged.get("copy")
+                    and self._live_snapshot_session_accepted()
+                    and profile_recovery.promote_pending_snapshot(global_dir, session_name)):
+                staged.clear()
+                self._shutdown_audit("profile snapshot refreshed with WinZapp open")
+                wx.CallAfter(self.output, self.i18n.t("profile_backup_live_done"), interrupt=False)
+                return
+            logging.warning("[profile-backup] the backup was not kept (restarted=%s, "
+                            "copied=%s); the previous snapshot stays.",
+                            restarted, bool(staged.get("copy")))
+            if staged.get("announced"):
+                wx.CallAfter(self.output, self.i18n.t("profile_backup_live_failed"),
+                             interrupt=False)
+        except Exception:
+            logging.exception("[profile-backup] backup with WinZapp open failed")
+        finally:
+            if staged.get("copy"):
+                try:
+                    profile_recovery.discard_pending_snapshot(global_dir, session_name)
+                except Exception:
+                    logging.exception("[profile-backup] could not discard the staged copy")
+            self._live_snapshot_pending = False
 
     # A live WPPConnect Socket.IO event this recent is treated as direct
     # proof of connectivity — see _note_live_wpp_event() and the top of
@@ -18239,6 +18527,14 @@ class MainWindow(wx.Frame):
                     self._reconcile_active_conversation_with_remote()
                 except Exception as e:
                     logging.warning(f"[periodic_contacts_sync] error: {e}")
+                # Settings > Cópia de segurança, when on. Outside the try above
+                # so a failed chat poll never skips it, and inside its own so
+                # it can never break the poll.
+                try:
+                    if getattr(self, "_wa_connected", False):
+                        self._maybe_refresh_profile_snapshot_live()
+                except Exception as e:
+                    logging.warning(f"[periodic_contacts_sync] profile backup check failed: {e}")
 
         threading.Thread(target=_loop, daemon=True).start()
 

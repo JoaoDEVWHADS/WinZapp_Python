@@ -8,6 +8,8 @@ WHAT'S NEW
 
 - Confirmation before marking all chats as read. The command now asks first, with No as the default, so a stray Alt followed by Enter no longer marks everything as read, on your phone too. The question has a "Don't show again" option: ticked and confirmed with Yes, later requests mark everything straight away. To be asked again, use the "Ask for confirmation before marking all chats as read" option in the User Interface tab of Settings.
 
+- Profile backup in Settings. The new Profile backup tab sets how often WinZapp renews, when it closes, the copy of the browser profile it uses to recover the connection, every 24 hours by default. The backup can also be taken while WinZapp is open, at the interval you choose: WhatsApp is disconnected while it runs, which can take a few minutes, and WinZapp can ask before each one. A new backup only replaces the previous one once WhatsApp has connected again with it.
+
 FIXES
 
 - When WhatsApp refused the connection right after the app was opened, the backup copy of the browser profile was never restored: if pairing codes started arriving in the first few seconds, WinZapp closed the session and sent you to pair again even with a good copy saved. It now restores the copy as soon as the first code appears, and only asks you to pair when the restore does not help.

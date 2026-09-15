@@ -858,6 +858,12 @@ DEFAULT_SETTINGS = {
         "alerts_enabled": True,
         "popup_enabled": True
     },
+    "profile_backup": {
+        "close_snapshot_min_hours": 24,
+        "live_snapshot_enabled": False,
+        "live_snapshot_interval_hours": 24,
+        "live_snapshot_confirm": True
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
