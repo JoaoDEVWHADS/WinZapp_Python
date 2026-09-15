@@ -10,6 +10,8 @@ FIXES
 
 - Changing the language in Settings and pressing Apply now translates every option. Some stayed in the previous language until Settings was closed and opened again, such as "When opening a chat, show up to this many messages" and "Messages to skip when pressing Page Up / Page Down".
 
+- The default audio playback speed no longer drops back to 1x on its own. When Settings opened, the field in the Audio playback tab was empty whatever speed was saved, and pressing Apply and then OK saved 1x over it. The saved speed is now shown selected and kept.
+
 V1.1.1.0
 
 This release is about keeping your account connected. WinZapp now keeps a backup copy of the browser profile — which is where your WhatsApp connection actually lives — and restores it on its own when it stops being accepted, telling you what happened. Alongside it come fixes for the situations that broke the session and left the app asking you to pair again: shutting the computer down, suspending and resuming, and the app restarting the connection by itself. Spell checking in the message field and link actions arrived too.

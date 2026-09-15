@@ -1362,7 +1362,11 @@ class SettingsDialog(wx.Dialog):
 
         self._port_field.SetValue(str(self.main_window.wpp_port))
 
-        api_key = conn.get("wpp_api_key", "wz-local-api-key")
+        # The shipped default rather than a placeholder. load_settings() and the
+        # defaults backfill normally fill the key before this runs, so this is
+        # consistency more than a live path — but a fallback that differs from
+        # DEFAULT_SETTINGS would be written back on OK if it ever were reached.
+        api_key = conn.get("wpp_api_key", DEFAULT_SETTINGS["connection"]["wpp_api_key"])
         self._api_key_field.SetValue(api_key)
 
         self._update_fields_state()
@@ -1405,6 +1409,17 @@ class SettingsDialog(wx.Dialog):
         self._mark_audio_played_check.SetValue(
             audio_playback.get("mark_audio_played_in_list", True)
         )
+
+        # This load used to sit inside _on_custom_api_toggle() instead of here,
+        # so opening Settings showed the Audio playback speed with nothing
+        # selected — whatever speed was saved — until the custom-API checkbox
+        # happened to be toggled.
+        saved_speed = audio_playback.get("audio_default_speed", 1.0)
+        try:
+            speed_idx = self._AUDIO_SPEED_STEPS.index(float(saved_speed))
+        except (ValueError, TypeError):
+            speed_idx = 0
+        self._audio_speed_combo.SetSelection(speed_idx)
 
     def _set_alert_combo(self, combo, choice_key: str):
         try:
@@ -1806,13 +1821,6 @@ class SettingsDialog(wx.Dialog):
 
     def _on_custom_api_toggle(self, event):
         self._update_fields_state()
-
-        saved_speed = self.main_window.settings.get("audio_playback", {}).get("audio_default_speed", 1.0)
-        try:
-            speed_idx = self._AUDIO_SPEED_STEPS.index(float(saved_speed))
-        except (ValueError, TypeError):
-            speed_idx = 0
-        self._audio_speed_combo.SetSelection(speed_idx)
         event.Skip()
 
     def _on_call_alerts_toggle(self, event):

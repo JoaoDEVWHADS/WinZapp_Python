@@ -10,6 +10,8 @@ CORRECCIONES
 
 - Cambiar el idioma en Configuración y pulsar Aplicar ahora traduce todas las opciones. Algunas seguían en el idioma anterior hasta cerrar y volver a abrir Configuración, como "Al abrir una conversación, mostrar número de mensajes hasta" y "Mensajes a saltar al presionar Av Pág / Re Pág".
 
+- La velocidad predeterminada de reproducción de audio ya no vuelve sola a 1x. Al abrir Configuración, el campo de la pestaña Reproducción de audio aparecía vacío, fuera cual fuera la velocidad guardada, y pulsar Aplicar y después Aceptar guardaba 1x encima. Ahora la velocidad guardada aparece seleccionada y se conserva.
+
 V1.1.1.0
 
 Esta versión trata de mantener tu cuenta conectada. WinZapp ahora guarda una copia de seguridad del perfil del navegador — que es donde vive realmente tu conexión con WhatsApp — y la restaura por su cuenta cuando deja de ser aceptada, avisando de lo ocurrido. Junto a ella llegan las correcciones de las situaciones que rompían la sesión y hacían que el programa pidiera vincular de nuevo: apagar el ordenador, suspender y reanudar, y el propio programa reiniciando la conexión. También llegan la corrección ortográfica en el campo de mensaje y las acciones sobre enlaces.
