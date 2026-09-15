@@ -492,6 +492,16 @@ class SettingsDialog(wx.Dialog):
             self._bulk_action_shortcuts_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        # Mirrors user_interface.confirm_mark_all_read, the same key the
+        # "don't show again" checkbox of that confirmation clears — this is
+        # the way back after ticking it.
+        self._confirm_mark_all_read_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_confirm_mark_all_read")
+        )
+        ui_sizer.Add(
+            self._confirm_mark_all_read_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._auto_focus_next_audio_cb = wx.CheckBox(
             self._ui_page, label=i18n.t("ui_auto_focus_next_audio")
         )
@@ -1244,6 +1254,11 @@ class SettingsDialog(wx.Dialog):
             "bulk_action_shortcuts", True
         )
         self._bulk_action_shortcuts_cb.SetValue(bool(bulk_action_shortcuts))
+
+        confirm_mark_all_read = self.main_window.settings.get("user_interface", {}).get(
+            "confirm_mark_all_read", True
+        )
+        self._confirm_mark_all_read_cb.SetValue(bool(confirm_mark_all_read))
 
         auto_focus_next_audio = self.main_window.settings.get("user_interface", {}).get(
             "auto_focus_next_audio", True
@@ -2190,6 +2205,9 @@ class SettingsDialog(wx.Dialog):
             "bulk_action_shortcuts"
         ] = self._bulk_action_shortcuts_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
+            "confirm_mark_all_read"
+        ] = self._confirm_mark_all_read_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
             "auto_focus_next_audio"
         ] = self._auto_focus_next_audio_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
@@ -2602,6 +2620,7 @@ class SettingsDialog(wx.Dialog):
         self._voice_msg_mode_voice_rb.SetLabel(i18n.t("ui_voice_message_mode_voice_message"))
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
+        self._confirm_mark_all_read_cb.SetLabel(i18n.t("ui_confirm_mark_all_read"))
         self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))
         self._selected_announce_box.SetLabel(i18n.t("ui_selected_announce_position_label"))
         self._selected_announce_start_rb.SetLabel(i18n.t("ui_selected_announce_position_start"))

@@ -871,6 +871,7 @@ DEFAULT_SETTINGS = {
         "show_delivery_status_in_chat_list": True,
         "preserve_typed_text_as_attachment_caption": True,
         "bulk_action_shortcuts": True,
+        "confirm_mark_all_read": True,
         "auto_focus_next_audio": True,
         "selected_announcement_position": "end",
         "show_yesterday_label": True,

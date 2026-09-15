@@ -4,6 +4,8 @@ NOWOŚCI
 
 - Wybór, czy wiadomości oznaczone gwiazdką zostają po wyczyszczeniu czatu. Potwierdzenie czyszczenia ma teraz opcję „Zachowaj wiadomości oznaczone gwiazdką", domyślnie zaznaczoną, tak jak w WhatsApp Web. Po jej odznaczeniu te wiadomości są usuwane razem z resztą, także na telefonie. Dotyczy czyszczenia jednego czatu, kilku zaznaczonych lub zarchiwizowanego.
 
+- Potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane. Polecenie najpierw pyta, z domyślną odpowiedzią Nie, aby przypadkowe naciśnięcie Alt, a potem Enter, nie oznaczyło wszystkiego jako przeczytane, także na telefonie. Pytanie ma opcję „Nie pokazuj ponownie": zaznaczona i potwierdzona przyciskiem Tak sprawia, że kolejne razy oznaczają wszystko od razu. Aby pytanie wróciło, użyj opcji „Pytaj o potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane" na karcie Interfejs użytkownika w Ustawieniach.
+
 V1.1.1.0
 
 Ta wersja dotyczy utrzymania połączenia z Twoim kontem. WinZapp zapisuje teraz kopię zapasową profilu przeglądarki — to w nim faktycznie przechowywane jest Twoje połączenie z WhatsApp — i sam ją przywraca, gdy przestaje być akceptowana, informując o tym, co się stało. Razem z nią pojawiają się poprawki sytuacji, które przerywały sesję i zmuszały do ponownego parowania: wyłączenie komputera, wstrzymanie i wznowienie oraz samo ponowne uruchamianie połączenia przez program. Doszły również sprawdzanie pisowni w polu wiadomości i akcje na odnośnikach.

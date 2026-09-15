@@ -4,6 +4,8 @@ NOVIDADES
 
 - Escolher se as mensagens favoritas ficam ao limpar uma conversa. A confirmação de limpar agora traz a opção "Manter mensagens favoritas", marcada por padrão, como no WhatsApp Web. Desmarcada, as favoritas são apagadas junto com o resto, também no celular. Vale para limpar uma conversa, várias selecionadas ou uma arquivada.
 
+- Confirmação ao marcar todas as conversas como lidas. O comando agora pergunta antes, com Não como padrão, para que um Alt seguido de Enter por engano não marque tudo como lido, também no celular. A pergunta tem a opção "Não mostrar novamente": marcada e confirmada com Sim, as próximas vezes marcam direto. Para voltar a ser perguntado, use a opção "Pedir confirmação ao marcar todas as conversas como lidas", na aba Interface do usuário das Configurações.
+
 V1.1.1.0
 
 Esta versão é sobre manter a sua conta conectada. O WinZapp passou a guardar uma cópia de segurança do perfil do navegador — que é onde a sua conexão com o WhatsApp realmente fica guardada — e a restaurá-la sozinho quando ela deixa de ser aceita, avisando o que aconteceu. Junto vieram as correções das situações que quebravam a sessão e faziam o programa pedir para parear de novo: desligar o computador, suspender e retomar, e o próprio programa reiniciando a conexão. Também chegaram a verificação ortográfica no campo de mensagem e as ações sobre links.

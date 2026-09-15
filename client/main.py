@@ -72,6 +72,7 @@ from core.wpp_runtime import (
 )
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults, auto_download_allows, migrate_voice_messages_media_types, migrate_voice_message_mode_default, migrate_spell_check_mode
 from core.utils import clear_chat_keep_starred_echo
+from ui.dialogs.checkbox_confirm import confirm_with_checkbox
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core import browser_payload
@@ -3632,6 +3633,11 @@ class MainWindow(wx.Frame):
         at 23:08:59.7 and 1.2 s later every one of 100+ unread chats was read
         on WhatsApp too, with no way back. The dialog defaults to No for
         exactly that keystroke.
+
+        Its "don't show again" checkbox turns that protection off, by the
+        user's explicit choice and only together with Yes;
+        user_interface.confirm_mark_all_read (Settings > Interface) turns it
+        back on.
         """
         unread_jids = [
             jid for jid, chat in list(self.chats.items())
@@ -3640,13 +3646,27 @@ class MainWindow(wx.Frame):
         if not unread_jids:
             self.output(self.i18n.t("mark_all_read_none"), interrupt=True)
             return
-        if wx.MessageBox(
-            self.i18n.t("mark_all_read_confirm").format(count=len(unread_jids)),
-            self.i18n.t("menu_mark_all_read"),
-            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
-            self,
-        ) != wx.YES:
-            return
+        if self.settings.get("user_interface", {}).get("confirm_mark_all_read", True):
+            t = self.i18n.t
+            confirmed, dont_ask_again = confirm_with_checkbox(
+                self,
+                t("mark_all_read_confirm").format(count=len(unread_jids)),
+                t("menu_mark_all_read"),
+                t("mark_all_read_dont_show_again"),
+                yes_label=t("yes_button"),
+                no_label=t("no_button"),
+                checked=False,
+                default_yes=False,
+            )
+            if not confirmed:
+                return
+            # "Don't show again" is only honoured together with Yes: saying
+            # No with it ticked must not turn every later request into an
+            # unconfirmed one. Settings > Interface mirrors the same key, so
+            # the confirmation can be turned back on from there.
+            if dont_ask_again:
+                self.settings.setdefault("user_interface", {})["confirm_mark_all_read"] = False
+                self.save_settings()
         self.mark_conversations_as_read(unread_jids)
 
     def _apply_global_hotkey(self):
