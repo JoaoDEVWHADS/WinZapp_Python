@@ -28,17 +28,47 @@ class _Tracker:
         return self._connected
 
 
+class _Queue:
+    """The outgoing message queue, recording what the backup asks of it."""
+
+    def __init__(self, events, work=False, drains=True):
+        self.events = events
+        self.work = work
+        self.drains = drains
+        self.held = False
+
+    def has_work(self):
+        return self.work
+
+    def hold(self):
+        self.held = True
+        self.events.append("hold")
+
+    def release(self):
+        self.held = False
+        self.events.append("release")
+
+    def is_held(self):
+        return self.held
+
+    def wait_until_idle(self, timeout):
+        self.events.append("drain")
+        return self.drains
+
+
 class _Stub:
     _maybe_refresh_profile_snapshot_live = MainWindow._maybe_refresh_profile_snapshot_live
     _live_snapshot_blocked_reason = MainWindow._live_snapshot_blocked_reason
     _live_snapshot_session = MainWindow._live_snapshot_session
     _live_snapshot_cancelled = MainWindow._live_snapshot_cancelled
     _ask_live_profile_snapshot = MainWindow._ask_live_profile_snapshot
+    _postpone_live_snapshot = MainWindow._postpone_live_snapshot
     _refresh_profile_snapshot_live = MainWindow._refresh_profile_snapshot_live
     _self_inflicted_teardown_expected = MainWindow._self_inflicted_teardown_expected
     _session_restart_owned = MainWindow._session_restart_owned
     _WPP_SESSION_RESTART_COOLDOWN = MainWindow._WPP_SESSION_RESTART_COOLDOWN
     _LIVE_SNAPSHOT_BUDGET_SECONDS = MainWindow._LIVE_SNAPSHOT_BUDGET_SECONDS
+    _LIVE_SNAPSHOT_DRAIN_SECONDS = MainWindow._LIVE_SNAPSHOT_DRAIN_SECONDS
 
     def __init__(self, **backup):
         section = {"live_snapshot_enabled": True, "live_snapshot_interval_hours": 1,
@@ -55,6 +85,8 @@ class _Stub:
         self.accepted = True
         self.restart_runs = True
         self.spoken, self.audits, self.restarts = [], [], []
+        self.events = []
+        self.message_queue = _Queue(self.events)
         self.saved = 0
         self.workers = 0
 
@@ -82,6 +114,7 @@ class _Stub:
 
     def _restart_wpp_session(self, on_profile_released=None, reason=None):
         self.restarts.append(reason)
+        self.events.append("restart")
         if not self.restart_runs:
             return False
         if on_profile_released is not None:
@@ -200,9 +233,11 @@ class TestNotNow:
         lambda s: setattr(s, "_profile_health", _Tracker(connected=False)),
         lambda s: setattr(s, "token", ""),
         lambda s: setattr(s, "active", False),
+        lambda s: setattr(s.message_queue, "work", True),
     ], ids=["offline", "initial-sync", "media-sync", "restarting", "restoring",
             "recovering", "shutting-down", "updating", "restart-cooldown", "pairing",
-            "pairing-dialog", "never-connected", "no-session", "window-not-active"])
+            "pairing-dialog", "never-connected", "no-session", "window-not-active",
+            "messages-being-sent"])
     def test_left_alone_and_retried_at_the_next_poll(self, snapshot, answer, block):
         stub = _Stub()
         stub._maybe_refresh_profile_snapshot_live(now=0)
@@ -364,6 +399,116 @@ class TestTheWindowCheck:
         assert stub._window_can_ask() is True
         stub._main_window_active = False
         assert stub._window_can_ask() is False
+
+
+class TestTheSendQueue:
+    """A message the user sends around the backup is never lost or failed: the
+    queue is held while the session is deliberately closed, and a send already
+    on the wire is waited for instead of being cut off."""
+
+    def test_held_before_the_session_closes_and_released_once_it_starts_again(
+            self, snapshot, answer):
+        stub = _Stub(live_snapshot_confirm=False)
+        _due(stub)
+        assert stub.events == ["hold", "drain", "restart", "release"]
+        assert stub.message_queue.is_held() is False
+
+    def test_a_send_still_on_the_wire_postpones_the_backup(self, snapshot, answer):
+        stub = _Stub(live_snapshot_confirm=False)
+        stub.message_queue.drains = False
+        _due(stub)
+        assert stub.events == ["hold", "drain", "release"]
+        assert stub.restarts == [] and snapshot.copies == []
+        assert stub.message_queue.is_held() is False
+
+    def test_released_even_when_the_backup_crashes(self, snapshot, answer):
+        stub = _Stub(live_snapshot_confirm=False)
+
+        def _boom(**kw):
+            stub.events.append("restart")
+            raise RuntimeError("boom")
+
+        stub._restart_wpp_session = _boom
+        _due(stub)
+        assert stub.events == ["hold", "drain", "restart", "release"]
+        assert stub.message_queue.is_held() is False
+
+    def test_a_backup_that_never_starts_leaves_the_queue_alone(self, snapshot, answer):
+        stub = _Stub(live_snapshot_confirm=False)
+        stub._wa_connected = False
+        _due(stub)
+        assert stub.events == []
+
+    def test_a_message_sent_while_answering_the_question_does_not_cost_a_day(
+            self, snapshot, monkeypatch):
+        """The queue is only consulted before asking. Refusing again after a
+        Yes would throw the whole interval away — a day, by default — for a
+        message the hold protects anyway."""
+        stub = _Stub()
+
+        def _confirm_then_send(*a, **kw):
+            stub.message_queue.work = True
+            return True, False
+
+        monkeypatch.setattr(main_module, "confirm_with_checkbox", _confirm_then_send)
+        _due(stub)
+        assert stub.restarts == ["profile backup"]
+        assert stub.events == ["hold", "drain", "restart", "release"]
+
+    def test_manual_offline_mode_never_blocks_a_backup(self, snapshot, answer):
+        """Nothing is on the wire while offline, and the queue never empties,
+        so refusing would stop every backup for as long as the switch is on."""
+        stub = _Stub(live_snapshot_confirm=False)
+        stub.offline_mode = True
+        stub.message_queue.work = True
+        _due(stub)
+        assert stub.restarts == ["profile backup"]
+
+    def test_a_send_on_the_wire_leaves_the_backup_due_again(self, snapshot, answer):
+        """The interval is spent before the question is asked, so a worker that
+        bows out must give it back rather than wait another whole one."""
+        stub = _Stub(live_snapshot_confirm=False)
+        stub._maybe_refresh_profile_snapshot_live(now=0)
+        stub.message_queue.drains = False
+        stub._maybe_refresh_profile_snapshot_live(now=HOUR + 10)
+        assert stub.restarts == []
+
+        # A minute later, with the send finished, it runs.
+        stub.message_queue.drains = True
+        stub._maybe_refresh_profile_snapshot_live(now=HOUR + 70)
+        assert stub.restarts == ["profile backup"]
+
+    def test_a_session_that_gets_busy_while_asking_leaves_it_due_again(
+            self, snapshot, monkeypatch):
+        """The obstacle has to appear AFTER the interval was spent to reach the
+        worker: before that, the free check refuses and costs nothing."""
+        stub = _Stub()
+
+        def _busy_after_the_question(*a, **kw):
+            stub._restarting_wpp_session = True
+            return True, False
+
+        monkeypatch.setattr(main_module, "confirm_with_checkbox", _busy_after_the_question)
+        stub._maybe_refresh_profile_snapshot_live(now=0)
+        stub._maybe_refresh_profile_snapshot_live(now=HOUR + 10)
+        assert stub.restarts == [] and stub.workers == 1
+
+        stub._restarting_wpp_session = False
+        monkeypatch.setattr(main_module, "confirm_with_checkbox", lambda *a, **kw: (True, False))
+        stub._maybe_refresh_profile_snapshot_live(now=HOUR + 70)
+        assert stub.restarts == ["profile backup"]
+
+    def test_a_restart_held_back_by_its_cooldown_leaves_it_due_again(self, snapshot, answer):
+        """Nothing was closed, so the round cost nothing — including the interval."""
+        stub = _Stub(live_snapshot_confirm=False)
+        stub.restart_runs = False
+        stub._maybe_refresh_profile_snapshot_live(now=0)
+        stub._maybe_refresh_profile_snapshot_live(now=HOUR + 10)
+        assert stub.restarts == ["profile backup"] and snapshot.copies == []
+
+        stub.restart_runs = True
+        stub._maybe_refresh_profile_snapshot_live(now=HOUR + 70)
+        assert len(snapshot.copies) == 1
 
 
 class TestSessionAccepted:

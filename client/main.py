@@ -13585,6 +13585,16 @@ class MainWindow(wx.Frame):
     _LIVE_SNAPSHOT_CONFIRM_SECONDS = 120.0
     _LIVE_SNAPSHOT_STABLE_SECONDS = 30.0
 
+    # How long to wait for a send already on the wire before giving up on this
+    # round. Nothing can recall a request in flight, and cutting one off with
+    # close-session is what turns a send seconds from succeeding into an
+    # unconfirmed one the queue deliberately never retries.
+    # Sized above the send timeouts themselves (25 s for text, 30 s for a
+    # voice message): nobody is waiting on this thread, and giving up early
+    # only throws the round away. stop()'s 4 s drain is the opposite case —
+    # there the user is waiting for the app to quit.
+    _LIVE_SNAPSHOT_DRAIN_SECONDS = 35.0
+
     def _live_snapshot_cancelled(self) -> bool:
         """Stop the copy: WinZapp is closing or WPPConnect is updating."""
         return bool(getattr(self, "_shutting_down", False)
@@ -13630,7 +13640,7 @@ class MainWindow(wx.Frame):
             return None, None
         return global_dir, session_name
 
-    def _live_snapshot_blocked_reason(self) -> str:
+    def _live_snapshot_blocked_reason(self, check_queue: bool = True) -> str:
         """'' when the session may be closed for a backup right now, else why not.
 
         Every refusal is a "not now", never a "no": the next poll asks again.
@@ -13650,6 +13660,19 @@ class MainWindow(wx.Frame):
             return "the session was restarted moments ago"
         if getattr(self, "_pairing_in_progress", False) or self._is_pairing_dialog_active():
             return "pairing is in progress"
+        queue = getattr(self, "message_queue", None)
+        if (check_queue and queue is not None
+                and not getattr(self, "offline_mode", False)
+                and queue.has_work()):
+            # Closing the session under a message the user just sent is how a
+            # send becomes "not confirmed", so the free check before the
+            # question waits for a quiet moment; the next poll costs nothing.
+            # Asked again by the worker it would instead throw a whole interval
+            # away for a message the hold there already protects — and in
+            # manual offline mode the queue never empties at all, so a single
+            # message left in it would stop every backup for as long as the
+            # switch is on.
+            return "messages are still being sent"
         tracker = getattr(self, "_profile_health", None)
         if tracker is not None and not tracker.ever_connected():
             # Same refusal as _capture_profile_snapshot(): a profile that never
@@ -13687,12 +13710,31 @@ class MainWindow(wx.Frame):
             logging.info("[profile-backup] a backup is due; waiting for the "
                          "WinZapp window to be active to ask about it.")
             return
+        self._live_snapshot_previous_attempt = last
         self._live_snapshot_last_attempt = now
         self._live_snapshot_pending = True
         if confirm:
             wx.CallAfter(self._ask_live_profile_snapshot)
         else:
             self._start_live_snapshot_worker()
+
+    def _postpone_live_snapshot(self):
+        """Give the interval back after a round that closed nothing.
+
+        _maybe_refresh_profile_snapshot_live() spends the interval before the
+        question is even asked, so a worker that then bows out (another cycle
+        took the session, a send is still on the wire) would otherwise cost a
+        whole interval — a day on the shipped settings — for a backup the user
+        just agreed to. Putting the previous mark back leaves it due again at
+        the next poll, and uses that poll's own clock rather than a second
+        reading of this one.
+
+        A Yes is deliberately not carried over: the next poll asks again, since
+        by then the answer may have changed (the user is mid-call, or writing).
+        """
+        previous = getattr(self, "_live_snapshot_previous_attempt", None)
+        if previous is not None:
+            self._live_snapshot_last_attempt = previous
 
     def _ask_live_profile_snapshot(self):
         """Main thread. The same dialog as marking every chat as read: No is
@@ -13740,14 +13782,34 @@ class MainWindow(wx.Frame):
         from core import profile_recovery
         global_dir, session_name = self._live_snapshot_session()
         staged = {}
+        queue = getattr(self, "message_queue", None)
+        held = False
         try:
             if not _live_snapshot_policy(getattr(self, "settings", {}))[0]:
                 return
-            reason = self._live_snapshot_blocked_reason()
+            # Not the queue here: that is what the hold below is for, and
+            # refusing would cost the whole interval for a message the user
+            # sent while the question was on screen.
+            reason = self._live_snapshot_blocked_reason(check_queue=False)
             if reason:
                 # The situation changed while the question was on screen.
                 logging.info("[profile-backup] not backing up after all: %s.", reason)
+                self._postpone_live_snapshot()
                 return
+            if queue is not None:
+                # Nothing may be attempted against the session this is about to
+                # close. Held, the queue keeps every message — including one the
+                # user writes during the backup — and sends it when the session
+                # is back, instead of spending its retries against a session
+                # that is deliberately gone. A send already on the wire is
+                # waited for rather than cut off.
+                queue.hold()
+                held = True
+                if not queue.wait_until_idle(self._LIVE_SNAPSHOT_DRAIN_SECONDS):
+                    logging.info("[profile-backup] a message is still being sent "
+                                 "— leaving the session alone this round.")
+                    self._postpone_live_snapshot()
+                    return
 
             def _copy_released_profile():
                 # Announced here, not before the restart: a restart held back
@@ -13764,6 +13826,12 @@ class MainWindow(wx.Frame):
 
             restarted = self._restart_wpp_session(on_profile_released=_copy_released_profile,
                                                   reason="profile backup")
+            if held:
+                # The session is starting again; queued messages go out as soon
+                # as it reports connected, without waiting for the copy to be
+                # confirmed below.
+                queue.release()
+                held = False
             if (restarted and staged.get("copy")
                     and self._live_snapshot_session_accepted()
                     and profile_recovery.promote_pending_snapshot(global_dir, session_name)):
@@ -13771,6 +13839,14 @@ class MainWindow(wx.Frame):
                 self._shutdown_audit("profile snapshot refreshed with WinZapp open")
                 wx.CallAfter(self.output, self.i18n.t("profile_backup_live_done"), interrupt=False)
                 return
+            if not restarted and not staged.get("announced"):
+                # The restart did not get far enough to release the profile
+                # (its own cooldown or re-entry guard, or a session that never
+                # reported CLOSED), so this round cost nothing and must not
+                # cost the interval either. It cannot loop: the close stamps
+                # _last_wpp_session_restart_ts, whose cooldown refuses the next
+                # polls for free.
+                self._postpone_live_snapshot()
             logging.warning("[profile-backup] the backup was not kept (restarted=%s, "
                             "copied=%s); the previous snapshot stays.",
                             restarted, bool(staged.get("copy")))
@@ -13780,6 +13856,14 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[profile-backup] backup with WinZapp open failed")
         finally:
+            if held:
+                # Every path that leaves before the restart releases here: a
+                # queue left held sends nothing for the rest of the launch, and
+                # a raise here must not skip what follows either.
+                try:
+                    queue.release()
+                except Exception:
+                    logging.exception("[profile-backup] could not release the message queue")
             if staged.get("copy"):
                 try:
                     profile_recovery.discard_pending_snapshot(global_dir, session_name)
