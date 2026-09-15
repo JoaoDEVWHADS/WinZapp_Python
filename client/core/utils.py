@@ -930,6 +930,7 @@ DEFAULT_SETTINGS = {
     },
     "conversation_sounds": {},
     "cleared_chats": {},
+    "cleared_starred_chats": {},
     "storage": {
         "auto_download_media": True,
         # Which categories the auto-download covers. All of them by default —
@@ -940,6 +941,23 @@ DEFAULT_SETTINGS = {
         "probe_video_duration_on_download": False
     }
 }
+
+def clear_chat_keep_starred_echo(body):
+    """What a /clear-chat response says it applied for keepStarred.
+
+    True/False when the server echoed it; None when it did not — an older
+    client/api that ignores keepStarred and therefore kept the starred
+    messages. Anything unparseable is None too: only an explicit False may
+    make WinZapp treat starred messages as cleared for good.
+    """
+    if not isinstance(body, dict):
+        return None
+    response = body.get("response")
+    if not isinstance(response, dict):
+        return None
+    value = response.get("keepStarred")
+    return value if isinstance(value, bool) else None
+
 
 def generate_and_save_key(filepath):
     key = Fernet.generate_key()

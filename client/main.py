@@ -71,6 +71,7 @@ from core.wpp_runtime import (
     read_homologated_wpp_version, wppconnect_library_drift, WPPCONNECT_PACKAGE,
 )
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults, auto_download_allows, migrate_voice_messages_media_types, migrate_voice_message_mode_default, migrate_spell_check_mode
+from core.utils import clear_chat_keep_starred_echo
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
 from core import browser_payload
@@ -27604,27 +27605,38 @@ class MainWindow(wx.Frame):
         self._schedule_save()
         self._schedule_set_chats()
 
-    def clear_chat_messages_local(self, jid: str, record_cutoff: bool = True):
+    def clear_chat_messages_local(self, jid: str, record_cutoff: bool = True,
+                                  keep_starred: bool = True):
         """Empty a conversation locally, keeping it in the chat list.
 
         Clearing removes the messages and the last-message preview — it must
         NOT remove the conversation itself; that is what "delete chat" does.
-        Starred messages are the one exception — starring is meant to make a
-        message durable, so clearing a chat must not wipe them, matching
-        WhatsApp's own behavior.
+        Starred messages survive when `keep_starred` is True, which is the
+        default of WhatsApp Web's own "keep starred messages" checkbox; the
+        user can untick it in the confirmation to clear those too.
         `record_cutoff` is False when we are only mirroring a clear that already
         happened on the phone (no new cutoff to remember, the server is the
         source of truth).
+
+        Returns the recorded cutoff (or None). The separate cutoff for starred
+        messages is NOT written here: clear_chat() writes it through
+        _record_starred_clear_cutoff() only once the server confirms it
+        cleared them too.
         """
         chat = self.chats.get(jid)
         if not chat:
-            return
+            return None
+        cutoff = None
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
-        starred = [m for m in records if isinstance(m, dict) and m.get("starred")]
+        starred = (
+            [m for m in records if isinstance(m, dict) and m.get("starred")]
+            if keep_starred else []
+        )
         chat.setdefault("messages", {}).setdefault("messages", {})["records"] = starred
         chat["unreadCount"] = 0
         if record_cutoff:
-            self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
+            cutoff = int(time.time())
+            self.settings.setdefault("cleared_chats", {})[jid] = cutoff
             self.save_settings()
         self._schedule_save(dirty_jid=jid)
         # Recomputes lastMessage/t from the survivors (a kept starred message,
@@ -27654,6 +27666,37 @@ class MainWindow(wx.Frame):
                 self.db.delete_chat_messages_except(jid, keep_ids)
             except Exception as exc:
                 logging.warning("[clear_chat_messages_local] DB clear failed for %s: %s", jid, exc)
+        return cutoff
+
+    def _announce_starred_clear_unsupported(self):
+        """Say, once per process, that the installed client/api kept the
+        starred messages on the phone. Runs on the main thread, so the flag
+        needs no lock: a bulk clear of 20 chats must not read the same long
+        sentence 20 times, and the API version cannot change mid-process.
+        The menu path is built from the menu's own keys so it cannot drift
+        from what the user will actually find there."""
+        if getattr(self, "_starred_clear_unsupported_announced", False):
+            return
+        self._starred_clear_unsupported_announced = True
+        t = self.i18n.t
+        self.output(t("clear_chat_starred_kept_on_phone").format(
+            menu=t("menu_help").replace("&", ""),
+            option=t("menu_force_reinstall_wpp").replace("&", ""),
+        ))
+
+    def _record_starred_clear_cutoff(self, jid: str, cutoff):
+        """Remember that a clear of `jid` also dropped its starred messages.
+
+        The ordinary cutoff exempts starred messages (see
+        _is_cleared_message), so without this the next sync would bring the
+        ones just cleared back. Only ever advanced, never removed: a later
+        clear that keeps starred messages must not resurrect these.
+        """
+        cutoff = int(cutoff or time.time())
+        starred_cutoffs = self.settings.setdefault("cleared_starred_chats", {})
+        if cutoff > int(starred_cutoffs.get(jid) or 0):
+            starred_cutoffs[jid] = cutoff
+            self.save_settings()
 
     def delete_chat(self, jid: str):
         """Delete chat locally and sync to WPPConnect API."""
@@ -27684,20 +27727,43 @@ class MainWindow(wx.Frame):
                 logging.warning("[delete_chat] Request failed for %s: %s", jid, exc)
         threading.Thread(target=_api, daemon=True).start()
 
-    def clear_chat(self, jid: str):
+    def clear_chat(self, jid: str, keep_starred: bool = True):
         """Clear chat messages locally and sync to WPPConnect API."""
-        self.clear_chat_messages_local(jid)
+        cutoff = self.clear_chat_messages_local(jid, keep_starred=keep_starred)
         def _api():
             phone = jid.replace("@s.whatsapp.net", "@c.us")
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
+                # An older client/api ignores keepStarred and keeps the starred
+                # messages on the phone. That is why the starred cutoff waits
+                # for the server's echo below: recording it regardless would
+                # hide, in WinZapp only and for good, messages still on the
+                # phone. Without it the next sync brings them back instead.
                 r = api_post(
-                    url, json={"phone": [phone], "isGroup": phone.endswith("@g.us")},
+                    url,
+                    json={
+                        "phone": [phone],
+                        "isGroup": phone.endswith("@g.us"),
+                        "keepStarred": bool(keep_starred),
+                    },
                     headers=headers, timeout=10,
                 )
                 if not r.ok:
                     logging.warning("[clear_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
+                elif not keep_starred:
+                    try:
+                        body = r.json()
+                    except Exception:
+                        body = None
+                    if clear_chat_keep_starred_echo(body) is False:
+                        wx.CallAfter(self._record_starred_clear_cutoff, jid, cutoff)
+                    else:
+                        logging.warning(
+                            "[clear_chat] %s: server did not confirm keepStarred=false "
+                            "(outdated client/api?) — starred messages kept on the phone.", jid,
+                        )
+                        wx.CallAfter(self._announce_starred_clear_unsupported)
             except Exception as exc:
                 logging.warning("[clear_chat] Request failed for %s: %s", jid, exc)
         threading.Thread(target=_api, daemon=True).start()
@@ -27767,18 +27833,23 @@ class MainWindow(wx.Frame):
         clear appear to do nothing. Messages received after the clear have a
         newer timestamp and are kept.
 
-        Starred messages are never "cleared", whatever their timestamp.
-        clear_chat_messages_local() deliberately keeps them (starring is meant
+        Starred messages kept by a clear are not "cleared", whatever their
+        timestamp. clear_chat_messages_local() deliberately keeps them (starring is meant
         to make a message durable, same as WhatsApp itself), but every path
         that rebuilds a conversation — the history sync, the on-disk cache
         merge, a WebSocket re-delivery — filtered them right back out through
         this cutoff, so the survivors it had just saved disappeared again on
         the next sync or restart. Reported live as "limpar uma conversa
         tambem apaga as mensagens favoritas".
+
+        Unless the user unticked "keep starred messages" when clearing: that
+        records settings["cleared_starred_chats"], the cutoff starred
+        messages are judged against instead.
         """
-        if isinstance(msg, dict) and msg.get("starred"):
+        if not isinstance(msg, dict):
             return False
-        cutoff = self.settings.get("cleared_chats", {}).get(jid)
+        cutoff_key = "cleared_starred_chats" if msg.get("starred") else "cleared_chats"
+        cutoff = self.settings.get(cutoff_key, {}).get(jid)
         if not cutoff:
             return False
         try:

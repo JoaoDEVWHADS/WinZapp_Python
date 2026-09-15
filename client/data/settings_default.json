@@ -97,6 +97,7 @@
     },
     "conversation_sounds": {},
     "cleared_chats": {},
+    "cleared_starred_chats": {},
     "storage": {
         "auto_download_media": true,
         "auto_download_media_types": [

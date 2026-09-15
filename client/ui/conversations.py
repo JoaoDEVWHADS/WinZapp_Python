@@ -59,6 +59,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
+from ui.dialogs.clear_chat_confirm import confirm_clear_chat
 from core.save_location import resolve_save_dialog_folder
 from core.utils import history_window, reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, db_fetch_limit, looks_like_binary_blob, normalize_for_search, normalize_line_separators, to_editor_line_endings, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, is_voice_message, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
@@ -10661,14 +10662,17 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_clear_chat(self, jid: str):
         i18n = self.main_window.i18n
-        if wx.MessageBox(
+        confirmed, keep_starred = confirm_clear_chat(
+            self,
             i18n.t("clear_confirm_msg"),
             i18n.t("clear_chat"),
-            wx.YES_NO | wx.ICON_QUESTION,
-            self,
-        ) != wx.YES:
+            i18n.t("clear_chat_keep_starred"),
+            yes_label=i18n.t("yes_button"),
+            no_label=i18n.t("no_button"),
+        )
+        if not confirmed:
             return
-        self.main_window.clear_chat(jid)
+        self.main_window.clear_chat(jid, keep_starred=keep_starred)
         # Refresh messages list if this conversation is open
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
@@ -15906,14 +15910,18 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
         if not self.selected_chats: return
         count = len(self.selected_chats)
-        if wx.MessageBox(
+        confirmed, keep_starred = confirm_clear_chat(
+            self,
             i18n.t("clear_confirm_msg_bulk").format(count=count),
             i18n.t("clear_chat_bulk_title"),
-            wx.YES_NO | wx.ICON_QUESTION, self,
-        ) != wx.YES:
+            i18n.t("clear_chat_keep_starred"),
+            yes_label=i18n.t("yes_button"),
+            no_label=i18n.t("no_button"),
+        )
+        if not confirmed:
             return
         for jid in list(self.selected_chats):
-            self.main_window.clear_chat(jid)
+            self.main_window.clear_chat(jid, keep_starred=keep_starred)
         self.selected_chats.clear()
         self.main_window.add_chats_to_ui()
         self.main_window.output(i18n.t("success_clear"), interrupt=True)
@@ -16921,14 +16929,17 @@ class ArchivedConversationsPanel(wx.Panel):
 
     def _on_clear(self, jid: str):
         i18n = self.main_window.i18n
-        if wx.MessageBox(
+        confirmed, keep_starred = confirm_clear_chat(
+            self,
             i18n.t("clear_confirm_msg"),
             i18n.t("clear_chat"),
-            wx.YES_NO | wx.ICON_QUESTION,
-            self,
-        ) != wx.YES:
+            i18n.t("clear_chat_keep_starred"),
+            yes_label=i18n.t("yes_button"),
+            no_label=i18n.t("no_button"),
+        )
+        if not confirmed:
             return
-        self.main_window.clear_chat(jid)
+        self.main_window.clear_chat(jid, keep_starred=keep_starred)
         # Refresh this list so the emptied preview disappears immediately —
         # mirrors ConversationsPanel._on_menu_clear_chat's own refresh call.
         self.main_window._schedule_set_chats()

@@ -1,3 +1,9 @@
+V1.1.2.0
+
+WHAT'S NEW
+
+- Choose whether starred messages stay when clearing a chat. The clear confirmation now has a "Keep starred messages" option, ticked by default, just like WhatsApp Web. Unticked, starred messages are cleared along with everything else, on your phone too. It applies to clearing one chat, several selected chats or an archived one.
+
 V1.1.1.0
 
 This release is about keeping your account connected. WinZapp now keeps a backup copy of the browser profile — which is where your WhatsApp connection actually lives — and restores it on its own when it stops being accepted, telling you what happened. Alongside it come fixes for the situations that broke the session and left the app asking you to pair again: shutting the computer down, suspending and resuming, and the app restarting the connection by itself. Spell checking in the message field and link actions arrived too.
