@@ -12,8 +12,6 @@ CORRECCIONES
 
 - La velocidad predeterminada de reproducción de audio ya no vuelve sola a 1x. Al abrir Configuración, el campo de la pestaña Reproducción de audio aparecía vacío, fuera cual fuera la velocidad guardada, y pulsar Aplicar y después Aceptar guardaba 1x encima. Ahora la velocidad guardada aparece seleccionada y se conserva.
 
-- Los mensajes ya no desaparecen solos de una conversación abierta. Cuando WhatsApp Web descargaba parte del historial, o volvía de una recuperación de perfil con menos mensajes, WinZapp tomaba los que ya no tenía cargados como eliminados en el teléfono y los quitaba, a veces cientos de una vez.
-
 - Después de que WinZapp recupera el perfil del navegador, las conversaciones con mensajes no leídos ya no aparecen como leídas.
 
 V1.1.1.0

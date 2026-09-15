@@ -253,6 +253,8 @@ class _ReconcileStub:
     methods as plain functions (no HTTP, no wx event loop)."""
 
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _deletions_before_remote_window = MainWindow._deletions_before_remote_window
+    _REMOTE_BEFORE_PAGES = MainWindow._REMOTE_BEFORE_PAGES
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions
@@ -273,7 +275,13 @@ class _ReconcileStub:
     def _fetch_remote_message_window(self, remote_jid):
         if self._remote_ids is None:
             return None
-        return set(self._remote_ids), (999 if self._remote_ids else 0)
+        return (set(self._remote_ids), (999 if self._remote_ids else 0),
+                ("anchor" if self._remote_ids else ""))
+
+    # Never reached with these fixtures: every message sits at 1000, after the
+    # window's stated start of 999, so nothing is older than the window.
+    def _fetch_remote_messages_before(self, remote_jid, anchor_id):
+        return None
 
     def clear_chat_messages_local(self, jid, record_cutoff=True):
         self.clear_calls.append((jid, record_cutoff))

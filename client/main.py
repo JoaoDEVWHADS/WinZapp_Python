@@ -38,6 +38,7 @@ import atexit
 import ctypes
 import ctypes.wintypes
 import uuid
+from urllib.parse import quote as _url_quote
 from accessible_output2 import outputs
 from core.accessible_speech import AccessibleSpeechOutput
 from core.sound_system import (
@@ -57,9 +58,12 @@ from core.message_edit import (
 from core.i18n import I18n
 from core.sync_contracts import observe_payload
 from core.remote_reconcile import (
-    MAX_MIRRORED_DELETIONS as _MAX_MIRRORED_DELETIONS,
     deletions_within_remote_window as _deletions_within_remote_window,
+    observe_deletions as _observe_deletions,
+    older_than_window as _older_than_window,
+    oldest_anchor as _oldest_anchor,
     remote_window_oldest as _remote_window_oldest,
+    split_deletions as _split_deletions,
 )
 from core.incremental_sync import (
     chat_activity_floor as _chat_activity_floor,
@@ -22526,17 +22530,15 @@ class MainWindow(wx.Frame):
     # payoff (not staring at a message that no longer exists, or a "cleared"
     # conversation that stays full until F5) is worth it.
 
-    def _fetch_remote_message_window(self, remote_jid: str) -> "tuple[set[str], int] | None":
-        """Best-effort GET of what WPPConnect currently has for remote_jid:
-        (message ids, oldest timestamp in seconds among them — 0 when none).
+    def _get_remote_messages(self, remote_jid: str, extra_query: str = "") -> "tuple[list, int] | None":
+        """Best-effort GET of get-messages for remote_jid.
 
-        Returns None on ANY failure/ambiguity — a failed fetch must never be
-        read as "the phone deleted everything". IDs are extracted via the same
-        _normalize_wpp_message() sync_chat_messages() uses, so they compare
-        equal to what's stored in key.id locally. The oldest timestamp is what
-        bounds which local messages the answer can say anything about: only
-        the ones WhatsApp Web has loaded, never older history (see
-        core/remote_reconcile.py).
+        Returns ((normalised, raw) pairs, number of raw items in the answer),
+        or None on ANY failure/ambiguity — a failed fetch must never be read as
+        "the phone deleted everything". Messages go through the same
+        _normalize_wpp_message() sync_chat_messages() uses, so their key.id
+        compares equal to what's stored locally; the raw item is kept because
+        only it carries the full serialized id an anchored query needs.
         """
         if not self.ws:
             return None
@@ -22548,7 +22550,8 @@ class MainWindow(wx.Frame):
         else:
             phone = remote_jid
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
+        url = (f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/"
+               f"{phone}?count={limit}{extra_query}")
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         try:
             response = api_get(url, headers=headers, timeout=15)
@@ -22558,8 +22561,7 @@ class MainWindow(wx.Frame):
             wpp_messages = body.get("response", []) if isinstance(body, dict) else []
             if not isinstance(wpp_messages, list):
                 return None
-            ids = set()
-            normalized_messages = []
+            pairs = []
             for wm in wpp_messages:
                 if not isinstance(wm, dict):
                     continue
@@ -22567,14 +22569,123 @@ class MainWindow(wx.Frame):
                     normalized = self.ws._normalize_wpp_message(wm)
                 except Exception:
                     continue
-                mid = normalized.get("key", {}).get("id", "")
-                if mid:
-                    ids.add(mid)
-                    normalized_messages.append(normalized)
-            return ids, _remote_window_oldest(normalized_messages)
+                if normalized.get("key", {}).get("id", ""):
+                    pairs.append((normalized, wm))
+            return pairs, len(wpp_messages)
         except Exception as e:
-            logging.warning(f"[_fetch_remote_message_window] failed for {remote_jid}: {e}")
+            logging.warning(f"[_get_remote_messages] failed for {remote_jid}: {e}")
             return None
+
+    def _fetch_remote_message_window(self, remote_jid: str) -> "tuple[set[str], int, str] | None":
+        """The newest messages WhatsApp Web has for remote_jid:
+        (message ids, oldest timestamp in seconds among them — 0 when none,
+        serialized id of that oldest message — '' when none), or None.
+
+        The oldest timestamp bounds which local messages this answer can say
+        anything about: only the ones WhatsApp Web has loaded, never older
+        history. The serialized id is where _deletions_before_remote_window()
+        continues from (see core/remote_reconcile.py).
+        """
+        answer = self._get_remote_messages(remote_jid)
+        if answer is None:
+            return None
+        pairs, _raw_count = answer
+        normalized = [n for n, _raw in pairs]
+        return ({n["key"]["id"] for n in normalized},
+                _remote_window_oldest(normalized), _oldest_anchor(pairs))
+
+    def _fetch_remote_messages_before(self, remote_jid: str,
+                                      anchor_id: str) -> "tuple[set[str], int, str] | None":
+        """The page of messages WhatsApp Web's database holds before anchor_id:
+        (ids, oldest timestamp, serialized id of the oldest), or None.
+
+        An EMPTY id set with a successful answer means the database has nothing
+        earlier (msgFindBefore's own "end of history"). Raw items that came back
+        but could not be read are None, never an empty page.
+
+        A page is used even when it holds messages newer than the anchor: the
+        server swaps an anchor it cannot find for another one without saying so
+        (deviceController.ts getMessages, originalOldestId), but what it returns
+        is still one contiguous run of history, so everything after its oldest
+        message is covered. Discarding such pages would leave the older
+        messages of that chat unjudged for as long as the swap keeps happening
+        — a deletion on the phone that never reaches WinZapp.
+        """
+        answer = self._get_remote_messages(
+            remote_jid, f"&direction=before&id={_url_quote(anchor_id, safe='')}")
+        if answer is None:
+            return None
+        pairs, raw_count = answer
+        if raw_count and not pairs:
+            return None
+        normalized = [n for n, _raw in pairs]
+        return ({n["key"]["id"] for n in normalized},
+                _remote_window_oldest(normalized), _oldest_anchor(pairs))
+
+    # How many anchored pages one poll may walk back into older history. Local
+    # candidates are only the last messages_page_size records, so one page
+    # normally settles all of them; the bound keeps a chat that never settles
+    # from costing more than a few GETs a minute.
+    _REMOTE_BEFORE_PAGES = 5
+
+    def _deletions_before_remote_window(self, remote_jid: str, candidates: list,
+                                        window_ids: set, window_oldest_ts: int,
+                                        anchor_id: str) -> set:
+        """Ids of local messages OLDER than the newest window that look deleted
+        on the phone.
+
+        The newest window says nothing about them: it is cut by count, and the
+        server's own paging behind it can stop early (an exception, a page that
+        adds nothing). So ask WhatsApp Web's database again, anchored on the
+        oldest message the window returned: a message found in any page is
+        kept, and a page proves the ones inside its period that are absent.
+
+        Whatever the walk cannot account for — an empty page (nothing earlier
+        exists), a failed page, no anchor, a page that does not move back, the
+        page budget spent — counts as missing, just as the plain diff of
+        v1.1.1.0 judged every message of the page. Leaving it unjudged would
+        stop that deletion from ever reaching WinZapp for as long as the
+        condition lasts. Note what this cannot do: a message WhatsApp Web's
+        database has lost answers exactly like a deleted one. None of it is
+        mirrored from a single read — the caller confirms it on consecutive
+        polls (split_deletions()), and a poll that finds the message again
+        drops it from the run (observe_deletions()).
+        """
+        unresolved = _older_than_window(candidates, window_ids, window_oldest_ts)
+        if not unresolved:
+            return set()
+        known = set(window_ids)
+        found = set()
+        anchor = anchor_id
+        cause = "page budget spent" if anchor else "no anchor"
+        for _page in range(self._REMOTE_BEFORE_PAGES):
+            if not anchor:
+                break
+            page = self._fetch_remote_messages_before(remote_jid, anchor)
+            if page is None:
+                cause = "page fetch failed"
+                break
+            page_ids, page_oldest_ts, page_anchor = page
+            if not page_ids:
+                cause = "history ends"
+                break
+            known |= page_ids
+            found |= _deletions_within_remote_window(unresolved, known, page_oldest_ts)
+            unresolved = _older_than_window(unresolved, known, page_oldest_ts)
+            if not unresolved:
+                break
+            if not page_anchor or page_anchor == anchor:
+                cause = "page did not move back"
+                break
+            anchor = page_anchor
+        unaccounted = {r.get("key", {}).get("id") for r in unresolved}
+        if unaccounted:
+            logging.info(
+                "[_deletions_before_remote_window] %s: %d older message(s) not found "
+                "(%s) — counted as missing, pending confirmation.",
+                remote_jid, len(unaccounted), cause,
+            )
+        return found | unaccounted
 
     # Consecutive polls a conversation must look fully cleared server-side
     # (see _reconcile_active_conversation_with_remote) before it's actually
@@ -22589,6 +22700,8 @@ class MainWindow(wx.Frame):
         """
         if not hasattr(self, "_remote_clear_strikes"):
             self._remote_clear_strikes = {}
+        if not hasattr(self, "_remote_deletion_strikes"):
+            self._remote_deletion_strikes = {}
         cp = getattr(self, "conversations_panel", None)
         if cp is None or cp.conversation is None:
             return
@@ -22615,6 +22728,17 @@ class MainWindow(wx.Frame):
         # WinZapp's own local history shortly after being sent.
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         recent_records = records[-limit:] if len(records) > limit else records
+        # Messages already waiting for confirmation stay judged even once new
+        # messages push them out of that slice. Otherwise a bulk deletion in a
+        # busy chat would drop out of its own confirmation run and never be
+        # mirrored — which v1.1.1.0, mirroring on the first read, always did.
+        pending_run = self._remote_deletion_strikes.get(remote_jid)
+        if pending_run and len(records) > limit:
+            pending_ids = pending_run[0]
+            recent_records = [
+                r for r in records[:-limit]
+                if isinstance(r, dict) and r.get("key", {}).get("id") in pending_ids
+            ] + recent_records
 
         # Also exclude anything sent/received in roughly the last two
         # minutes: WhatsApp Web's own /get-messages can lag behind a message
@@ -22646,32 +22770,40 @@ class MainWindow(wx.Frame):
         remote = self._fetch_remote_message_window(remote_jid)
         if remote is None:
             return
-        remote_ids, remote_oldest_ts = remote
+        remote_ids, remote_oldest_ts, anchor_id = remote
         if remote_ids:
-            # get-messages only returns what WhatsApp Web has LOADED for the
-            # chat, and that window moves by itself — it unloads older
-            # messages, and a restored profile comes back holding only its
-            # snapshot. So only a local message inside the period the answer
-            # covers can be judged deleted; one older than anything returned
-            # is merely not loaded. Diffing all of them used to mirror a
-            # shrunken window as mass deletions: 199 messages removed at once
-            # from an open group on 2026-09-15, from the only copy that still
-            # had them. See core/remote_reconcile.py.
+            # The answer is cut by count, so it only proves deletions inside the
+            # period it covers. Older local messages are asked about again,
+            # anchored on its oldest message (_deletions_before_remote_window).
+            # Mirroring everything absent from one read is what removed 199
+            # messages at once from an open group on 2026-09-15.
+            # See core/remote_reconcile.py.
+            #
+            # A big batch, and anything about older history, waits for the same
+            # confirmation strikes a clear does, and only what was missing on
+            # every one of those polls is mirrored. Not refused: a chat cleared
+            # on the phone while WinZapp was closed, with new messages since,
+            # looks exactly like that and must still arrive.
             self._remote_clear_strikes.pop(remote_jid, None)
-            missing_ids = _deletions_within_remote_window(
-                candidates, remote_ids, remote_oldest_ts)
-            if len(missing_ids) > _MAX_MIRRORED_DELETIONS:
-                logging.warning(
+            direct = _deletions_within_remote_window(candidates, remote_ids, remote_oldest_ts)
+            inferred = self._deletions_before_remote_window(
+                remote_jid, candidates, remote_ids, remote_oldest_ts, anchor_id)
+            immediate, to_confirm = _split_deletions(direct, inferred)
+            confirmed = _observe_deletions(self._remote_deletion_strikes, remote_jid,
+                                           to_confirm, self._REMOTE_CLEAR_CONFIRM_STRIKES)
+            run = self._remote_deletion_strikes.get(remote_jid)
+            if run:
+                logging.info(
                     "[_reconcile_active_conversation_with_remote] %s: %d message(s) "
-                    "look deleted at once — not mirroring (limit %d); more likely "
-                    "a misread loaded window than a phone-side deletion.",
-                    remote_jid, len(missing_ids), _MAX_MIRRORED_DELETIONS,
+                    "look deleted on the phone (confirmation %d/%d) — waiting.",
+                    remote_jid, len(run[0]), run[1], self._REMOTE_CLEAR_CONFIRM_STRIKES,
                 )
-                return
+            missing_ids = immediate | confirmed
             if missing_ids:
                 wx.CallAfter(self._mirror_remote_deletions, remote_jid, missing_ids)
             return
         if not remote_ids:
+            self._remote_deletion_strikes.pop(remote_jid, None)
             # The answer is empty — every local message is gone server-side,
             # which is what a clear looks like. Require this to hold for
             # _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls before actually

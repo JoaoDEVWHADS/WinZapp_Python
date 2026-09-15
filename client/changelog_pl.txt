@@ -12,8 +12,6 @@ POPRAWKI
 
 - Domyślna prędkość odtwarzania dźwięku nie wraca już sama do 1x. Po otwarciu Ustawień pole na karcie Odtwarzanie audio było puste niezależnie od zapisanej prędkości, a naciśnięcie Zastosuj, a potem OK zapisywało 1x w jej miejsce. Teraz zapisana prędkość jest zaznaczona i zachowywana.
 
-- Wiadomości nie znikają już same z otwartego czatu. Gdy WhatsApp Web zwalniał część historii albo wracał po odzyskaniu profilu z mniejszą liczbą wiadomości, WinZapp traktował te, których już nie miał wczytanych, jako usunięte na telefonie i je usuwał, czasem setki naraz.
-
 - Po odzyskaniu profilu przeglądarki przez WinZapp czaty z nieprzeczytanymi wiadomościami nie są już pokazywane jako przeczytane.
 
 V1.1.1.0

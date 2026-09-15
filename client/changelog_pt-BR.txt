@@ -12,8 +12,6 @@ CORREÇÕES
 
 - A velocidade padrão de reprodução de áudio não volta mais para 1x sozinha. Ao abrir as Configurações, o campo da aba Reprodução de áudio aparecia vazio, qualquer que fosse a velocidade salva, e acionar Aplicar e depois OK gravava 1x por cima dela. Agora a velocidade salva aparece selecionada e é mantida.
 
-- Mensagens não somem mais sozinhas de uma conversa aberta. Quando o WhatsApp Web descarregava parte do histórico ou voltava de uma recuperação de perfil com menos mensagens, o WinZapp entendia as que não estavam mais carregadas como apagadas no celular e as removia, às vezes centenas de uma vez.
-
 - Depois que o WinZapp recupera o perfil do navegador, conversas com mensagens não lidas não aparecem mais como lidas.
 
 V1.1.1.0

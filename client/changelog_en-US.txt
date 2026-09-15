@@ -12,8 +12,6 @@ FIXES
 
 - The default audio playback speed no longer drops back to 1x on its own. When Settings opened, the field in the Audio playback tab was empty whatever speed was saved, and pressing Apply and then OK saved 1x over it. The saved speed is now shown selected and kept.
 
-- Messages no longer vanish on their own from an open chat. When WhatsApp Web unloaded part of the history, or came back from a profile recovery holding fewer messages, WinZapp took the ones it no longer had loaded as deleted on the phone and removed them, sometimes hundreds at once.
-
 - After WinZapp recovers the browser profile, chats with unread messages no longer show up as read.
 
 V1.1.1.0

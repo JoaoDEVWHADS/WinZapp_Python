@@ -13,13 +13,20 @@ one of them is a deletion:
 
 - the message is INSIDE the period the answer covers and still absent: it
   really is gone (deleted on the phone);
-- the message is OLDER than anything the answer returned: nothing can be
-  concluded about it at all — it simply is not loaded.
+- the message is OLDER than anything the answer returned: the answer says
+  nothing about it — it may simply not be loaded.
 
-Treating the second case like the first is what deleted 199 messages at once
-from an open group (2026-09-15): WhatsApp Web held one or two messages for the
-chat, a new one arrived, and every stored message older than it was mirrored
-as a phone-side deletion — from the only copy that still had them.
+Treating the second case like the first, from a single read, is what deleted
+199 messages at once from an open group (2026-09-15): the answer held one or two
+messages for the chat, and every stored message older than them was mirrored as
+a phone-side deletion on the spot.
+
+What no answer can do is tell a deletion apart from a message WhatsApp Web's
+own database has lost: both say "not here". Mirroring what was done on the phone
+comes first — nothing v1.1.1.0 mirrored may stop being mirrored — so older
+messages are asked about again with an anchored query, anything it cannot
+account for counts as missing, and every large or inferred batch has to be seen
+on consecutive polls before it is mirrored.
 """
 
 
@@ -50,12 +57,15 @@ def remote_window_oldest(messages) -> int:
     return min(stamps) if stamps else 0
 
 
-#: More apparent phone-side deletions than this in one answer are not mirrored.
+#: More apparent phone-side deletions than this in one poll are not mirrored at
+#: once: they must be confirmed on consecutive polls (see observe_deletions()).
 #: A deletion made on the phone is almost always one message or a handful; a
-#: big batch is far likelier to be the loaded window misread again (a stray old
-#: message in the answer pulls remote_oldest_ts back, and everything between it
-#: and the recent ones looks deleted). A real bulk deletion left unmirrored is
-#: cosmetic; a wrong mirror is irreversible.
+#: big batch is likelier to be the loaded window misread (a stray old message in
+#: the answer pulls remote_oldest_ts back, and everything between it and the
+#: recent ones looks deleted), which a single read cannot rule out. It is not
+#: refused outright, because a real bulk deletion — a chat cleared on the phone
+#: while WinZapp was closed, with new messages since — has exactly this shape
+#: and must still reach WinZapp.
 MAX_MIRRORED_DELETIONS = 10
 
 
@@ -82,3 +92,92 @@ def deletions_within_remote_window(local_records, remote_ids, remote_oldest_ts) 
         if mid and ts and ts > remote_oldest_ts and mid not in remote_ids:
             missing.add(mid)
     return missing
+
+
+def older_than_window(local_records, window_ids, window_oldest_ts) -> list:
+    """Local records the newest-window answer says nothing about: at or before
+    its oldest timestamp and not among its ids. These are what a second,
+    anchored "messages before" query has to settle."""
+    window_ids = set(window_ids or ())
+    if not window_oldest_ts:
+        return []
+    out = []
+    for record in local_records or []:
+        mid = _message_id(record)
+        ts = _message_seconds(record)
+        if mid and ts and ts <= window_oldest_ts and mid not in window_ids:
+            out.append(record)
+    return out
+
+
+def serialized_id(raw) -> str:
+    """The full WhatsApp id of a RAW get-messages item (`id._serialized`).
+
+    The normalised key.id is only the last part of it, and the anchored
+    "messages before" query needs the whole thing to find the message."""
+    value = raw.get("id") if isinstance(raw, dict) else None
+    if isinstance(value, dict):
+        value = value.get("_serialized")
+    return value if isinstance(value, str) else ""
+
+
+def oldest_anchor(pairs) -> str:
+    """Serialized id of the oldest message of a page given as (normalised, raw)
+    pairs — the anchor to ask what comes before it. '' when no message carries
+    both a timestamp and an id."""
+    best_ts, best_id = 0, ""
+    for normalized, raw in pairs or ():
+        ts = _message_seconds(normalized)
+        sid = serialized_id(raw)
+        if ts and sid and (not best_ts or ts < best_ts):
+            best_ts, best_id = ts, sid
+    return best_id
+
+
+def split_deletions(direct, inferred):
+    """(mirror now, confirm first) for one poll's apparent deletions.
+
+    *direct* are messages absent from inside the newest window the server
+    returned: up to MAX_MIRRORED_DELETIONS of them mirror at once, a bigger
+    batch waits for confirmation. *inferred* come from the anchored walk into
+    older history and always wait, because that answer is built by a fallback
+    chain on the server side — an anchor it cannot find is silently swapped for
+    another one — so a single read of it is never enough to delete anything.
+    """
+    direct = set(direct or ())
+    inferred = set(inferred or ())
+    if len(direct) > MAX_MIRRORED_DELETIONS:
+        return set(), direct | inferred
+    return direct, inferred
+
+
+def observe_deletions(state: dict, key, missing, threshold: int):
+    """Record one poll's apparent deletions; return the ids now confirmed.
+
+    Confirmation is a running intersection: only ids missing on EVERY one of
+    *threshold* polls of that chat are returned, so a set that wobbles between
+    reads (a window that loads differently each time) never confirms the ids
+    that came and went. A poll with nothing in common with the previous run
+    starts a new run. Returns an empty set until the run reaches *threshold*;
+    on confirmation the state for *key* is cleared.
+
+    Deliberately no expiry by time: the polls only happen while the chat is
+    open, and a run that restarted after a gap would never confirm for someone
+    who only ever opens a chat briefly — a deletion made on the phone that
+    v1.1.1.0 mirrored on the first read and this would never mirror at all.
+    """
+    current = set(missing or ())
+    previous = state.get(key)
+    if previous and current:
+        common = set(previous[0]) & current
+        run = (common, previous[1] + 1) if common else (current, 1)
+    else:
+        run = (current, 1)
+    if not run[0]:
+        state.pop(key, None)
+        return set()
+    if run[1] >= threshold:
+        state.pop(key, None)
+        return set(run[0])
+    state[key] = run
+    return set()

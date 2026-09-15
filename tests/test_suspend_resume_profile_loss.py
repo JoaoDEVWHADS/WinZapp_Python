@@ -146,6 +146,8 @@ class TestTheRestartWaitsForChromeToLetGo:
 class _ReconcileStub:
     _reconcile_active_conversation_with_remote = (
         MainWindow._reconcile_active_conversation_with_remote)
+    _deletions_before_remote_window = MainWindow._deletions_before_remote_window
+    _REMOTE_BEFORE_PAGES = MainWindow._REMOTE_BEFORE_PAGES
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
 
     _REMOTE_CLEAR_CONFIRM_STRIKES = MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES
@@ -170,7 +172,7 @@ class _ReconcileStub:
 
     def _fetch_remote_message_window(self, remote_jid):
         self.fetched.append(remote_jid)
-        return set(), 0       # the rolled-back store knows nothing
+        return set(), 0, ""   # the rolled-back store knows nothing
 
 
 class TestARolledBackStoreIsNotADeletion:
