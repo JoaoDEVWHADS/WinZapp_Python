@@ -6,6 +6,10 @@ WHAT'S NEW
 
 - Confirmation before marking all chats as read. The command now asks first, with No as the default, so a stray Alt followed by Enter no longer marks everything as read, on your phone too. The question has a "Don't show again" option: ticked and confirmed with Yes, later requests mark everything straight away. To be asked again, use the "Ask for confirmation before marking all chats as read" option in the User Interface tab of Settings.
 
+FIXES
+
+- The "Show yesterday's messages with the date omitted (yesterday)" option in Settings now changes language along with everything else when you switch the app's language. It used to stay in the previous language until Settings was closed and opened again.
+
 V1.1.1.0
 
 This release is about keeping your account connected. WinZapp now keeps a backup copy of the browser profile — which is where your WhatsApp connection actually lives — and restores it on its own when it stops being accepted, telling you what happened. Alongside it come fixes for the situations that broke the session and left the app asking you to pair again: shutting the computer down, suspending and resuming, and the app restarting the connection by itself. Spell checking in the message field and link actions arrived too.

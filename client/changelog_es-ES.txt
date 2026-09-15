@@ -6,6 +6,10 @@ NOVEDADES
 
 - Confirmación al marcar todas las conversaciones como leídas. El comando ahora pregunta antes, con No por defecto, para que un Alt seguido de Enter por error no marque todo como leído, también en tu teléfono. La pregunta tiene la opción "No volver a mostrar": marcada y confirmada con Sí, las siguientes veces se marca directamente. Para que vuelva a preguntar, usa la opción "Pedir confirmación al marcar todas las conversaciones como leídas" en la pestaña Interfaz de usuario de Configuración.
 
+CORRECCIONES
+
+- La opción "Mostrar los mensajes de ayer con la fecha omitida (ayer)" de Configuración ahora cambia de idioma junto con el resto al cambiar el idioma del programa. Antes seguía en el idioma anterior hasta cerrar y volver a abrir Configuración.
+
 V1.1.1.0
 
 Esta versión trata de mantener tu cuenta conectada. WinZapp ahora guarda una copia de seguridad del perfil del navegador — que es donde vive realmente tu conexión con WhatsApp — y la restaura por su cuenta cuando deja de ser aceptada, avisando de lo ocurrido. Junto a ella llegan las correcciones de las situaciones que rompían la sesión y hacían que el programa pidiera vincular de nuevo: apagar el ordenador, suspender y reanudar, y el propio programa reiniciando la conexión. También llegan la corrección ortográfica en el campo de mensaje y las acciones sobre enlaces.

@@ -6,6 +6,10 @@ NOVIDADES
 
 - Confirmação ao marcar todas as conversas como lidas. O comando pergunta agora antes, com Não como predefinição, para que um Alt seguido de Enter por engano não marque tudo como lido, também no telemóvel. A pergunta tem a opção "Não mostrar novamente": assinalada e confirmada com Sim, as vezes seguintes marcam diretamente. Para voltar a ser perguntado, use a opção "Pedir confirmação ao marcar todas as conversas como lidas", no separador Interface do utilizador das Definições.
 
+CORREÇÕES
+
+- A opção "Mostrar mensagens do dia anterior com data omitida (ontem)", nas Definições, muda agora de idioma juntamente com o resto quando troca a língua do programa. Antes continuava no idioma anterior até fechar e voltar a abrir as Definições.
+
 V1.1.1.0
 
 Esta versão é sobre manter a sua conta ligada. O WinZapp passou a guardar uma cópia de segurança do perfil do navegador — que é onde a sua ligação ao WhatsApp fica realmente guardada — e a restaurá-la sozinho quando ela deixa de ser aceite, avisando o que aconteceu. Com ela vieram as correções das situações que quebravam a sessão e faziam o programa pedir para emparelhar de novo: desligar o computador, suspender e retomar, e o próprio programa a reiniciar a ligação. Chegaram também a verificação ortográfica no campo de mensagem e as ações sobre ligações.
