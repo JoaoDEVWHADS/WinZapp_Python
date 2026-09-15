@@ -324,6 +324,11 @@ class _RecoveryStub:
         self.db = _MetadataDB()
         self._broken = broken
 
+    def _is_pairing_dialog_active(self):
+        # _restore() now refuses to copy over a re-pairing that began while
+        # it was stalled (issue #203 review); nobody is pairing here.
+        return False
+
     def browser_payload_blocks_startup(self):
         return self._broken
 

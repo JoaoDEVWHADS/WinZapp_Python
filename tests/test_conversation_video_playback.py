@@ -370,11 +370,12 @@ class _ActivationStub:
     )
     _do_activate_message                        = ConversationsPanel._do_activate_message
     activate_message                            = ConversationsPanel.activate_message
+    _message_own_links                          = ConversationsPanel._message_own_links
 
     def __init__(self, sorted_messages, settings=None):
         self.main_window = _FakeSettingsHolder(settings or {})
         self._sorted_messages = sorted_messages
-        self._render_message_line = lambda msg: ""
+        self._render_message_line = lambda msg, index=None, total=None, include_quoted_preview=True: ""
         self._extract_links = lambda rendered: []
         self._extract_mentions = lambda msg: []
         self._update_links_panel = lambda links: None

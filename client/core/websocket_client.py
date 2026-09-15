@@ -1,4 +1,3 @@
-import functools
 import logging
 import threading
 import time
@@ -180,23 +179,37 @@ class WebSocketClient:
     # window, which is the property that matters for an account that was
     # banned over code volume.
     #
-    # The profile repair adds its own, separate allowance:
-    # _recover_suspect_profile() zeroes this counter when a restore actually
-    # succeeds (main.py), because the burst that triggered it was minted by
-    # the profile now moved aside. That zeroing happens on the restore
-    # thread, with close-session, wait_for_profile_release and a copy of a
-    # few hundred MB between the trigger and it — so it is NOT one event
-    # later, and writing it as if it were understates the one number an
-    # account was banned over. By the time it lands, 1 or 2 codes have
-    # usually been counted already and those are not given back; what the
-    # reset does hand back is the run-up, since the count towards this
-    # constant starts again from 0. Bounded, because the branch that starts
-    # the restore has already passed both gates and every route out of it
-    # returns above the halt: the reset can only push the *dialog* out by up
-    # to _REPAIR_DIALOG_CONFIRM_EVENTS - 1 further codes, and the dialog then
-    # resets the counter itself (_reset_unattended_qr_guards()). See
-    # TestTheProfileIsRepairedBeforeAskingTheUserToPair for both orderings,
-    # and tests/test_profile_recovery_wiring.py::
+    # The profile repair adds its own, separate allowance, and since issue
+    # #203 it is spent BEFORE this counter's gates rather than after them:
+    # the repair is tried on the first unattended code whenever a restore
+    # would really start (_profile_restore_worth_trying(), main.py), inside
+    # the startup grace or not, and only the dialog still waits for
+    # confirmation. Its cost in codes, written down because an account was
+    # banned over that number:
+    #
+    #   * one code starts the restore;
+    #   * codes during the restore's flight are not counted and trigger
+    #     nothing — the restore has already closed the session, and
+    #     _handle_unattended_qr() explains why they are stragglers, three or
+    #     four in the worst case (about 81 s of close, release wait, kill and
+    #     settle, against a ~20-30 s rotation), and never for longer than
+    #     _RESTORE_FLIGHT_IGNORE_SECONDS;
+    #   * after it, a successful restore zeroes this counter on the restore
+    #     thread (the burst was minted by the profile now moved aside) and a
+    #     failed one leaves it where it stood, so the flood that follows is
+    #     bounded by exactly the ceilings a flood with nothing to restore has
+    #     — the dialog on the _REPAIR_DIALOG_CONFIRM_EVENTS'th counted code
+    #     outside the grace, the halt on the _UNATTENDED_QR_LIMIT'th inside
+    #     it — and cannot start a second restore, since the recovery stays
+    #     latched until a connection proves the snapshot good.
+    #
+    # A restore that fails on an unconfirmed reading does not open the
+    # dialog (_repair_gave_up() asks the gates again): the refused profile is
+    # put back and its next code confirms. See
+    # tests/test_qrcode_auto_repair_dialog.py::
+    # TestTheProfileIsRepairedBeforeAskingTheUserToPair::
+    # test_after_the_restore_the_flood_keeps_its_ceiling_and_no_more, and
+    # tests/test_profile_recovery_wiring.py::
     # TestASuccessfulRestoreGivesBackTheQrFloodAllowance for the production
     # line the fake there stands in for.
     #
@@ -219,10 +232,14 @@ class WebSocketClient:
     # (`if mw._recover_suspect_profile(...): return`, above the halt), and
     # landing on the very event where `seen` reached _UNATTENDED_QR_LIMIT
     # stopped the halt being evaluated at all rather than postponing it,
-    # because that test is `==` and `seen` only grows. Fixed in #209 by
-    # moving the re-arm to the probe-agreeing branch; the seam this paragraph
-    # describes is closed, and the paragraph is kept because the shape is
-    # worth recognising if either half is ever moved again.
+    # because that test was `==` and `seen` only grows. Fixed in #209 by
+    # moving the re-arm to the probe-agreeing branch. Issue #203 then opened a
+    # second route of the same shape (a restore started on the limit's own
+    # code and failed) and closed the whole class instead of that one route:
+    # the halt now reads `seen >= limit` and its own latch, so no early
+    # return can withhold it past the next code. The paragraph is kept
+    # because the shape is worth recognising if the halt test is ever
+    # touched again.
     #
     # Note what did NOT move with it: the generation ladder
     # (_profile_recovery_generation, which chooses WHICH snapshot a restore
@@ -238,6 +255,23 @@ class WebSocketClient:
     # measured 11 s between a restored profile connecting and a superseded
     # session start force-killing its browser.
     _REPAIR_DIALOG_CONFIRM_EVENTS = 2
+
+    # How long _handle_unattended_qr() leaves codes to a profile restore in
+    # flight before counting them again. A restore closes the session first and
+    # kills whatever still holds the profile within about 81 s at worst:
+    # close-session's 10 s timeout; a 20 s release deadline whose last profile
+    # scan (_chrome_pids_owning_session, 15 s timeout) can overrun it, 35 s;
+    # the 15 s scan before the kill; and the post-kill settle, whose 5 s
+    # deadline is only checked after a scan of up to 15 s and can start a
+    # second one, ~20.5 s. A code arriving after more than twice that means the
+    # browser survived all of it. taskkill itself has no timeout, which no
+    # figure here can bound — that is what the ceiling below is for. The copy
+    # itself can take longer than this on a slow disk; that does not matter,
+    # because a restore
+    # that got that far has no browser left to mint codes. Only a restore that
+    # is slow AND still producing codes is ever counted — and for that one the
+    # flood ceiling is worth more than protecting the copy.
+    _RESTORE_FLIGHT_IGNORE_SECONDS = 180
 
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
@@ -989,6 +1023,15 @@ class WebSocketClient:
         unlink-confirming path in this codebase accepts either — see
         _REPAIR_DIALOG_CONFIRM_EVENTS, which requires this one too.
 
+        Both of those gates hold the DIALOG, and nothing else (issue #203).
+        Repairing the profile comes first and does not wait for them: a code
+        already proves the stored session failed to restore, and the earliest
+        code is the last moment a restore can still help, since the halt's
+        latch keeps even a restored profile from starting. The repair is tried
+        early only when a restore would really start, because with nothing
+        restorable it announces a dead end of its own; and codes arriving
+        while it runs are left to it. See the branches below.
+
         Stopping the churn is the part whose absence got an account banned.
         `autoClose`/`deviceSyncTimeout` are pinned to 0 (client/api_patches/
         src/config.ts) so WPPConnect never closes a code-producing session on
@@ -1014,14 +1057,118 @@ class WebSocketClient:
             # is already back to 0 — _update_ui() zeroes it for the same
             # condition before any branch runs.
             return
+        restore_overdue = False
+        if getattr(mw, "_profile_restore_in_flight", False):
+            started = getattr(mw, "_profile_restore_started_at", 0.0) or 0.0
+            restore_overdue = (started > 0 and time.monotonic() - started
+                               >= self._RESTORE_FLIGHT_IGNORE_SECONDS)
+        if getattr(mw, "_profile_restore_in_flight", False) and not restore_overdue:
+            # A profile restore owns this session right now, and it is already
+            # doing everything the two outcomes below exist for — so this code
+            # gets neither, and is not counted.
+            #
+            # It is already the halt. _recover_suspect_profile()'s thread opens
+            # with /close-session and then wait_for_profile_release(), which
+            # kills whatever still holds the profile once its 20 s deadline
+            # passes; and for the whole flight check_wa_connection_http() will
+            # not issue /start-session, which is the only thing the halt's
+            # latch adds. That last part rests on _profile_restore_in_flight
+            # itself, not only on _recovery_restart_active: the latter has a
+            # second owner (the power-resume restart) whose finally can clear it
+            # mid-restore, so the auto-start block, the self-inflicted-teardown
+            # check and that restart's own loop all read this flag too (the
+            # review of issue #203 found the overlap). A restore stuck in its
+            # copy has no browser left to mint codes with. What can still
+            # arrive are stragglers from the session being closed: about 81 s
+            # in the worst case (see _RESTORE_FLIGHT_IGNORE_SECONDS), so three
+            # or four codes at WhatsApp's ~20-30 s rotation — more often none,
+            # since a close-session that answers stops the page at once.
+            #
+            # And each outcome would do harm here. The halt latches
+            # _qr_flood_halted, which blocks /start-session until the user
+            # re-pairs — a profile restored a few seconds later would never be
+            # started. The dialog would put the user one click from pairing a
+            # new session over the very userDataDir restore_snapshot() may
+            # still be writing, which core/profile_recovery.py calls
+            # manufacturing the corruption it recovers from. That was the
+            # KNOWN GAP recorded here before issue #203 made the in-flight
+            # state explicit.
+            #
+            # Not counted, because a counted-but-skipped event is exactly how
+            # a halt stops being evaluated (see the `>=` below). The count
+            # resumes from where it stood if the restore fails, and from 0 if
+            # it succeeds (the restore thread resets it).
+            #
+            # Bounded by _RESTORE_FLIGHT_IGNORE_SECONDS: a restore still in
+            # flight past that, with codes still arriving, means the close and
+            # the kill both failed to stop the browser, and an unbounded code
+            # stream is the one outcome worse than either of the above.
+            logging.info("[on_qrcode_update] code arrived while a profile "
+                         "restore is closing this session — ignored.")
+            return
+        if restore_overdue:
+            logging.warning(
+                "[on_qrcode_update] a profile restore has been in flight for "
+                "over %ds and codes are still arriving — counting them towards "
+                "the flood ceiling again.", self._RESTORE_FLIGHT_IGNORE_SECONDS)
         seen = getattr(mw, "_unattended_qr_events", 0) + 1
         mw._unattended_qr_events = seen
         paired = bool(mw.settings.get("privateinfo", {}).get("paired"))
-        if (
+        confirmed = (not self._qr_within_startup_grace()
+                     and seen >= self._REPAIR_DIALOG_CONFIRM_EVENTS)
+        if (paired
+                and not restore_overdue
+                and not getattr(mw, "_auto_repair_dialog_shown", False)
+                and not confirmed
+                and mw._profile_restore_worth_trying()):
+            # Recover early, confirm late (issue #203). The startup grace and
+            # _REPAIR_DIALOG_CONFIRM_EVENTS were written against the
+            # CONCLUSION — "you have to pair again", which costs the user their
+            # history — not against the observation. Any code at all already
+            # proves the observation: wa-js mints one only while unpaired and
+            # unauthenticated, so the stored session has failed to restore (the
+            # reasoning is written out in _halt_unattended_qr_session()'s
+            # docstring, main.py). Holding the repair behind both gates meant a
+            # flood spent entirely inside the grace — a fresh boot on a profile
+            # WhatsApp had just refused — ran out _UNATTENDED_QR_LIMIT and hit
+            # the halt with a good snapshot on disk nothing ever looked at, and
+            # the halt's latch then kept even a later restore from starting.
+            #
+            # Gated on _profile_restore_worth_trying() and not merely on a
+            # snapshot existing, because the gates still guard every
+            # user-visible conclusion, and _recover_suspect_profile() reaches
+            # one on its own when it cannot restore: the "profile corrupted"
+            # sound, speech and modal, plus the latch and a rung of the
+            # generation ladder. An install whose last shutdown was killed
+            # rather than closed — routine, per CLAUDE.md — would otherwise get
+            # that modal seconds after opening. So early, only a restore that
+            # will really start; the confirmed branch below still calls the
+            # recovery for everything else.
+            #
+            # Cost in codes requested from WhatsApp: the restore starts on the
+            # first code instead of on the _REPAIR_DIALOG_CONFIRM_EVENTS'th
+            # outside the grace or never inside it, and closes the session
+            # itself. Codes during the flight are uncounted stragglers (see
+            # above). After it, the flood has its full ceiling again and no
+            # more: a restore that succeeds zeroes the counter, one that fails
+            # does not, and neither can start a second restore, since the
+            # recovery latches until a connection proves the snapshot good.
+            if mw._recover_suspect_profile(
+                    reason="WPPConnect minted a pairing code for a paired "
+                           "install — the stored session could not be restored",
+                    on_give_up=self._repair_gave_up):
+                return
+            # Nothing started after all — the disk changed between the check
+            # and the recovery's own reading of it, or the recovery refused on
+            # a browser that cannot start (practically unreachable here: a code
+            # means a browser did start, and that refusal announces itself).
+            # Not confirmed, so no dialog; the halt below still gets its say on
+            # this very event.
+        elif (
             paired
+            and not restore_overdue
             and not getattr(mw, "_auto_repair_dialog_shown", False)
-            and not self._qr_within_startup_grace()
-            and seen >= self._REPAIR_DIALOG_CONFIRM_EVENTS
+            and confirmed
         ):
             # Try to repair the profile before sending the user off to pair by
             # hand. This event is the *earliest and strongest* evidence that
@@ -1055,65 +1202,42 @@ class WebSocketClient:
             # back when it gives up — against a re-pairing saved every time the
             # profile was the actual fault.
             #
-            # play_sound is bound here rather than left to its default
-            # because wx.CallAfter(on_give_up) invokes this with no
-            # arguments: the restore's give-up path queues it directly behind
-            # wx.CallAfter(self._announce_profile_beyond_repair), whose very
-            # first statement is that same error_sound.play() — and whose
-            # own MessageBox then pumps the queue, so this callback runs from
-            # inside it. Two plays milliseconds apart on one stream are not
-            # two cues: sound_lib restarts it and they are heard as a single
-            # truncated blip, the same defect the post-halt route below is
-            # written around.
+            # Usually the recovery has already been tried by the early branch
+            # above, on this flood's first code, and this call is refused by
+            # its latch; it still runs because it is also what announces a
+            # profile with nothing restorable, which the early branch
+            # deliberately leaves to this confirmed reading.
             if mw._recover_suspect_profile(
                     reason="WPPConnect minted a pairing code for a paired "
                            "install — the stored session could not be restored",
-                    on_give_up=functools.partial(self._show_repair_dialog,
-                                                 play_sound=False)):
+                    on_give_up=self._repair_gave_up):
                 return
             # Nothing was started (no snapshot, or the recovery budget is
             # already spent), so a human is the only way back — and that is
-            # the judgment, not the observation.
-            #
-            # KNOWN GAP, inherited and not introduced here: "already spent"
-            # also covers a restore still IN FLIGHT. _recover_suspect_profile()
-            # latches at the top of the method, before it has even looked for a
-            # snapshot, so the next code ~20-30s later is refused with False and
-            # lands right here, opening the pairing dialog on top of a
-            # restore_snapshot() that may still be writing into
-            # userDataDir/<session>. If the user pairs from that dialog,
-            # _reset_unattended_qr_guards() clears _qr_flood_halted and
-            # /start-session launches Chrome over the directory being written —
-            # precisely what core/profile_recovery.py forbids: restoring under a
-            # running browser is "manufacturing the exact corruption this
-            # recovers from".
-            # Closing it means exposing a "restore in flight" state and holding
-            # _show_repair_dialog() on it, which is a production change of its
-            # own; see tests/test_qrcode_auto_repair_dialog.py::
-            # TestTheProfileIsRepairedBeforeAskingTheUserToPair for both
-            # orderings, the losing one pinned as today's real behaviour.
+            # the judgment, not the observation. "Already spent" no longer
+            # covers a restore still in flight: those codes return at the top
+            # of this method, before anything is counted.
             self._show_repair_dialog()
             return
-        if seen == self._UNATTENDED_QR_LIMIT:
+        if seen >= self._UNATTENDED_QR_LIMIT and not getattr(mw, "_qr_flood_halted", False):
             # Nobody is going to scan these, whichever case we are in. Reached
             # on the same event count regardless — deliberately NOT delayed by
             # the startup grace or the confirmation counter above, since the
             # ceiling on codes requested from WhatsApp is the half of this
             # protection an account was banned for not having.
             #
-            # `==`, not `>=`: _halt_unattended_qr_session() latches, so asking
-            # again on every later event changes nothing except filling the
-            # log. The counter is reset whenever somebody is pairing
-            # (_pairing_attended()) or the connection comes back, and those are
-            # also what clear the latch, so a second outage does get a second
-            # halt.
-            #
-            # One case does not hold that, and it is why `==` is the
-            # load-bearing half of the seam described on
-            # _REPAIR_DIALOG_CONFIRM_EVENTS: an event that returns above this
-            # line never evaluates the halt, and `seen` can only grow past the
-            # limit afterwards, so a skipped event withholds the halt for the
-            # rest of the flood rather than delaying it by one.
+            # `>=` with the latch, not `==`. It used to be `==`, on the grounds
+            # that _halt_unattended_qr_session() latches and asking again only
+            # fills the log — and that made every early `return` above a way
+            # to lose the halt outright rather than delay it, because `seen`
+            # only grows past the limit afterwards. That was issue #202's
+            # shape, and issue #203 added a second route of that kind (a
+            # restore started, or given up, on the limit's own event). Reading
+            # the latch instead makes the halt independent of which event it
+            # lands on: the first unattended code at or past the limit halts,
+            # and nothing after it does until something clears the latch — a
+            # human reaching the pairing UI, or the connection coming back,
+            # both of which also zero the counter.
             logging.warning(
                 "[on_qrcode_update] %d QR/pairing codes generated with no "
                 "pairing dialog on screen — closing the session so it stops "
@@ -1170,6 +1294,48 @@ class WebSocketClient:
             mw.restore_window()
             self.connect.show_connection_dial()
 
+    def _repair_gave_up(self):
+        """A profile restore started from _handle_unattended_qr() has failed.
+
+        Called by the restore thread through wx.CallAfter, with no arguments,
+        queued directly behind _announce_profile_beyond_repair() — so the user
+        has just been told the repair failed, with the error sound.
+
+        It used to open the pairing dialog unconditionally, which was right
+        while the restore could only start once both gates had passed. Issue
+        #203 moved the restore in front of them, and a callback that ignored
+        them would put the device_logged_out MessageBox and the pairing dialog
+        (whose Cancel quits the app) on screen seconds into a boot, on one
+        unconfirmed reading — the exact thing the gates are for. So they are
+        asked again here, at the moment of giving up.
+
+        Not opening it loses nothing. The failed restore has put the original
+        profile back, the health poll restarts the session within ~30 s, and
+        wa-js mints its next code on the same profile it refused; that code
+        reaches _handle_unattended_qr() with the recovery latched, and goes on
+        to the dialog or to the halt exactly as a flood with nothing to restore
+        does.
+
+        play_sound=False because _announce_profile_beyond_repair() has just
+        played that very error_sound object and its MessageBox pumps the queue
+        this callback sits in: two plays milliseconds apart on one stream are
+        heard as a single truncated blip, not as two cues (the same defect the
+        post-halt route in _handle_unattended_qr() is written around).
+        """
+        mw = self.main_window
+        if (not bool(mw.settings.get("privateinfo", {}).get("paired"))
+                or getattr(mw, "_auto_repair_dialog_shown", False)
+                or self._pairing_attended()):
+            return
+        seen = getattr(mw, "_unattended_qr_events", 0)
+        if (self._qr_within_startup_grace()
+                or seen < self._REPAIR_DIALOG_CONFIRM_EVENTS):
+            logging.info("[profile-recovery] restore failed on an unconfirmed "
+                         "reading (%d code(s)) — waiting for the next code "
+                         "before sending the user to pair.", seen)
+            return
+        self._show_repair_dialog(play_sound=False)
+
     def _show_repair_dialog(self, play_sound=True):
         """Tell a previously-paired user their session needs re-pairing, and
         put the pairing dialog in front of them straight away.
@@ -1181,10 +1347,13 @@ class WebSocketClient:
         not a single one — and differ only in what the profile repair then
         did with it: called inline when _recover_suspect_profile() refused to
         start one (no snapshot, or the once-per-launch budget already spent),
-        and handed to it as on_give_up for the restore that started and then
-        failed. The third runs when the grace/counter withheld those two and
-        the flood then spent the entire _UNATTENDED_QR_LIMIT inside that
-        window, which is a stronger reading still.
+        and through _repair_gave_up() for a restore that started and then
+        failed — which may have started before the gates (issue #203), so
+        that route checks them again at the moment of giving up rather than
+        trusting the moment the restore began. The third runs when the
+        grace/counter withheld those two and the flood then spent the entire
+        _UNATTENDED_QR_LIMIT inside that window, which is a stronger reading
+        still.
 
         The last two run behind something that has already played error_sound
         — _announce_profile_beyond_repair() on the give-up route, the halt on

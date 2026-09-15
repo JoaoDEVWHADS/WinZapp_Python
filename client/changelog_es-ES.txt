@@ -1,5 +1,7 @@
 V1.1.2.0
 
+Esta versión corrige situaciones en las que WinZapp pedía vincular de nuevo sin necesidad, y añade opciones a las confirmaciones de vaciar una conversación y de marcar todas las conversaciones como leídas.
+
 NOVEDADES
 
 - Elegir si los mensajes destacados se conservan al vaciar una conversación. La confirmación de vaciar ahora incluye la opción "Conservar los mensajes destacados", marcada por defecto, igual que en WhatsApp Web. Si la desmarcas, los destacados se borran junto con el resto, también en tu teléfono. Sirve para vaciar una conversación, varias seleccionadas o una archivada.
@@ -7,6 +9,8 @@ NOVEDADES
 - Confirmación al marcar todas las conversaciones como leídas. El comando ahora pregunta antes, con No por defecto, para que un Alt seguido de Enter por error no marque todo como leído, también en tu teléfono. La pregunta tiene la opción "No volver a mostrar": marcada y confirmada con Sí, las siguientes veces se marca directamente. Para que vuelva a preguntar, usa la opción "Pedir confirmación al marcar todas las conversaciones como leídas" en la pestaña Interfaz de usuario de Configuración.
 
 CORRECCIONES
+
+- Cuando WhatsApp rechazaba la conexión justo al abrir el programa, la copia de seguridad del perfil nunca llegaba a restaurarse: si los códigos de vinculación empezaban a llegar en los primeros segundos, WinZapp cerraba la sesión y pedía vincular de nuevo aunque hubiera una copia buena guardada. Ahora restaura la copia en cuanto aparece el primer código, y solo pide vincular cuando la restauración no lo resuelve.
 
 - Cambiar el idioma en Configuración y pulsar Aplicar ahora traduce todas las opciones. Algunas seguían en el idioma anterior hasta cerrar y volver a abrir Configuración, como "Al abrir una conversación, mostrar número de mensajes hasta" y "Mensajes a saltar al presionar Av Pág / Re Pág".
 

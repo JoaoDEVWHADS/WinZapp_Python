@@ -134,6 +134,9 @@ class _FakeMainWindow:
         self._WA_STARTUP_GRACE_SECONDS = MainWindow._WA_STARTUP_GRACE_SECONDS
         self._wa_startup_time = time.time() - (self._WA_STARTUP_GRACE_SECONDS * 10)
 
+    def _profile_restore_worth_trying(self):
+        return bool(self.profile_restore_available)
+
     def _recover_suspect_profile(self, reason=None, on_give_up=None):
         # on_give_up fires only when a restore was started and then failed;
         # a False return means nothing was started. See the real method.
@@ -164,6 +167,7 @@ class _Stub:
     _handle_unattended_qr = WebSocketClient._handle_unattended_qr
     _qr_within_startup_grace = WebSocketClient._qr_within_startup_grace
     _show_repair_dialog = WebSocketClient._show_repair_dialog
+    _repair_gave_up = WebSocketClient._repair_gave_up
     _UNATTENDED_QR_LIMIT = WebSocketClient._UNATTENDED_QR_LIMIT
     _REPAIR_DIALOG_CONFIRM_EVENTS = WebSocketClient._REPAIR_DIALOG_CONFIRM_EVENTS
     _extract_qr_payload = staticmethod(WebSocketClient._extract_qr_payload)

@@ -51,7 +51,9 @@ class TestClosedDuringShutdownSkipsAutoStart:
         adds a third condition, it does not replace either existing one."""
         branch = _closed_branch_source()
         assert "_is_pairing_dialog_active" in branch
-        assert "_recovery_restart_active" in branch
+        # Read through _session_restart_owned(), which also covers a profile
+        # restore whose shared flag another restart cleared (issue #203).
+        assert "_session_restart_owned()" in branch
 
     def test_the_shutting_down_check_actually_skips_the_start_session_call(self):
         """Guard against the guard being present but not actually wired to

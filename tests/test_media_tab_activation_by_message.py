@@ -63,6 +63,7 @@ class _Panel:
     activate_message = ConversationsPanel.activate_message
     _do_activate_message = ConversationsPanel._do_activate_message
     _extract_links = ConversationsPanel._extract_links
+    _message_own_links = ConversationsPanel._message_own_links
 
     def __init__(self, in_list=()):
         # Deliberately NOT the messages under test: the whole point is that
@@ -92,7 +93,7 @@ class _Panel:
     def _show_message_text_popup(self, msg):
         self.popups.append(msg)
 
-    def _render_message_line(self, msg):
+    def _render_message_line(self, msg, index=None, total=None, include_quoted_preview=True):
         return (msg.get("message") or {}).get("conversation", "")
 
 

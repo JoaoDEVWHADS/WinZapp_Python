@@ -42,15 +42,51 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          # uv itself, pinned like every action: "latest" would let a release
+          # build change toolchains on the day uv ships.
+          version: "0.12.13"
+
       - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip --quiet
-          pip install -r requirements.txt --quiet
-          pip install -r requirements-dev.txt --quiet
+        run: uv sync --locked
 
       # client/api/ não existe aqui (é git-ignored e não há clone da
       # WPPConnect), então os testes que comparam as duas cópias dos patches se
       # pulam sozinhos — vide test_api_patches_in_sync.py. Isso é esperado: a
       # deriva que eles pegam só é detectável numa máquina de dev.
       - name: Run pytest
-        run: pytest --run-wx-gui
+        run: uv run pytest --run-wx-gui
+
+  # O fluxo venv + pip continua suportado ao lado do uv: checkouts antigos,
+  # forks e scripts instalam só `requirements.txt`. O job `test` acima usa uv,
+  # então nada exercitaria esse caminho — um pin que o pip não consegue
+  # resolver ou instalar no Windows passaria despercebido até alguém de fora
+  # reclamar. test_requirements_in_sync.py garante que as duas listas dizem o
+  # mesmo; este job garante que a do pip de fato instala e importa.
+  # Só no CI de PR, de propósito: alpha-release.yml e release.yml não precisam
+  # dele para decidir se um build vale a pena.
+  pip-compat:
+    name: venv + pip install
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install from requirements.txt into a venv
+        run: |
+          python -m venv venv
+          venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+          venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt --quiet
+
+      - name: Import what the app and the build need
+        run: venv\Scripts\python.exe -c "import wx, accessible_output2, sound_lib, cryptography, aiosqlite, socketio, PyInstaller, pytest_asyncio; print('ok')"
+
+      - name: Run the dependency and build-environment checks under the venv
+        run: venv\Scripts\python.exe -m pytest tests/test_requirements_in_sync.py tests/test_uv_build_architecture.py --run-wx-gui -q

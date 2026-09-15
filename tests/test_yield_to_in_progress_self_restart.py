@@ -28,6 +28,7 @@ from main import MainWindow
 
 class _Stub:
     _yield_to_in_progress_self_restart = MainWindow._yield_to_in_progress_self_restart
+    _session_restart_owned = MainWindow._session_restart_owned
     _SELF_RESTART_YIELD_SECONDS = 0.3
     _SELF_RESTART_YIELD_POLL_SECONDS = 0.02
 

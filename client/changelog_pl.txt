@@ -1,5 +1,7 @@
 V1.1.2.0
 
+Ta wersja poprawia sytuacje, w których WinZapp niepotrzebnie prosił o ponowne parowanie, i dodaje opcje do potwierdzeń czyszczenia czatu oraz oznaczania wszystkich czatów jako przeczytane.
+
 NOWOŚCI
 
 - Wybór, czy wiadomości oznaczone gwiazdką zostają po wyczyszczeniu czatu. Potwierdzenie czyszczenia ma teraz opcję „Zachowaj wiadomości oznaczone gwiazdką", domyślnie zaznaczoną, tak jak w WhatsApp Web. Po jej odznaczeniu te wiadomości są usuwane razem z resztą, także na telefonie. Dotyczy czyszczenia jednego czatu, kilku zaznaczonych lub zarchiwizowanego.
@@ -7,6 +9,8 @@ NOWOŚCI
 - Potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane. Polecenie najpierw pyta, z domyślną odpowiedzią Nie, aby przypadkowe naciśnięcie Alt, a potem Enter, nie oznaczyło wszystkiego jako przeczytane, także na telefonie. Pytanie ma opcję „Nie pokazuj ponownie": zaznaczona i potwierdzona przyciskiem Tak sprawia, że kolejne razy oznaczają wszystko od razu. Aby pytanie wróciło, użyj opcji „Pytaj o potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane" na karcie Interfejs użytkownika w Ustawieniach.
 
 POPRAWKI
+
+- Gdy WhatsApp odrzucał połączenie tuż po uruchomieniu programu, kopia zapasowa profilu przeglądarki w ogóle nie była przywracana: jeśli kody parowania zaczynały napływać w pierwszych sekundach, WinZapp zamykał sesję i kazał sparować konto od nowa, mimo że zapisana była dobra kopia. Teraz przywraca kopię, gdy tylko pojawi się pierwszy kod, i prosi o parowanie dopiero wtedy, gdy przywrócenie nie pomoże.
 
 - Zmiana języka w Ustawieniach i naciśnięcie Zastosuj tłumaczy teraz wszystkie opcje. Niektóre pozostawały w poprzednim języku aż do zamknięcia i ponownego otwarcia Ustawień, na przykład „Przy otwieraniu czatu pokaż maksymalnie tyle wiadomości" i „Liczba wiadomości pomijanych klawiszami Page Up / Page Down".
 

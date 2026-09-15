@@ -1,3 +1,12 @@
+# Python dependencies for the pip/venv workflow:
+#   python -m venv venv
+#   venv\Scripts\pip install -r requirements.txt -r requirements-dev.txt
+#
+# uv users run `uv sync` instead, which reads pyproject.toml and uv.lock. Both
+# routes are supported and must install the same versions, so a pin changes in
+# both places (then `uv lock`); tests/test_requirements_in_sync.py fails when
+# they disagree. This file still carries the test/build tools (pytest,
+# pyinstaller...) because scripts and forks install only it.
 accessible-output2==0.17
 aiosqlite==0.22.1
 altgraph==0.17.5

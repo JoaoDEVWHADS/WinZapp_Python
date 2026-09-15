@@ -263,3 +263,33 @@ class TestAutoRestartGraceWindow:
 
         assert calls == []
         assert s._auto_restart_grace_active() is True
+
+
+class TestItDoesNotStartOverAProfileRestore:
+    """A profile restore can begin during this restart's close or release wait
+    (issue #203 review). Starting then opens Chrome over the profile being
+    copied back, so the in-flight flag is read right before start-session."""
+
+    def test_start_session_is_skipped_when_a_restore_began_meanwhile(self, monkeypatch):
+        calls = []
+
+        def _fake_post(url, json=None, headers=None, timeout=None, **kw):
+            calls.append(url)
+
+            class _Resp:
+                status_code = 200
+            return _Resp()
+
+        monkeypatch.setattr("main.requests.post", _fake_post)
+        s = _Stub()
+        s._profile_restore_in_flight = False
+
+        def release(session_name, timeout=20.0):
+            s._profile_restore_in_flight = True
+            return True
+
+        s.wait_for_profile_release = release
+        s._restart_wpp_session()
+
+        assert calls == ["http://127.0.0.1:6300/api/test-token/close-session"]
+        assert s._restarting_wpp_session is False

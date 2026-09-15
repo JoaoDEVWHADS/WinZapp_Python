@@ -26,22 +26,25 @@ Steps (onefile):
   2. Compile client with PyInstaller --onefile -> dist/WinZapp.exe
   3. Create portable dist/WinZapp.zip from the single .exe
 
-Before running this script you must prepare:
-  venv/  - activate the venv and install pyinstaller:
-             venv\Scripts\pip install pyinstaller
+Before running this script, install its Python dependencies, either way:
+  uv sync
+  -- or --
+  python -m venv venv
+  venv\Scripts\pip install -r requirements.txt -r requirements-dev.txt
 
-  client/node/  - download the Windows x64 portable Node.js zip from
-                  https://nodejs.org/dist/ (node-vXX.X.X-win-x64.zip)
-                  and extract its contents into client/node/.
-
-  client/api/ - run setup_api.py, then inside client/api/ run:
-                  npm install
-                  npm run build
-                Verify: client/api/dist/server.js must exist.
+The script downloads the checksum-verified portable Node.js runtime (replacing
+a client/node/ that is not exactly the homologated version) and runs
+setup_api.py automatically when client/api/dist/server.js is absent.
 
 Usage:
-  venv\Scripts\python.exe build.py                  (onedir, default)
-  venv\Scripts\python.exe build.py --onefile         (single-file exe)
+  uv run build-installer                  (onedir, default)
+  uv run build-onefile                    (single-file exe)
+  venv\Scripts\python.exe build.py        (onedir, default)
+  venv\Scripts\python.exe build.py --onefile
+
+Whichever interpreter starts it, the build runs under the one
+winzapp_tools.build_env.select_build_python() picks: WINZAPP_VENV, then the
+running virtual environment, then venv\ or .venv\ in the repository.
 """
 
 import os
@@ -55,6 +58,10 @@ import io
 import glob
 import tarfile
 import urllib.request
+import importlib.util
+import sysconfig
+import hashlib
+import tempfile
 
 # -- Paths -------------------------------------------------------------------
 
@@ -63,14 +70,55 @@ CLIENT_DIR    = os.path.join(ROOT_DIR, "client")
 INSTALLER_DIR = os.path.join(ROOT_DIR, "installer")
 BUILD_DIR     = os.path.join(ROOT_DIR, "build")
 DIST_DIR      = os.path.join(ROOT_DIR, "dist")
-VENV_DIR      = os.environ.get("WINZAPP_VENV") or os.path.join(ROOT_DIR, "venv")
-
 # External pre-built assets
 NODE_DIR      = os.path.join(CLIENT_DIR, "node")
 API_DIR       = os.path.join(CLIENT_DIR, "api")
 
-PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
-PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+from winzapp_tools.build_env import (  # noqa: E402
+    hand_over_to_build_python,
+    portable_node_needs_replacing,
+    portable_node_version,
+)
+
+# Before uv, build.py hardcoded venv\ and worked from any interpreter. Now it
+# builds with the one running it, so a bare `python build.py` is handed to
+# venv\ (or .venv\) here — before anything below reads site-packages.
+if __name__ == "__main__":
+    hand_over_to_build_python(__file__, ROOT_DIR)
+
+
+def _load_node_download_config():
+    """client/node_download_config.py, loaded by path.
+
+    Putting client/ on sys.path instead would let its modules (config,
+    version, updater...) shadow anything this script imports afterwards.
+    """
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location(
+        "_winzapp_node_download_config",
+        os.path.join(CLIENT_DIR, "node_download_config.py"),
+    )
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Keep the build on the exact portable runtime the application downloads for
+# end users. build-windows.yml reads the same file.
+_node_config  = _load_node_download_config()
+NODE_VERSION     = _node_config.NODE_VERSION
+NODE_FILENAME    = _node_config.NODE_FILENAME
+NODE_SHASUMS_URL = _node_config.NODE_SHASUMS_URL
+NODE_TOP_DIR     = _node_config.NODE_TOP_DIR
+NODE_URL         = _node_config.NODE_URL
+
+# The interpreter running this script is the build environment (see
+# _hand_over_to_build_python). Invoking PyInstaller as a module keeps it and
+# its installed packages in lockstep, under uv and venv alike.
+PYTHON_CMD      = sys.executable
+PYINSTALLER_CMD = [PYTHON_CMD, "-m", "PyInstaller"]
 GCC_CMD         = "gcc"
 WINDRES_CMD     = "windres"
 
@@ -97,7 +145,7 @@ PORTABLE_ZIP    = os.path.join(DIST_DIR,  "WinZapp.zip")
 
 SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
 
-SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
+SITE_PACKAGES = sysconfig.get_paths()["purelib"]
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
@@ -131,7 +179,7 @@ def _download_opus_dll():
 
     Uses the MSYS2 packages API to find the latest package URL, then downloads
     and extracts the DLL from the .tar.zst archive into client/lib/.
-    Requires the ``zstandard`` package (already in requirements.txt).
+    Requires the ``zstandard`` package (pyproject.toml / requirements.txt).
     """
     dst_dir = os.path.join(CLIENT_DIR, "lib")
     dst     = os.path.join(dst_dir, "libopus-0.dll")
@@ -139,10 +187,10 @@ def _download_opus_dll():
     print("  [opus] libopus-0.dll not found locally — downloading from MSYS2...")
 
     try:
-        import zstandard  # already in requirements.txt
+        import zstandard  # pyproject.toml / requirements.txt
     except ImportError:
         print("  [WARN] 'zstandard' package not installed; cannot auto-download libopus.")
-        print("         Run: venv\\Scripts\\pip install zstandard")
+        print("         Run: uv sync  (or: pip install -r requirements.txt)")
         return None
 
     # Query the MSYS2 package API to discover the download URL for the latest
@@ -407,19 +455,98 @@ def _resync_api_patches(out_of_sync):
     run([PYTHON_CMD, os.path.join(ROOT_DIR, "setup_api.py")])
 
 
+def _download_portable_node():
+    """Download and checksum-verify the runtime bundled into local builds."""
+    print(f"  [bootstrap] Downloading portable Node.js v{NODE_VERSION}...")
+    # ignore_cleanup_errors: a scanner briefly holding a file in the retired
+    # runtime must not fail a build whose Node.js was already replaced.
+    with tempfile.TemporaryDirectory(prefix="winzapp-node-", dir=ROOT_DIR,
+                                     ignore_cleanup_errors=True) as tmp:
+        archive = os.path.join(tmp, NODE_FILENAME)
+        checksums = os.path.join(tmp, "SHASUMS256.txt")
+        urllib.request.urlretrieve(NODE_URL, archive)
+        urllib.request.urlretrieve(NODE_SHASUMS_URL, checksums)
+
+        with open(checksums, encoding="utf-8") as fh:
+            expected = next(
+                (line.split()[0] for line in fh if line.rstrip().endswith(NODE_FILENAME)),
+                None,
+            )
+        with open(archive, "rb") as fh:
+            actual = hashlib.sha256(fh.read()).hexdigest()
+        if not expected or actual.lower() != expected.lower():
+            raise RuntimeError(
+                f"Node.js checksum mismatch for {NODE_FILENAME}: "
+                f"expected {expected or 'missing'}, got {actual}"
+            )
+
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(tmp)
+        extracted = os.path.join(tmp, NODE_TOP_DIR)
+        if not os.path.isfile(os.path.join(extracted, "node.exe")):
+            raise RuntimeError("Node.js archive did not contain node.exe")
+        retired = None
+        if os.path.isdir(NODE_DIR):
+            # Rename first: it fails atomically while node.exe is running,
+            # where rmtree would delete half the folder and then stop on the
+            # locked exe, leaving no working Node.js at all.
+            retired = os.path.join(tmp, "node-previous")
+            try:
+                os.rename(NODE_DIR, retired)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Could not replace {NODE_DIR} ({exc}). Is a WinZapp or "
+                    "node.exe started from it still running?"
+                ) from exc
+        try:
+            shutil.move(extracted, NODE_DIR)
+        except OSError:
+            # Put the previous runtime back rather than leave none at all.
+            if retired and not os.path.exists(NODE_DIR):
+                os.rename(retired, NODE_DIR)
+            raise
+    print(f"  [bootstrap] Portable Node.js ready at {NODE_DIR}")
+
+
+def ensure_build_assets():
+    """Prepare generated runtime inputs that a local build should not require manually."""
+    # Checked before the bootstrap below, which can spend minutes downloading
+    # Node.js and running setup_api.py only for check_tools() to then report
+    # that the onedir build was never possible on this machine.
+    if not ONEFILE:
+        missing_native = [t for t in (GCC_CMD, WINDRES_CMD) if shutil.which(t) is None]
+        if missing_native:
+            print(
+                f"\n[ERROR] {', '.join(missing_native)} not found in PATH. The installer "
+                "build needs MSYS2 UCRT64 (gcc + binutils); use --onefile to build "
+                "without them."
+            )
+            sys.exit(1)
+    installed = portable_node_version(os.path.join(NODE_DIR, "node.exe"))
+    if portable_node_needs_replacing(installed, NODE_VERSION):
+        if installed:
+            print(
+                f"  [bootstrap] client/node/ is Node.js v{installed}; "
+                f"the homologated runtime is v{NODE_VERSION}."
+            )
+        _download_portable_node()
+    if not os.path.isfile(os.path.join(API_DIR, "dist", "server.js")):
+        print("  [bootstrap] WPPConnect API is missing; running setup_api.py...")
+        run([PYTHON_CMD, os.path.join(ROOT_DIR, "setup_api.py")])
+
+
 # -- Step 1: Check tools and pre-built assets --------------------------------
 
 def check_tools():
     step("1/8  Checking required tools and pre-built assets")
     missing = []
 
-    if not os.path.isfile(PYINSTALLER_CMD):
+    if importlib.util.find_spec("PyInstaller") is None:
         missing.append(
-            f"pyinstaller  (expected at {PYINSTALLER_CMD})\n"
-            f"    Install with: venv\\Scripts\\pip install pyinstaller"
+            f"pyinstaller  (not installed for {PYTHON_CMD})\n"
+            "    Install with: uv sync\n"
+            "    or: pip install -r requirements.txt -r requirements-dev.txt"
         )
-    if not os.path.isfile(PYTHON_CMD):
-        missing.append(f"python  (expected at {PYTHON_CMD})")
 
     if not ONEFILE:
         for tool, name in [(GCC_CMD, "gcc"), (WINDRES_CMD, "windres")]:
@@ -446,11 +573,9 @@ def check_tools():
     api_main = os.path.join(API_DIR, "dist", "server.js")
     if not os.path.isfile(api_main):
         missing.append(
-            "client/api/dist/server.js  -- WPPConnect Server API not built.\n"
-            "    1. Run:  venv\\Scripts\\python.exe setup_api.py\n"
-            "    2. Then inside client/api/ run:\n"
-            "         npm install\n"
-            "         npm run build"
+            "client/api/dist/server.js  -- WPPConnect Server API not built,\n"
+            "    even after running setup_api.py. Check its output above, then\n"
+            "    retry with:  uv run setup-api  (or: python setup_api.py)"
         )
 
     if OPUS_DLL:
@@ -591,7 +716,7 @@ def pyinstaller_compile():
     ]
 
     cmd = [
-        PYINSTALLER_CMD,
+        *PYINSTALLER_CMD,
         "--onefile" if ONEFILE else "--onedir",
         "--windowed",
         "--name", "WinZapp",
@@ -907,6 +1032,8 @@ if __name__ == "__main__":
     mode_str = "onefile" if ONEFILE else "onedir"
     print(f"\nWinZapp Build Script — PyInstaller ({mode_str})")
     print("=" * 60)
+
+    ensure_build_assets()
 
     if ONEFILE:
         check_tools()

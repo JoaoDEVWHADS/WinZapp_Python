@@ -15,6 +15,7 @@ Configuration (via .env at the project root):
                             run.
 
 Usage:
+  uv run setup-api
   venv\\Scripts\\python.exe setup_api.py
 """
 
@@ -56,7 +57,9 @@ if _CLIENT_DIR not in sys.path:
 # These are FULL-FILE restores, so any upstream change to one of them is
 # silently discarded on the next setup run. That is the intended trade — our
 # copies are the patches — but it means a server bump has to be read as "what
-# did upstream change in these 28 files", not only "does it still build".
+# did upstream change in these files", not only "does it still build".
+# .github/scripts/audit_wpp_upgrade.py reads the two lists below and answers
+# exactly that question against a candidate tag.
 #
 # Audited at wppconnect-server 2.10.18 (2026-09-07). 2.10.17 added the Manager
 # dashboard and wired it into four of them (jest.config.js, src/index.ts,

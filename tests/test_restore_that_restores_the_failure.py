@@ -178,6 +178,11 @@ class _Stub:
     def wait_for_profile_release(self, session_name, timeout=20.0):
         return True
 
+    def _is_pairing_dialog_active(self):
+        # _restore() now refuses to copy over a re-pairing that began while
+        # it was stalled (issue #203 review); nobody is pairing here.
+        return False
+
     def browser_payload_blocks_startup(self):
         """A healthy browser by default. _recover_suspect_profile() refuses
         outright when the bundled Chromium cannot start, because a failed

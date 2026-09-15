@@ -47,8 +47,11 @@ on:
         type: number
         default: 14
 
+# No NODE_VERSION here: the Node.js a build bundles is the one
+# client/node_download_config.py names, read by the download step below. A
+# second copy of the number is how CI came to bundle 24.15.0 while the app
+# itself, and WPPConnect Server's exactly-pinned engines.node, said 22.22.2.
 env:
-  NODE_VERSION: "24.15.0"
   PYTHON_VERSION: "3.13"
 
 jobs:
@@ -104,12 +107,24 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          # uv itself, pinned like every action: "latest" would let a release
+          # build change toolchains on the day uv ships.
+          version: "0.12.13"
+
       # build.py expects client/node/node.exe — download the same portable ZIP
       # version that developers use and place it at the right path.
-      - name: Download portable Node.js v${{ env.NODE_VERSION }}
+      - name: Download portable Node.js
         shell: pwsh
         run: |
-          $version = "${{ env.NODE_VERSION }}"
+          $version = (python -c "import runpy; print(runpy.run_path('client/node_download_config.py')['NODE_VERSION'])").Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "Could not read NODE_VERSION from client/node_download_config.py (got '$version')"
+            exit 1
+          }
+          Write-Output "[INFO] Node.js v$version (client/node_download_config.py)"
           $zip = "node-v${version}-win-x64.zip"
           Invoke-WebRequest "https://nodejs.org/dist/v${version}/${zip}" -OutFile $zip -UseBasicParsing
           # nodejs.org publishes a signed checksum manifest for every release —
@@ -131,12 +146,8 @@ jobs:
           Expand-Archive $zip -DestinationPath . -Force
           Move-Item "node-v${version}-win-x64" "client\node"
 
-      - name: Create Python venv and install dependencies
-        run: |
-          python -m venv venv
-          venv\Scripts\pip install --upgrade pip --quiet
-          venv\Scripts\pip install -r requirements-dev.txt --quiet
-          venv\Scripts\pip install -r requirements.txt --quiet
+      - name: Install locked Python dependencies
+        run: uv sync --locked
 
       # Cache node_modules to avoid re-downloading hundreds of packages on every run.
       # setup_api.py preserves node_modules across clones (moves/restores the folder),
@@ -167,7 +178,7 @@ jobs:
       # @wppconnect-team/wppconnect + @wppconnect/wa-js pins in
       # client/api_patches/package.json move together, by hand, on purpose.
       - name: Set up WPPConnect Server
-        run: venv\Scripts\python.exe setup_api.py
+        run: uv run python setup_api.py
 
       # ensure_wpp_version() (client/main.py) compares an *installed*
       # api/package.json's version against the minimum baked into
@@ -229,7 +240,7 @@ jobs:
 
       # Runs all 8 build steps: PyInstaller → staging → C installer/uninstaller → ZIP.
       - name: Build WinZapp
-        run: venv\Scripts\python.exe build.py
+        run: uv run python build.py
 
       # Sanity-check that the portable ZIP contains the expected directories.
       # A missing sounds/ or lib/ entry means the staging step silently failed.

@@ -1,5 +1,7 @@
 V1.1.2.0
 
+This release fixes situations where WinZapp asked you to pair again when it did not need to, and adds options to the confirmations for clearing a chat and for marking all chats as read.
+
 WHAT'S NEW
 
 - Choose whether starred messages stay when clearing a chat. The clear confirmation now has a "Keep starred messages" option, ticked by default, just like WhatsApp Web. Unticked, starred messages are cleared along with everything else, on your phone too. It applies to clearing one chat, several selected chats or an archived one.
@@ -7,6 +9,8 @@ WHAT'S NEW
 - Confirmation before marking all chats as read. The command now asks first, with No as the default, so a stray Alt followed by Enter no longer marks everything as read, on your phone too. The question has a "Don't show again" option: ticked and confirmed with Yes, later requests mark everything straight away. To be asked again, use the "Ask for confirmation before marking all chats as read" option in the User Interface tab of Settings.
 
 FIXES
+
+- When WhatsApp refused the connection right after the app was opened, the backup copy of the browser profile was never restored: if pairing codes started arriving in the first few seconds, WinZapp closed the session and sent you to pair again even with a good copy saved. It now restores the copy as soon as the first code appears, and only asks you to pair when the restore does not help.
 
 - Changing the language in Settings and pressing Apply now translates every option. Some stayed in the previous language until Settings was closed and opened again, such as "When opening a chat, show up to this many messages" and "Messages to skip when pressing Page Up / Page Down".
 

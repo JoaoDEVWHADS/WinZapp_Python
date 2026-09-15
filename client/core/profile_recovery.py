@@ -566,9 +566,12 @@ class ProfileHealthTracker:
     So the real guarantee is a rate limit, not impossibility — before
     anything can be restored again, either the tracker counts
     FAILED_CYCLES_BEFORE_SUSPECT more failed start cycles at roughly a minute
-    each, or a fresh flood of codes clears both of _handle_unattended_qr()'s
-    gates (past the startup grace, _REPAIR_DIALOG_CONFIRM_EVENTS consecutive
-    readings) while _auto_repair_dialog_shown is still False. The QR route is
+    each, or a fresh unattended code reaches _handle_unattended_qr() while
+    _auto_repair_dialog_shown is still False. Since issue #203 that takes a
+    single code when a restorable snapshot exists — the repair no longer waits
+    for that method's gates (the startup grace, _REPAIR_DIALOG_CONFIRM_EVENTS
+    consecutive readings), only the dialog does — and a confirmed reading
+    otherwise. The QR route is
     the faster of the two and does not consult this tracker at all — that is
     the seam the paragraph above describes, seen from the other side. Being
     wrong in that direction costs a minute; being wrong in the other

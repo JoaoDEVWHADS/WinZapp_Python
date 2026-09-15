@@ -26,6 +26,7 @@ machine somebody is actually using.
 
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -93,19 +94,8 @@ class TestTheDefaultRunIsSafe:
         offenders = []
         for wf in workflows:
             for i, line in enumerate(wf.read_text(encoding="utf-8").splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                # Both shapes: `run: pytest ...` on one line, and a bare
-                # `pytest ...` inside a `run: |` block. Only the first exists
-                # today, but the block form is the natural way somebody adds
-                # a second command later, and a guard that misses it fails
-                # silently in the one direction that matters.
-                if stripped.startswith("run:"):
-                    command = stripped[len("run:"):].strip()
-                else:
-                    command = stripped
-                if not (command == "pytest" or command.startswith("pytest ")):
+                command = _pytest_command_in_workflow_line(line)
+                if command is None:
                     continue
                 if "--run-wx-gui" not in command:
                     offenders.append(f"{wf.name}:{i}: {command}")
@@ -113,6 +103,87 @@ class TestTheDefaultRunIsSafe:
             "these CI steps run pytest without --run-wx-gui, so the wxgui "
             f"tests are skipped there too and nothing covers them: {offenders}"
         )
+
+    def test_launcher_prefixes_do_not_blind_the_guard(self):
+        """`uv run pytest` used to read as "not pytest", which silently turned
+        the check above off the day CI moved to uv."""
+        for line in (
+            "pytest",
+            "pytest -q",
+            "uv run pytest -q",
+            "uv run test -q",
+            "uv run --locked pytest",
+            "uv run --frozen test",
+            "uv run python -m pytest",
+            "uv run -m pytest",
+            r"venv\Scripts\python.exe -m pytest -q",
+            r"venv\Scripts\pytest.exe -q",
+            "python -X utf8 -m pytest",
+            "py -m pytest",
+        ):
+            assert _as_pytest_invocation(line) is not None, line
+        # The shell builtin must not be mistaken for the `uv run test` shortcut.
+        for line in (
+            'test -s "$f" || exit 1',
+            "pip install pytest_asyncio",
+            "uv sync --locked",
+            'python -c "import wx, pytest_asyncio"',
+        ):
+            assert _as_pytest_invocation(line) is None, line
+
+    def test_workflow_line_shapes(self):
+        for line in (
+            "        run: uv run pytest",
+            "      - run: uv run pytest",
+            "      - run: pytest -q",
+            "          uv run python -m pytest",
+        ):
+            assert _pytest_command_in_workflow_line(line) is not None, line
+        for line in (
+            "      - name: Run pytest",
+            "        name: Run pytest",
+            "      # run: pytest",
+        ):
+            assert _pytest_command_in_workflow_line(line) is None, line
+
+
+def _pytest_command_in_workflow_line(line):
+    """The pytest command a workflow line runs, or None.
+
+    Both shapes: `run: pytest ...` on one line, and a bare `pytest ...` inside
+    a `run: |` block — the block form is the natural way somebody adds a
+    second command later, and a guard that misses it fails silently in the one
+    direction that matters.
+    """
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        return None
+    # `- run: pytest` is a step with no name; the list marker must not make it
+    # read as "some other YAML key" below.
+    if stripped.startswith("- "):
+        stripped = stripped[2:].lstrip()
+    if stripped.startswith("run:"):
+        command = stripped[len("run:"):].strip()
+    elif re.match(r"^[A-Za-z_][\w-]*:(?:\s|$)", stripped):
+        # Any other YAML key: `name: Run pytest` names a step, it runs nothing.
+        return None
+    else:
+        command = stripped
+    return _as_pytest_invocation(command)
+
+
+def _as_pytest_invocation(command):
+    """`command` if it runs the test suite, however it is launched, else None.
+
+    Matches `pytest` as a whole command token anywhere in the line rather than
+    a list of launcher prefixes: every prefix list so far (`uv run`,
+    `python -m`) missed the next idiom somebody wrote.
+    """
+    if re.search(r"(?:^|[\s\\/])pytest(?:\.exe)?(?:\s|$)", command):
+        return command
+    if re.match(r"^uv run(?:\s+--?\S+)*\s+test(?:\s|$)", command):
+        return command
+    return None
 
 
 class TestTheMarkerIsRegisteredAndUsed:
