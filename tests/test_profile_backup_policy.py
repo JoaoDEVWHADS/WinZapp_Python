@@ -24,6 +24,43 @@ class TestDefaults:
         assert profile_backup.close_snapshot_max_age(DEFAULT_SETTINGS) == SNAPSHOT_MAX_AGE_SECONDS
 
 
+class TestStoredHours:
+    """The forgiving reader for settings.json — also what Settings opens on."""
+
+    @pytest.mark.parametrize("value, minimum, expected", [
+        (6, 0, 6), ("6", 0, 6), (1.5, 1, 1), (0, 0, 0),
+        (0, 1, 24), (-3, 0, 24), (None, 0, 24), ("abc", 1, 24), (True, 0, 24),
+    ])
+    def test_falls_back_rather_than_fails(self, value, minimum, expected):
+        assert profile_backup.stored_hours(value, 24, minimum) == expected
+
+
+class TestParseHoursField:
+    """What Settings accepts in the two hour fields; None refuses OK/Apply."""
+
+    @pytest.mark.parametrize("text, minimum, hours", [
+        ("0", 0, 0), ("24", 0, 24), (" 6 ", 0, 6), ("1", 1, 1), ("48", 1, 48),
+    ])
+    def test_a_whole_number_of_hours_is_accepted(self, text, minimum, hours):
+        assert profile_backup.parse_hours_field(text, minimum) == hours
+
+    @pytest.mark.parametrize("text", ["", "   ", "abc", "12h", "1.5", "1,5", "doze", "-", "2 4"])
+    def test_anything_that_is_not_a_whole_number_is_refused(self, text):
+        assert profile_backup.parse_hours_field(text, 0) is None
+        assert profile_backup.parse_hours_field(text, 1) is None
+
+    def test_below_the_minimum_is_refused(self):
+        assert profile_backup.parse_hours_field("-1", profile_backup.CLOSE_HOURS_MINIMUM) is None
+        assert profile_backup.parse_hours_field("0", profile_backup.LIVE_HOURS_MINIMUM) is None
+
+    def test_zero_means_every_close_only_for_the_close_field(self):
+        assert profile_backup.parse_hours_field("0", profile_backup.CLOSE_HOURS_MINIMUM) == 0
+
+    def test_not_text_is_refused(self):
+        assert profile_backup.parse_hours_field(None, 0) is None
+        assert profile_backup.parse_hours_field(5, 0) is None
+
+
 class TestCloseSnapshotMaxAge:
     @pytest.mark.parametrize("hours, seconds", [(0, 0), (1, HOUR), (6, 6 * HOUR), (48, 48 * HOUR)])
     def test_hours_become_seconds(self, hours, seconds):

@@ -117,6 +117,10 @@ class _HotkeyCapture(wx.TextCtrl):
 
 from core.utils import DEFAULT_SETTINGS, SEARCH_NORMALIZATION_MODES, search_normalization_mode, GROUP_MEDIA_TYPES, AUTO_DOWNLOAD_MEDIA_TYPES
 from core import save_location
+from core.profile_backup import (
+    CLOSE_HOURS_MINIMUM, DEFAULT_CLOSE_HOURS, DEFAULT_LIVE_HOURS, LIVE_HOURS_MINIMUM,
+    parse_hours_field, stored_hours,
+)
 
 
 def ensure_default_settings_file():
@@ -1181,11 +1185,17 @@ class SettingsDialog(wx.Dialog):
         self._update_call_fields_state()
 
         profile_backup = self.main_window.settings.get("profile_backup", {})
-        self._close_snapshot_hours_field.SetValue(
-            str(profile_backup.get("close_snapshot_min_hours", 24)))
+        # Shown as the value WinZapp actually applies (core/profile_backup.py):
+        # a hand-edited 0, null or "abc" in settings.json would otherwise open
+        # as a field the validation refuses, blocking OK for a user who only
+        # came to change something else.
+        self._close_snapshot_hours_field.SetValue(str(stored_hours(
+            profile_backup.get("close_snapshot_min_hours", 24),
+            DEFAULT_CLOSE_HOURS, CLOSE_HOURS_MINIMUM)))
         self._live_snapshot_check.SetValue(profile_backup.get("live_snapshot_enabled", False))
-        self._live_snapshot_hours_field.SetValue(
-            str(profile_backup.get("live_snapshot_interval_hours", 24)))
+        self._live_snapshot_hours_field.SetValue(str(stored_hours(
+            profile_backup.get("live_snapshot_interval_hours", 24),
+            DEFAULT_LIVE_HOURS, LIVE_HOURS_MINIMUM)))
         self._live_snapshot_confirm_check.SetValue(profile_backup.get("live_snapshot_confirm", True))
         self._update_live_snapshot_fields()
 
@@ -1896,18 +1906,6 @@ class SettingsDialog(wx.Dialog):
             control.Show(show)
         self._profile_backup_page.Layout()
 
-    def _live_snapshot_hours_value(self, stored: dict) -> int:
-        """The live interval to save. While the option is off its field is
-        hidden and not validated, so an unusable value there keeps the stored
-        one instead of failing Apply over a field nobody can see."""
-        try:
-            hours = int(self._live_snapshot_hours_field.GetValue().strip())
-        except ValueError:
-            hours = 0
-        if hours >= 1:
-            return hours
-        return stored.get("live_snapshot_interval_hours", DEFAULT_SETTINGS["profile_backup"]["live_snapshot_interval_hours"])
-
     def _validate(self) -> bool:
         """Return True if all values are valid; show an error and return False otherwise."""
         # Custom save folder: only meaningful when that mode is the one
@@ -2037,13 +2035,13 @@ class SettingsDialog(wx.Dialog):
             self._media_max_mb_field.SetFocus()
             return False
 
-        # Profile backup: 0 hours is the documented "every clean close"; the
-        # live interval has no such sentinel, since 0 would close the session
-        # on every poll — and it is only checked while its field is visible.
-        try:
-            if int(self._close_snapshot_hours_field.GetValue().strip()) < 0:
-                raise ValueError
-        except ValueError:
+        # Profile backup: both hour fields must hold a whole number of hours —
+        # 0 is the documented "every clean close" for the first, while the live
+        # interval has no such sentinel (0 would close the session on every
+        # poll). Checked whether or not the live option is ticked: a value left
+        # in its hidden field is still what Apply would save.
+        if parse_hours_field(self._close_snapshot_hours_field.GetValue(),
+                             CLOSE_HOURS_MINIMUM) is None:
             self._notebook.SetSelection(self._notebook.FindPage(self._profile_backup_page))
             wx.MessageBox(
                 self.main_window.i18n.t("invalid_profile_backup_close_hours"),
@@ -2053,20 +2051,21 @@ class SettingsDialog(wx.Dialog):
             )
             self._close_snapshot_hours_field.SetFocus()
             return False
-        if self._live_snapshot_check.GetValue():
-            try:
-                if int(self._live_snapshot_hours_field.GetValue().strip()) < 1:
-                    raise ValueError
-            except ValueError:
-                self._notebook.SetSelection(self._notebook.FindPage(self._profile_backup_page))
-                wx.MessageBox(
-                    self.main_window.i18n.t("invalid_profile_backup_live_hours"),
-                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                    self,
-                )
-                self._live_snapshot_hours_field.SetFocus()
-                return False
+        if parse_hours_field(self._live_snapshot_hours_field.GetValue(),
+                             LIVE_HOURS_MINIMUM) is None:
+            self._notebook.SetSelection(self._notebook.FindPage(self._profile_backup_page))
+            # A hidden field cannot take focus or be corrected: show it.
+            for control in (self._live_snapshot_hours_label, self._live_snapshot_hours_field):
+                control.Show()
+            self._profile_backup_page.Layout()
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_profile_backup_live_hours"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._live_snapshot_hours_field.SetFocus()
+            return False
 
         # Sound events: an ENABLED event's override path, if the user set one,
         # must point to a real file. An empty override is always fine — it
@@ -2468,10 +2467,11 @@ class SettingsDialog(wx.Dialog):
         calls["popup_enabled"] = self._call_popup_check.GetValue()
 
         profile_backup = self.main_window.settings.setdefault("profile_backup", {})
-        profile_backup["close_snapshot_min_hours"] = int(
-            self._close_snapshot_hours_field.GetValue().strip())
+        profile_backup["close_snapshot_min_hours"] = parse_hours_field(
+            self._close_snapshot_hours_field.GetValue(), CLOSE_HOURS_MINIMUM)
         profile_backup["live_snapshot_enabled"] = self._live_snapshot_check.GetValue()
-        profile_backup["live_snapshot_interval_hours"] = self._live_snapshot_hours_value(profile_backup)
+        profile_backup["live_snapshot_interval_hours"] = parse_hours_field(
+            self._live_snapshot_hours_field.GetValue(), LIVE_HOURS_MINIMUM)
         profile_backup["live_snapshot_confirm"] = self._live_snapshot_confirm_check.GetValue()
         if not calls["alerts_enabled"]:
             stop_alerts = getattr(self.main_window, "stop_all_incoming_call_alerts", None)
@@ -2881,6 +2881,9 @@ class SettingsDialog(wx.Dialog):
 
     def _on_apply(self, event):
         if self._apply_values():
+            # An invalid interval revealed its field even with the option
+            # off (_validate()); once the value is fixed, hide it again.
+            self._update_live_snapshot_fields()
             self._loading_values = True
             self._refresh_dialog_labels()
             self._loading_values = False

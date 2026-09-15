@@ -325,14 +325,108 @@ def test_the_live_backup_options_follow_their_checkbox(make_dialog):
     assert all(c.IsShown() for c in _live_backup_options(reopened))
 
 
-def test_a_hidden_unusable_interval_keeps_the_stored_one(make_dialog):
-    """While the option is off its field is hidden and not validated: garbage
-    left there must neither fail Apply nor overwrite the saved interval."""
-    dialog = make_dialog({"profile_backup": {"live_snapshot_interval_hours": 5}})
-    dialog._live_snapshot_hours_field.SetValue("abc")
+@pytest.fixture
+def error_boxes(monkeypatch):
+    """wx.MessageBox is modal; record what it would say instead."""
+    import ui.dialogs.settings_dialog as settings_dialog_module
 
+    shown = []
+    monkeypatch.setattr(settings_dialog_module.wx, "MessageBox",
+                        lambda message, *a, **kw: shown.append(message) or 0)
+    return shown
+
+
+_STORED = {"profile_backup": {"close_snapshot_min_hours": 5, "live_snapshot_interval_hours": 7}}
+
+
+@pytest.mark.parametrize("field, message_key, live_on", [
+    ("_close_snapshot_hours_field", "invalid_profile_backup_close_hours", False),
+    ("_close_snapshot_hours_field", "invalid_profile_backup_close_hours", True),
+    ("_live_snapshot_hours_field", "invalid_profile_backup_live_hours", True),
+    ("_live_snapshot_hours_field", "invalid_profile_backup_live_hours", False),
+])
+@pytest.mark.parametrize("bad", ["abc", "", "1.5", "-1"])
+def test_an_invalid_hour_value_refuses_to_save(make_dialog, error_boxes, field, message_key,
+                                               live_on, bad):
+    """OK and Apply both go through _apply_values(): an hour field that is not
+    a whole number is an error, whether or not the live option is ticked, and
+    nothing is written."""
+    import copy
+
+    dialog = make_dialog(copy.deepcopy(_STORED))
+    dialog._live_snapshot_check.SetValue(live_on)
+    dialog._update_live_snapshot_fields()
+    getattr(dialog, field).SetValue(bad)
+
+    assert dialog._apply_values() is False
+    assert error_boxes == [dialog.main_window.i18n.t(message_key)]
+    assert dialog.main_window.settings["profile_backup"] == _STORED["profile_backup"]
+    assert dialog._notebook.GetSelection() == dialog._notebook.FindPage(dialog._profile_backup_page)
+    # A hidden field cannot be corrected: the error brings it back into view.
+    assert getattr(dialog, field).IsShown()
+
+
+def test_a_revealed_field_hides_again_once_applied(make_dialog, error_boxes):
+    """Option off, invalid value in its hidden field: the error reveals it,
+    and fixing it then applying must not leave it visible under an unticked
+    checkbox."""
+    dialog = make_dialog({})
+    dialog._live_snapshot_hours_field.SetValue("abc")
+    assert dialog._apply_values() is False
+    assert dialog._live_snapshot_hours_field.IsShown()
+
+    dialog._live_snapshot_hours_field.SetValue("12")
+    dialog._on_apply(None)
+
+    assert dialog.main_window.settings["profile_backup"]["live_snapshot_interval_hours"] == 12
+    assert not any(c.IsShown() for c in _live_backup_options(dialog))
+
+
+@pytest.mark.parametrize("stored, close_shown, live_shown", [
+    ({"close_snapshot_min_hours": -3, "live_snapshot_interval_hours": 0}, "24", "24"),
+    ({"close_snapshot_min_hours": None, "live_snapshot_interval_hours": "abc"}, "24", "24"),
+    ({"close_snapshot_min_hours": "6", "live_snapshot_interval_hours": 1.5}, "6", "1"),
+])
+def test_a_hand_edited_stored_value_never_blocks_saving(make_dialog, error_boxes, stored,
+                                                        close_shown, live_shown):
+    """The fields open on what WinZapp actually applies, so OK works for a user
+    who came to change something else."""
+    dialog = make_dialog({"profile_backup": dict(stored)})
+    assert dialog._close_snapshot_hours_field.GetValue() == close_shown
+    assert dialog._live_snapshot_hours_field.GetValue() == live_shown
     assert dialog._apply_values() is True
-    assert dialog.main_window.settings["profile_backup"]["live_snapshot_interval_hours"] == 5
+    assert error_boxes == []
+
+
+def test_zero_is_refused_for_the_live_interval_only(make_dialog, error_boxes):
+    dialog = make_dialog({})
+    dialog._close_snapshot_hours_field.SetValue("0")
+    assert dialog._apply_values() is True
+    assert dialog.main_window.settings["profile_backup"]["close_snapshot_min_hours"] == 0
+
+    dialog._live_snapshot_hours_field.SetValue("0")
+    assert dialog._apply_values() is False
+    assert error_boxes == [dialog.main_window.i18n.t("invalid_profile_backup_live_hours")]
+
+
+def test_ok_refuses_to_close_on_an_invalid_hour_value(make_dialog, error_boxes, monkeypatch):
+    """The OK button, not just Apply: the dialog stays open and nothing is saved."""
+    dialog = make_dialog({})
+    ended = []
+    monkeypatch.setattr(dialog, "EndModal", lambda code: ended.append(code))
+    dialog._close_snapshot_hours_field.SetValue("abc")
+
+    dialog._on_ok(None)
+
+    assert ended == []
+    assert error_boxes == [dialog.main_window.i18n.t("invalid_profile_backup_close_hours")]
+
+    # Positive control: with the value fixed, the same OK closes the dialog.
+    import wx
+
+    dialog._close_snapshot_hours_field.SetValue("6")
+    dialog._on_ok(None)
+    assert ended == [wx.ID_OK]
 
 
 def test_ok_without_changes_resets_nothing(make_dialog, tmp_path):

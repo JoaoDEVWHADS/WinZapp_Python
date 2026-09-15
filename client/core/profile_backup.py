@@ -25,8 +25,14 @@ DEFAULT_CLOSE_HOURS = SNAPSHOT_MAX_AGE_SECONDS // 3600
 DEFAULT_LIVE_HOURS = 24
 
 
-def _hours(value, default, minimum):
-    """A whole number of hours not below `minimum`, else `default`."""
+def stored_hours(value, default, minimum):
+    """A whole number of hours not below `minimum`, else `default`.
+
+    Forgiving on purpose: this reads what is already in settings.json, where
+    anything unusable must fall back to the default rather than stop the app.
+    Settings uses it too, so a field opens on the value WinZapp actually
+    applies. What a person types goes through parse_hours_field() instead,
+    which refuses rather than guesses."""
     if isinstance(value, bool):
         return default
     try:
@@ -36,6 +42,29 @@ def _hours(value, default, minimum):
     return hours if hours >= minimum else default
 
 
+#: Smallest value each Settings field accepts: 0 means "every clean close" for
+#: the close interval; the live interval has no such sentinel.
+CLOSE_HOURS_MINIMUM = 0
+LIVE_HOURS_MINIMUM = 1
+
+
+def parse_hours_field(text, minimum):
+    """The whole number of hours typed in a Settings field, or None when it is
+    not one: empty, letters, a decimal, or below `minimum`. The dialog refuses
+    to save on None, so nothing unusable ever reaches settings.json.
+
+    Strict where stored_hours() is forgiving — do not merge them: a guess about
+    stored data keeps the app working, a guess about typed text would save
+    something the person did not mean."""
+    if not isinstance(text, str):
+        return None
+    try:
+        hours = int(text.strip())
+    except ValueError:
+        return None
+    return hours if hours >= minimum else None
+
+
 def _section(settings):
     section = (settings or {}).get(SECTION) if isinstance(settings, dict) else None
     return section if isinstance(section, dict) else {}
@@ -43,7 +72,7 @@ def _section(settings):
 
 def close_snapshot_max_age(settings) -> int:
     """Seconds a snapshot may age before a clean close refreshes it."""
-    hours = _hours(_section(settings).get("close_snapshot_min_hours"), DEFAULT_CLOSE_HOURS, 0)
+    hours = stored_hours(_section(settings).get("close_snapshot_min_hours"), DEFAULT_CLOSE_HOURS, 0)
     return hours * 3600
 
 
@@ -54,7 +83,7 @@ def live_snapshot_policy(settings):
     so anything below one hour falls back to the default."""
     section = _section(settings)
     enabled = section.get("live_snapshot_enabled", False) is True
-    hours = _hours(section.get("live_snapshot_interval_hours"), DEFAULT_LIVE_HOURS, 1)
+    hours = stored_hours(section.get("live_snapshot_interval_hours"), DEFAULT_LIVE_HOURS, 1)
     confirm = section.get("live_snapshot_confirm", True) is not False
     return enabled, hours * 3600, confirm
 
