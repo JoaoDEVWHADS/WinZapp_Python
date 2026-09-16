@@ -37,14 +37,11 @@ export const chromiumArgs = [
   '--ignore-certificate-errors', // Ignores certificate errors
   '--ignore-ssl-errors', // Ignores SSL errors
   '--ignore-certificate-errors-spki-list', // Ignores certificate errors in SPKI list
-  '--disable-3d-apis',
-  '--disable-webgl',
   '--disable-component-update',
   '--disable-speech-api',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
   '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
-  '--disable-software-rasterizer',
   '--disable-ipc-flooding-protection',
   '--password-store=basic',
   '--use-mock-keychain',

@@ -27,6 +27,9 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert "WPP.call.end" in controller
     assert "WPP.call.offer" in controller
     assert "prepareAudioBridge(req)" in controller
+    assert "isOutgoingOrLiveCall" in controller
+    assert "without successful voipInit" in controller
+    assert "installAudioBridge(req)" in controller
 
 
 def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
@@ -42,16 +45,40 @@ def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
     assert "RTCPeerConnection" in bridge
     assert "__winzappOnCallRemoteAudio" in bridge
     assert "if (!constraints?.audio) return nativeGetUserMedia(constraints)" in bridge
+    assert "microphone" in bridge
+    assert "camera" in bridge
+    assert "webkitGetUserMedia" in bridge
     assert "if (!state.enabled || !constraints?.audio)" not in bridge
 
 
 def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
+    start_js = _source("client/api_patches/start.js")
     config = _source("client/api_patches/src/config.ts")
     session_util = _source("client/api_patches/src/util/sessionUtil.ts")
 
+    assert "'--disable-voice-input'," not in start_js
     assert "--disable-voice-input" not in config
     assert "--disable-voice-input" not in session_util
     assert "--mute-audio" in config
+
+
+def test_chromium_keeps_rendering_backend_available_for_voip_runtime():
+    session_util = "\n".join(
+        line
+        for line in _source("client/api_patches/src/util/sessionUtil.ts").splitlines()
+        if not line.lstrip().startswith("//")
+    )
+
+    assert "--disable-software-rasterizer" not in session_util
+    assert "--disable-3d-apis" not in session_util
+    assert "--disable-webgl" not in session_util
+
+
+def test_cdp_permission_grant_includes_voip_capture_permissions():
+    create_session = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    assert "audioCapture" in create_session
+    assert "videoCapture" in create_session
 
 
 def test_setup_api_copies_call_patch_files_into_runtime_api():

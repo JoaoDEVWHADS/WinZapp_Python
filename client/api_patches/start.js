@@ -289,7 +289,6 @@ const optimizedBrowserArgs = [
   '--no-zygote',
   '--disable-component-update',
   '--disable-speech-api',
-  '--disable-voice-input',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
   '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',

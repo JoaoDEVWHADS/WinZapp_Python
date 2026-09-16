@@ -697,7 +697,10 @@ async function restoreStatusSender(page: any, logger: any, session: string) {
  *   * No puppeteer overridePermissions() here. That call replaces the whole
  *     granted set for the origin, so asking for ['notifications'] flips
  *     durableStorage from 'prompt' to 'denied' — measurably worse than doing
- *     nothing. The CDP grant below covers notifications anyway.
+ *     nothing. The CDP grant below covers notifications anyway. The same single
+ *     grant also covers audioCapture/videoCapture so WhatsApp's VoIP bootstrap
+ *     sees microphone/camera permission as granted while WinZapp's page patch
+ *     still replaces the physical microphone with the Python PCM bridge.
  *
  * Best-effort throughout: never throw from here.
  */
@@ -713,7 +716,7 @@ async function grantPersistentStorage(page: any, logger: any, session: string) {
     }
     await page.__wzPermissionSession.send('Browser.grantPermissions', {
       origin,
-      permissions: ['durableStorage', 'notifications'],
+      permissions: ['durableStorage', 'notifications', 'audioCapture', 'videoCapture'],
     });
   } catch (e: any) {
     page.__wzPermissionSession = null;

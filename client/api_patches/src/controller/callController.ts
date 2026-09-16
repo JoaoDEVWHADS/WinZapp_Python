@@ -79,6 +79,21 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         );
       };
 
+      const isOutgoingOrLiveCall = (call: any): boolean => {
+        const state = callStateOf(call);
+        return (
+          state === 'CALLING' ||
+          state === 'PRE_CALLING' ||
+          state === 'ACCEPT_SENT' ||
+          state === 'ACCEPT_RECEIVED' ||
+          state === 'ACTIVE' ||
+          state === 'CALL_B_STARTING' ||
+          call?.outgoing === true ||
+          call?.isOutgoing === true ||
+          call?.direction === 'outgoing'
+        );
+      };
+
       const getModels = (store: any): any[] => {
         try {
           const models = store?.getModelsArray?.();
@@ -106,7 +121,10 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           const exact = models.find((call) => sameCallId(call, wanted));
           if (exact) return exact;
         }
-        return models.find((call) => isIncomingCall(call) || call?.isGroup) || null;
+        return (
+          models.find((call) => isIncomingCall(call) || isOutgoingOrLiveCall(call) || call?.isGroup) ||
+          null
+        );
       };
 
       const summarizeCall = (call: any) => ({
@@ -142,7 +160,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           win.WPP?.whatsapp?.requireVoipJsBackend;
 
         let lastError: any = null;
-        for (let attempt = 0; attempt < 5; attempt += 1) {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
           try {
             if (typeof requireBackend === 'function') {
               const backend = await requireBackend();
@@ -160,20 +178,42 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           } catch (error) {
             lastError = error;
           }
-          await delay(120 * (attempt + 1));
+          await delay(180 * (attempt + 1));
         }
 
         const message = String(lastError?.message || lastError || 'unknown error');
         throw new Error(`WhatsApp VoIP initialization failed: ${message}`);
       };
 
+      const isVoipInitError = (error: any): boolean =>
+        String(error?.message || error || '').includes('without successful voipInit');
+
+      const runNativeVoipAction = async (fn: (stack: any) => Promise<any>): Promise<any> => {
+        let lastError: any = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const stack = await ensureVoipRuntimeReady();
+          try {
+            return await fn(stack);
+          } catch (error) {
+            lastError = error;
+            if (!isVoipInitError(error) || attempt >= 2) throw error;
+            await delay(250 * (attempt + 1));
+          }
+        }
+        throw lastError;
+      };
+
       if (action === 'accept') {
         const callId = String(payload.callId || '');
         const call = findCall(callId);
-        const voipStack = await ensureVoipRuntimeReady();
-        if (call && typeof voipStack?.acceptCall === 'function') {
-          await voipStack.acceptCall(true, call?.isVideo === true);
-          return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+        if (call) {
+          return runNativeVoipAction(async (voipStack: any) => {
+            if (typeof voipStack?.acceptCall !== 'function') {
+              throw new Error('Native VoIP acceptCall is not available');
+            }
+            await voipStack.acceptCall(true, call?.isVideo === true);
+            return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+          });
         }
         return win.WPP.call.accept(callId || undefined);
       }
@@ -181,11 +221,15 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       if (action === 'reject') {
         const callId = String(payload.callId || '');
         const call = findCall(callId);
-        const voipStack = await ensureVoipRuntimeReady();
-        if (call && typeof voipStack?.rejectCall === 'function') {
-          call.userEndedCall = true;
-          await voipStack.rejectCall();
-          return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+        if (call) {
+          return runNativeVoipAction(async (voipStack: any) => {
+            if (typeof voipStack?.rejectCall !== 'function') {
+              throw new Error('Native VoIP rejectCall is not available');
+            }
+            call.userEndedCall = true;
+            await voipStack.rejectCall();
+            return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+          });
         }
         const reject = win.WPP.call.rejectCall || win.WPP.call.reject;
         if (typeof reject !== 'function') throw new Error('WPP.call.reject is not available');
@@ -194,28 +238,27 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
       if (action === 'end') {
         const call = findCall(String(payload.callId || ''));
-        const voipStack = await ensureVoipRuntimeReady();
-        if (typeof voipStack?.endCall === 'function') {
-          if (call) call.userEndedCall = true;
-          await voipStack.endCall(2, true);
-          return { handled: true, via: 'native-voip', call: call ? summarizeCall(call) : null };
-        }
-        return win.WPP.call.end();
+        return runNativeVoipAction(async (voipStack: any) => {
+          if (typeof voipStack?.endCall === 'function') {
+            if (call) call.userEndedCall = true;
+            await voipStack.endCall(2, true);
+            return { handled: true, via: 'native-voip', call: call ? summarizeCall(call) : null };
+          }
+          return win.WPP.call.end();
+        });
       }
 
       if (action === 'offer') {
-        await ensureVoipRuntimeReady();
-        let call = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
-        if (!call) {
-          const target = String(payload.to || '');
-          for (let attempt = 0; attempt < 20 && !call; attempt += 1) {
+        let call: any = null;
+        for (let attempt = 0; attempt < 3 && !call; attempt += 1) {
+          await ensureVoipRuntimeReady();
+          const offered = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
+          call = offered || null;
+          for (let waitAttempt = 0; waitAttempt < 30 && !call; waitAttempt += 1) {
             await delay(100);
             call = findCall();
-            if (call && target) {
-              const peer = peerJidOf(call);
-              if (peer && peer !== target) call = null;
-            }
           }
+          if (!call && attempt < 2) await delay(300 * (attempt + 1));
         }
         if (!call) throw new Error('WhatsApp did not create an outgoing call model');
         return summarizeCall(call);
@@ -237,11 +280,16 @@ function fail(req: Request, res: Response, action: string, error: unknown) {
   res.status(500).json({ status: 'error', message: `Error on ${action}`, error: message });
 }
 
-async function prepareAudioBridge(req: Request): Promise<boolean> {
+async function installAudioBridge(req: Request): Promise<boolean> {
   const client = req.client as any;
   const installed = await ensureCallMediaBridge(client, req.io, req.logger);
   if (!installed) throw new Error('WinZapp call media bridge is not available');
-  const enabled = await setCallMediaBridgeActive(client, true);
+  return true;
+}
+
+async function prepareAudioBridge(req: Request): Promise<boolean> {
+  await installAudioBridge(req);
+  const enabled = await setCallMediaBridgeActive(req.client as any, true);
   if (!enabled) throw new Error('WinZapp call media bridge could not be enabled');
   return true;
 }
@@ -262,6 +310,7 @@ export async function acceptCall(req: Request, res: Response) {
 
 export async function rejectCall(req: Request, res: Response) {
   try {
+    await installAudioBridge(req);
     await stopAudioBridge(req);
     ok(res, await evaluateWppCall(req, 'reject', req.body || {}));
   } catch (error) {
@@ -271,6 +320,7 @@ export async function rejectCall(req: Request, res: Response) {
 
 export async function endCall(req: Request, res: Response) {
   try {
+    await installAudioBridge(req);
     await stopAudioBridge(req);
     ok(res, await evaluateWppCall(req, 'end', req.body || {}));
   } catch (error) {

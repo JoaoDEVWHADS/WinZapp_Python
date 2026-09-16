@@ -192,6 +192,31 @@ function installCallMediaBridgeInPage(): boolean {
   } catch (_) {}
 
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  const permissionResult = (stateValue: PermissionState = 'granted') => ({
+    state: stateValue,
+    onchange: null,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    dispatchEvent: () => false,
+  });
+
+  try {
+    const nativePermissionQuery = navigator.permissions?.query?.bind(navigator.permissions);
+    if (nativePermissionQuery) {
+      Object.defineProperty(navigator.permissions, 'query', {
+        configurable: true,
+        writable: true,
+        value: async (descriptor: PermissionDescriptor) => {
+          const name = String((descriptor as any)?.name || '');
+          if (name === 'microphone' || name === 'camera') {
+            return permissionResult('granted') as PermissionStatus;
+          }
+          return nativePermissionQuery(descriptor);
+        },
+      });
+    }
+  } catch (_) {}
+
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
     if (!constraints?.audio) return nativeGetUserMedia(constraints);
 
@@ -214,6 +239,12 @@ function installCallMediaBridgeInPage(): boolean {
   } catch (_) {
     (navigator.mediaDevices as any).getUserMedia = bridgedGetUserMedia;
   }
+  try {
+    win.navigator.getUserMedia = (constraints: MediaStreamConstraints, ok: any, fail: any) => {
+      bridgedGetUserMedia(constraints).then(ok, fail);
+    };
+    win.navigator.webkitGetUserMedia = win.navigator.getUserMedia;
+  } catch (_) {}
 
   win.__winzappCallMediaBridge = state;
   return true;
