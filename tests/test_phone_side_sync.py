@@ -234,6 +234,7 @@ class TestRemoveMessagesById:
 class _FakeConversationsPanel:
     def __init__(self, remote_jid=None):
         self.conversation = {"remoteJid": remote_jid} if remote_jid else None
+        self.selected_messages = {"A", "B", "C"}
         self.removed = None
         self.populate_called = False
 
@@ -346,6 +347,7 @@ class TestReconcileActiveConversation:
             stub._reconcile_active_conversation_with_remote()
         assert stub.clear_calls == [(jid, False)]  # record_cutoff=False: mirroring, not a new cutoff
         assert stub.conversations_panel.populate_called is True
+        assert stub.conversations_panel.selected_messages == set()
         assert stub._schedule_set_chats_calls == 1
 
     def test_a_single_empty_read_does_not_immediately_clear(self):

@@ -11019,6 +11019,7 @@ class ConversationsPanel(wx.Panel):
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
+            self.selected_messages.clear()
             # _unread_sep_idx pointed into the list just emptied above — left
             # stale, a live message arriving right after (on_incoming_message,
             # the branch for a separator anchoring an already-read position)

@@ -51,6 +51,7 @@ class _Stub:
         self._sep_anchors_read_position = True
         self._first_unread_msg_id = "m2"
         self._first_unread_count = 3
+        self.selected_messages = {"m1", "m2"}
 
 
 JID = "120363409931936700@g.us"
@@ -70,6 +71,7 @@ class TestClearChatResetsSeparatorBookkeeping:
         # dela, e um id que não existe mais deixaria um separador fantasma.
         assert stub._first_unread_msg_id is None
         assert stub._first_unread_count == 0
+        assert stub.selected_messages == set()
         assert stub.messages_list.delete_all_calls == 1
         assert stub.main_window.clear_chat_calls == [JID]
 
@@ -81,6 +83,7 @@ class TestClearChatResetsSeparatorBookkeeping:
 
         assert stub._sorted_messages != []
         assert stub._unread_sep_idx == 1
+        assert stub.selected_messages == {"m1", "m2"}
         assert stub.main_window.clear_chat_calls == []
 
     def test_clearing_a_different_conversation_than_the_open_one_leaves_separator_alone(self, monkeypatch):
@@ -94,6 +97,7 @@ class TestClearChatResetsSeparatorBookkeeping:
 
         assert stub._sorted_messages != []
         assert stub._unread_sep_idx == 1
+        assert stub.selected_messages == {"m1", "m2"}
         assert stub.main_window.clear_chat_calls == ["some-other-chat@g.us"]
 
 

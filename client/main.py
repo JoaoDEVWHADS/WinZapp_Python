@@ -23698,6 +23698,7 @@ class MainWindow(wx.Frame):
         # remember, the server is already the source of truth going forward.
         self.clear_chat_messages_local(remote_jid, record_cutoff=False)
         cp.conversation = self.chats.get(remote_jid, cp.conversation)
+        cp.selected_messages.clear()
         cp.populate_messages()
         self._schedule_set_chats()
 
