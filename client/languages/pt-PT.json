@@ -818,6 +818,7 @@
     "voice_call_settings_title": "Definições da chamada",
     "voice_call_playback_devices": "Dispositivos de reprodução",
     "voice_call_recording_devices": "Dispositivos de gravação",
+    "calls_audio_settings_button": "Definições de áudio da chamada",
     "voice_call_active_label": "Chamada de voz com {name}.",
     "voice_call_individual_only": "Por enquanto, o WinZapp apenas suporta chamadas de voz individuais.",
     "voice_call_already_active": "Já existe uma chamada de voz em curso.",

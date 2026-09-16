@@ -818,6 +818,7 @@
     "voice_call_settings_title": "Call settings",
     "voice_call_playback_devices": "Playback devices",
     "voice_call_recording_devices": "Recording devices",
+    "calls_audio_settings_button": "Call audio settings",
     "voice_call_active_label": "Voice call with {name}.",
     "voice_call_individual_only": "For now, WinZapp only supports one-to-one voice calls.",
     "voice_call_already_active": "A voice call is already in progress.",

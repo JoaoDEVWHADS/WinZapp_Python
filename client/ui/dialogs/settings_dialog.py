@@ -1068,7 +1068,7 @@ class SettingsDialog(wx.Dialog):
         )
         calls_sizer.Add(self._call_popup_check, 0, wx.ALL, 8)
         self._call_audio_settings_button = wx.Button(
-            self._calls_page, label="Configurações de áudio da chamada"
+            self._calls_page, label=i18n.t("calls_audio_settings_button")
         )
         calls_sizer.Add(self._call_audio_settings_button, 0, wx.ALL, 8)
 
@@ -2535,6 +2535,7 @@ class SettingsDialog(wx.Dialog):
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._call_alerts_check.SetLabel(i18n.t("calls_alerts_enabled_label"))
         self._call_popup_check.SetLabel(i18n.t("calls_popup_enabled_label"))
+        self._call_audio_settings_button.SetLabel(i18n.t("calls_audio_settings_button"))
         self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._spell_check_radio.SetLabel(i18n.t("spell_check_label"))
