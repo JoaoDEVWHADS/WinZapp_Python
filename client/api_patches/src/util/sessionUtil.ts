@@ -32,6 +32,7 @@ export const chromiumArgs = [
   '--hide-scrollbars', // Hides scrollbars
   '--metrics-recording-only', // Records metrics only
   '--use-fake-ui-for-media-stream', // Auto-grants WebRTC media permission for headless calls
+  '--use-fake-device-for-media-stream', // Keeps getUserMedia available without physical devices
   '--mute-audio', // Mutes audio
   '--no-first-run', // Skips first run
   '--safebrowsing-disable-auto-update', // Disables Safe Browsing auto-update
@@ -42,7 +43,7 @@ export const chromiumArgs = [
   '--disable-speech-api',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
-  '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
+  '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction,WebRtcHideLocalIpsWithMdns',
   '--disable-ipc-flooding-protection',
   '--password-store=basic',
   '--use-mock-keychain',

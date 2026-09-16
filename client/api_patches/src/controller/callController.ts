@@ -154,6 +154,13 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return getter();
       };
 
+      const isVoipInitialized = (): boolean | undefined => {
+        const conn =
+          win.WPP?.whatsapp?.ConnStore || win.Store?.Conn || win.WPP?.whatsapp?.Conn;
+        if (!conn || typeof conn.isVoipInitialized !== 'boolean') return undefined;
+        return conn.isVoipInitialized;
+      };
+
       const ensureVoipRuntimeReady = async (): Promise<any> => {
         // WA-JS' enableCallInterface flips the calling AB props, but it marks
         // itself enabled before its best-effort backend init. If that first
@@ -181,8 +188,10 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             }
 
             const stack = await getNativeVoipStack();
-            if (stack) return stack;
-            lastError = new Error('VoIP stack interface is not available');
+            if (stack && isVoipInitialized() !== false) return stack;
+            lastError = stack
+              ? new Error('WhatsApp VoIP connection initialization is pending')
+              : new Error('VoIP stack interface is not available');
           } catch (error) {
             lastError = error;
           }
