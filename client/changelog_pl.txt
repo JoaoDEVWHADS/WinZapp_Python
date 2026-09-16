@@ -10,6 +10,8 @@ NOWOŚCI
 
 - Kopia zapasowa profilu w Ustawieniach. Nowa karta Kopia zapasowa określa, jak często WinZapp przy zamykaniu odnawia kopię profilu przeglądarki, z której odzyskuje połączenie — domyślnie co 24 godziny. Kopię można też tworzyć przy otwartym WinZapp, w wybranym odstępie: WhatsApp jest wtedy rozłączony, co może potrwać kilka minut, a WinZapp może pytać przed każdą kopią. Nowa kopia zastępuje poprzednią dopiero wtedy, gdy WhatsApp ponownie się z nią połączy.
 
+- Eksport i import ustawień. W menu Plik „Eksportuj ustawienia” zapisuje twoje preferencje do pliku, a „Importuj ustawienia” stosuje ten plik od razu, bez ponownego uruchamiania — aby przenieść wszystko na inny komputer lub na inne konto. Połączenie z WhatsApp i to, co należy do jednego konta, jak wyczyszczone czaty i dźwięki dla czatu, nie trafia do pliku. Jeśli używasz własnego API, jego adres, port i klucz przenoszą się razem z ustawieniami.
+
 POPRAWKI
 
 - Gdy WhatsApp odrzucał połączenie tuż po uruchomieniu programu, kopia zapasowa profilu przeglądarki w ogóle nie była przywracana: jeśli kody parowania zaczynały napływać w pierwszych sekundach, WinZapp zamykał sesję i kazał sparować konto od nowa, mimo że zapisana była dobra kopia. Teraz przywraca kopię, gdy tylko pojawi się pierwszy kod, i prosi o parowanie dopiero wtedy, gdy przywrócenie nie pomoże.

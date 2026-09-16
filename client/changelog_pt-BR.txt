@@ -10,6 +10,8 @@ NOVIDADES
 
 - Cópia de segurança do perfil nas Configurações. A nova aba Cópia de segurança define de quanto em quanto tempo o WinZapp renova, ao ser fechado, a cópia do perfil do navegador que usa para recuperar a conexão, com padrão de 24 horas. A cópia também pode ser feita com o WinZapp aberto, no intervalo escolhido: o WhatsApp fica desconectado enquanto ela é feita, o que pode levar alguns minutos, e o WinZapp pode perguntar antes de cada vez. A nova cópia só substitui a anterior depois que o WhatsApp volta a conectar com ela.
 
+- Exportar e importar as configurações. No menu Arquivo, “Exportar configurações” grava as suas preferências num arquivo, e “Importar configurações” aplica esse arquivo aqui, na hora, sem reiniciar. Serve para levar tudo para outro computador ou outra conta. A sua conexão com o WhatsApp e o que é próprio de cada conta, como as conversas limpas e os sons por conversa, não vão no arquivo. Se você usa uma API própria, o endereço, a porta e a chave dela vão junto.
+
 CORREÇÕES
 
 - Quando o WhatsApp recusava a conexão logo ao abrir o programa, a cópia de segurança do perfil não chegava a ser restaurada: se os códigos de pareamento começavam a aparecer nos primeiros segundos, o WinZapp encerrava a sessão e mandava parear de novo mesmo com uma cópia boa guardada. Agora ele restaura a cópia assim que o primeiro código aparece, e só pede para parear quando a restauração não resolve.

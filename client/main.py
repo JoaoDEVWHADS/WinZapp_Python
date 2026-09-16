@@ -84,6 +84,7 @@ from core.wpp_runtime import (
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults, auto_download_allows, migrate_voice_messages_media_types, migrate_voice_message_mode_default, migrate_spell_check_mode
 from core.utils import clear_chat_keep_starred_echo
 from ui.dialogs.checkbox_confirm import confirm_with_checkbox
+from core.settings_transfer import connection_runtime as _connection_runtime
 from core.profile_backup import (
     close_snapshot_max_age as _close_snapshot_max_age,
     live_snapshot_due as _live_snapshot_due,
@@ -2884,6 +2885,8 @@ class MainWindow(wx.Frame):
         """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
         self._ID_MARK_ALL_READ = wx.NewIdRef()
         self._ID_SETTINGS      = wx.NewIdRef()
+        self._ID_EXPORT_SETTINGS = wx.NewIdRef()
+        self._ID_IMPORT_SETTINGS = wx.NewIdRef()
         self._ID_DISCONNECT    = wx.NewIdRef()
         self._ID_EXIT          = wx.NewIdRef()
         self._ID_RESYNC_ALL    = wx.NewIdRef()
@@ -2909,6 +2912,11 @@ class MainWindow(wx.Frame):
             self._ID_SETTINGS,
             f"{self.i18n.t('menu_settings')}\tCtrl+,",
         )
+        # Carrying settings to another install. Next to Configurações because
+        # that is what they are about, and with no accelerator: they are rare,
+        # deliberate actions and every letter here is already spoken for.
+        file_menu.Append(self._ID_EXPORT_SETTINGS, self.i18n.t("menu_export_settings"))
+        file_menu.Append(self._ID_IMPORT_SETTINGS, self.i18n.t("menu_import_settings"))
         file_menu.AppendSeparator()
         file_menu.Append(
             self._ID_DISCONNECT,
@@ -3035,6 +3043,8 @@ class MainWindow(wx.Frame):
         self.SetMenuBar(menubar)
         self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
+        self.Bind(wx.EVT_MENU, self._on_export_settings, id=self._ID_EXPORT_SETTINGS)
+        self.Bind(wx.EVT_MENU, self._on_import_settings, id=self._ID_IMPORT_SETTINGS)
         self.Bind(wx.EVT_MENU, self._on_menu_disconnect, id=self._ID_DISCONNECT)
         self.Bind(wx.EVT_MENU, lambda e: self.quit_all_accounts(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
@@ -3524,6 +3534,12 @@ class MainWindow(wx.Frame):
         )
         file_menu.FindItemById(self._ID_SETTINGS).SetItemLabel(
             f"{self.i18n.t('menu_settings')}\tCtrl+,"
+        )
+        file_menu.FindItemById(self._ID_EXPORT_SETTINGS).SetItemLabel(
+            self.i18n.t("menu_export_settings")
+        )
+        file_menu.FindItemById(self._ID_IMPORT_SETTINGS).SetItemLabel(
+            self.i18n.t("menu_import_settings")
         )
         file_menu.FindItemById(self._ID_DISCONNECT).SetItemLabel(
             f"{self.i18n.t('menu_disconnect')}\tCtrl+Alt+Shift+D"
@@ -11310,6 +11326,269 @@ class MainWindow(wx.Frame):
         was deleted outside the app)."""
         pack_id = self.settings.get("active_sound_pack", DEFAULT_PACK_ID)
         return self._sound_packs.get(pack_id) or self._default_sound_pack
+
+    # ── Carrying settings to another install ─────────────────────────────────
+    # settings.json cannot simply be copied: it also holds this install's
+    # session and this account's own state. core/settings_transfer.py decides
+    # what travels; this is the file dialog, the writing, and making what was
+    # imported take effect without a restart.
+
+    _SETTINGS_EXPORT_FILENAME = "winzapp-settings.json"
+
+    def _settings_transfer_folder(self) -> str:
+        """Where the file dialogs open: the same folder every other Save As
+        dialog uses (Settings > Arquivos e salvamento)."""
+        try:
+            from core import save_location
+            return save_location.resolve_save_dialog_folder(self.settings)
+        except Exception:
+            return ""
+
+    def _on_export_settings(self, event=None):
+        t = self.i18n.t
+        dlg = wx.FileDialog(
+            self, t("settings_export_dialog_title"),
+            defaultDir=self._settings_transfer_folder(),
+            defaultFile=self._SETTINGS_EXPORT_FILENAME,
+            wildcard=t("settings_file_wildcard"),
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        finally:
+            dlg.Destroy()
+        error = self.export_settings_to_file(path)
+        if error:
+            self._announce_settings_transfer(error, error=True)
+            return
+        # A custom API travels with its address, port and key, so the file holds
+        # a credential — the user is told, since where they put it now matters.
+        from core.settings_transfer import uses_custom_api
+        done = ("settings_export_done_custom_api" if uses_custom_api(self.settings)
+                else "settings_export_done")
+        try:
+            from core import save_location
+            if save_location.remember_save_dialog_folder(self.settings, path):
+                self.save_settings()
+        except Exception:
+            logging.exception("[settings-transfer] could not remember the folder")
+        self._announce_settings_transfer(done, name=os.path.basename(path))
+
+    def _on_import_settings(self, event=None):
+        t = self.i18n.t
+        dlg = wx.FileDialog(
+            self, t("settings_import_dialog_title"),
+            defaultDir=self._settings_transfer_folder(),
+            wildcard=t("settings_file_wildcard"),
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        finally:
+            dlg.Destroy()
+        # Asked before anything is written: an import overwrites settings the
+        # user may have spent a while on, and No is the default so a stray
+        # Enter changes nothing.
+        confirm = wx.MessageDialog(
+            self, t("settings_import_confirm"), t("settings_import_confirm_title"),
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
+        )
+        try:
+            if confirm.ShowModal() != wx.ID_YES:
+                return
+        finally:
+            confirm.Destroy()
+        error, applied = self.import_settings_from_file(path)
+        if error:
+            self._announce_settings_transfer(error, error=True)
+            return
+        self._announce_settings_transfer("settings_import_done", count=applied)
+
+    def _announce_settings_transfer(self, key: str, error: bool = False, **fields):
+        """Show the outcome: this is a rare, deliberate action whose result the
+        user has to be sure of, and the error path is the one that matters most
+        (nothing was changed). Shown rather than also spoken — the screen
+        reader reads the box when it takes focus."""
+        message = self.i18n.t(key)
+        if fields:
+            try:
+                message = message.format(**fields)
+            except (KeyError, IndexError, ValueError):
+                pass
+        # Shown, not also spoken: the screen reader reads the box when it takes
+        # focus, and saying the same sentence twice is worse than saying it once.
+        try:
+            wx.MessageBox(
+                message,
+                self.i18n.t("error").format(app_name=self.app_name) if error
+                else self.i18n.t("settings_title"),
+                wx.OK | (wx.ICON_ERROR if error else wx.ICON_INFORMATION),
+                self,
+            )
+        except Exception:
+            logging.exception("[settings-transfer] could not show the outcome")
+
+    def export_settings_to_file(self, path: str) -> str:
+        """Write the shareable settings to `path`; '' or an i18n error key."""
+        from core.settings_transfer import build_export
+        try:
+            payload = build_export(self.settings, __version__)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
+            logging.info("[settings-transfer] settings exported to %s", path)
+            return ""
+        except Exception:
+            logging.exception("[settings-transfer] export failed")
+            return "settings_export_failed"
+
+    def import_settings_from_file(self, path: str):
+        """Apply the settings in `path`. Returns (i18n error key or '', count).
+
+        Nothing is written until the file has been read and understood, so a
+        file that is not an export, or holds nothing this build knows, leaves
+        the install exactly as it was.
+        """
+        from core.settings_transfer import merge_settings, read_export
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                payload = json.load(f)
+        except Exception:
+            logging.exception("[settings-transfer] could not read %s", path)
+            return "settings_import_unreadable", 0
+        incoming, error = read_export(payload)
+        if error:
+            logging.warning("[settings-transfer] refused %s: %s", path, error)
+            return error, 0
+        merged, applied, ignored = merge_settings(self.settings, incoming)
+        if ignored:
+            # Not an error: a newer export, or one carrying this install's own
+            # state, simply leaves those alone.
+            logging.info("[settings-transfer] %d setting(s) ignored: %s",
+                         len(ignored), ", ".join(sorted(ignored)[:20]))
+        if not applied:
+            return "settings_import_nothing", 0
+        # In place: panels and helpers hold a reference to this very dict.
+        self.settings.clear()
+        self.settings.update(merged)
+        self.save_settings()
+        self.apply_settings_live()
+        logging.info("[settings-transfer] %d setting(s) imported from %s", applied, path)
+        return "", applied
+
+    def apply_settings_live(self):
+        """Make the settings currently in self.settings take effect now.
+
+        The Settings dialog applies each control as it saves it; an import
+        replaces many at once, so this does the same work driven by the values
+        instead. Every step is guarded on its own: one that fails must not
+        leave the rest unapplied, and none of them may take the app down — the
+        settings are already saved by the time this runs.
+        """
+        # The install-wide copy every account reads is written by
+        # save_settings() itself (_persist_global_settings), which the import
+        # calls before this — including the connection block.
+
+        def _step(what, fn):
+            try:
+                fn()
+            except Exception:
+                logging.exception("[settings-transfer] could not apply %s", what)
+
+        general = self.settings.get("general", {})
+
+        # The API this account talks to, applied whole: every URL is built from
+        # server and port together and authenticated with the key, so moving
+        # the server while leaving the other two would point the app at the new
+        # host on the old port with the old key — working again only after a
+        # restart, which is exactly what an import promises not to need. For
+        # the bundled API these are this install's own values, unchanged by any
+        # import (core/settings_transfer.py).
+        # Outside _step() on purpose: connection_runtime() cannot raise (it is
+        # total over anything self.settings may hold), and these five have to
+        # move together or not at all. Anything added here needs its own guard.
+        runtime = _connection_runtime(self.settings, {
+            "wpp_custom_api": self.wpp_custom_api,
+            "wpp_server": self.wpp_server,
+            "wpp_ws_server": self.wpp_ws_server,
+            "wpp_port": getattr(self, "wpp_port", None),
+            "wpp_api_key": getattr(self, "wpp_api_key", None),
+        })
+        self.wpp_custom_api = runtime["wpp_custom_api"]
+        self.wpp_server = runtime["wpp_server"]
+        self.wpp_ws_server = runtime["wpp_ws_server"]
+        self.wpp_port = runtime["wpp_port"]
+        self.wpp_api_key = runtime["wpp_api_key"]
+
+        _step("audio devices", self._apply_configured_audio_devices)
+        _step("sounds", self.load_sounds)
+
+        def _clear_sound_cache():
+            cache = getattr(self, "_notification_sound_cache", None)
+            if cache is not None:
+                cache.clear()
+
+        _step("notification sounds", _clear_sound_cache)
+
+        def _reload_language():
+            from core.i18n import I18n
+            I18n.invalidate_cache()
+            self.i18n.get_language()
+            self.apply_language_changes()
+
+        _step("language", _reload_language)
+
+        def _apply_tray():
+            show = general.get("show_tray_icon", True)
+            if show and self.tray_icon is None:
+                self._init_tray()
+            elif not show and self.tray_icon is not None:
+                self.tray_icon.RemoveIcon()
+                self.tray_icon.Destroy()
+                self.tray_icon = None
+
+        _step("tray icon", _apply_tray)
+
+        def _apply_hotkey():
+            hotkey = general.get("global_hotkey") or {}
+            self.set_global_hotkey(hotkey.get("vk", 0), hotkey.get("mod", 0))
+
+        _step("global hotkey", _apply_hotkey)
+
+        def _apply_calls():
+            if not self.settings.get("calls", {}).get("alerts_enabled", True):
+                self.stop_all_incoming_call_alerts()
+            self._sync_incoming_call_bar()
+
+        _step("calls", _apply_calls)
+
+        def _apply_conversation():
+            cp = getattr(self, "conversations_panel", None)
+            if cp is None:
+                return
+            ui = self.settings.get("user_interface", {})
+            cp.apply_message_list_mode(ui.get("message_list_mode", "classic"))
+            speed = float(self.settings.get("audio_playback", {}).get(
+                "audio_default_speed", 1.0))
+            if speed in cp._audio_speed_steps:
+                cp._audio_speed_index = cp._audio_speed_steps.index(speed)
+                cp.audio_speed_btn.SetLabel(cp._format_speed(speed))
+            if getattr(cp, "conversation", None) is not None:
+                cp.populate_messages(preserve_focus=True)
+
+        _step("open conversation", _apply_conversation)
+
+        def _rebuild_chat_list():
+            # The list embeds settings of its own (the self-reference word, the
+            # delivery status, the yesterday label), and its fingerprint has
+            # not changed — so it has to be cleared or the rebuild is skipped.
+            self._chats_ui_fp = None
+            self.add_chats_to_ui()
+
+        _step("chat list", _rebuild_chat_list)
 
     def load_sounds(self):
         """Load every per-event UI sound from the active soundpack (Settings >
