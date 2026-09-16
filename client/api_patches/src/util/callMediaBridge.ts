@@ -182,6 +182,21 @@ function installCallMediaBridgeInPage(): boolean {
     if (tagged.__winzappCallMediaAttached) return pc;
     tagged.__winzappCallMediaAttached = true;
     pc.addEventListener('track', (event) => attachRemoteTrack(event.track));
+    // WhatsApp can obtain a stream before the bridge wrapper is installed and
+    // then add that stream later. Replace only outgoing audio at the final
+    // WebRTC boundary so Python PCM is always the media source.
+    try {
+      const nativeAddTrack = pc.addTrack.bind(pc);
+      tagged.__winzappNativeAddTrack = nativeAddTrack;
+      pc.addTrack = ((track: MediaStreamTrack, ...streams: MediaStream[]) => {
+        if (state.enabled && track?.kind === 'audio') {
+          const micTrack = ensureMicTrack().clone();
+          const micStream = new MediaStream([micTrack]);
+          return nativeAddTrack(micTrack, micStream);
+        }
+        return nativeAddTrack(track, ...streams);
+      }) as typeof pc.addTrack;
+    } catch (_) {}
     return pc;
   };
 
