@@ -62,6 +62,19 @@ def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     assert "--mute-audio" in config
 
 
+def test_headless_chromium_auto_grants_webrtc_media_permission():
+    start_js = _source("client/api_patches/start.js")
+    config = _source("client/api_patches/src/config.ts")
+    session_util = _source("client/api_patches/src/util/sessionUtil.ts")
+
+    # Current WhatsApp Web initializes the native VoIP backend only after the
+    # browser-level media permission gate passes.  The Python bridge replaces
+    # getUserMedia with a synthetic track, while this flag removes Chromium's
+    # permission UI (which cannot be answered in headless mode).
+    for source in (start_js, config, session_util):
+        assert "--use-fake-ui-for-media-stream" in source
+
+
 def test_chromium_keeps_rendering_backend_available_for_voip_runtime():
     session_util = "\n".join(
         line

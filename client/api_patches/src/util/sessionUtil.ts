@@ -31,6 +31,7 @@ export const chromiumArgs = [
   '--disable-translate', // Disables translation
   '--hide-scrollbars', // Hides scrollbars
   '--metrics-recording-only', // Records metrics only
+  '--use-fake-ui-for-media-stream', // Auto-grants WebRTC media permission for headless calls
   '--mute-audio', // Mutes audio
   '--no-first-run', // Skips first run
   '--safebrowsing-disable-auto-update', // Disables Safe Browsing auto-update

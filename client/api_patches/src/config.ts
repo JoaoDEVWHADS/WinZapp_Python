@@ -135,6 +135,7 @@ export default {
       '--hide-scrollbars',
       '--metrics-recording-only',
       '--autoplay-policy=no-user-gesture-required',
+      '--use-fake-ui-for-media-stream',
       '--mute-audio',
       '--no-first-run',
       '--safebrowsing-disable-auto-update',
