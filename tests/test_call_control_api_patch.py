@@ -99,3 +99,9 @@ def test_setup_api_copies_call_patch_files_into_runtime_api():
 
     assert "src/util/callMediaBridge.ts" in setup_api
     assert "src/controller/callController.ts" in setup_api
+
+
+def test_outgoing_call_allows_native_voip_more_than_generic_http_timeout():
+    main_py = _source("client/main.py")
+
+    assert '"offer",\n                        {"to": peer_jid, "isVideo": False},\n                        timeout=75,' in main_py

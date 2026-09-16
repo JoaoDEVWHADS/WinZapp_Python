@@ -6124,7 +6124,9 @@ class MainWindow(wx.Frame):
                 try:
                     self._start_voice_call_audio(identity, details)
                     response = self._post_call_control(
-                        "offer", {"to": peer_jid, "isVideo": False}
+                        "offer",
+                        {"to": peer_jid, "isVideo": False},
+                        timeout=75,
                     )
                     if response.status_code >= 400:
                         raise RuntimeError(response.text[:500])
