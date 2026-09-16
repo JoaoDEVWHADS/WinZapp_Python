@@ -8,3 +8,4 @@
 /README.md merge=ours
 /CHANGELOG.md merge=ours
 /.github/workflows/release.yml merge=ours
+/client/core/wpp_dependency_setup.py merge=ours
