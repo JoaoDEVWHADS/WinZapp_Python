@@ -953,7 +953,18 @@ async function installPinnedPageInterception(page, body, log) {
         await cdp.send('Fetch.fulfillRequest', {
           requestId,
           responseCode: 200,
-          responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+          // Keep the isolation contract from Meta's real document response.
+          // WhatsApp's browser VoIP backend uses pthread-enabled WebAssembly;
+          // without COOP+COEP, SharedArrayBuffer is unavailable, voipInit
+          // silently ends in the failed state, and every call RPC is rejected.
+          responseHeaders: [
+            { name: 'Content-Type', value: 'text/html; charset=utf-8' },
+            { name: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+            { name: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
+            { name: 'Cross-Origin-Resource-Policy', value: 'cross-origin' },
+            { name: 'Origin-Agent-Cluster', value: '?1' },
+            { name: 'Cache-Control', value: 'no-store, must-revalidate, no-cache, private' },
+          ],
           body: Buffer.from(body).toString('base64'),
         });
       } else {
