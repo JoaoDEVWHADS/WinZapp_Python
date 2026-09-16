@@ -4,15 +4,15 @@ Ta wersja poprawia sytuacje, w których WinZapp niepotrzebnie prosił o ponowne 
 
 NOWOŚCI
 
-- Spacja odtwarza i wstrzymuje audio lub wideo, na którym jesteś. Wcześniej ten klawisz nie robił nic na liście wiadomości. Nadal działa węziej niż Enter: nigdy nie otwiera odnośnika, dokumentu, podglądu ani rozmowy z kontaktem.
+- Spacja odtwarza i wstrzymuje audio lub wideo, na którym jesteś. Wcześniej ten klawisz nie robił nic na liście wiadomości. Nadal działa węziej niż Enter: nigdy nie otwiera odnośnika, dokumentu, podglądu ani czatu z kontaktem.
 
-- Tryb zaznaczania. Po zaznaczeniu pierwszego elementu klawiszami Ctrl+Spacja sama Spacja zaznacza i odznacza kolejne — na liście rozmów, na liście wiadomości i w oknie przekazywania dalej — bez przytrzymywania Ctrl przy każdym z nich. Czytnik ekranu mówi, kiedy tryb się włącza i kiedy wyłącza, a wyłącza się sam, gdy tylko nic nie jest już zaznaczone. Jeśli wolisz, żeby Spacja zawsze odtwarzała, odznacz "Używaj Spacji do zaznaczania/odznaczania, gdy coś jest już zaznaczone" w Ustawieniach, Interfejs użytkownika.
+- Tryb zaznaczania. Po zaznaczeniu pierwszego elementu klawiszami Ctrl+Spacja sama Spacja zaznacza i odznacza kolejne — na liście czatów, na liście wiadomości i w oknie przekazywania dalej — bez przytrzymywania Ctrl przy każdym z nich. Czytnik ekranu mówi, kiedy tryb się włącza i kiedy wyłącza, a wyłącza się sam, gdy tylko nic nie jest już zaznaczone. Jeśli wolisz, żeby Spacja zawsze odtwarzała, odznacz "Używaj Spacji do zaznaczania/odznaczania, gdy coś jest już zaznaczone" w Ustawieniach, Interfejs użytkownika.
 
-- Esc odznacza przed zamknięciem. Gdy wiadomości są zaznaczone, pierwszy Esc tylko odznacza wszystkie, a dopiero drugi zamyka rozmowę. To także można wyłączyć w Ustawieniach, Interfejs użytkownika.
+- Esc odznacza przed zamknięciem. Gdy wiadomości są zaznaczone, pierwszy Esc tylko odznacza wszystkie, a dopiero drugi zamyka czat. To także można wyłączyć w Ustawieniach, Interfejs użytkownika.
 
 POPRAWKI
 
-- Wiadomości zaznaczone w rozmowie pozostawały zaznaczone po jej zamknięciu i wracały zaznaczone po ponownym otwarciu. Teraz zaznaczenie kończy się razem z rozmową.
+- Wiadomości zaznaczone w czacie pozostawały zaznaczone po jego zamknięciu i wracały zaznaczone po ponownym otwarciu. Teraz zaznaczenie kończy się razem z czatem.
 
 - Gdy WhatsApp odrzucał połączenie tuż po uruchomieniu programu, kopia zapasowa profilu przeglądarki w ogóle nie była przywracana: jeśli kody parowania zaczynały napływać w pierwszych sekundach, WinZapp zamykał sesję i kazał sparować konto od nowa, mimo że zapisana była dobra kopia. Teraz przywraca kopię, gdy tylko pojawi się pierwszy kod, i prosi o parowanie dopiero wtedy, gdy przywrócenie nie pomoże.
 

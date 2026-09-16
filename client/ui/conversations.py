@@ -355,9 +355,14 @@ def toggle_jid_selection(selected: set, jid: str) -> "tuple[bool, bool]":
     repaint, the sound, the announcement — since none of that is decidable
     from the set alone.
 
-    *was_active* is the state BEFORE the toggle, which is what
-    _selection_mode_announcement() compares against the state after it to name
-    the mode turning on or off.
+    *was_active* is the state BEFORE the toggle, i.e. whether anything at all
+    was selected. That is deliberately NOT what names the mode in the forward
+    dialog: its list is filtered by its own search box, and a selection the
+    filter hides is not a mode the user is in, so the caller derives both
+    booleans from visible_jid_selected() and ignores this one. It stays part of
+    the answer because it is the whole-set reading the caller is choosing
+    against, and because getting the two confused is the bug this pair of
+    helpers exists to keep apart.
     """
     was_active = bool(selected)
     now_selected = jid not in selected
@@ -366,6 +371,26 @@ def toggle_jid_selection(selected: set, jid: str) -> "tuple[bool, bool]":
     else:
         selected.discard(jid)
     return now_selected, was_active
+
+
+def visible_jid_selected(selected: set, listed_jids) -> bool:
+    """Whether any of *listed_jids* is in *selected*.
+
+    The forward dialog's equivalent of
+    ConversationsPanel._chat_selection_visible(), and it exists for the same
+    reason: that dialog has its own search box, which rebuilds the rows while
+    selected_jids survives untouched. Gating plain Space on the raw set let a
+    user select a contact, type a query that hides it, press Space on another
+    one, and forward the message to both — including one they could not see
+    they had picked. This surface is the one that actually sends, so it is the
+    one where an invisible selection costs most.
+
+    *listed_jids* is any iterable (the dialog passes a generator over the rows
+    currently in the ListBox), and the scan short-circuits on the first hit.
+    """
+    if not selected:
+        return False
+    return any(jid in selected for jid in listed_jids)
 
 
 class ConversationsPanel(wx.Panel):
@@ -7012,23 +7037,29 @@ class ConversationsPanel(wx.Panel):
         no jid), rather than consuming a keystroke with no sound, speech or
         effect. Ctrl+Space keeps swallowing it, as it always has.
 
-        The was_active/is_active bookkeeping below deliberately reads the raw
-        set, not _chat_selection_visible(): it is announcing a change to the
-        set itself, and a chat hidden by the active filter is still selected.
+        The was_active/is_active bookkeeping below reads
+        _chat_selection_visible(), not the raw set, because that is what
+        _on_conv_list_key_down() gates plain Space on — and the announcement
+        has to name the mode the gate actually enforces. Reading the raw set
+        here left the two disagreeing: with one selected chat hidden by the
+        filter, Ctrl+Space on a visible one announced no mode change (the raw
+        set was already non-empty), deselecting it again announced none
+        either, and the next plain Space then fell through to the control with
+        nothing to show for it — the silent dead key, one surface over.
         """
         if not (0 <= idx < len(self.chats_list)):
             return False
         jid = self.chats_list[idx].get("remoteJid", "")
         if not jid:
             return False
-        was_active = bool(self.selected_chats)
+        was_active = self._chat_selection_visible()
         if jid in self.selected_chats:
             self.selected_chats.remove(jid)
             self.main_window.add_chats_to_ui()
             self.main_window.output(
                 self._selection_mode_announcement(
                     self.main_window.i18n.t("unselected"),
-                    was_active, bool(self.selected_chats)),
+                    was_active, self._chat_selection_visible()),
                 interrupt=True)
         else:
             self.selected_chats.add(jid)
@@ -7037,7 +7068,7 @@ class ConversationsPanel(wx.Panel):
             self.main_window.output(
                 self._selection_mode_announcement(
                     self.main_window.i18n.t("selected"),
-                    was_active, bool(self.selected_chats)),
+                    was_active, self._chat_selection_visible()),
                 interrupt=True)
         return True
 
@@ -7114,7 +7145,10 @@ class ConversationsPanel(wx.Panel):
         if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
             target = (idx + 1) if idx >= 0 else 0
             if target < total:
-                was_active = bool(self.selected_chats)
+                # Every announcement on this list derives the mode from
+                # _chat_selection_visible(), the same predicate plain Space is
+                # gated on below — see _toggle_chat_selection().
+                was_active = self._chat_selection_visible()
                 self.conversations_list.Focus(target)
                 self.conversations_list.Select(target, True)
                 self.conversations_list.EnsureVisible(target)
@@ -7124,14 +7158,14 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.output(
                         self._selection_mode_announcement(
                             self.main_window.i18n.t("selected"),
-                            was_active, bool(self.selected_chats)),
+                            was_active, self._chat_selection_visible()),
                         interrupt=True)
             return
 
         if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
             target = (idx - 1) if idx >= 0 else 0
             if target >= 0:
-                was_active = bool(self.selected_chats)
+                was_active = self._chat_selection_visible()
                 self.conversations_list.Focus(target)
                 self.conversations_list.Select(target, True)
                 self.conversations_list.EnsureVisible(target)
@@ -7141,7 +7175,7 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.output(
                         self._selection_mode_announcement(
                             self.main_window.i18n.t("selected"),
-                            was_active, bool(self.selected_chats)),
+                            was_active, self._chat_selection_visible()),
                         interrupt=True)
             return
 
@@ -7150,7 +7184,7 @@ class ConversationsPanel(wx.Panel):
             if total > 0:
                 idx0 = idx if idx >= 0 else 0
                 lo, hi = (idx0, total - 1) if to_end else (0, idx0)
-                was_active = bool(self.selected_chats)
+                was_active = self._chat_selection_visible()
                 selected_any = False
                 for i in range(lo, hi + 1):
                     if self._select_chat_at(i):
@@ -7165,20 +7199,20 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.output(
                         self._selection_mode_announcement(
                             self.main_window.i18n.t("selected"),
-                            was_active, bool(self.selected_chats)),
+                            was_active, self._chat_selection_visible()),
                         interrupt=True)
             return
 
         if ctrl and shift and key == wx.WXK_SPACE:
             all_jids = self._all_chat_jids()
-            was_active = bool(self.selected_chats)
+            was_active = self._chat_selection_visible()
             if all_jids and all(j in self.selected_chats for j in all_jids):
                 self.selected_chats.clear()
                 self.main_window.add_chats_to_ui()
                 self.main_window.output(
                     self._selection_mode_announcement(
                         self.main_window.i18n.t("all_unselected"),
-                        was_active, bool(self.selected_chats)),
+                        was_active, self._chat_selection_visible()),
                     interrupt=True)
             elif all_jids:
                 self.selected_chats.update(all_jids)
@@ -7187,7 +7221,7 @@ class ConversationsPanel(wx.Panel):
                 self.main_window.output(
                     self._selection_mode_announcement(
                         self.main_window.i18n.t("all_selected"),
-                        was_active, bool(self.selected_chats)),
+                        was_active, self._chat_selection_visible()),
                     interrupt=True)
             return
 
@@ -11910,21 +11944,39 @@ class ConversationsPanel(wx.Panel):
 
         lst.Bind(wx.EVT_LISTBOX, _on_listbox_select)
 
+        def _selection_visible():
+            """Whether any selected contact is among the rows listed right
+            now — this dialog's search box rebinds _filtered_chats, and
+            selected_jids survives it. Everything here derives the selection
+            mode from this, gate and announcement alike."""
+            return visible_jid_selected(
+                selected_jids, (_jid_at(i) for i in range(lst.GetCount())))
+
         def _toggle_at(row):
             """Toggle the contact on *row*, exactly as Ctrl+Space always has —
-            shared with plain Space once a selection exists (issue #99)."""
+            shared with plain Space once a selection exists (issue #99).
+
+            Returns whether anything was toggled, so plain Space can hand the
+            key back instead of dying on a row with no jid (an empty search
+            result focuses nothing at all). Ctrl+Space ignores it and keeps
+            swallowing the key, as it always has.
+            """
             jid = _jid_at(row)
             if not jid:
-                return
-            now_selected, was_active = toggle_jid_selection(selected_jids, jid)
+                return False
+            was_active = _selection_visible()
+            # The set bookkeeping is the pure helper's; its own was_active is
+            # the raw-set answer, which is the one this dialog must not use.
+            now_selected, _ = toggle_jid_selection(selected_jids, jid)
             _refresh_row(row)
             if now_selected:
                 self.selection_sound.play()
             mw.output(
                 self._selection_mode_announcement(
                     i18n.t("selected" if now_selected else "unselected"),
-                    was_active, bool(selected_jids)),
+                    was_active, _selection_visible()),
                 interrupt=True)
+            return True
 
         def _on_list_key_down(event):
             key   = event.GetKeyCode()
@@ -11939,13 +11991,13 @@ class ConversationsPanel(wx.Panel):
                     lst.SetSelection(target)
                     jid = _jid_at(target)
                     if jid and jid not in selected_jids:
-                        was_active = bool(selected_jids)
+                        was_active = _selection_visible()
                         selected_jids.add(jid)
                         _refresh_row(target)
                         self.selection_sound.play()
                         mw.output(
                             self._selection_mode_announcement(
-                                i18n.t("selected"), was_active, bool(selected_jids)),
+                                i18n.t("selected"), was_active, _selection_visible()),
                             interrupt=True)
                 return
 
@@ -11954,7 +12006,7 @@ class ConversationsPanel(wx.Panel):
                 if count > 0:
                     focus0 = focus if focus >= 0 else 0
                     lo, hi = (focus0, count - 1) if to_end else (0, focus0)
-                    was_active = bool(selected_jids)
+                    was_active = _selection_visible()
                     newly = []
                     for i in range(lo, hi + 1):
                         jid = _jid_at(i)
@@ -11969,7 +12021,7 @@ class ConversationsPanel(wx.Panel):
                         self.selection_sound.play()
                         mw.output(
                             self._selection_mode_announcement(
-                                i18n.t("selected"), was_active, bool(selected_jids)),
+                                i18n.t("selected"), was_active, _selection_visible()),
                             interrupt=True)
                 return
 
@@ -11979,7 +12031,7 @@ class ConversationsPanel(wx.Panel):
                 row_jids = [_jid_at(i) for i in range(count)]
                 real_jids = [j for j in row_jids if j]
                 all_selected = bool(real_jids) and all(j in selected_jids for j in real_jids)
-                was_active = bool(selected_jids)
+                was_active = _selection_visible()
                 for i, jid in enumerate(row_jids):
                     if not jid:
                         continue
@@ -11994,7 +12046,7 @@ class ConversationsPanel(wx.Panel):
                     mw.output(
                         self._selection_mode_announcement(
                             i18n.t("all_unselected" if all_selected else "all_selected"),
-                            was_active, bool(selected_jids)),
+                            was_active, _selection_visible()),
                         interrupt=True)
                 return
 
@@ -12002,12 +12054,15 @@ class ConversationsPanel(wx.Panel):
                 _toggle_at(focus)
                 return
 
-            # Plain Space keeps selecting once a selection exists (issue #99);
-            # with nothing selected it stays the native key it always was.
+            # Plain Space keeps selecting once a selection the user can SEE
+            # exists (issue #99); with nothing selected — or with every
+            # selected contact hidden by the search box — it stays the native
+            # key it always was, and so it does when the toggle itself refuses
+            # (an empty search result focuses no row at all).
             if (key == wx.WXK_SPACE and not ctrl and not shift
-                    and self._selection_mode_enabled() and selected_jids):
-                _toggle_at(focus)
-                return
+                    and self._selection_mode_enabled() and _selection_visible()):
+                if _toggle_at(focus):
+                    return
 
             event.Skip()  # Arrows, letter type-ahead, everything else: native behavior
 
