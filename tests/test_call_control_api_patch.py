@@ -135,6 +135,14 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
     assert "Math.min(1500, 300 * (attempt + 1))" in controller
 
 
+def test_wa_js_voip_initialization_can_retry_after_lazy_backend_failure():
+    source = _source("rm download/wa-js/src/call/functions/enableCallInterface.ts")
+
+    assert "initializationPromise" in source
+    assert "isEnabled = false" in source
+    assert "throw err" in source
+
+
 def test_voip_runtime_warmup_is_deduplicated_per_session():
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
