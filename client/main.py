@@ -5934,11 +5934,13 @@ class MainWindow(wx.Frame):
 
     def _call_control_payload(self, identity: str) -> dict:
         details = getattr(self, "_incoming_call_details", {}).get(identity, {})
-        call_id = details.get("call_id") or identity
-        payload = {}
-        if call_id and "@" not in str(call_id):
-            payload["callId"] = call_id
-        return payload
+        call_id = str(details.get("call_id") or "")
+        if call_id:
+            return {"callId": call_id}
+        # When only a peer JID is known, leave the payload empty.  WA-JS/WhatsApp
+        # can then act on the native active call instead of receiving a contact
+        # JID where a call id is expected.
+        return {}
 
     def _post_call_control(self, endpoint: str, payload: dict, *, timeout: float = 15):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/call/{endpoint}"

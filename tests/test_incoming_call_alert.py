@@ -212,6 +212,22 @@ def test_offer_stores_call_details_for_real_answer_or_reject():
     assert stub._call_control_payload("call-1") == {"callId": "call-1"}
 
 
+def test_call_control_payload_keeps_real_whatsapp_ids_with_at_sign():
+    stub = _MainStub()
+    call_id = "false_5511999999999@s.whatsapp.net_ABC123"
+
+    stub.on_incoming_call_event(_offer(call_id=call_id))
+
+    assert stub._call_control_payload(call_id) == {"callId": call_id}
+
+
+def test_call_control_payload_does_not_send_peer_jid_as_call_id():
+    stub = _MainStub()
+    stub._incoming_call_details["5511999999999@s.whatsapp.net"] = {"peer_jid": "5511999999999@s.whatsapp.net"}
+
+    assert stub._call_control_payload("5511999999999@s.whatsapp.net") == {}
+
+
 def test_offer_received_while_offline_is_ignored_even_if_recent():
     stub = _MainStub()
     event = _offer()
