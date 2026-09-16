@@ -6291,7 +6291,21 @@ class MainWindow(wx.Frame):
         peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
         active = getattr(self, "_active_voice_call", None)
         if not active:
-            return
+            # The call may be answered from the WhatsApp page controls. In
+            # that path WinZapp receives ACTIVE without its own answer button
+            # having created the Python audio session.
+            if state != "ACTIVE" or not call_id:
+                return
+            active = {
+                "identity": call_id,
+                "call_id": call_id,
+                "peer_jid": peer_jid,
+                "name": self._preview_sender_from_jid(peer_jid) or peer_jid,
+                "outgoing": bool(event.get("outgoing", False)),
+            }
+            self._active_voice_call = active
+            self._voice_call_last_announced_state = ""
+            wx.CallAfter(self._sync_voice_call_bar)
         matches = (
             (call_id and call_id in {active.get("call_id"), active.get("identity")})
             or (peer_jid and peer_jid == active.get("peer_jid"))
@@ -6316,7 +6330,26 @@ class MainWindow(wx.Frame):
             return
         if state == "ACTIVE" and self._voice_call_last_announced_state != "ACTIVE":
             self._voice_call_last_announced_state = "ACTIVE"
+            if getattr(self, "_call_audio_session", None) is None:
+                details = dict(active)
+                threading.Thread(
+                    target=self._attach_audio_to_browser_call,
+                    args=(details,), daemon=True,
+                ).start()
             self.output(self.i18n.t("voice_call_connected"), interrupt=True)
+
+    def _attach_audio_to_browser_call(self, details: dict):
+        """Attach Python capture/playback when the page handled the answer."""
+        with self._call_action_lock:
+            if self._call_audio_session is not None:
+                return
+            try:
+                self._start_voice_call_audio(
+                    str(details.get("identity") or details.get("call_id") or "call"),
+                    details,
+                )
+            except Exception:
+                logging.exception("[call_audio] failed to attach to browser call")
 
     def on_incoming_call_event(self, event: dict):
         """Announce an incoming call and keep its tone playing until it ends.
