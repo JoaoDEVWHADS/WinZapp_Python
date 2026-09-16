@@ -183,7 +183,19 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
                 backend?.WAWebVoipInit?.initWAWebVoip ||
                 backend?.initWAWebVoip;
               if (typeof init === 'function') {
-                await init.call(backend?.WAWebVoipInit || backend);
+                const initModule = backend?.WAWebVoipInit || backend;
+                await init.call(initModule, 'winzapp_call_action');
+                const emitter = initModule?.VoipInitEventEmitter;
+                if (
+                  emitter?.getIsVoipInited?.() !== true &&
+                  emitter?.getDidVoipInitError?.() === true &&
+                  typeof initModule?.retryWAWebVoipInitAfterFailure === 'function'
+                ) {
+                  await initModule.retryWAWebVoipInitAfterFailure();
+                }
+                if (emitter?.getIsVoipInited?.() === false) {
+                  throw new Error('WhatsApp VoIP initializer completed without becoming ready');
+                }
               }
             }
 
@@ -450,6 +462,9 @@ export async function callDiagnostics(req: Request, res: Response) {
         backendInitSource: (backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip)
           ? String(backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip).slice(0, 1200)
           : '',
+        emitterReady: backend?.WAWebVoipInit?.VoipInitEventEmitter?.getIsVoipInited?.(),
+        emitterFailed: backend?.WAWebVoipInit?.VoipInitEventEmitter?.getDidVoipInitError?.(),
+        retryFunction: typeof backend?.WAWebVoipInit?.retryWAWebVoipInitAfterFailure,
         isVoipInitialized: conn?.isVoipInitialized,
         connectionKeys: conn ? Object.keys(conn).filter((key) => /voip|call/i.test(key)).sort() : [],
       };

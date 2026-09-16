@@ -335,7 +335,21 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
               const backend = await requireBackend();
               const init = backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip;
               if (typeof init === 'function') {
-                await init.call(backend?.WAWebVoipInit || backend);
+                const initModule = backend?.WAWebVoipInit || backend;
+                await init.call(initModule, 'winzapp_session_warmup');
+                const emitter = initModule?.VoipInitEventEmitter;
+                if (
+                  emitter?.getIsVoipInited?.() !== true &&
+                  emitter?.getDidVoipInitError?.() === true &&
+                  typeof initModule?.retryWAWebVoipInitAfterFailure === 'function'
+                ) {
+                  await initModule.retryWAWebVoipInitAfterFailure();
+                }
+                if (emitter?.getIsVoipInited?.() === false) {
+                  lastError = 'WhatsApp VoIP initializer did not become ready';
+                  await delay(250 * (attempt + 1));
+                  continue;
+                }
               }
             }
 

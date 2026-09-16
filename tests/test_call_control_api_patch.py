@@ -145,6 +145,9 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
     assert "const maxAttempts = 8" in controller
     assert "isVoipInitError(error)" in controller
     assert "Math.min(1500, 300 * (attempt + 1))" in controller
+    assert "winzapp_call_action" in controller
+    assert "getIsVoipInited" in controller
+    assert "retryWAWebVoipInitAfterFailure" in controller
 
 
 def test_wa_js_voip_initialization_can_retry_after_lazy_backend_failure():
@@ -161,3 +164,5 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "__winzappVoipWarmupPromise" in bridge
     assert "if (pending) return pending" in bridge
     assert "delete (client as any).__winzappVoipWarmupPromise" in bridge
+    assert "winzapp_session_warmup" in bridge
+    assert "getDidVoipInitError" in bridge
