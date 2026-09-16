@@ -388,6 +388,7 @@
     "add_member_country_label": "Select the country to add by number",
     "add_member_phone_number_label": "Type a phone number",
     "add_member_custom_number_button": "Add number",
+    "add_member_invalid_number": "Type a valid phone number.",
     "no_groups_available": "No groups available.",
     "unread_sep_singular": "1 unread message",
     "unread_sep_plural": "{count} unread messages",

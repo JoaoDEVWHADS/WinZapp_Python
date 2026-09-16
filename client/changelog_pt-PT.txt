@@ -16,6 +16,10 @@ CORREÇÕES
 
 - Quando o WhatsApp recusava a ligação logo ao abrir o programa, a cópia de segurança do perfil não chegava a ser restaurada: se os códigos de emparelhamento começavam a aparecer nos primeiros segundos, o WinZapp terminava a sessão e mandava emparelhar de novo mesmo com uma cópia boa guardada. Agora restaura a cópia assim que o primeiro código aparece, e só pede para emparelhar quando a restauração não resolve.
 
+- Adicionar um membro ao grupo pelo número de telefone não fazia nada: o botão "Adicionar número" não adicionava ninguém e não mostrava erro. Agora adiciona o número de imediato e mostra se correu bem, e um número inválido é assinalado. Na mesma janela, o campo de pesquisa passou a ser lido como "Procurar contacto".
+
+- Com uma conversa aberta, a lista de mensagens encolhia de volta ao limite configurado a cada minuto, e mensagens antigas desapareciam — incluindo do histórico guardado. O WinZapp confundia mensagens fora do intervalo que consulta no WhatsApp com mensagens apagadas no telemóvel. Agora só compara o intervalo que o WhatsApp de facto devolveu, e a lista já não encolhe enquanto está a ler.
+
 V1.1.1.0
 
 Esta versão é sobre manter a sua conta ligada. O WinZapp passou a guardar uma cópia de segurança do perfil do navegador — que é onde a sua ligação ao WhatsApp fica realmente guardada — e a restaurá-la sozinho quando ela deixa de ser aceite, avisando o que aconteceu. Com ela vieram as correções das situações que quebravam a sessão e faziam o programa pedir para emparelhar de novo: desligar o computador, suspender e retomar, e o próprio programa a reiniciar a ligação. Chegaram também a verificação ortográfica no campo de mensagem e as ações sobre ligações.

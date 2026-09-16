@@ -388,6 +388,7 @@
     "add_member_country_label": "Seleccionar el país para añadir por número",
     "add_member_phone_number_label": "Escriba un número de teléfono",
     "add_member_custom_number_button": "Agregar número",
+    "add_member_invalid_number": "Escriba un número de teléfono válido.",
     "no_groups_available": "No hay grupos disponibles.",
     "unread_sep_singular": "1 mensaje no leído",
     "unread_sep_plural": "{count} mensajes no leídos",

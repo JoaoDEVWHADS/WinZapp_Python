@@ -16,6 +16,10 @@ FIXES
 
 - When WhatsApp refused the connection right after the app was opened, the backup copy of the browser profile was never restored: if pairing codes started arriving in the first few seconds, WinZapp closed the session and sent you to pair again even with a good copy saved. It now restores the copy as soon as the first code appears, and only asks you to pair when the restore does not help.
 
+- Adding a group member by phone number did nothing: the "Add number" button added nobody and showed no error. It now adds the number right away and tells you whether it worked, and an invalid number is reported. In the same dialog, the search field is now read as "Search contact".
+
+- With a chat open, the message list shrank back to the configured limit every minute, and older messages disappeared — including from the stored history. WinZapp mistook messages outside the range it checks on WhatsApp for messages deleted on the phone. It now only compares the range WhatsApp actually returned, and the list no longer shrinks while you read.
+
 V1.1.1.0
 
 This release is about keeping your account connected. WinZapp now keeps a backup copy of the browser profile — which is where your WhatsApp connection actually lives — and restores it on its own when it stops being accepted, telling you what happened. Alongside it come fixes for the situations that broke the session and left the app asking you to pair again: shutting the computer down, suspending and resuming, and the app restarting the connection by itself. Spell checking in the message field and link actions arrived too.

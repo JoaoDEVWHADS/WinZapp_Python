@@ -16,6 +16,10 @@ POPRAWKI
 
 - Gdy WhatsApp odrzucał połączenie tuż po uruchomieniu programu, kopia zapasowa profilu przeglądarki w ogóle nie była przywracana: jeśli kody parowania zaczynały napływać w pierwszych sekundach, WinZapp zamykał sesję i kazał sparować konto od nowa, mimo że zapisana była dobra kopia. Teraz przywraca kopię, gdy tylko pojawi się pierwszy kod, i prosi o parowanie dopiero wtedy, gdy przywrócenie nie pomoże.
 
+- Dodawanie członka grupy według numeru telefonu nic nie robiło: przycisk "Dodaj numer" nikogo nie dodawał i nie pokazywał błędu. Teraz od razu dodaje numer i informuje, czy się udało, a nieprawidłowy numer jest zgłaszany. W tym samym oknie pole wyszukiwania jest teraz odczytywane jako "Szukaj kontaktu".
+
+- Przy otwartym czacie lista wiadomości co minutę kurczyła się z powrotem do ustawionego limitu, a starsze wiadomości znikały — także z zapisanej historii. WinZapp mylił wiadomości spoza zakresu sprawdzanego w WhatsAppie z wiadomościami usuniętymi na telefonie. Teraz porównuje tylko zakres, który WhatsApp faktycznie zwrócił, i lista nie kurczy się już podczas czytania.
+
 V1.1.1.0
 
 Ta wersja dotyczy utrzymania połączenia z Twoim kontem. WinZapp zapisuje teraz kopię zapasową profilu przeglądarki — to w nim faktycznie przechowywane jest Twoje połączenie z WhatsApp — i sam ją przywraca, gdy przestaje być akceptowana, informując o tym, co się stało. Razem z nią pojawiają się poprawki sytuacji, które przerywały sesję i zmuszały do ponownego parowania: wyłączenie komputera, wstrzymanie i wznowienie oraz samo ponowne uruchamianie połączenia przez program. Doszły również sprawdzanie pisowni w polu wiadomości i akcje na odnośnikach.

@@ -10,6 +10,47 @@ from core.utils import format_number, contact_search_matches
 from countries import get_countries
 
 
+def _focused_window():
+    """wx.Window.FindFocus(), or None when there is nothing to ask."""
+    try:
+        return wx.Window.FindFocus()
+    except Exception:
+        return None
+
+
+def typed_number_to_jid(raw: str, dial_code: str) -> str:
+    """The JID for a phone number typed into the "add by number" field, or ""
+    when what was typed cannot be a phone number.
+
+    Everything but digits is dropped, so a pasted "+55 (51) 99999-8888" works.
+    The selected country's code is prepended unless the number already starts
+    with it — with one exception that matters in the default country: Brazil's
+    code is 55 and so is the area code of part of Rio Grande do Sul, so
+    "55 99999-8888" typed as a local number used to be read as already carrying
+    the country code and sent as 5599999888, a number that does not exist. A
+    Brazilian number with its area code is 10 or 11 digits and one with the
+    country code 12 or 13, so the length settles it.
+    """
+    digits = "".join(c for c in (raw or "") if c.isdigit())
+    dial_code = "".join(c for c in (dial_code or "") if c.isdigit())
+    if not digits:
+        return ""
+    # A trunk 0 ("051 99999-8888", UK "07911 123456") is dialled only inside
+    # the country and never follows a country code. Italy is the exception:
+    # its landlines keep the 0 after +39.
+    if digits.startswith("0") and not digits.startswith("00") and dial_code != "39":
+        digits = digits[1:]
+    if dial_code == "55" and len(digits) in (10, 11):
+        digits = dial_code + digits
+    elif dial_code and not digits.startswith(dial_code):
+        digits = dial_code + digits
+    # The shortest real numbers (country code included) are 8 digits and E.164
+    # caps them at 15; anything outside that is a typo, not a member.
+    if not 8 <= len(digits) <= 15:
+        return ""
+    return f"{digits}@c.us"
+
+
 class AddMemberDialog(wx.Dialog):
     """
     Shows a list of all contacts. The user selects one or more and clicks
@@ -46,18 +87,26 @@ class AddMemberDialog(wx.Dialog):
         # primary/expected path, the number field is the alternative one —
         # a blind user tabbing through the dialog used to land on the
         # alternative first, which read backwards.
-        contacts_label = wx.StaticText(self, label=i18n.t("add_member_contacts_list_label"))
-        sizer.Add(contacts_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
-
-        # Search field, right under the list's own label and before the list
-        # itself, focused on open (issue #85): first-letter navigation searches
-        # from the start of the displayed name, so it cannot find anyone by
-        # surname. Same field, same matcher, as the "Anexar contato" dialog.
+        # Search field before the list, focused on open (issue #85): first-letter
+        # navigation searches from the start of the displayed name, so it
+        # cannot find anyone by surname. Same field, same matcher, as the
+        # "Anexar contato" dialog.
+        #
+        # Each control gets its own label immediately before it, because NVDA
+        # reads the StaticText right before a control as that control's name.
+        # The list's label used to sit above the search field, so the field was
+        # announced as "Selecionar um contato". "Pesquisar contato" is the
+        # wording the "Novo grupo" dialog already uses for the same field.
+        search_label = wx.StaticText(self, label=i18n.t("group_search_label"))
+        sizer.Add(search_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        # No SetHint: it would repeat the label, and NVDA reads both.
         self._search_field = wx.TextCtrl(self, style=wx.TE_DONTWRAP)
-        self._search_field.SetHint(i18n.t("search_contact_label").replace("&", ""))
         self._search_field.Bind(wx.EVT_TEXT, self._on_search_text)
         self._search_field.Bind(wx.EVT_KEY_DOWN, self._on_search_key_down)
         sizer.Add(self._search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        contacts_label = wx.StaticText(self, label=i18n.t("add_member_contacts_list_label"))
+        sizer.Add(contacts_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
 
         self._list = wx.ListCtrl(
             self, style=wx.LC_REPORT | wx.LC_HRULES
@@ -110,9 +159,9 @@ class AddMemberDialog(wx.Dialog):
         self._phone_field.Bind(wx.EVT_TEXT_ENTER, self._on_add_typed_number)
         num_sizer.Add(self._phone_field, 1, wx.EXPAND | wx.RIGHT, 6)
 
-        add_number_btn = wx.Button(self, label=i18n.t("add_member_custom_number_button"))
-        add_number_btn.Bind(wx.EVT_BUTTON, self._on_add_typed_number)
-        num_sizer.Add(add_number_btn, 0)
+        self._add_number_btn = wx.Button(self, label=i18n.t("add_member_custom_number_button"))
+        self._add_number_btn.Bind(wx.EVT_BUTTON, self._on_add_typed_number)
+        num_sizer.Add(self._add_number_btn, 0)
 
         num_box_sizer.Add(num_sizer, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(num_box_sizer, 0, wx.EXPAND | wx.ALL, 8)
@@ -164,37 +213,31 @@ class AddMemberDialog(wx.Dialog):
         # rejected the same way the pairing dialog's field rejects it.
 
     def _on_add_typed_number(self, event):
-        """Detect the format of what the user typed/pasted, strip everything
-        but digits, prefix with the selected country's dial code (unless the
-        user already typed the code themselves) and append it to the pickable
-        contact list — same conversion done for pairing in connect.py."""
-        i18n = self._i18n
-        raw = self._phone_field.GetValue()
-        digits = "".join(c for c in raw if c.isdigit())
-        if not digits:
-            return
+        """Add the typed number to the group, right away.
 
+        This used to only append the number as a new row at the bottom of the
+        contact list and select it there, leaving the actual add to the "Add"
+        button above. Nothing was said and focus stayed in the field, so for a
+        screen-reader user pressing "Adicionar número" did nothing at all — and
+        the row it did add was lost on the next keystroke in the search field
+        (it never entered _all_rows), while the contact pre-selected on open
+        stayed selected next to it and would have been added too. The button
+        says "add", so it adds, and the result comes back through the same
+        success/error dialog as the contact list.
+        """
         idx = self._country_combo.GetSelection()
         dial_code = self._countries[idx][1] if 0 <= idx < len(self._countries) else "55"
-
-        # If the number as typed doesn't already start with the selected
-        # country's dial code, assume it's a local number and prepend it.
-        if not digits.startswith(dial_code):
-            digits = dial_code + digits
-
-        jid = f"{digits}@c.us"
-        if jid in self._contact_jids:
-            self._phone_field.SetValue("")
+        jid = typed_number_to_jid(self._phone_field.GetValue(), dial_code)
+        if not jid:
+            wx.MessageBox(
+                self._i18n.t("add_member_invalid_number"),
+                self._i18n.t("add_member_title"),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._phone_field.SetFocus()
             return
-
-        name = format_number(jid)
-        idx_row = self._list.GetItemCount()
-        self._list.InsertItem(idx_row, name)
-        self._list.SetItem(idx_row, 1, name)
-        self._contact_jids.append(jid)
-        self._list.Select(idx_row)
-        self._list.EnsureVisible(idx_row)
-        self._phone_field.SetValue("")
+        self._start_add([jid])
 
     def _populate_contacts(self):
         """Fill the list with the user's own contacts — not every entry in
@@ -279,9 +322,21 @@ class AddMemberDialog(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
 
+        self._start_add(selected_jids)
+
+    def _start_add(self, jids: list):
+        """Both add buttons end here; each is disabled while the request runs,
+        so a second press cannot send the same add twice.
+
+        Disabling the button that has keyboard focus makes Windows move focus
+        elsewhere — for a screen-reader user, onto whatever it picks, often
+        Cancel, where the next Enter closes the dialog. So the focused control
+        is remembered and _finish() gives focus back to it after a failure."""
+        self._focus_before_add = _focused_window()
         self._ok_btn.Disable()
+        self._add_number_btn.Disable()
         threading.Thread(
-            target=self._do_add, args=(selected_jids,), daemon=True
+            target=self._do_add, args=(jids,), daemon=True
         ).start()
 
     def _do_add(self, jids: list):
@@ -306,6 +361,13 @@ class AddMemberDialog(wx.Dialog):
                 self,
             )
             self._ok_btn.Enable()
+            self._add_number_btn.Enable()
+            target = getattr(self, "_focus_before_add", None)
+            if target is not None:
+                try:
+                    target.SetFocus()
+                except Exception:
+                    pass  # the control went away with the dialog's state
 
 
 class SelectGroupDialog(wx.Dialog):
