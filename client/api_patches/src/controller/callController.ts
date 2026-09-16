@@ -8,7 +8,11 @@
  */
 import { Request, Response } from 'express';
 
-import { ensureCallMediaBridge, setCallMediaBridgeActive } from '../util/callMediaBridge';
+import {
+  ensureCallMediaBridge,
+  setCallMediaBridgeActive,
+  warmCallVoipRuntime,
+} from '../util/callMediaBridge';
 
 type CallActionPayload = {
   callId?: string;
@@ -147,6 +151,12 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       };
 
       const ensureVoipRuntimeReady = async (): Promise<any> => {
+        // Session startup warms the lazy VoIP bundle in the background. Do
+        // not initialize it a second time while that promise is in flight:
+        // WhatsApp can expose the stack before its worker-side voipInit RPC
+        // has completed, which makes accept/reject fail intermittently.
+        await warmCallVoipRuntime(req.client, (req as any).logger);
+
         // WA-JS' enableCallInterface flips the calling AB props, but it marks
         // itself enabled before its best-effort backend init. If that first
         // init races the lazy VoIP bundle, later calls never retry it. Retry
