@@ -71,12 +71,13 @@ def test_headless_chromium_auto_grants_webrtc_media_permission():
 
     # Current WhatsApp Web initializes the native VoIP backend only after the
     # browser-level media permission gate passes.  The Python bridge replaces
-    # getUserMedia with a synthetic track, while this flag removes Chromium's
-    # permission UI (which cannot be answered in headless mode).
+    # getUserMedia with a synthetic track, while fake-ui removes Chromium's
+    # permission UI (which cannot be answered in headless mode). Never launch
+    # a fake capture device: WhatsApp's native VoIP backend can bypass the JS
+    # wrapper and would then transmit Chromium's silent test microphone.
     for source in (start_js, config, session_util):
         assert "--use-fake-ui-for-media-stream" in source
-
-    assert "--use-fake-device-for-media-stream" in start_js
+        assert "--use-fake-device-for-media-stream" not in source
 
 
 def test_runtime_user_agent_matches_the_launched_chromium_for_voip():
