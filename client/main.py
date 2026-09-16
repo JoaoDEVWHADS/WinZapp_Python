@@ -20531,6 +20531,9 @@ class MainWindow(wx.Frame):
 
     def sync_remote_chats(self, target_chats=None, incremental: bool = False,
                           expected_run_id=None):
+        if getattr(self, "_active_voice_call", None):
+            logging.info("[sync_remote_chats] paused during active voice call")
+            return set()
         # expected_run_id is passed only by _run_sync() (issue #198); the
         # periodic poll leaves it None and behaves exactly as before.
         def _superseded():
@@ -21507,6 +21510,11 @@ class MainWindow(wx.Frame):
                         return
                     time.sleep(1)
 
+                if getattr(self, "_active_voice_call", None):
+                    logging.info("[backfill] paused during active voice call")
+                    delay = 1
+                    continue
+
                 if not getattr(self, "_wa_connected", False):
                     # Not a wasted pass: nothing was attempted, so just wait
                     # again rather than spending part of the budget on it.
@@ -21596,6 +21604,8 @@ class MainWindow(wx.Frame):
                         "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
                         attempt, len(window), len(deep_pending))
                     for jid in window:
+                        if getattr(self, "_active_voice_call", None):
+                            break
                         if getattr(self, "_sync_run_id", 0) != my_run:
                             return
                         try:
@@ -22394,6 +22404,8 @@ class MainWindow(wx.Frame):
         return payload if isinstance(payload, dict) else None
 
     def sync_chat_messages(self, chat, expected_run_id=None, sync_mode="full"):
+        if getattr(self, "_active_voice_call", None):
+            return None
         if (expected_run_id is not None
                 and getattr(self, "_sync_run_id", 0) != expected_run_id):
             logging.info(
