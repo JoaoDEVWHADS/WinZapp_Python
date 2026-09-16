@@ -6344,6 +6344,9 @@ class MainWindow(wx.Frame):
             if self._call_audio_session is not None:
                 return
             try:
+                response = self._post_call_control("audio/enable", {}, timeout=20)
+                if response.status_code >= 400:
+                    raise RuntimeError(response.text[:500])
                 self._start_voice_call_audio(
                     str(details.get("identity") or details.get("call_id") or "call"),
                     details,

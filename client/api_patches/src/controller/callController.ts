@@ -376,6 +376,14 @@ export async function acceptCall(req: Request, res: Response) {
   }
 }
 
+export async function enableCallAudio(req: Request, res: Response) {
+  try {
+    ok(res, { enabled: await prepareAudioBridge(req) });
+  } catch (error) {
+    fail(req, res, 'enableCallAudio', error);
+  }
+}
+
 export async function rejectCall(req: Request, res: Response) {
   try {
     await installAudioBridge(req);

@@ -708,6 +708,12 @@ routes.post(
   CallController.acceptCall
 );
 routes.post(
+  '/api/:session/call/audio/enable',
+  verifyToken,
+  statusConnection,
+  CallController.enableCallAudio
+);
+routes.post(
   '/api/:session/call/reject',
   verifyToken,
   statusConnection,
