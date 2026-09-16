@@ -2659,6 +2659,8 @@ class MainWindow(wx.Frame):
             self.voice_call_bar, label="Configurações"
         )
         self.voice_call_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
+        self.voice_call_mute_button = wx.Button(self.voice_call_bar, label="Silenciar microfone")
+        self.voice_call_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
         voice_call_sizer.Add(
             self.voice_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
         )
@@ -2667,6 +2669,9 @@ class MainWindow(wx.Frame):
         )
         voice_call_sizer.Add(
             self.voice_call_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        voice_call_sizer.Add(
+            self.voice_call_mute_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
         )
         self.voice_call_bar.SetSizer(voice_call_sizer)
         self.voice_call_bar.Hide()
@@ -2681,11 +2686,14 @@ class MainWindow(wx.Frame):
         self.voice_call_window_label = wx.StaticText(call_panel, label="")
         self.voice_call_window_end_button = wx.Button(call_panel, label="Desligar")
         self.voice_call_window_settings_button = wx.Button(call_panel, label="Configurações")
+        self.voice_call_window_mute_button = wx.Button(call_panel, label="Silenciar microfone")
         self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
         self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
+        self.voice_call_window_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
         call_sizer.Add(self.voice_call_window_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 12)
         call_sizer.Add(self.voice_call_window_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         call_sizer.Add(self.voice_call_window_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        call_sizer.Add(self.voice_call_window_mute_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         call_panel.SetSizer(call_sizer)
         self.voice_call_window.Bind(wx.EVT_CLOSE, self._on_voice_call_window_close)
         self.voice_call_window.Hide()
@@ -6268,6 +6276,12 @@ class MainWindow(wx.Frame):
                 window.Hide()
             self.Layout()
             return
+        muted = bool(getattr(getattr(self, "_call_audio_session", None), "microphone_muted", False))
+        mute_label = "Ativar microfone" if muted else "Silenciar microfone"
+        for button_name in ("voice_call_mute_button", "voice_call_window_mute_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.SetLabel(mute_label)
         name = active.get("name") or active.get("peer_jid") or self.i18n.t("unknown_contact")
         label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
         window = getattr(self, "voice_call_window", None)
@@ -6281,6 +6295,13 @@ class MainWindow(wx.Frame):
             self.voice_call_window_end_button.SetFocus()
         bar.Hide()
         self.Layout()
+
+    def toggle_call_microphone(self, _event=None):
+        session = getattr(self, "_call_audio_session", None)
+        if session is None:
+            return
+        session.set_microphone_muted(not session.microphone_muted)
+        self._sync_voice_call_bar()
 
     def on_voice_call_state_event(self, event: dict):
         """Apply the complete call lifecycle emitted by the page CallStore."""

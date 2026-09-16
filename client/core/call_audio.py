@@ -85,6 +85,16 @@ class CallAudioSession:
         self._player_thread: Optional[threading.Thread] = None
         self._mic_frames_sent = 0
         self._mic_bytes_sent = 0
+        self._microphone_muted = False
+
+    @property
+    def microphone_muted(self) -> bool:
+        return self._microphone_muted
+
+    def set_microphone_muted(self, muted: bool) -> None:
+        """Mute only this call's outgoing microphone, keeping the stream alive."""
+        self._microphone_muted = bool(muted)
+        logging.info("[call_audio] microphone %s", "muted" if self._microphone_muted else "unmuted")
 
     @property
     def running(self) -> bool:
@@ -253,6 +263,8 @@ class CallAudioSession:
             except queue.Empty:
                 continue
             try:
+                if self._microphone_muted:
+                    pcm = b"\x00" * len(pcm)
                 self._sio.emit(
                     "call:audio:mic",
                     {
