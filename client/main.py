@@ -45,7 +45,7 @@ from core.sound_system import (
     alert_tone_choice_keys, resolve_alert_tone_path,
     discover_sound_packs, resolve_sound_event_path, DEFAULT_PACK_ID,
 )
-from core.audio_devices import find_input_device_index, test_input_device
+from core.audio_devices import find_input_device_index, test_input_device, enumerate_input_devices
 from core.bulk_read_state import run_bulk_read_state
 from core.message_edit import (
     apply_caption_edit,
@@ -2655,11 +2655,18 @@ class MainWindow(wx.Frame):
             self.voice_call_bar, label=self.i18n.t("voice_call_end_button")
         )
         self.voice_call_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
+        self.voice_call_settings_button = wx.Button(
+            self.voice_call_bar, label="Configurações"
+        )
+        self.voice_call_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
         voice_call_sizer.Add(
             self.voice_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
         )
         voice_call_sizer.Add(
             self.voice_call_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        voice_call_sizer.Add(
+            self.voice_call_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
         )
         self.voice_call_bar.SetSizer(voice_call_sizer)
         self.voice_call_bar.Hide()
@@ -6102,6 +6109,67 @@ class MainWindow(wx.Frame):
                     )
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def open_call_audio_settings(self, _event=None):
+        """Open the focused, keyboard-friendly device chooser for calls."""
+        import sounddevice as sd
+        dialog = wx.Dialog(self, title="Configurações da chamada", size=(560, 390))
+        root = wx.BoxSizer(wx.VERTICAL)
+        notebook = wx.Notebook(dialog)
+        cfg = self.settings.get("audio_devices", {})
+        try:
+            output_names = [str(d.get("name", "")).strip() for d in sd.query_devices()
+                            if d.get("max_output_channels", 0) > 0]
+        except Exception:
+            output_names = []
+        input_names = [name for _, name in enumerate_input_devices()]
+        lists = []
+        for title, names, selected in (
+            ("Dispositivos de reprodução", output_names, cfg.get("output_device_name", "")),
+            ("Dispositivos de gravação", input_names, cfg.get("input_device_name", "")),
+        ):
+            page = wx.Panel(notebook)
+            page_sizer = wx.BoxSizer(wx.VERTICAL)
+            listing = wx.ListBox(page, choices=["Padrão"] + names, style=wx.LB_SINGLE)
+            listing.SetSelection((names.index(selected) + 1) if selected in names else 0)
+            page_sizer.Add(listing, 1, wx.EXPAND | wx.ALL, 12)
+            page.SetSizer(page_sizer)
+            lists.append((listing, names))
+            notebook.AddPage(page, title)
+            def on_key(event, control=listing):
+                key = event.GetKeyCode()
+                if key == wx.WXK_RIGHT:
+                    notebook.ChangeSelection(min(notebook.GetSelection() + 1, notebook.GetPageCount() - 1))
+                elif key == wx.WXK_LEFT:
+                    notebook.ChangeSelection(max(notebook.GetSelection() - 1, 0))
+                elif key == wx.WXK_SPACE:
+                    # ListBox focus and selection are intentionally explicit:
+                    # Space confirms the highlighted device for keyboard users.
+                    selection = control.GetSelection()
+                    if selection >= 0:
+                        control.SetSelection(selection)
+                else:
+                    event.Skip()
+            listing.Bind(wx.EVT_KEY_DOWN, on_key)
+        root.Add(notebook, 1, wx.EXPAND | wx.ALL, 8)
+        buttons = wx.StdDialogButtonSizer()
+        apply_button = wx.Button(dialog, wx.ID_APPLY, "Aplicar")
+        ok_button = wx.Button(dialog, wx.ID_OK, "OK")
+        buttons.AddButton(apply_button); buttons.AddButton(ok_button); buttons.Realize()
+        root.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        def apply(_evt=None):
+            out = lists[0][0].GetStringSelection()
+            inp = lists[1][0].GetStringSelection()
+            self.settings.setdefault("audio_devices", {})["output_device_name"] = "" if out == "Padrão" else out
+            self.settings.setdefault("audio_devices", {})["input_device_name"] = "" if inp == "Padrão" else inp
+            self.effective_input_device_name = self.settings["audio_devices"]["input_device_name"]
+            self.save_settings()
+        apply_button.Bind(wx.EVT_BUTTON, apply)
+        ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
+        dialog.SetSizer(root)
+        lists[0][0].SetFocus()
+        dialog.ShowModal()
+        dialog.Destroy()
 
     def start_voice_call(self, peer_jid: str, name: str = ""):
         """Start a one-to-one WhatsApp voice call using Python-owned audio."""
