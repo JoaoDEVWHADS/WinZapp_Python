@@ -16,6 +16,9 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert '/api/:session/call/end' in routes
     assert '/api/:session/call/offer' in routes
     assert "getVoipStackInterface" in controller
+    assert "enableCallInterface" in controller
+    assert "requireVoipJsBackend" in controller
+    assert "initWAWebVoip" in controller
     assert "acceptCall(true" in controller
     assert "rejectCall()" in controller
     assert "endCall(2, true)" in controller
@@ -38,6 +41,17 @@ def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
     assert "call:audio:remote" in bridge
     assert "RTCPeerConnection" in bridge
     assert "__winzappOnCallRemoteAudio" in bridge
+    assert "if (!constraints?.audio) return nativeGetUserMedia(constraints)" in bridge
+    assert "if (!state.enabled || !constraints?.audio)" not in bridge
+
+
+def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
+    config = _source("client/api_patches/src/config.ts")
+    session_util = _source("client/api_patches/src/util/sessionUtil.ts")
+
+    assert "--disable-voice-input" not in config
+    assert "--disable-voice-input" not in session_util
+    assert "--mute-audio" in config
 
 
 def test_setup_api_copies_call_patch_files_into_runtime_api():

@@ -118,6 +118,8 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         outgoing: !!call?.outgoing,
       });
 
+      const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
       const getNativeVoipStack = async (): Promise<any> => {
         const getter =
           win.WPP?.whatsapp?.functions?.getVoipStackInterface ||
@@ -126,10 +128,49 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return getter();
       };
 
+      const ensureVoipRuntimeReady = async (): Promise<any> => {
+        // WA-JS' enableCallInterface flips the calling AB props, but it marks
+        // itself enabled before its best-effort backend init. If that first
+        // init races the lazy VoIP bundle, later calls never retry it. Retry
+        // the actual backend initialization here before every call action.
+        const enable = win.WPP?.call?.enableCallInterface;
+        if (typeof enable === 'function') await enable();
+
+        const functions = win.WPP?.whatsapp?.functions || {};
+        const requireBackend =
+          functions.requireVoipJsBackend ||
+          win.WPP?.whatsapp?.requireVoipJsBackend;
+
+        let lastError: any = null;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          try {
+            if (typeof requireBackend === 'function') {
+              const backend = await requireBackend();
+              const init =
+                backend?.WAWebVoipInit?.initWAWebVoip ||
+                backend?.initWAWebVoip;
+              if (typeof init === 'function') {
+                await init.call(backend?.WAWebVoipInit || backend);
+              }
+            }
+
+            const stack = await getNativeVoipStack();
+            if (stack) return stack;
+            lastError = new Error('VoIP stack interface is not available');
+          } catch (error) {
+            lastError = error;
+          }
+          await delay(120 * (attempt + 1));
+        }
+
+        const message = String(lastError?.message || lastError || 'unknown error');
+        throw new Error(`WhatsApp VoIP initialization failed: ${message}`);
+      };
+
       if (action === 'accept') {
         const callId = String(payload.callId || '');
         const call = findCall(callId);
-        const voipStack = await getNativeVoipStack();
+        const voipStack = await ensureVoipRuntimeReady();
         if (call && typeof voipStack?.acceptCall === 'function') {
           await voipStack.acceptCall(true, call?.isVideo === true);
           return { handled: true, via: 'native-voip', call: summarizeCall(call) };
@@ -140,7 +181,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       if (action === 'reject') {
         const callId = String(payload.callId || '');
         const call = findCall(callId);
-        const voipStack = await getNativeVoipStack();
+        const voipStack = await ensureVoipRuntimeReady();
         if (call && typeof voipStack?.rejectCall === 'function') {
           call.userEndedCall = true;
           await voipStack.rejectCall();
@@ -153,7 +194,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
       if (action === 'end') {
         const call = findCall(String(payload.callId || ''));
-        const voipStack = await getNativeVoipStack();
+        const voipStack = await ensureVoipRuntimeReady();
         if (typeof voipStack?.endCall === 'function') {
           if (call) call.userEndedCall = true;
           await voipStack.endCall(2, true);
@@ -163,7 +204,20 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       }
 
       if (action === 'offer') {
-        const call = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
+        await ensureVoipRuntimeReady();
+        let call = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
+        if (!call) {
+          const target = String(payload.to || '');
+          for (let attempt = 0; attempt < 20 && !call; attempt += 1) {
+            await delay(100);
+            call = findCall();
+            if (call && target) {
+              const peer = peerJidOf(call);
+              if (peer && peer !== target) call = null;
+            }
+          }
+        }
+        if (!call) throw new Error('WhatsApp did not create an outgoing call model');
         return summarizeCall(call);
       }
 

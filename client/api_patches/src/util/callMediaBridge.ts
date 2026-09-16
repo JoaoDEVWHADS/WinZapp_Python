@@ -193,7 +193,12 @@ function installCallMediaBridgeInPage(): boolean {
 
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
-    if (!state.enabled || !constraints?.audio) return nativeGetUserMedia(constraints);
+    if (!constraints?.audio) return nativeGetUserMedia(constraints);
+
+    // Never let WhatsApp Web open the physical microphone. Even while the
+    // Python call engine is not active, expose a live silent synthetic track so
+    // the native VoIP bootstrap can complete without touching audio hardware.
+    // Once state.enabled becomes true, Python PCM is written into this track.
     const micTrack = ensureMicTrack().clone();
     if (!constraints.video) return new MediaStream([micTrack]);
     const videoOnly = await nativeGetUserMedia({ video: constraints.video, audio: false });
