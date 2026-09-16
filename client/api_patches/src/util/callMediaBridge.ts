@@ -3,7 +3,7 @@ import { Socket } from 'socket.io';
 import { clientsArray } from './sessionUtil';
 
 const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
-const MAX_MIC_QUEUE_FRAMES = 12;
+const MAX_MIC_QUEUE_FRAMES = 75;
 const micQueues = new Map<string, Buffer[]>();
 const micDraining = new Set<string>();
 
@@ -128,7 +128,7 @@ function installCallMediaBridgeInPage(): boolean {
     state.micQueue.push(samples);
     state.micFramesPushed += 1;
     state.micBytesPushed += Math.floor(base64.length * 3 / 4);
-    while (state.micQueue.length > 16) state.micQueue.shift();
+    while (state.micQueue.length > 75) state.micQueue.shift();
   };
 
   state.reset = () => {
