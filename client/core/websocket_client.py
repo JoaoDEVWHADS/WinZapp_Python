@@ -1,3 +1,4 @@
+import base64
 import logging
 import threading
 import time
@@ -58,6 +59,11 @@ def _socketio_binary_to_bytes(value):
     normally turns that into bytes, but test doubles and alternate transports
     may surface Uint8Array-style lists or JSON Buffer objects.
     """
+    if isinstance(value, str):
+        try:
+            return base64.b64decode(value, validate=True)
+        except (ValueError, TypeError):
+            return b""
     if isinstance(value, bytes):
         return value
     if isinstance(value, bytearray):

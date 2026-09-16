@@ -215,6 +215,9 @@ function installCallMediaBridgeInPage(): boolean {
 }
 
 function toBuffer(value: any): Buffer | null {
+  if (typeof value === 'string') {
+    try { return Buffer.from(value, 'base64'); } catch (_) { return null; }
+  }
   if (Buffer.isBuffer(value)) return value;
   if (value instanceof Uint8Array) return Buffer.from(value);
   if (Array.isArray(value)) return Buffer.from(value);
@@ -223,7 +226,7 @@ function toBuffer(value: any): Buffer | null {
 }
 
 export async function ensureCallMediaBridge(client: any, io: any, logger: any): Promise<boolean> {
-  const page = client?.page;
+  const page = client?.waPage || client?.page;
   if (!page) return false;
 
   try {
@@ -231,12 +234,13 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
       '__winzappOnCallRemoteAudio',
       (base64: string, sampleRate: number) => {
         if (typeof base64 !== 'string' || base64.length > MAX_AUDIO_FRAME_BYTES * 2) return;
-        const pcm = Buffer.from(base64, 'base64');
-        if (!pcm.length || pcm.length > MAX_AUDIO_FRAME_BYTES) return;
+        const pcmBytes = Math.floor((base64.length * 3) / 4);
+        if (!pcmBytes || pcmBytes > MAX_AUDIO_FRAME_BYTES) return;
         io.emit('call:audio:remote', {
           session: client.session,
           sampleRate: Number(sampleRate) || 48000,
-          pcm,
+          encoding: 'base64',
+          pcm: base64,
         });
       }
     );
@@ -261,7 +265,7 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
 }
 
 export async function setCallMediaBridgeActive(client: any, active: boolean): Promise<boolean> {
-  const page = client?.page;
+  const page = client?.waPage || client?.page;
   if (!page) return false;
   try {
     return !!(await page.evaluate((activeInPage: boolean) => {
@@ -283,7 +287,8 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
     const queue = micQueues.get(session);
     while (queue?.length) {
       const client: any = (clientsArray as any)[session];
-      if (!client?.page) {
+      const page = client?.waPage || client?.page;
+      if (!page) {
         queue.length = 0;
         break;
       }
@@ -291,7 +296,7 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
       if (!frame) continue;
       const base64 = frame.toString('base64');
       try {
-        await client.page.evaluate((payload: string) => {
+        await page.evaluate((payload: string) => {
           const bridge = (window as any).__winzappCallMediaBridge;
           bridge?.pushMicrophone?.(payload);
         }, base64);
@@ -309,7 +314,10 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
 export function registerCallAudioSocket(socket: Socket, logger: any): void {
   socket.on('call:audio:mic', (payload: any) => {
     const session = String(payload?.session || '');
-    const pcm = toBuffer(payload?.pcm);
+    const pcm =
+      payload?.encoding === 'base64' && typeof payload?.pcm === 'string'
+        ? Buffer.from(payload.pcm, 'base64')
+        : toBuffer(payload?.pcm);
     if (!session || !pcm?.length || pcm.length > MAX_AUDIO_FRAME_BYTES) return;
     if (!(clientsArray as any)[session]) return;
     const queue = micQueues.get(session) || [];
@@ -324,7 +332,8 @@ export function registerCallAudioSocket(socket: Socket, logger: any): void {
     if (!session) return;
     micQueues.delete(session);
     const client: any = (clientsArray as any)[session];
-    client?.page
+    const page = client?.waPage || client?.page;
+    page
       ?.evaluate(() => (window as any).__winzappCallMediaBridge?.reset?.())
       .catch(() => undefined);
   });

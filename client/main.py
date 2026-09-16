@@ -2109,7 +2109,12 @@ class MainWindow(wx.Frame):
         # Incoming call IDs currently ringing. The sound is one shared looping
         # stream, so it stops only after the final simultaneous call ends.
         self._active_incoming_calls = {}
+        self._incoming_call_details = {}
         self._incoming_call_watchdogs = {}
+        self._call_action_lock = threading.Lock()
+        self._call_audio_session = None
+        self._active_voice_call = None
+        self._voice_call_last_announced_state = ""
         # Modeless call dialogs, keyed by the same call identity as the active
         # lifecycle maps.  Keeping ownership here lets terminal socket events
         # close a popup that is no longer relevant.
@@ -2607,9 +2612,23 @@ class MainWindow(wx.Frame):
         self.incoming_call_bar = wx.Panel(self)
         incoming_call_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.incoming_call_label = wx.StaticText(self.incoming_call_bar, label="")
+        self.incoming_call_answer_button = wx.Button(
+            self.incoming_call_bar,
+            label=self.i18n.t("incoming_call_answer_button"),
+        )
+        self.incoming_call_answer_button.Bind(
+            wx.EVT_BUTTON, self._on_answer_incoming_call_bar
+        )
+        self.incoming_call_reject_button = wx.Button(
+            self.incoming_call_bar,
+            label=self.i18n.t("incoming_call_reject_button"),
+        )
+        self.incoming_call_reject_button.Bind(
+            wx.EVT_BUTTON, self._on_reject_incoming_call_bar
+        )
         self.incoming_call_stop_button = wx.Button(
             self.incoming_call_bar,
-            label=self.i18n.t("incoming_call_stop_button"),
+            label=self.i18n.t("incoming_call_silence_button"),
         )
         self.incoming_call_stop_button.Bind(
             wx.EVT_BUTTON, self._on_stop_incoming_call_bar
@@ -2618,10 +2637,32 @@ class MainWindow(wx.Frame):
             self.incoming_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
         )
         incoming_call_sizer.Add(
+            self.incoming_call_answer_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        incoming_call_sizer.Add(
+            self.incoming_call_reject_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        incoming_call_sizer.Add(
             self.incoming_call_stop_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
         )
         self.incoming_call_bar.SetSizer(incoming_call_sizer)
         self.incoming_call_bar.Hide()
+
+        self.voice_call_bar = wx.Panel(self)
+        voice_call_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.voice_call_label = wx.StaticText(self.voice_call_bar, label="")
+        self.voice_call_end_button = wx.Button(
+            self.voice_call_bar, label=self.i18n.t("voice_call_end_button")
+        )
+        self.voice_call_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
+        voice_call_sizer.Add(
+            self.voice_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        voice_call_sizer.Add(
+            self.voice_call_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
+        )
+        self.voice_call_bar.SetSizer(voice_call_sizer)
+        self.voice_call_bar.Hide()
 
         self.main_panel = wx.Panel(self)
 
@@ -2651,6 +2692,7 @@ class MainWindow(wx.Frame):
         # Frame sizer
         frame_sizer = wx.BoxSizer(wx.VERTICAL)
         frame_sizer.Add(self.incoming_call_bar, 0, wx.EXPAND)
+        frame_sizer.Add(self.voice_call_bar, 0, wx.EXPAND)
         frame_sizer.Add(self.main_panel, 1, wx.EXPAND)
         self.SetSizer(frame_sizer)
 
@@ -5292,10 +5334,15 @@ class MainWindow(wx.Frame):
             # not "hide the call controls". Once the user deliberately comes
             # back with Alt+Tab, put keyboard and screen-reader focus directly
             # on the in-window Desligar button.
-            stop_button = getattr(self, "incoming_call_stop_button", None)
+            answer_button = getattr(self, "incoming_call_answer_button", None)
             call_bar = getattr(self, "incoming_call_bar", None)
-            if stop_button is not None and call_bar is not None and call_bar.IsShown():
-                wx.CallAfter(stop_button.SetFocus)
+            if answer_button is not None and call_bar is not None and call_bar.IsShown():
+                wx.CallAfter(answer_button.SetFocus)
+            else:
+                end_button = getattr(self, "voice_call_end_button", None)
+                voice_bar = getattr(self, "voice_call_bar", None)
+                if end_button is not None and voice_bar is not None and voice_bar.IsShown():
+                    wx.CallAfter(end_button.SetFocus)
         if self.background_mode:
             event.Skip()
             return
@@ -5589,6 +5636,7 @@ class MainWindow(wx.Frame):
                 self._close_incoming_call_dialog(identity)
             if hasattr(self, "call_incoming_sound"):
                 self.call_incoming_sound.stop()
+            self._stop_voice_call_audio()
             if getattr(self, "tray_icon", None) is not None:
                 try:
                     self.tray_icon.RemoveIcon()
@@ -5773,6 +5821,7 @@ class MainWindow(wx.Frame):
         if close_dialog is not None:
             close_dialog(identity)
         logging.warning("[incoming_call] lifecycle timeout id=%s", identity)
+        getattr(self, "_incoming_call_details", {}).pop(identity, None)
         if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
         self._sync_incoming_call_bar()
@@ -5786,8 +5835,9 @@ class MainWindow(wx.Frame):
                 logging.exception("[incoming_call] could not close popup id=%s", identity)
 
     def _forget_incoming_call_dialog(self, identity: str):
-        """Forget a popup dismissed by the user without ending the call alert."""
+        """Forget a popup and keep the call controls available in WinZapp."""
         getattr(self, "_incoming_call_dialogs", {}).pop(identity, None)
+        self._sync_incoming_call_bar()
 
     def _show_incoming_call_dialog(self, identity: str, message: str):
         from ui.dialogs.incoming_call import IncomingCallDialog
@@ -5798,17 +5848,38 @@ class MainWindow(wx.Frame):
         if getattr(self, "_window_hidden", False):
             self.restore_window()
         self._close_incoming_call_dialog(identity)
+        details = getattr(self, "_incoming_call_details", {}).get(identity, {})
+        can_answer = not details.get("is_video") and not details.get("is_group")
         dialog = IncomingCallDialog(
             self,
             message,
+            on_answer=lambda: self.accept_incoming_call(identity),
+            on_reject=lambda: self.reject_incoming_call(identity),
             on_stop=lambda: self.stop_incoming_call_alert(identity),
             on_closed=lambda: self._forget_incoming_call_dialog(identity),
+            can_answer=can_answer,
         )
         self._incoming_call_dialogs[identity] = dialog
         dialog.show_accessibly()
 
+    def _first_incoming_call_identity(self) -> str:
+        calls = getattr(self, "_active_incoming_calls", {})
+        return next(iter(calls), "")
+
+    def _on_answer_incoming_call_bar(self, _event=None):
+        """Answer the first visible incoming call from the in-window bar."""
+        identity = self._first_incoming_call_identity()
+        if identity:
+            self.accept_incoming_call(identity)
+
+    def _on_reject_incoming_call_bar(self, _event=None):
+        """Reject the first visible incoming call from the in-window bar."""
+        identity = self._first_incoming_call_identity()
+        if identity:
+            self.reject_incoming_call(identity)
+
     def _on_stop_incoming_call_bar(self, _event=None):
-        """Handle the native in-window Desligar button."""
+        """Handle the native in-window silence-alert button."""
         self.stop_all_incoming_call_alerts()
 
     def _sync_incoming_call_bar(self, message: str = ""):
@@ -5820,10 +5891,20 @@ class MainWindow(wx.Frame):
 
         calls = getattr(self, "_active_incoming_calls", {})
         call_settings = getattr(self, "settings", {}).get("calls", {})
-        should_show = bool(calls) and not call_settings.get("popup_enabled", True)
+        dialogs = getattr(self, "_incoming_call_dialogs", {})
+        should_show = bool(calls) and (
+            not call_settings.get("popup_enabled", True) or not dialogs
+        )
         if should_show:
+            identity = self._first_incoming_call_identity()
+            details = getattr(self, "_incoming_call_details", {}).get(identity, {})
+            if not message:
+                message = str(details.get("message") or "")
             if message:
                 label.SetLabel(message)
+            answer = getattr(self, "incoming_call_answer_button", None)
+            if answer is not None:
+                answer.Enable(not details.get("is_video") and not details.get("is_group"))
             bar.Show()
         else:
             bar.Hide()
@@ -5836,6 +5917,7 @@ class MainWindow(wx.Frame):
         for identity in list(getattr(self, "_incoming_call_dialogs", {})):
             self._close_incoming_call_dialog(identity)
         self._active_incoming_calls.clear()
+        getattr(self, "_incoming_call_details", {}).clear()
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
         self._sync_incoming_call_bar()
@@ -5843,18 +5925,282 @@ class MainWindow(wx.Frame):
     def stop_incoming_call_alert(self, identity: str):
         """Stop one incoming-call alert locally; the phone keeps ringing."""
         self._active_incoming_calls.pop(identity, None)
+        getattr(self, "_incoming_call_details", {}).pop(identity, None)
         self._cancel_incoming_call_watchdog(identity)
         self._close_incoming_call_dialog(identity)
         if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
         self._sync_incoming_call_bar()
 
+    def _call_control_payload(self, identity: str) -> dict:
+        details = getattr(self, "_incoming_call_details", {}).get(identity, {})
+        call_id = details.get("call_id") or identity
+        payload = {}
+        if call_id and "@" not in str(call_id):
+            payload["callId"] = call_id
+        return payload
+
+    def _post_call_control(self, endpoint: str, payload: dict, *, timeout: float = 15):
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/call/{endpoint}"
+        return api_post(url, token=self.token, json=payload, timeout=timeout)
+
+    def _start_voice_call_audio(self, identity: str, details: dict | None = None):
+        if getattr(self, "_call_audio_session", None) is not None:
+            return True
+        ws = getattr(self, "ws", None)
+        sio = getattr(ws, "sio", None)
+        if sio is None:
+            raise RuntimeError("Socket.IO client is not available for call audio")
+        from core.call_audio import CallAudioConfig, CallAudioSession
+
+        audio_settings = self.settings.get("audio_devices", {})
+        input_name = (
+            getattr(self, "effective_input_device_name", "")
+            or audio_settings.get("input_device_name", "")
+        )
+        output_name = audio_settings.get("output_device_name", "")
+        session_name = str(getattr(ws, "instance_name", "") or self.token).split(":", 1)[0]
+        audio = CallAudioSession(
+            sio,
+            CallAudioConfig(
+                session=session_name,
+                input_device_name=input_name,
+                output_device_name=output_name,
+            ),
+        )
+        audio.start()
+        self._call_audio_session = audio
+        details = details or getattr(self, "_incoming_call_details", {}).get(identity, {})
+        self._active_voice_call = {
+            "identity": identity,
+            "call_id": details.get("call_id") or identity,
+            "peer_jid": details.get("peer_jid") or "",
+            "name": details.get("name") or "",
+            "outgoing": bool(details.get("outgoing", False)),
+        }
+        self._voice_call_last_announced_state = ""
+        wx.CallAfter(self._sync_voice_call_bar)
+        return True
+
+    def _stop_voice_call_audio(self):
+        session = getattr(self, "_call_audio_session", None)
+        self._call_audio_session = None
+        self._active_voice_call = None
+        self._voice_call_last_announced_state = ""
+        if session is not None:
+            try:
+                session.stop()
+            except Exception:
+                logging.exception("[call] failed to stop Python call audio")
+        ws = getattr(self, "ws", None)
+        stop = getattr(ws, "stop_call_audio_stream", None)
+        if stop is not None:
+            stop()
+        if hasattr(self, "voice_call_bar"):
+            wx.CallAfter(self._sync_voice_call_bar)
+
+    def _stop_active_voice_call_if_matches(self, identity: str, peer_jid: str):
+        active = getattr(self, "_active_voice_call", None)
+        if not active:
+            return
+        if not identity and not peer_jid:
+            self._stop_voice_call_audio()
+            return
+        if identity and identity in {active.get("identity"), active.get("call_id")}:
+            self._stop_voice_call_audio()
+            return
+        if peer_jid and peer_jid == active.get("peer_jid"):
+            self._stop_voice_call_audio()
+
+    def on_call_remote_audio(self, pcm: bytes, sample_rate: int):
+        session = getattr(self, "_call_audio_session", None)
+        if session is not None:
+            session.enqueue_remote_audio(pcm, sample_rate)
+
+    def accept_incoming_call(self, identity: str):
+        if getattr(self, "_active_voice_call", None) is not None:
+            self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
+            return
+        details = dict(getattr(self, "_incoming_call_details", {}).get(identity, {}))
+        if details.get("is_video"):
+            self.output(self.i18n.t("incoming_call_video_not_supported"), interrupt=True)
+            return
+        if details.get("is_group"):
+            self.output(self.i18n.t("incoming_call_group_not_supported"), interrupt=True)
+            return
+        payload = self._call_control_payload(identity)
+        self.stop_incoming_call_alert(identity)
+
+        def _worker():
+            with self._call_action_lock:
+                try:
+                    self._start_voice_call_audio(identity, details)
+                    response = self._post_call_control("accept", payload)
+                    if response.status_code >= 400:
+                        raise RuntimeError(response.text[:500])
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("incoming_call_answered"),
+                        True,
+                    )
+                except Exception as exc:
+                    self._stop_voice_call_audio()
+                    logging.exception("[call] accept failed")
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("incoming_call_answer_failed").format(error=exc),
+                        True,
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def reject_incoming_call(self, identity: str):
+        payload = self._call_control_payload(identity)
+        self.stop_incoming_call_alert(identity)
+
+        def _worker():
+            with self._call_action_lock:
+                try:
+                    response = self._post_call_control("reject", payload)
+                    if response.status_code >= 400:
+                        raise RuntimeError(response.text[:500])
+                except Exception as exc:
+                    logging.exception("[call] reject failed")
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("incoming_call_reject_failed").format(error=exc),
+                        True,
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def end_active_call(self, _event=None):
+        self._stop_voice_call_audio()
+
+        def _worker():
+            with self._call_action_lock:
+                try:
+                    response = self._post_call_control("end", {})
+                    if response.status_code >= 400:
+                        raise RuntimeError(response.text[:500])
+                except Exception as exc:
+                    logging.exception("[call] end failed")
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("incoming_call_end_failed").format(error=exc),
+                        True,
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def start_voice_call(self, peer_jid: str, name: str = ""):
+        """Start a one-to-one WhatsApp voice call using Python-owned audio."""
+        peer_jid = self._normalize_jid(str(peer_jid or ""))
+        if not peer_jid or peer_jid.endswith(("@g.us", "@newsletter", "@broadcast")):
+            self.output(self.i18n.t("voice_call_individual_only"), interrupt=True)
+            return
+        if (
+            getattr(self, "_active_voice_call", None) is not None
+            or bool(getattr(self, "_active_incoming_calls", {}))
+        ):
+            self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
+            return
+        identity = f"outgoing:{peer_jid}"
+        details = {
+            "call_id": identity,
+            "peer_jid": peer_jid,
+            "name": name or self._preview_sender_from_jid(peer_jid) or peer_jid,
+            "outgoing": True,
+        }
+        self.output(
+            self.i18n.t("voice_call_starting").format(name=details["name"]),
+            interrupt=True,
+        )
+
+        def _worker():
+            with self._call_action_lock:
+                try:
+                    self._start_voice_call_audio(identity, details)
+                    response = self._post_call_control(
+                        "offer", {"to": peer_jid, "isVideo": False}
+                    )
+                    if response.status_code >= 400:
+                        raise RuntimeError(response.text[:500])
+                    try:
+                        body = response.json().get("response") or {}
+                    except Exception:
+                        body = {}
+                    call_id = str(body.get("id") or "") if isinstance(body, dict) else ""
+                    active = getattr(self, "_active_voice_call", None)
+                    if active is not None and call_id:
+                        active["call_id"] = call_id
+                except Exception as exc:
+                    self._stop_voice_call_audio()
+                    logging.exception("[call] outgoing call failed")
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("voice_call_start_failed").format(error=exc),
+                        True,
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _sync_voice_call_bar(self):
+        bar = getattr(self, "voice_call_bar", None)
+        label = getattr(self, "voice_call_label", None)
+        if bar is None or label is None:
+            return
+        active = getattr(self, "_active_voice_call", None)
+        if not active:
+            bar.Hide()
+            self.Layout()
+            return
+        name = active.get("name") or active.get("peer_jid") or self.i18n.t("unknown_contact")
+        label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
+        bar.Show()
+        self.Layout()
+
+    def on_voice_call_state_event(self, event: dict):
+        """Apply the complete call lifecycle emitted by the page CallStore."""
+        if not isinstance(event, dict):
+            return
+        state = str(event.get("state") or "").upper()
+        call_id = str(event.get("id") or "")
+        peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
+        active = getattr(self, "_active_voice_call", None)
+        if not active:
+            return
+        matches = (
+            (call_id and call_id in {active.get("call_id"), active.get("identity")})
+            or (peer_jid and peer_jid == active.get("peer_jid"))
+        )
+        if not matches:
+            return
+        if call_id:
+            active["call_id"] = call_id
+        if peer_jid:
+            active["peer_jid"] = peer_jid
+        if not active.get("name") and peer_jid:
+            active["name"] = self._preview_sender_from_jid(peer_jid) or peer_jid
+        self._sync_voice_call_bar()
+
+        terminal_states = {
+            "ENDED", "REJECTED", "FAILED", "NOT_ANSWERED",
+            "HANDLED_REMOTELY", "REMOTE_CALL_IN_PROGRESS",
+        }
+        if state in terminal_states or event.get("event") in {"ended", "timeout"}:
+            self._stop_voice_call_audio()
+            self.output(self.i18n.t("voice_call_ended"), interrupt=True)
+            return
+        if state == "ACTIVE" and self._voice_call_last_announced_state != "ACTIVE":
+            self._voice_call_last_announced_state = "ACTIVE"
+            self.output(self.i18n.t("voice_call_connected"), interrupt=True)
+
     def on_incoming_call_event(self, event: dict):
         """Announce an incoming call and keep its tone playing until it ends.
 
-        WhatsApp Web's current call API is not reliable enough to reject a call
-        from WinZapp.  The call model still reports enough lifecycle state to
-        provide and locally dismiss an accessible alert. Duplicate offer events
+        WhatsApp Web provides signaling while WinZapp owns the accessible call
+        controls and Python audio. Duplicate offer events
         are expected because the Node bridge has both the public WA-JS event and
         a direct CallStore fallback.
         """
@@ -5900,6 +6246,7 @@ class MainWindow(wx.Frame):
         if not is_ringing:
             if call_id:
                 self._active_incoming_calls.pop(call_id, None)
+                getattr(self, "_incoming_call_details", {}).pop(call_id, None)
                 self._cancel_incoming_call_watchdog(call_id)
                 close_dialog = getattr(self, "_close_incoming_call_dialog", None)
                 if close_dialog is not None:
@@ -5914,12 +6261,14 @@ class MainWindow(wx.Frame):
                     if jid != peer_jid
                 }
                 for identity in ended_ids:
+                    getattr(self, "_incoming_call_details", {}).pop(identity, None)
                     self._cancel_incoming_call_watchdog(identity)
                     close_dialog = getattr(self, "_close_incoming_call_dialog", None)
                     if close_dialog is not None:
                         close_dialog(identity)
             else:
                 self._active_incoming_calls.clear()
+                getattr(self, "_incoming_call_details", {}).clear()
                 for identity in list(self._incoming_call_watchdogs):
                     self._cancel_incoming_call_watchdog(identity)
                 for identity in list(getattr(self, "_incoming_call_dialogs", {})):
@@ -5939,10 +6288,17 @@ class MainWindow(wx.Frame):
         if not identity or identity in self._active_incoming_calls:
             return
         self._active_incoming_calls[identity] = peer_jid
-        self._arm_incoming_call_watchdog(identity)
-
         group_jid = self._normalize_jid(str(event.get("groupJid") or ""))
         is_group = bool(event.get("isGroup")) or group_jid.endswith("@g.us")
+        self._incoming_call_details[identity] = {
+            "call_id": call_id,
+            "peer_jid": peer_jid,
+            "group_jid": group_jid,
+            "is_video": bool(event.get("isVideo")),
+            "is_group": is_group,
+        }
+        self._arm_incoming_call_watchdog(identity)
+
         if is_group:
             chat = getattr(self, "chats", {}).get(group_jid, {}) if group_jid else {}
             group_name = self._group_name_from_chat_dict(chat) if chat else ""
@@ -5953,6 +6309,7 @@ class MainWindow(wx.Frame):
             message = self.i18n.t("incoming_group_call_announcement").format(
                 name=group_name
             )
+            self._incoming_call_details[identity]["name"] = group_name
         else:
             # Keep the proven one-to-one call path unchanged: peerJid is the
             # caller and resolves through the existing contact-name machinery.
@@ -5960,6 +6317,8 @@ class MainWindow(wx.Frame):
             if not caller_name:
                 caller_name = self.i18n.t("unknown_contact")
             message = self.i18n.t("incoming_call_announcement").format(name=caller_name)
+            self._incoming_call_details[identity]["name"] = caller_name
+        self._incoming_call_details[identity]["message"] = message
         self.output(message, interrupt=True)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.play()
@@ -10644,10 +11003,21 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel.refresh_labels()
         if hasattr(self, "status_panel"):
             self.status_panel.refresh_labels()
+        if hasattr(self, "incoming_call_answer_button"):
+            self.incoming_call_answer_button.SetLabel(
+                self.i18n.t("incoming_call_answer_button")
+            )
+        if hasattr(self, "incoming_call_reject_button"):
+            self.incoming_call_reject_button.SetLabel(
+                self.i18n.t("incoming_call_reject_button")
+            )
         if hasattr(self, "incoming_call_stop_button"):
             self.incoming_call_stop_button.SetLabel(
-                self.i18n.t("incoming_call_stop_button")
+                self.i18n.t("incoming_call_silence_button")
             )
+        if hasattr(self, "voice_call_end_button"):
+            self.voice_call_end_button.SetLabel(self.i18n.t("voice_call_end_button"))
+            self._sync_voice_call_bar()
         # Update frame title (unread indicator + any status suffix)
         self._update_title()
         self.main_panel.Layout()

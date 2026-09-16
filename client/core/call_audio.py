@@ -7,6 +7,7 @@ plays the PCM extracted from the remote WebRTC track.
 
 from __future__ import annotations
 
+import base64
 import logging
 import queue
 import threading
@@ -252,7 +253,12 @@ class CallAudioSession:
             try:
                 self._sio.emit(
                     "call:audio:mic",
-                    {"session": self._config.session, "sampleRate": CALL_SAMPLE_RATE, "pcm": pcm},
+                    {
+                        "session": self._config.session,
+                        "sampleRate": CALL_SAMPLE_RATE,
+                        "encoding": "base64",
+                        "pcm": base64.b64encode(pcm).decode("ascii"),
+                    },
                 )
             except Exception:
                 logging.exception("[call_audio] failed to send microphone audio")

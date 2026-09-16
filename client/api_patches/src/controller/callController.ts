@@ -42,7 +42,15 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return win.WPP.call.end();
       }
       if (action === 'offer') {
-        return win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
+        const call = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
+        return {
+          id: String(call?.id?._serialized || call?.id || ''),
+          peerJid: String(call?.peerJid?._serialized || call?.peerJid?.toString?.() || ''),
+          state: String(call?.getState?.() || call?.state || ''),
+          isVideo: !!call?.isVideo,
+          isGroup: !!call?.isGroup,
+          outgoing: !!call?.outgoing,
+        };
       }
 
       throw new Error(`Unsupported call action: ${action}`);
