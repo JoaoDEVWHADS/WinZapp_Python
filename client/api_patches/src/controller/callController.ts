@@ -444,6 +444,12 @@ export async function callDiagnostics(req: Request, res: Response) {
         initFunction: typeof (backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip),
         stack: !!stack,
         stackMethods: stack ? Object.keys(stack).sort() : [],
+        stackVoipInitArity: stack?.voipInit?.length,
+        stackVoipInitSource: stack?.voipInit ? String(stack.voipInit).slice(0, 1200) : '',
+        backendInitArity: (backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip)?.length,
+        backendInitSource: (backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip)
+          ? String(backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip).slice(0, 1200)
+          : '',
         isVoipInitialized: conn?.isVoipInitialized,
         connectionKeys: conn ? Object.keys(conn).filter((key) => /voip|call/i.test(key)).sort() : [],
       };
