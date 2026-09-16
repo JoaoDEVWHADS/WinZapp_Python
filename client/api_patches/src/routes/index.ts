@@ -725,6 +725,12 @@ routes.post(
   statusConnection,
   CallController.offerCall
 );
+routes.get(
+  '/api/:session/call/diagnostics',
+  verifyToken,
+  statusConnection,
+  CallController.callDiagnostics
+);
 
 // Catalog
 routes.get(

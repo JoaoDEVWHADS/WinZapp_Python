@@ -398,3 +398,58 @@ export async function offerCall(req: Request, res: Response) {
     fail(req, res, 'offerCall', error);
   }
 }
+
+export async function callDiagnostics(req: Request, res: Response) {
+  try {
+    const page = getWhatsappPage(req);
+    const response = await page.evaluate(async () => {
+      const win = window as any;
+      const functions = win.WPP?.whatsapp?.functions || {};
+      const conn = win.WPP?.whatsapp?.ConnStore || win.Store?.Conn || win.WPP?.whatsapp?.Conn;
+      let backend: any = null;
+      let backendError = '';
+      try {
+        backend = await functions.requireVoipJsBackend?.();
+      } catch (error: any) {
+        backendError = String(error?.stack || error?.message || error);
+      }
+      const stack = await functions.getVoipStackInterface?.().catch?.((error: any) => {
+        backendError ||= String(error?.stack || error?.message || error);
+        return null;
+      });
+      const permission = async (name: string) => {
+        try {
+          return (await navigator.permissions.query({ name } as any)).state;
+        } catch (error: any) {
+          return `error:${error?.message || error}`;
+        }
+      };
+      return {
+        userAgent: navigator.userAgent,
+        webdriver: navigator.webdriver,
+        secureContext: window.isSecureContext,
+        mediaDevices: !!navigator.mediaDevices,
+        getUserMedia: typeof navigator.mediaDevices?.getUserMedia,
+        audioPermission: await permission('microphone'),
+        videoPermission: await permission('camera'),
+        rtcPeerConnection: typeof win.RTCPeerConnection,
+        audioContext: typeof (win.AudioContext || win.webkitAudioContext),
+        worker: typeof win.Worker,
+        sharedWorker: typeof win.SharedWorker,
+        webAssembly: typeof win.WebAssembly,
+        crossOriginIsolated: win.crossOriginIsolated,
+        requireBackend: typeof functions.requireVoipJsBackend,
+        backendKeys: backend ? Object.keys(backend).sort() : [],
+        backendError,
+        initFunction: typeof (backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip),
+        stack: !!stack,
+        stackMethods: stack ? Object.keys(stack).sort() : [],
+        isVoipInitialized: conn?.isVoipInitialized,
+        connectionKeys: conn ? Object.keys(conn).filter((key) => /voip|call/i.test(key)).sort() : [],
+      };
+    });
+    ok(res, response);
+  } catch (error) {
+    fail(req, res, 'callDiagnostics', error);
+  }
+}

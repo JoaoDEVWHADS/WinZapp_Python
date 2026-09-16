@@ -15,6 +15,7 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert '/api/:session/call/reject' in routes
     assert '/api/:session/call/end' in routes
     assert '/api/:session/call/offer' in routes
+    assert '/api/:session/call/diagnostics' in routes
     assert "getVoipStackInterface" in controller
     assert "enableCallInterface" in controller
     assert "requireVoipJsBackend" in controller
@@ -30,6 +31,7 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert "isOutgoingOrLiveCall" in controller
     assert "without successful voipInit" in controller
     assert "installAudioBridge(req)" in controller
+    assert "callDiagnostics" in controller
 
 
 def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
