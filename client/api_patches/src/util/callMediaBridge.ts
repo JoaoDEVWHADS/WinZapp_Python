@@ -131,6 +131,10 @@ function installCallMediaBridgeInPage(): boolean {
     while (state.micQueue.length > 75) state.micQueue.shift();
   };
 
+  state.pushMicrophoneBatch = (frames: string[]) => {
+    for (const frame of frames || []) state.pushMicrophone(frame);
+  };
+
   state.reset = () => {
     state.enabled = false;
     state.micQueue.length = 0;
@@ -478,17 +482,18 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
         queue.length = 0;
         break;
       }
-      const frame = queue.shift();
-      if (!frame) continue;
-      const base64 = frame.toString('base64');
+      const frames = queue.splice(0, 8);
+      if (!frames.length) continue;
+      const base64Frames = frames.map((frame) => frame.toString('base64'));
       try {
-        await page.evaluate((payload: string) => {
+        await page.evaluate((payloads: string[]) => {
           const bridge = (window as any).__winzappCallMediaBridge;
-          bridge?.pushMicrophone?.(payload);
-        }, base64);
+          if (bridge?.pushMicrophoneBatch) bridge.pushMicrophoneBatch(payloads);
+          else payloads.forEach((payload) => bridge?.pushMicrophone?.(payload));
+        }, base64Frames);
       } catch (error: any) {
         logger?.debug?.(
-          `[${session}] call microphone frame dropped: ${error?.message || error}`
+          `[${session}] call microphone batch dropped (${frames.length} frames): ${error?.message || error}`
         );
       }
     }
