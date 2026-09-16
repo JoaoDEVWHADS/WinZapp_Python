@@ -1831,7 +1831,12 @@ export default class CreateSessionUtil {
             (window as any).Store?.Call,
           ].filter((store, index, all) => store && all.indexOf(store) === index);
           const callIdOf = (call: any) =>
-            String(call?.id?._serialized || call?.id || '');
+            String(
+              call?.id?._serialized ||
+              call?.id?.toString?.() ||
+              call?.id ||
+              ''
+            );
           const groupJidOf = (call: any) =>
             String(
               call?.groupJid?._serialized ||
