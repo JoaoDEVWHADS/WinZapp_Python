@@ -118,7 +118,6 @@ export default {
     // undefined, and WhatsApp Web still could not get a persistent storage
     // bucket. See the long comment in start.js for why that matters.)
     browserArgs: [
-      '--disable-web-security',
       '--no-sandbox',
       '--aggressive-cache-discard',
       '--disable-cache',

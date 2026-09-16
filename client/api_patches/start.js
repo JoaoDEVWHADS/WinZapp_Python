@@ -285,7 +285,6 @@ if (process.env.AUTHENTICATION_API_KEY) {
 // software rasterizer fallback available.
 const optimizedBrowserArgs = [
   '--disable-renderer-accessibility',
-  '--disable-web-security',
   '--no-sandbox',
   '--disable-background-networking',
   '--disable-default-apps',

@@ -94,6 +94,7 @@ def test_pinned_document_preserves_cross_origin_isolation_for_voip_wasm():
     assert "Cross-Origin-Embedder-Policy" in start_js
     assert "require-corp" in start_js
     assert "Origin-Agent-Cluster" in start_js
+    assert "--disable-web-security" not in start_js
 
 
 def test_chromium_keeps_rendering_backend_available_for_voip_runtime():

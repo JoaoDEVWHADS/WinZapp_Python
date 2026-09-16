@@ -17,7 +17,6 @@ import { Whatsapp } from '@wppconnect-team/wppconnect';
 import { EventEmitter } from 'events';
 
 export const chromiumArgs = [
-  '--disable-web-security', // Disables web security
   '--no-sandbox', // Disables sandbox
   '--aggressive-cache-discard', // Aggressively discards cache
   '--disable-cache', // Disables cache
