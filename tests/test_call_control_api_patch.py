@@ -133,3 +133,11 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
     assert "const maxAttempts = 8" in controller
     assert "isVoipInitError(error)" in controller
     assert "Math.min(1500, 300 * (attempt + 1))" in controller
+
+
+def test_voip_runtime_warmup_is_deduplicated_per_session():
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "__winzappVoipWarmupPromise" in bridge
+    assert "if (pending) return pending" in bridge
+    assert "delete (client as any).__winzappVoipWarmupPromise" in bridge

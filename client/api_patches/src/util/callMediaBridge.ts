@@ -308,75 +308,89 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
   const page = client?.waPage || client?.page;
   if (!page) return false;
 
-  try {
-    const result = await page.evaluate(async () => {
-      const win = window as any;
-      const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-      let lastError = '';
+  const pending = (client as any).__winzappVoipWarmupPromise;
+  if (pending) return pending;
 
-      for (let attempt = 0; attempt < 10; attempt += 1) {
-        try {
-          const enable = win.WPP?.call?.enableCallInterface;
-          if (typeof enable !== 'function') {
-            lastError = 'WPP.call.enableCallInterface is not ready';
-            await delay(250);
-            continue;
-          }
-          await enable();
+  const warmup = (async (): Promise<boolean> => {
+    try {
+      const result = await page.evaluate(async () => {
+        const win = window as any;
+        const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+        let lastError = '';
 
-          const functions = win.WPP?.whatsapp?.functions || {};
-          const requireBackend =
-            functions.requireVoipJsBackend || win.WPP?.whatsapp?.requireVoipJsBackend;
-          if (typeof requireBackend === 'function') {
-            const backend = await requireBackend();
-            const init = backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip;
-            if (typeof init === 'function') {
-              await init.call(backend?.WAWebVoipInit || backend);
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          try {
+            const enable = win.WPP?.call?.enableCallInterface;
+            if (typeof enable !== 'function') {
+              lastError = 'WPP.call.enableCallInterface is not ready';
+              await delay(250);
+              continue;
             }
-          }
+            await enable();
 
-          const getStack =
-            functions.getVoipStackInterface || win.WPP?.whatsapp?.getVoipStackInterface;
-          if (typeof getStack !== 'function') {
-            lastError = 'getVoipStackInterface is not ready';
-            await delay(250);
-            continue;
+            const functions = win.WPP?.whatsapp?.functions || {};
+            const requireBackend =
+              functions.requireVoipJsBackend || win.WPP?.whatsapp?.requireVoipJsBackend;
+            if (typeof requireBackend === 'function') {
+              const backend = await requireBackend();
+              const init = backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip;
+              if (typeof init === 'function') {
+                await init.call(backend?.WAWebVoipInit || backend);
+              }
+            }
+
+            const getStack =
+              functions.getVoipStackInterface || win.WPP?.whatsapp?.getVoipStackInterface;
+            if (typeof getStack !== 'function') {
+              lastError = 'getVoipStackInterface is not ready';
+              await delay(250);
+              continue;
+            }
+            const stack = await getStack();
+            if (stack) {
+              return {
+                ready: true,
+                acceptCall: typeof stack.acceptCall === 'function',
+                rejectCall: typeof stack.rejectCall === 'function',
+                endCall: typeof stack.endCall === 'function',
+              };
+            }
+            lastError = 'VoIP stack interface returned no value';
+          } catch (error: any) {
+            lastError = String(error?.message || error || 'unknown error');
           }
-          const stack = await getStack();
-          if (stack) {
-            return {
-              ready: true,
-              acceptCall: typeof stack.acceptCall === 'function',
-              rejectCall: typeof stack.rejectCall === 'function',
-              endCall: typeof stack.endCall === 'function',
-            };
-          }
-          lastError = 'VoIP stack interface returned no value';
-        } catch (error: any) {
-          lastError = String(error?.message || error || 'unknown error');
+          await delay(250 * (attempt + 1));
         }
-        await delay(250 * (attempt + 1));
+
+        return { ready: false, error: lastError };
+      });
+
+      if (result?.ready) {
+        logger?.info?.(
+          `[${client.session}] WinZapp VoIP runtime warmed ` +
+            `(accept=${!!result.acceptCall}, reject=${!!result.rejectCall}, end=${!!result.endCall})`
+        );
+        return true;
       }
-
-      return { ready: false, error: lastError };
-    });
-
-    if (result?.ready) {
-      logger?.info?.(
-        `[${client.session}] WinZapp VoIP runtime warmed ` +
-          `(accept=${!!result.acceptCall}, reject=${!!result.rejectCall}, end=${!!result.endCall})`
+      logger?.warn?.(
+        `[${client.session}] WinZapp VoIP runtime warmup incomplete: ${result?.error || 'unknown error'}`
       );
-      return true;
+      return false;
+    } catch (error: any) {
+      logger?.warn?.(
+        `[${client.session}] WinZapp VoIP runtime warmup failed: ${error?.message || error}`
+      );
+      return false;
     }
-    logger?.warn?.(
-      `[${client.session}] WinZapp VoIP runtime warmup incomplete: ${result?.error || 'unknown error'}`
-    );
-    return false;
-  } catch (error: any) {
-    logger?.warn?.(
-      `[${client.session}] WinZapp VoIP runtime warmup failed: ${error?.message || error}`
-    );
-    return false;
+  })();
+
+  (client as any).__winzappVoipWarmupPromise = warmup;
+  try {
+    return await warmup;
+  } finally {
+    if ((client as any).__winzappVoipWarmupPromise === warmup) {
+      delete (client as any).__winzappVoipWarmupPromise;
+    }
   }
 }
 
