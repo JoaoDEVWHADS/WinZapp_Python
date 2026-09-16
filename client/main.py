@@ -6032,6 +6032,14 @@ class MainWindow(wx.Frame):
             return
         payload = self._call_control_payload(identity)
         self.stop_incoming_call_alert(identity)
+        self._active_voice_call = {
+            "identity": identity,
+            "call_id": details.get("call_id") or identity,
+            "peer_jid": details.get("peer_jid") or "",
+            "name": details.get("name") or "",
+            "outgoing": False,
+        }
+        wx.CallAfter(self._sync_voice_call_bar)
 
         def _worker():
             with self._call_action_lock:
@@ -6118,6 +6126,9 @@ class MainWindow(wx.Frame):
             self.i18n.t("voice_call_starting").format(name=details["name"]),
             interrupt=True,
         )
+        self._active_voice_call = dict(details)
+        self._voice_call_last_announced_state = ""
+        wx.CallAfter(self._sync_voice_call_bar)
 
         def _worker():
             with self._call_action_lock:
