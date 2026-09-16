@@ -29,6 +29,7 @@ import config from './config';
 import { convert } from './mapper/index';
 import { errorHandler } from './middleware/errorHandler';
 import { requestInstrumentation } from './middleware/instrumentation';
+import { socketAuthMiddleware, socketSession } from './middleware/socketAuth';
 import routes from './routes';
 import { ServerOptions } from './types/ServerOptions';
 import {
@@ -129,12 +130,21 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
     },
   });
 
+  // REST requests already authenticate through verifyToken. Socket.IO used
+  // to trust every connection because the server historically only listened
+  // on localhost; that is not safe once WinZapp's custom-API mode points at a
+  // remote host. Bind every socket to the session encoded in the same
+  // `<session>:<bcrypt>` token the REST API uses before registering handlers.
+  io.use(socketAuthMiddleware(String(serverOptions.secretKey || ''), logger));
+
   io.on('connection', (sock) => {
-    logger.info(`ID: ${sock.id} entrou`);
-    registerCallAudioSocket(sock, logger);
+    const session = socketSession(sock);
+    sock.join(`session:${session}`);
+    logger.info(`ID: ${sock.id} entrou (session=${session})`);
+    registerCallAudioSocket(sock, logger, session);
 
     sock.on('disconnect', () => {
-      logger.info(`ID: ${sock.id} saiu`);
+      logger.info(`ID: ${sock.id} saiu (session=${session})`);
     });
   });
 
