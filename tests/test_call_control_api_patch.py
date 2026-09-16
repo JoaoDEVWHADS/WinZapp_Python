@@ -127,4 +127,9 @@ def test_session_prewarms_lazy_whatsapp_voip_runtime():
     assert "initWAWebVoip" in bridge
     assert "getVoipStackInterface" in bridge
     assert "void warmCallVoipRuntime(client, req.logger)" in create_session
+def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
+    controller = _source("client/api_patches/src/controller/callController.ts")
 
+    assert "const maxAttempts = 8" in controller
+    assert "isVoipInitError(error)" in controller
+    assert "Math.min(1500, 300 * (attempt + 1))" in controller

@@ -190,14 +190,18 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
       const runNativeVoipAction = async (fn: (stack: any) => Promise<any>): Promise<any> => {
         let lastError: any = null;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
+        const maxAttempts = 8;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
           const stack = await ensureVoipRuntimeReady();
           try {
             return await fn(stack);
           } catch (error) {
             lastError = error;
-            if (!isVoipInitError(error) || attempt >= 2) throw error;
-            await delay(250 * (attempt + 1));
+            if (!isVoipInitError(error) || attempt >= maxAttempts - 1) throw error;
+            // The interface object can exist before its worker-side RPC has
+            // completed voipInit. Give that lazy backend a bounded window to
+            // settle, then reacquire/reinitialize it on the next iteration.
+            await delay(Math.min(1500, 300 * (attempt + 1)));
           }
         }
         throw lastError;
