@@ -134,6 +134,7 @@ export default {
       '--disable-translate',
       '--hide-scrollbars',
       '--metrics-recording-only',
+      '--autoplay-policy=no-user-gesture-required',
       '--mute-audio',
       '--no-first-run',
       '--safebrowsing-disable-auto-update',

@@ -36,6 +36,7 @@ import {
   setMaxListners,
   startAllSessions,
 } from './util/functions';
+import { registerCallAudioSocket } from './util/callMediaBridge';
 import { createLogger } from './util/logger';
 
 // Upstream deleted this dead comment in 2.10.19 when it moved dotenv loading
@@ -130,6 +131,7 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
 
   io.on('connection', (sock) => {
     logger.info(`ID: ${sock.id} entrou`);
+    registerCallAudioSocket(sock, logger);
 
     sock.on('disconnect', () => {
       logger.info(`ID: ${sock.id} saiu`);

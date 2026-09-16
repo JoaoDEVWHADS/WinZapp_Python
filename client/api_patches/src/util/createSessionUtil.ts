@@ -22,6 +22,7 @@ import * as path from 'path';
 import { download } from '../controller/sessionController';
 import { WhatsAppServer } from '../types/WhatsAppServer';
 import chatWootClient from './chatWootClient';
+import { ensureCallMediaBridge } from './callMediaBridge';
 import {
   autoDownload,
   callWebHook,
@@ -1157,10 +1158,14 @@ export default class CreateSessionUtil {
           // browser context), but the bucket request does not — persist() has
           // to be asked again by the new document, so re-run the whole thing.
           grantPersistentStorage(client.page, req.logger, session);
+          // The Python-owned call audio bridge lives in the page context and
+          // therefore has to be recreated after every WhatsApp Web reload.
+          ensureCallMediaBridge(client, req.io, req.logger);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
         await restoreStatusSender(client.page, req.logger, session);
         await grantPersistentStorage(client.page, req.logger, session);
+        await ensureCallMediaBridge(client, req.io, req.logger);
       }
       await this.start(req, client);
 
@@ -1761,6 +1766,42 @@ export default class CreateSessionUtil {
       // harmless, the existing binding still works.
     }
 
+    try {
+      await client.page.exposeFunction(
+        '__winzappOnCallState',
+        (
+          event: string,
+          state: string,
+          peerJid: string,
+          callId: string,
+          isVideo: boolean,
+          isGroup: boolean,
+          groupJid: string,
+          outgoing: boolean,
+          callTimestamp: number,
+          observedAt: number
+        ) => {
+          req.io.emit('callstate', {
+            session: client.session,
+            data: {
+              event,
+              state,
+              peerJid,
+              id: callId,
+              isVideo,
+              isGroup,
+              groupJid,
+              outgoing,
+              timestamp: callTimestamp,
+              observedAt,
+            },
+          });
+        }
+      );
+    } catch (e) {
+      // Same reconnect case as the incoming-call binding above.
+    }
+
     const installListener = (attempt = 0) => {
       // CallStore is hydrated from persisted WhatsApp Web state at startup.
       // Its `add` event therefore does not necessarily mean "a call started
@@ -1865,15 +1906,34 @@ export default class CreateSessionUtil {
             }
             return false;
           };
-          const emitCall = (event: string, call: any, state = '') => {
-            const peerJid =
+          const peerJidOf = (call: any) =>
+            String(
               call?.peerJid?._serialized ||
               call?.peerJid?.toString?.() ||
               call?.sender?._serialized ||
               call?.sender?.toString?.() ||
               call?.from?._serialized ||
               call?.from?.toString?.() ||
-              '';
+              ''
+            );
+          const emitCallState = (event: string, call: any, state = '') => {
+            const peerJid = peerJidOf(call);
+            if (!peerJid) return;
+            (window as any).__winzappOnCallState(
+              event,
+              state,
+              peerJid,
+              callIdOf(call),
+              !!call?.isVideo || !!call?.isVideoCall,
+              !!call?.isGroup || !!call?.isGroupCall,
+              groupJidOf(call),
+              !!call?.outgoing,
+              Math.floor(callTimestampOf(call) / 1000),
+              Math.floor(Date.now() / 1000)
+            );
+          };
+          const emitCall = (event: string, call: any, state = '') => {
+            const peerJid = peerJidOf(call);
             if (!peerJid) return;
             (window as any).__winzappOnIncomingCall(
               event,
@@ -1886,6 +1946,7 @@ export default class CreateSessionUtil {
               Math.floor(callTimestampOf(call) / 1000),
               Math.floor(Date.now() / 1000)
             );
+            emitCallState(event, call, state);
           };
           const rememberCall = (call: any) => {
             const id = callIdOf(call);
@@ -2058,6 +2119,54 @@ export default class CreateSessionUtil {
               }
             }
           }, 500);
+
+          // Native WhatsApp Web VoIP keeps the active call on CallStore.activeCall
+          // and may never add it to the legacy collection. Poll that slot so both
+          // incoming and outgoing calls expose their complete lifecycle to Python.
+          let lastActiveSignature = '';
+          let lastActiveCall: any = null;
+          (window as any).__winzappCallStatePoll = window.setInterval(() => {
+            try {
+              let activeCall: any = null;
+              for (const store of stores) {
+                activeCall = store?.activeCall || store?.get?.('activeCall') || activeCall;
+                if (activeCall) break;
+              }
+              if (!activeCall) {
+                activeCall =
+                  WPP?.whatsapp?.CallStore?.activeCall ||
+                  (window as any).Store?.Call?.activeCall ||
+                  null;
+              }
+
+              if (!activeCall) {
+                if (lastActiveCall) {
+                  const previousState = callStateOf(lastActiveCall);
+                  if (!['ENDED', 'REJECTED', 'FAILED', 'NOT_ANSWERED'].includes(previousState)) {
+                    emitCallState('ended', lastActiveCall, 'ENDED');
+                  }
+                }
+                lastActiveCall = null;
+                lastActiveSignature = '';
+                return;
+              }
+
+              const state = callStateOf(activeCall);
+              const signature = [
+                callIdOf(activeCall),
+                state,
+                peerJidOf(activeCall),
+                activeCall?.outgoing ? '1' : '0',
+              ].join('|');
+              if (signature !== lastActiveSignature) {
+                emitCallState('state', activeCall, state);
+                lastActiveSignature = signature;
+              }
+              lastActiveCall = activeCall;
+            } catch (e) {
+              // A later poll can recover from WhatsApp replacing CallStore.
+            }
+          }, 250);
           return true;
         }, listenerStartedAt)
         .then((installed: boolean) => {
