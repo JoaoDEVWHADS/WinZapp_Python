@@ -388,6 +388,7 @@
     "add_member_country_label": "Wybierz kraj, aby dodać przez numer",
     "add_member_phone_number_label": "Wpisz numer telefonu",
     "add_member_custom_number_button": "Dodaj numer",
+    "add_member_invalid_number": "Wpisz prawidłowy numer telefonu.",
     "no_groups_available": "Brak dostępnych grup.",
     "unread_sep_singular": "1 nieprzeczytana wiadomość",
     "unread_sep_plural": "{count} nieprzeczytanych wiadomości",

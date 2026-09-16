@@ -55,6 +55,7 @@ from core.message_edit import (
     response_not_sent,
 )
 from core.i18n import I18n
+from core.remote_deletions import comparable_local_ids, message_timestamp_seconds
 from core.sync_contracts import observe_payload
 from core.incremental_sync import (
     chat_message_records as _chat_message_records,
@@ -22674,12 +22675,18 @@ class MainWindow(wx.Frame):
     # payoff (not staring at a message that no longer exists, or a "cleared"
     # conversation that stays full until F5) is worth it.
 
-    def _fetch_remote_message_ids(self, remote_jid: str) -> "set[str] | None":
-        """Best-effort GET of the message IDs WPPConnect currently has for
-        remote_jid. Returns None on ANY failure/ambiguity — a failed fetch
-        must never be read as "the phone deleted everything". IDs are
-        extracted via the same _normalize_wpp_message() sync_chat_messages()
-        uses, so they compare equal to what's stored in key.id locally.
+    def _fetch_remote_message_window(self, remote_jid: str) -> "tuple[set[str], int | None] | None":
+        """Best-effort GET of the messages WPPConnect currently has for
+        remote_jid, as ``(ids, oldest_timestamp)``. Returns None on ANY
+        failure/ambiguity — a failed fetch must never be read as "the phone
+        deleted everything". IDs are extracted via the same
+        _normalize_wpp_message() sync_chat_messages() uses, so they compare
+        equal to what's stored in key.id locally.
+
+        The oldest timestamp is what bounds the comparison: the answer is only
+        the newest `limit` messages, and a local message older than the oldest
+        of those was never asked about (see core/remote_deletions.py). None
+        when nothing in the answer carried a usable timestamp.
         """
         if not self.ws:
             return None
@@ -22702,9 +22709,20 @@ class MainWindow(wx.Frame):
             if not isinstance(wpp_messages, list):
                 return None
             ids = set()
+            oldest = None
+            answered = 0
             for wm in wpp_messages:
                 if not isinstance(wm, dict):
                     continue
+                answered += 1
+                # Read off the raw message, before and regardless of the
+                # normaliser: the window is bounded by everything the server
+                # returned, including what the normaliser cannot map.
+                ts = message_timestamp_seconds(
+                    {"messageTimestamp": wm.get("t") or wm.get("timestamp")}
+                )
+                if ts and (oldest is None or ts < oldest):
+                    oldest = ts
                 try:
                     normalized = self.ws._normalize_wpp_message(wm)
                 except Exception:
@@ -22712,9 +22730,23 @@ class MainWindow(wx.Frame):
                 mid = normalized.get("key", {}).get("id", "")
                 if mid:
                     ids.add(mid)
-            return ids
+            # The server answered with entries, yet they yielded no id or no
+            # timestamp: the normaliser or the payload shape broke, not the
+            # conversation. Reading that as data is how it would go wrong —
+            # no ids is the shape of a phone-side clear (three polls later the
+            # whole conversation is wiped), and ids with no timestamp leave the
+            # comparison unbounded (the oldest local messages deleted again).
+            # Only a genuinely empty answer may count toward a clear.
+            if answered and (not ids or oldest is None):
+                logging.warning(
+                    "[_fetch_remote_message_window] %s: %d entr(ies) answered but "
+                    "%d id(s), oldest timestamp %s — treating as ambiguous.",
+                    remote_jid, answered, len(ids), oldest,
+                )
+                return None
+            return ids, oldest
         except Exception as e:
-            logging.warning(f"[_fetch_remote_message_ids] failed for {remote_jid}: {e}")
+            logging.warning(f"[_fetch_remote_message_window] failed for {remote_jid}: {e}")
             return None
 
     # Consecutive polls a conversation must look fully cleared server-side
@@ -22745,7 +22777,7 @@ class MainWindow(wx.Frame):
         if not chat:
             return
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
-        # _fetch_remote_message_ids() only asks WhatsApp Web for its last
+        # _fetch_remote_message_window() only asks WhatsApp Web for its last
         # `limit` messages (same messages_page_size setting) — comparing the
         # FULL local history against that limited remote window meant any
         # older local message, once a busy conversation pushed it past the
@@ -22754,8 +22786,16 @@ class MainWindow(wx.Frame):
         # was reported live as a message that had demonstrably been
         # delivered (visible to other group members) vanishing from
         # WinZapp's own local history shortly after being sent.
+        #
+        # The slice alone was not enough, and the rest of the bounding lives in
+        # core/remote_deletions.py: the server's last `limit` entries include
+        # edit events and placeholders WinZapp never stores as messages, so
+        # they reach less far back than the last `limit` local records, and
+        # the oldest local messages past that point were "mirrored" away on
+        # nearly every poll — measured 2026-09-16, one removal per round,
+        # each shrinking the list under the screen reader and deleting the
+        # message from the database.
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        recent_records = records[-limit:] if len(records) > limit else records
 
         # Also exclude anything sent/received in roughly the last two
         # minutes: WhatsApp Web's own /get-messages can lag behind a message
@@ -22764,27 +22804,30 @@ class MainWindow(wx.Frame):
         # (and delete it) purely because of that race, not a real deletion.
         _stable_cutoff = time.time() - 120
 
-        def _is_stable(r: dict) -> bool:
-            ts = r.get("messageTimestamp") or r.get("timestamp") or 0
-            try:
-                ts = int(ts)
-            except (TypeError, ValueError):
-                return False
-            if ts > 1_000_000_000_000:
-                ts //= 1000
-            return bool(ts) and ts < _stable_cutoff
-
-        local_ids = {
-            r.get("key", {}).get("id") for r in recent_records
-            if isinstance(r, dict) and not r.get("_local_pending")
-            and r.get("key", {}).get("id") and _is_stable(r)
-        }
         # Too little history for "the server has fewer messages" to mean
-        # anything other than "this is just a short conversation".
-        if len(local_ids) < 2:
+        # anything other than "this is just a short conversation". Checked
+        # before the fetch, with no remote bound yet, so a short chat costs
+        # no request at all.
+        if len(comparable_local_ids(records, limit, _stable_cutoff, None,
+                                    is_countable_message)) < 2:
             return
-        remote_ids = self._fetch_remote_message_ids(remote_jid)
-        if remote_ids is None:
+        remote = self._fetch_remote_message_window(remote_jid)
+        if remote is None:
+            return
+        remote_ids, remote_oldest_ts = remote
+        # Messages with no bound would be the old unbounded comparison; the
+        # fetch already refuses that, and this keeps any other source honest.
+        if remote_ids and remote_oldest_ts is None:
+            return
+        # An empty answer has no bound, and must not get one: that is the shape
+        # of a phone-side clear, confirmed over several polls below.
+        local_ids = comparable_local_ids(
+            records, limit, _stable_cutoff,
+            remote_oldest_ts if remote_ids else None,
+            is_countable_message,
+        )
+        if not local_ids:
+            self._remote_clear_strikes.pop(remote_jid, None)
             return
         missing_ids = local_ids - remote_ids
         if not missing_ids:
@@ -22794,7 +22837,7 @@ class MainWindow(wx.Frame):
             # Every local message is gone server-side — a clear, not a
             # handful of individually deleted messages. Require this to hold
             # for _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls before
-            # actually wiping anything: _fetch_remote_message_ids() returning
+            # actually wiping anything: _fetch_remote_message_window() returning
             # a valid-but-empty list (as opposed to None, which already bails
             # out above) is indistinguishable from a real clear, but can also
             # come from a transient server-side hiccup — reported live as an

@@ -6230,6 +6230,28 @@ class ConversationsPanel(wx.Panel):
         self._expanded_visible_count = 0
         self._expanded_oldest_msg_id = ""
 
+    def _refresh_expanded_window_before_rebuild(self) -> None:
+        """Registra de novo, logo antes do rebuild, a janela que está na tela.
+
+        O registro no fim de populate_messages() não basta sozinho, porque a
+        lista muda entre dois rebuilds por caminhos que não registram nada: os
+        appends ao vivo (on_incoming_message(), o envio otimista) aumentam a
+        contagem, e remove_messages_by_id() pode tirar exatamente a mensagem que
+        era a âncora. Juntos, os dois produzem o corte: a âncora some, a
+        janela cai para o piso por contagem, e esse piso é o da abertura (200),
+        não o da tela (201, 204...). Medido em 2026-09-16: 200 -> 201 linhas
+        com uma mensagem nova, a mensagem mais antiga removida pelo espelhamento
+        de apagadas, e o rebuild seguinte de volta a 200 com o offset andando.
+
+        Só vale para a conversa que já foi pintada: depois de
+        _reset_expanded_window() (troca ou fechamento de conversa) a contagem é
+        0 e _sorted_messages ainda pode ser da conversa anterior, então não se
+        registra nada e a abertura segue respeitando messages_page_size.
+        """
+        if getattr(self, "_expanded_visible_count", 0) <= 0:
+            return
+        self._remember_expanded_window()
+
     def _history_window_for_rebuild(self, displayable: list, limit: int) -> tuple:
         """(offset, sep_idx) da janela que populate_messages() vai reconstruir.
 
@@ -16143,6 +16165,12 @@ class ConversationsPanel(wx.Panel):
         # messages_page_size. Uma linha por rebuild diz quanto custa a janela
         # no tamanho a que ela chegou.
         _rebuild_started = time.monotonic()
+        # Antes de DeleteAllItems(): é _sorted_messages de agora, o que o leitor
+        # de tela está lendo, que vira o piso deste rebuild.
+        try:
+            self._refresh_expanded_window_before_rebuild()
+        except Exception:
+            logging.exception("[populate_messages] failed to record the window before rebuilding")
         self.messages_list.Freeze()
         try:
             self.messages_list.DeleteAllItems()
