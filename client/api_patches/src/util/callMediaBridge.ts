@@ -192,13 +192,17 @@ function installCallMediaBridgeInPage(): boolean {
   } catch (_) {}
 
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-  const permissionResult = (stateValue: PermissionState = 'granted') => ({
+  const permissionResult = (
+    permissionName: string,
+    stateValue: PermissionState = 'granted'
+  ): PermissionStatus => ({
+    name: permissionName,
     state: stateValue,
     onchange: null,
     addEventListener: () => undefined,
     removeEventListener: () => undefined,
     dispatchEvent: () => false,
-  });
+  } as unknown as PermissionStatus);
 
   try {
     const nativePermissionQuery = navigator.permissions?.query?.bind(navigator.permissions);
@@ -209,7 +213,7 @@ function installCallMediaBridgeInPage(): boolean {
         value: async (descriptor: PermissionDescriptor) => {
           const name = String((descriptor as any)?.name || '');
           if (name === 'microphone' || name === 'camera') {
-            return permissionResult('granted') as PermissionStatus;
+            return permissionResult(name, 'granted');
           }
           return nativePermissionQuery(descriptor);
         },
