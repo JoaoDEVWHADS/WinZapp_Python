@@ -2670,6 +2670,25 @@ class MainWindow(wx.Frame):
         )
         self.voice_call_bar.SetSizer(voice_call_sizer)
         self.voice_call_bar.Hide()
+        # Calls live in their own modeless window so changing focus back to
+        # the conversation never leaves call controls stranded in the main UI.
+        self.voice_call_window = wx.Frame(
+            self, title="Voice call", size=(430, 150),
+            style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
+        )
+        call_panel = wx.Panel(self.voice_call_window)
+        call_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.voice_call_window_label = wx.StaticText(call_panel, label="")
+        self.voice_call_window_end_button = wx.Button(call_panel, label="Desligar")
+        self.voice_call_window_settings_button = wx.Button(call_panel, label="Configurações")
+        self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
+        self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
+        call_sizer.Add(self.voice_call_window_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 12)
+        call_sizer.Add(self.voice_call_window_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        call_sizer.Add(self.voice_call_window_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        call_panel.SetSizer(call_sizer)
+        self.voice_call_window.Bind(wx.EVT_CLOSE, self._on_voice_call_window_close)
+        self.voice_call_window.Hide()
 
         self.main_panel = wx.Panel(self)
 
@@ -6113,7 +6132,7 @@ class MainWindow(wx.Frame):
     def open_call_audio_settings(self, _event=None):
         """Open the focused, keyboard-friendly device chooser for calls."""
         import sounddevice as sd
-        dialog = wx.Dialog(self, title="Configurações da chamada", size=(560, 390))
+        dialog = wx.Dialog(getattr(self, "voice_call_window", self), title="Configurações da chamada", size=(560, 390))
         root = wx.BoxSizer(wx.VERTICAL)
         notebook = wx.Notebook(dialog)
         cfg = self.settings.get("audio_devices", {})
@@ -6170,6 +6189,12 @@ class MainWindow(wx.Frame):
         lists[0][0].SetFocus()
         dialog.ShowModal()
         dialog.Destroy()
+
+    def _on_voice_call_window_close(self, event):
+        if getattr(self, "_active_voice_call", None):
+            self.end_active_call()
+        else:
+            event.Skip()
 
     def start_voice_call(self, peer_jid: str, name: str = ""):
         """Start a one-to-one WhatsApp voice call using Python-owned audio."""
@@ -6236,11 +6261,23 @@ class MainWindow(wx.Frame):
         active = getattr(self, "_active_voice_call", None)
         if not active:
             bar.Hide()
+            window = getattr(self, "voice_call_window", None)
+            if window is not None:
+                window.Hide()
             self.Layout()
             return
         name = active.get("name") or active.get("peer_jid") or self.i18n.t("unknown_contact")
         label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
-        bar.Show()
+        window = getattr(self, "voice_call_window", None)
+        if window is not None:
+            window_label = getattr(self, "voice_call_window_label", None)
+            if window_label is not None:
+                window_label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
+            if not window.IsShown():
+                window.Show()
+                window.Raise()
+            self.voice_call_window_end_button.SetFocus()
+        bar.Hide()
         self.Layout()
 
     def on_voice_call_state_event(self, event: dict):
