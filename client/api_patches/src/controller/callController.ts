@@ -32,25 +32,139 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       const win = window as any;
       if (!win.WPP?.call) throw new Error('WPP.call is not available');
 
+      const serializeId = (value: any): string => {
+        if (!value) return '';
+        if (typeof value === 'string') return value;
+        return String(value._serialized || value.id || value.toString?.() || value || '');
+      };
+
+      const callIdOf = (call: any): string => serializeId(call?.id);
+      const peerJidOf = (call: any): string => serializeId(call?.peerJid || call?.sender || call?.from);
+      const getCallStore = () => win.WPP?.whatsapp?.CallStore || win.Store?.Call;
+      const sameCallId = (call: any, wanted: string): boolean => {
+        if (!call || !wanted) return false;
+        return callIdOf(call) === wanted || serializeId(call?.id?._serialized) === wanted;
+      };
+
+      const callStateOf = (call: any): string => {
+        const raw = String(call?.getState?.() || call?.state || call?.get?.('state') || '');
+        const numericStates: Record<string, string> = {
+          '0': 'NONE',
+          '1': 'CALLING',
+          '2': 'PREACCEPT_RECEIVED',
+          '3': 'INCOMING_RING',
+          '4': 'ACCEPT_SENT',
+          '5': 'ACCEPT_RECEIVED',
+          '6': 'ACTIVE',
+          '7': 'HANDLED_REMOTELY',
+          '8': 'INCOMING_RING',
+          '9': 'REJOINING',
+          '10': 'LINK',
+          '11': 'CONNECTED_LONELY',
+          '12': 'PRE_CALLING',
+          '13': 'ENDED',
+          '14': 'CALL_B_STARTING',
+        };
+        return numericStates[raw] || raw;
+      };
+
+      const isIncomingCall = (call: any): boolean => {
+        const state = callStateOf(call);
+        return (
+          state === 'INCOMING_RING' ||
+          state === 'ReceivedCall' ||
+          state === 'ReceivedCallWithoutOffer' ||
+          call?.isIncoming === true ||
+          call?.direction === 'incoming'
+        );
+      };
+
+      const getModels = (store: any): any[] => {
+        try {
+          const models = store?.getModelsArray?.();
+          if (Array.isArray(models)) return models;
+        } catch (_) {}
+        if (Array.isArray(store?.models)) return store.models;
+        if (Array.isArray(store?._models)) return store._models;
+        return [];
+      };
+
+      const findCall = (wanted = ''): any => {
+        const store = getCallStore();
+        const active = store?.activeCall;
+        if (active && (!wanted || sameCallId(active, wanted))) return active;
+
+        if (wanted && typeof store?.get === 'function') {
+          try {
+            const direct = store.get(wanted);
+            if (direct) return direct;
+          } catch (_) {}
+        }
+
+        const models = getModels(store);
+        if (wanted) {
+          const exact = models.find((call) => sameCallId(call, wanted));
+          if (exact) return exact;
+        }
+        return models.find((call) => isIncomingCall(call) || call?.isGroup) || null;
+      };
+
+      const summarizeCall = (call: any) => ({
+        id: callIdOf(call),
+        peerJid: peerJidOf(call),
+        state: callStateOf(call),
+        isVideo: !!call?.isVideo,
+        isGroup: !!call?.isGroup,
+        outgoing: !!call?.outgoing,
+      });
+
+      const getNativeVoipStack = async (): Promise<any> => {
+        const getter =
+          win.WPP?.whatsapp?.functions?.getVoipStackInterface ||
+          win.WPP?.whatsapp?.getVoipStackInterface;
+        if (typeof getter !== 'function') return null;
+        return getter();
+      };
+
       if (action === 'accept') {
-        return win.WPP.call.accept(payload.callId || undefined);
+        const callId = String(payload.callId || '');
+        const call = findCall(callId);
+        const voipStack = await getNativeVoipStack();
+        if (call && typeof voipStack?.acceptCall === 'function') {
+          await voipStack.acceptCall(true, call?.isVideo === true);
+          return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+        }
+        return win.WPP.call.accept(callId || undefined);
       }
+
       if (action === 'reject') {
-        return win.WPP.call.rejectCall(payload.callId || undefined);
+        const callId = String(payload.callId || '');
+        const call = findCall(callId);
+        const voipStack = await getNativeVoipStack();
+        if (call && typeof voipStack?.rejectCall === 'function') {
+          call.userEndedCall = true;
+          await voipStack.rejectCall();
+          return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+        }
+        const reject = win.WPP.call.rejectCall || win.WPP.call.reject;
+        if (typeof reject !== 'function') throw new Error('WPP.call.reject is not available');
+        return reject(callId || undefined);
       }
+
       if (action === 'end') {
+        const call = findCall(String(payload.callId || ''));
+        const voipStack = await getNativeVoipStack();
+        if (typeof voipStack?.endCall === 'function') {
+          if (call) call.userEndedCall = true;
+          await voipStack.endCall(2, true);
+          return { handled: true, via: 'native-voip', call: call ? summarizeCall(call) : null };
+        }
         return win.WPP.call.end();
       }
+
       if (action === 'offer') {
         const call = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
-        return {
-          id: String(call?.id?._serialized || call?.id || ''),
-          peerJid: String(call?.peerJid?._serialized || call?.peerJid?.toString?.() || ''),
-          state: String(call?.getState?.() || call?.state || ''),
-          isVideo: !!call?.isVideo,
-          isGroup: !!call?.isGroup,
-          outgoing: !!call?.outgoing,
-        };
+        return summarizeCall(call);
       }
 
       throw new Error(`Unsupported call action: ${action}`);

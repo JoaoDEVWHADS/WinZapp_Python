@@ -15,6 +15,10 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert '/api/:session/call/reject' in routes
     assert '/api/:session/call/end' in routes
     assert '/api/:session/call/offer' in routes
+    assert "getVoipStackInterface" in controller
+    assert "acceptCall(true" in controller
+    assert "rejectCall()" in controller
+    assert "endCall(2, true)" in controller
     assert "WPP.call.accept" in controller
     assert "WPP.call.rejectCall" in controller
     assert "WPP.call.end" in controller
