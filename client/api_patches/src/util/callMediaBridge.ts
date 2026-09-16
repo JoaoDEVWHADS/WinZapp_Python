@@ -26,6 +26,7 @@ function installCallMediaBridgeInPage(): boolean {
     remotePipelines: new Map<string, any>(),
     micFramesPushed: 0,
     micBytesPushed: 0,
+    micSamplesConsumed: 0,
   };
 
   const ensureContext = () => {
@@ -97,8 +98,16 @@ function installCallMediaBridgeInPage(): boolean {
           state.micOffset = 0;
         }
       }
+      state.micSamplesConsumed += written;
     };
     processor.connect(destination);
+    // A zero-input ScriptProcessor is not scheduled reliably by Chromium
+    // unless it also has an audible graph sink. Keep that sink muted; the
+    // MediaStreamDestination remains the only call track source.
+    const schedulerSink = context.createGain();
+    schedulerSink.gain.value = 0;
+    processor.connect(schedulerSink);
+    schedulerSink.connect(context.destination);
     state.micProcessor = processor;
     state.micDestination = destination;
     return destination.stream.getAudioTracks()[0];
