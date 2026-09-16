@@ -502,14 +502,23 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
   }
 }
 
-export function registerCallAudioSocket(socket: Socket, logger: any): void {
+export function registerCallAudioSocket(
+  socket: Socket,
+  logger: any,
+  authenticatedSession: string
+): void {
   socket.on('call:audio:mic', (payload: any) => {
     const session = String(payload?.session || '');
     const pcm =
       payload?.encoding === 'base64' && typeof payload?.pcm === 'string'
         ? Buffer.from(payload.pcm, 'base64')
         : toBuffer(payload?.pcm);
-    if (!session || !pcm?.length || pcm.length > MAX_AUDIO_FRAME_BYTES) return;
+    if (
+      !session ||
+      session !== authenticatedSession ||
+      !pcm?.length ||
+      pcm.length > MAX_AUDIO_FRAME_BYTES
+    ) return;
     if (!(clientsArray as any)[session]) return;
     const queue = micQueues.get(session) || [];
     queue.push(pcm);
@@ -520,7 +529,7 @@ export function registerCallAudioSocket(socket: Socket, logger: any): void {
 
   socket.on('call:audio:stop', (payload: any) => {
     const session = String(payload?.session || '');
-    if (!session) return;
+    if (!session || session !== authenticatedSession) return;
     micQueues.delete(session);
     const client: any = (clientsArray as any)[session];
     const page = client?.waPage || client?.page;

@@ -8125,6 +8125,10 @@ class MainWindow(wx.Frame):
                     f"{self.wpp_ws_server}:{self.wpp_port}/",
                     socketio_path="socket.io",
                     headers={"apikey": self.token},
+                    auth={
+                        "token": self.token,
+                        "session": self.token.split(":", 1)[0],
+                    },
                     namespaces=["/"],
                     transports=["websocket"],
                 )

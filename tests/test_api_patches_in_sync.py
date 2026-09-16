@@ -71,6 +71,7 @@ MIRRORED_FILES = [
     "src/util/tokenStore/fileTokenStory.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/middleware/socketAuth.ts",
     "src/dto/sync.ts",
     "src/middleware/instrumentation.ts",
     "src/errors/domain.ts",

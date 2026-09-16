@@ -67,6 +67,7 @@ CUSTOM_SRC_FILES = [
     "src/util/callMediaBridge.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/middleware/socketAuth.ts",
     "src/dto/sync.ts",
     "src/middleware/instrumentation.ts",
     "src/errors/domain.ts",
