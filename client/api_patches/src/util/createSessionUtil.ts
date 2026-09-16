@@ -1497,6 +1497,10 @@ export default class CreateSessionUtil {
    * regardless of how connection finalization resolves.
    */
   async wireListeners(req: Request, client: WhatsAppServer) {
+    // VoIP ringing is time-sensitive. Install this first so message history,
+    // presence subscriptions, and unread synchronization cannot delay or
+    // swallow the incoming-call notification.
+    await this.onIncomingCallDirect(client, req);
     await this.listenMessages(client, req);
 
     if (req.serverOptions.webhook.listenAcks) {
@@ -1508,7 +1512,6 @@ export default class CreateSessionUtil {
     }
 
     await this.onUnreadCountChanged(client, req);
-    await this.onIncomingCallDirect(client, req);
   }
 
   /**
