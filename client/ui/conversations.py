@@ -1691,6 +1691,9 @@ class ConversationsPanel(wx.Panel):
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
+            self._sync_voice_call_button(conversation.get("remoteJid", ""))
+            self.conversation_panel.Layout()
+            self.Layout()
             # Conversation already open — just focus the message input field.
             wx.CallAfter(self.message_field.SetFocus)
             return
@@ -1808,6 +1811,7 @@ class ConversationsPanel(wx.Panel):
         )
 
         self._apply_composer_permissions(jid, conversation)
+        self._sync_voice_call_button(jid)
         self.message_label.SetLabel(
             self._message_label_text(jid, conversation, self.conversation_name)
         )
@@ -2259,6 +2263,8 @@ class ConversationsPanel(wx.Panel):
         jid = str(jid or "")
         unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast"))
         self._voice_call_btn.Show(bool(jid) and not unavailable)
+        self.conversation_panel.Layout()
+        self.Layout()
 
     def _on_voice_call(self, _event=None):
         if not self.conversation:
