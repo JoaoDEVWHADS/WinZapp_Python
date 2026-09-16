@@ -91,6 +91,7 @@ class _MainStub:
     _call_control_payload = MainWindow._call_control_payload
     _stop_active_voice_call_if_matches = MainWindow._stop_active_voice_call_if_matches
     on_call_remote_audio = MainWindow.on_call_remote_audio
+    on_voice_call_state_event = MainWindow.on_voice_call_state_event
 
     def __init__(self):
         self._active_incoming_calls = {}
@@ -117,6 +118,7 @@ class _MainStub:
         self.wpp_port = 6300
         self.token = "session-token"
         self._wa_startup_time = 2_000_000_000
+        self._voice_call_last_announced_state = ""
 
     def _arm_incoming_call_watchdog(self, identity):
         self.armed_watchdogs.append(identity)
@@ -444,6 +446,29 @@ def test_websocket_normalizes_call_state_payload(monkeypatch):
         "isVideo": False,
         "isGroup": False,
     }]
+
+
+def test_stale_terminal_event_for_same_peer_does_not_end_current_call(monkeypatch):
+    stub = _MainStub()
+    stub._active_voice_call = {
+        "identity": "outgoing:5511999999999@s.whatsapp.net",
+        "call_id": "current-call",
+        "peer_jid": "5511999999999@s.whatsapp.net",
+        "name": "Fulano",
+    }
+    stopped = []
+    stub._stop_voice_call_audio = lambda: stopped.append(True)
+    stub._sync_voice_call_bar = lambda: None
+
+    stub.on_voice_call_state_event({
+        "event": "timeout",
+        "state": "NOT_ANSWERED",
+        "id": "old-call",
+        "peerJid": "5511999999999@s.whatsapp.net",
+    })
+
+    assert stopped == []
+    assert stub._active_voice_call["call_id"] == "current-call"
 
 
 def test_websocket_forwards_remote_call_audio_to_main_window():

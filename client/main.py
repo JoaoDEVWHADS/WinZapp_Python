@@ -6306,10 +6306,18 @@ class MainWindow(wx.Frame):
             self._active_voice_call = active
             self._voice_call_last_announced_state = ""
             wx.CallAfter(self._sync_voice_call_bar)
-        matches = (
-            (call_id and call_id in {active.get("call_id"), active.get("identity")})
-            or (peer_jid and peer_jid == active.get("peer_jid"))
-        )
+        active_call_id = str(active.get("call_id") or "")
+        active_identity = str(active.get("identity") or "")
+        has_bound_call_id = bool(active_call_id) and not active_call_id.startswith("outgoing:")
+        if call_id and has_bound_call_id:
+            # A delayed terminal event from an older call with the same person
+            # must never tear down the current call.
+            matches = call_id in {active_call_id, active_identity}
+        else:
+            matches = (
+                (call_id and call_id == active_identity)
+                or (peer_jid and peer_jid == active.get("peer_jid"))
+            )
         if not matches:
             return
         if call_id:
