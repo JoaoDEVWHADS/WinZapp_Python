@@ -5973,6 +5973,7 @@ class MainWindow(wx.Frame):
         return api_post(url, token=self.token, json=payload, timeout=timeout)
 
     def _start_voice_call_audio(self, identity: str, details: dict | None = None):
+        logging.info("[call_audio] starting session identity=%s", identity)
         if getattr(self, "_call_audio_session", None) is not None:
             return True
         ws = getattr(self, "ws", None)
@@ -5997,6 +5998,7 @@ class MainWindow(wx.Frame):
             ),
         )
         audio.start()
+        logging.info("[call_audio] streams started session=%s", session_name)
         self._call_audio_session = audio
         details = details or getattr(self, "_incoming_call_details", {}).get(identity, {})
         self._active_voice_call = {
