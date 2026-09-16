@@ -128,6 +128,42 @@ def search_normalization_mode(value) -> str:
     return mode if mode in SEARCH_NORMALIZATION_MODES else "off"
 
 
+def contact_search_matches(query: str, name: str, number: str) -> bool:
+    """Whether a contact row survives the contact-list search box (issue #85).
+
+    Matches on the display name and on the phone number, and deliberately by
+    SUBSTRING on the name rather than by prefix: the whole point of the
+    request is that the lists only supported first-letter navigation, which
+    cannot find someone by surname. A substring match covers first name, last
+    name and full name in one rule, so there is nothing to keep in step.
+
+    Accents are folded (normalize_for_search's "nfd"), because a user typing a
+    surname into a search box is not going to reach for the dead-key: "assuncao"
+    has to find "Assunção". That is a stricter choice than the app-wide search
+    setting, which is a preference about the user's OWN text; here the text
+    being searched is other people's names, which the user did not write.
+
+    The number is compared digits-only on both sides, so a query typed as
+    "51 99999" finds a contact rendered "+55 51 99999-0000" — WinZapp formats
+    numbers for display and nobody types the formatting back.
+
+    An empty (or whitespace-only) query matches everything, which is what
+    restores the full list when the field is cleared.
+    """
+    q = (query or "").strip()
+    if not q:
+        return True
+    q_norm = normalize_for_search(q, "nfd")
+    if q_norm and q_norm in normalize_for_search(name or "", "nfd"):
+        return True
+    q_digits = re.sub(r"\D", "", q)
+    if q_digits:
+        num_digits = re.sub(r"\D", "", number or "")
+        if num_digits and q_digits in num_digits:
+            return True
+    return False
+
+
 def normalize_for_search(text: str, mode="off") -> str:
     """Prepare *text* for a case-insensitive substring search.
 
@@ -201,6 +237,34 @@ def normalize_line_separators(text) -> str:
     return text
 
 
+def to_editor_line_endings(text) -> str:
+    """The same text with CRLF breaks, for insertion into a MULTILINE field.
+
+    The inverse of normalize_line_separators(), and both are needed because
+    two consumers disagree about what a line break is:
+
+    * WhatsApp, the database and every comparison in this codebase want the
+      canonical ``\\n`` — which is what normalize_line_separators() produces and
+      what the send paths call on the field's value before posting.
+    * A screen reader navigating a ``wx.TextCtrl`` with the arrow keys wants
+      ``\\r\\n``. With a bare ``\\n``, NVDA reads a pasted block as ONE line and
+      Up/Down move through it as if the breaks were not there. Reported after
+      pasting a plain-LF file (a text file with 644 LF breaks and not one CR)
+      out of Notepad.
+
+    So the field holds the editor form and the send path collapses it back —
+    which it already did before this existed, for the CRLF that Windows
+    clipboard sources supply anyway. Nothing reaches WhatsApp with a stray CR.
+
+    **Only ever apply this to a multiline control.** A single-line
+    ``wx.TextCtrl`` cannot navigate lines, does not translate line endings the
+    way the multiline one does, and would simply hold the control characters
+    verbatim — the attachment caption field is exactly that, and shares the
+    paste handler with the message field.
+    """
+    return normalize_line_separators(text).replace("\n", "\r\n")
+
+
 _FORWARDABLE_SUB_KEYS = (
     "extendedTextMessage", "audioMessage", "imageMessage",
     "videoMessage", "documentMessage", "stickerMessage",
@@ -245,8 +309,24 @@ def is_voice_message(msg) -> bool:
     if msg.get("isPtt") or msg.get("ptt"):
         return True
     msg_type = msg.get("messageType") or msg.get("type")
+    if msg_type is None and isinstance(msg.get("audioMessage"), dict):
+        # A bare message BODY rather than a record: what a reply stores as
+        # contextInfo.quotedMessage when WinZapp itself builds it (the quoted
+        # message's own "message" dict). It carries no messageType, so it used
+        # to fall out here as "not a voice note" and every reply to a voice
+        # message read "mensagem citada: áudio". Only a body whose one media
+        # key is audioMessage gets here; a record always has messageType, so
+        # the guard below still keeps a stray ptt flag on a photo from counting.
+        msg_type = "audioMessage"
     if msg_type not in ("audioMessage", "audio", "ptt"):
         return False
+    if msg_type == "ptt":
+        # "ptt" IS the voice-note type — the name says so. It used to fall
+        # through to the ptt-flag check below, which a record carrying only
+        # the type (no inner audioMessage) failed, reporting a voice note as a
+        # plain audio file. Harmless while both were one category; not once
+        # they are two.
+        return True
     msg_obj = msg.get("message")
     inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
     if not inner and isinstance(msg.get("audioMessage"), dict):
@@ -258,6 +338,368 @@ def is_voice_message(msg) -> bool:
         or media_data.get("ptt", False)
         or media_data.get("isPtt", False)
     )
+
+
+# The media categories the group data dialog's Media tab filters by, and that
+# Settings > Interface do usuario lets the user pre-select. Order is the order
+# the checkboxes are shown in, and the keys are what gets persisted in
+# user_interface.group_media_default_types - so renaming one silently drops a
+# user's saved choice, exactly like SOUND_EVENTS' keys.
+#
+# "audios" and "voice_messages" are two categories, not one. They used to be
+# one — deliberately, on the reasoning that both are "the audio someone sent"
+# — but users asked for the split: they want the Media tab to show only voice
+# notes (or only music/audio files), and they want to choose whether the
+# automatic download fetches one, the other or both. is_voice_message() is the
+# single test that separates them, here as everywhere else.
+#
+# The risk the old grouping was avoiding is real and is handled by a migration
+# rather than by the grouping: a settings.json written before this split has
+# "audios" saved and cannot have "voice_messages", so read literally it would
+# leave every existing user's voice notes unchecked — invisible in the Media
+# tab and never auto-downloaded — silently, on the first launch after the
+# update. migrate_voice_messages_media_types() below inherits the "audios"
+# state into the new key once, at settings-load time.
+GROUP_MEDIA_TYPES = ("photos", "videos", "audios", "voice_messages",
+                     "documents", "links")
+
+_GROUP_MEDIA_MESSAGE_TYPES = {
+    "photos":    ("imageMessage", "image", "stickerMessage", "sticker"),
+    "videos":    ("videoMessage", "video"),
+    # No "ptt" here: group_media_category() tests is_voice_message() before
+    # this table, so a PTT never reaches it. Leaving it would only look like
+    # the two categories disagree.
+    "audios":    ("audioMessage", "audio"),
+    "documents": ("documentMessage", "document"),
+}
+
+# The message types a voice note can possibly arrive under. is_voice_message()
+# answers "is this audio a voice note" for records already known to be audio,
+# so it honours a top-level ptt/isPtt flag BEFORE looking at the type at all —
+# right at its own call sites, wrong as a category test: a photo record
+# carrying a stray truthy "ptt" would be filed under voice notes and vanish
+# from "Fotos" (and be judged against the wrong auto-download checkbox).
+# group_media_category() gates on the type first.
+_VOICE_CAPABLE_MESSAGE_TYPES = ("audioMessage", "audio", "ptt")
+
+
+# Same shape conversations._URL_RE matches, kept here rather than imported so
+# this module stays wx-free and importable by tests on its own.
+_MEDIA_URL_RE = re.compile(r"https?://\S+|www\.\S+")
+
+
+def message_has_link(msg) -> bool:
+    """True when a message body carries a URL.
+
+    Reads the WIRE text (conversation / extendedTextMessage.text), never a
+    rendered line: a link preview's title or a resolved @mention would
+    otherwise decide whether a message counts as a link.
+    """
+    if not isinstance(msg, dict):
+        return False
+    body = msg.get("message")
+    if not isinstance(body, dict):
+        return False
+    text = body.get("conversation") or ""
+    if not text:
+        ext = body.get("extendedTextMessage")
+        if isinstance(ext, dict):
+            text = ext.get("text") or ""
+    return bool(text) and bool(_MEDIA_URL_RE.search(text))
+
+
+def group_media_category(msg) -> str:
+    """Which Media-tab category *msg* belongs to, or "" when it belongs to none.
+
+    A message's own media type decides first, so a photo whose caption happens
+    to contain a URL is still a photo — a user looking for "the link someone
+    sent" is looking for the text message, and counting the photo twice would
+    make the checkboxes overlap.
+
+    Pure and message-shaped rather than a method on the dialog, so the filter
+    can be tested without wx - the tab itself is a wx.Panel.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    msg_type = msg.get("messageType") or msg.get("type") or ""
+    # Before the type table, not inside it: a voice note's messageType is
+    # "audioMessage" too, so the table would claim it as "audios" first and
+    # the new category would never match anything. Gated on the type as well —
+    # see _VOICE_CAPABLE_MESSAGE_TYPES for why that gate has to be here even
+    # though is_voice_message() has a type check of its own.
+    if msg_type in _VOICE_CAPABLE_MESSAGE_TYPES and is_voice_message(msg):
+        return "voice_messages"
+    for category, types in _GROUP_MEDIA_MESSAGE_TYPES.items():
+        if msg_type in types:
+            return category
+    if msg_type in ("conversation", "extendedTextMessage", "text") and \
+            message_has_link(msg):
+        return "links"
+    return ""
+
+
+# Categories the background media auto-download can be limited to
+# (Configuracoes > Armazenamento). Links are deliberately absent: a link is a
+# text message, there is no file behind it, and it never reaches the download
+# path at all — offering it as something to "not download" would be a checkbox
+# that does nothing.
+#
+# Derived from GROUP_MEDIA_TYPES rather than written out, so a category added
+# there appears here too instead of silently becoming undownloadable.
+AUTO_DOWNLOAD_MEDIA_TYPES = tuple(k for k in GROUP_MEDIA_TYPES if k != "links")
+
+
+# Marks that the one-shot "audios" -> "audios" + "voice_messages" migration has
+# already run for this install. A flag, not a shape check, because there is no
+# shape to check: after the migration, a list holding "audios" without
+# "voice_messages" is exactly what a user who unchecked "Mensagens de voz"
+# leaves behind, and it is byte-for-byte identical to a pre-split list. Without
+# something recording that the migration ran, every launch would re-tick the
+# box the user just unticked. Lives in "general" because it describes the file,
+# not a single section, and it is deliberately absent from DEFAULT_SETTINGS: a
+# fresh install runs the migration once over lists that already contain the new
+# key (a no-op) and writes the flag itself, which is one write and no special
+# case.
+VOICE_MEDIA_TYPE_MIGRATION_FLAG = "voice_messages_media_type_migrated"
+
+# The persisted lists this migration has to fix up, section by section. Both
+# hold GROUP_MEDIA_TYPES keys, both were written before "voice_messages"
+# existed.
+_MIGRATED_MEDIA_TYPE_SETTINGS = (
+    ("user_interface", "group_media_default_types"),
+    ("storage", "auto_download_media_types"),
+)
+
+
+def migrate_voice_messages_media_types(settings) -> bool:
+    """Teach a pre-split settings.json about the "voice_messages" category.
+
+    In a list written before the category existed, a checked "audios" meant
+    "audio files AND voice notes" — that is what the single box did — so the
+    new key inherits that state, and only that state. Nothing else is touched:
+
+    * an explicitly empty list stays empty, because unchecking everything is a
+      legitimate choice (see auto_download_allows()) and "empty" never meant
+      "voice notes too";
+    * a list without "audios" stays without "voice_messages", for the same
+      reason — the user had audio off, and off is what the split should keep;
+    * a missing or corrupt value is left alone, because every reader already
+      treats that as "all categories" and inserting a list here would turn an
+      un-chosen default into a saved choice.
+
+    Returns True whenever *settings* changed, which includes merely writing the
+    flag: the flag has to reach disk or the migration runs again next launch
+    and re-checks a box the user has since unchecked.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(VOICE_MEDIA_TYPE_MIGRATION_FLAG):
+        return False
+    for section_name, key in _MIGRATED_MEDIA_TYPE_SETTINGS:
+        section = settings.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        saved = section.get(key)
+        if not isinstance(saved, (list, tuple)):
+            continue
+        if "audios" not in saved or "voice_messages" in saved:
+            continue
+        # Rebuilt in GROUP_MEDIA_TYPES order, the order both dialogs write
+        # these lists in, so a migrated file looks like one the user saved.
+        section[key] = [k for k in GROUP_MEDIA_TYPES
+                        if k in saved or k == "voice_messages"]
+    general[VOICE_MEDIA_TYPE_MIGRATION_FLAG] = True
+    return True
+
+
+# Marks that the one-shot voice_message_mode "audio" -> "voice_message" default
+# change has already run for this install. Its own flag, deliberately not the
+# media-types one: the two migrations are independent and an install that ran
+# only the first one must still get this one.
+VOICE_MESSAGE_MODE_MIGRATION_FLAG = "voice_message_mode_default_migrated"
+
+
+def migrate_voice_message_mode_default(settings) -> bool:
+    """Move an existing install onto the new voice_message_mode default.
+
+    The default became "voice_message" (announce a voice note as "mensagem de
+    voz", not as "audio") — but every settings.json in existence was seeded
+    from settings_default.json and therefore already has the literal string
+    "audio" saved, so changing the default alone would reach nobody. Hence the
+    conversion, which is the deliberate cost of this change: a user who chose
+    "Audio" on purpose cannot be told apart from one who never opened the
+    setting, so both are converted and the first has to re-tick the radio in
+    Configuracoes > Interface do usuario.
+
+    Only the exact string "audio" is converted. A missing value is left absent
+    (backfill_missing_defaults() puts the new default there straight after),
+    and an unrecognized value is left untouched — rewriting a value we cannot
+    interpret would be guessing at what the user meant.
+
+    The flag is what makes this a one-shot change rather than a permanent
+    override: without it, the user who does go back and re-tick "Audio" would
+    find it silently reverted on the next launch, and that is exactly the user
+    who cares. Returns True whenever *settings* changed, the flag included —
+    an unwritten flag is the same as no flag.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(VOICE_MESSAGE_MODE_MIGRATION_FLAG):
+        return False
+    section = settings.get("user_interface")
+    if isinstance(section, dict) and section.get("voice_message_mode") == "audio":
+        section["voice_message_mode"] = "voice_message"
+    general[VOICE_MESSAGE_MODE_MIGRATION_FLAG] = True
+    return True
+
+
+# Marks that the one-shot spell_check_enabled -> spell_check_mode conversion
+# has already run. Its own flag, like the two above, for the same reason.
+SPELL_CHECK_MODE_MIGRATION_FLAG = "spell_check_mode_migrated"
+
+
+def migrate_spell_check_mode(settings) -> bool:
+    """Carry a legacy ``spell_check_enabled`` bool onto ``spell_check_mode``.
+
+    core/spell_checker.py's spell_check_mode() already knows how to read the
+    old bool, but that fallback is unreachable on a real install:
+    backfill_missing_defaults() inserts the new key (it is in DEFAULT_SETTINGS)
+    on the first launch after the update, before anything has read the setting,
+    so every later call finds a recognised mode and never looks at the legacy
+    value. A user who had turned spell checking off got it back on, while their
+    settings.json still said ``spell_check_enabled: false`` — the setting
+    looking honoured is what makes that hard to notice.
+
+    Hence a migration rather than a read-time fallback, run from
+    _migrate_settings() and therefore BEFORE the backfill that would otherwise
+    invent the value this reads.
+
+    Only an explicit False is carried across, matching what spell_check_mode()
+    already decided: True was the default nobody chose, so it means "expressed
+    no preference" and lands on the new default instead of being frozen into an
+    override that would ignore Windows forever. An already-present
+    ``spell_check_mode`` is never overwritten — that is a choice made under the
+    new setting and outranks the old one.
+
+    The flag is what keeps this one-shot: without it, a user who deliberately
+    goes back to "follow Windows" would find it reverted to "off" on the next
+    launch, and that is exactly the user who cares. Returns True whenever
+    *settings* changed, the flag included — an unwritten flag is no flag.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(SPELL_CHECK_MODE_MIGRATION_FLAG):
+        return False
+    if ("spell_check_mode" not in general
+            and general.get("spell_check_enabled") is False):
+        general["spell_check_mode"] = "off"
+    general[SPELL_CHECK_MODE_MIGRATION_FLAG] = True
+    return True
+
+
+def auto_download_allows(settings, msg) -> bool:
+    """Whether the background auto-download may fetch *msg*'s media.
+
+    A missing or non-list setting allows everything: that is the default, and
+    it is also what a settings.json written before this option looks like —
+    reading it as "nothing selected" would silently stop all media downloads
+    for every existing install. An explicitly empty list is honoured, because
+    unchecking everything is a choice the user can legitimately make.
+
+    Note that stickers count as photos, because group_media_category() puts
+    them there — the same grouping the Media tab shows, so unchecking "Fotos"
+    means the same thing in both places.
+    """
+    section = settings.get("storage") if isinstance(settings, dict) else None
+    allowed = section.get("auto_download_media_types") if isinstance(section, dict) else None
+    if not isinstance(allowed, (list, tuple)):
+        return True
+    category = group_media_category(msg)
+    if not category or category == "links":
+        # Not one of the categories this setting governs. Whatever else may
+        # skip it, this check is not the one to do it.
+        return True
+    return category in allowed
+
+
+# The Media tab's "Filtrar midias" radio, mirroring the conversation list's own
+# filter. Order is the order the radio shows them in.
+GROUP_MEDIA_FILTER_ALL = "all"
+GROUP_MEDIA_FILTER_DOWNLOADED = "downloaded"
+GROUP_MEDIA_FILTER_NOT_DOWNLOADED = "not_downloaded"
+GROUP_MEDIA_FILTERS = (
+    GROUP_MEDIA_FILTER_ALL,
+    GROUP_MEDIA_FILTER_DOWNLOADED,
+    GROUP_MEDIA_FILTER_NOT_DOWNLOADED,
+)
+
+
+def media_cache_id(msg) -> str:
+    """The id a message's cached media file is stored under.
+
+    WhatsApp ids for media sometimes arrive as "<a>_<b>_<real>" and the cache
+    is keyed by the last (or third) part — the same unpacking the message list
+    and the old media count both did inline. Here once, so the Media tab's
+    "is it downloaded" check cannot disagree with the code that wrote the file.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    mid = (msg.get("key") or {}).get("id", "") or ""
+    if "_" in mid:
+        parts = mid.split("_")
+        return parts[2] if len(parts) > 2 else parts[-1]
+    return mid
+
+
+def filter_group_media_by_download(records, media_filter, downloaded_ids) -> list:
+    """Apply the "Filtrar midias" radio.
+
+    *downloaded_ids* is a precomputed set of media_cache_id()s known to be on
+    disk. It is passed in rather than stat-ed here on purpose: this runs on the
+    UI thread on every filter change, and one os.path.isfile() per message is
+    exactly what froze this dialog before (issue #52).
+
+    A link message has no file to download, so it belongs with the
+    not-downloaded side — which is what the third option asks for by name
+    ("nao baixadas / links").
+    """
+    if media_filter == GROUP_MEDIA_FILTER_ALL:
+        return list(records or [])
+    downloaded = set(downloaded_ids or ())
+    out = []
+    for m in (records or []):
+        is_link = group_media_category(m) == "links"
+        on_disk = (not is_link) and media_cache_id(m) in downloaded
+        if media_filter == GROUP_MEDIA_FILTER_DOWNLOADED:
+            if on_disk:
+                out.append(m)
+        elif not on_disk:
+            out.append(m)
+    return out
+
+
+def filter_group_media(records, enabled_types) -> list:
+    """The Media tab's list contents: every media record whose category is
+    enabled, in the order the message list itself uses them, so a row reads the
+    same in both places.
+
+    Anything that is not media is excluded outright, whatever the checkboxes
+    say: the tab is a media browser, not a filtered conversation.
+    """
+    enabled = set(enabled_types or ())
+    return [m for m in (records or []) if group_media_category(m) in enabled]
 
 
 def append_selected_marker(text: str, word: str, position: str, is_selected: bool) -> str:
@@ -380,6 +822,14 @@ DEFAULT_SETTINGS = {
         "updates_enabled": True,
         "alpha_updates_enabled": False,
         "noise_reduction_enabled": False,
+        # Windows spell checking in the message field (core/spell_checker.py).
+        # One of SPELL_CHECK_MODES: "windows" (default — follow Windows' own
+        # Settings > Time & language > Typing > Spelling), or "on"/"off" to
+        # override it. The cue is a Sound Event, so a user who wants the
+        # checking but not the sound can silence just that event in Settings >
+        # Eventos Sonoros; "off" turns the checking itself off, which is
+        # also what stops the COM/dictionary work from ever being done.
+        "spell_check_mode": "windows",
         "first_run": True,
         "api_type_first_run_asked": False,
         "hotkey_first_run_asked": False,
@@ -426,10 +876,19 @@ DEFAULT_SETTINGS = {
         "forwarded_prefix_enabled": False,
         "conversation_video_media_viewer_dialog": True,
         "status_media_viewer_dialog": True,
-        "voice_message_mode": "audio"
+        "voice_message_mode": "voice_message",
+        # Which media categories start checked in a group's Media tab.
+        # A list, not four booleans, so GROUP_MEDIA_TYPES stays the single
+        # place a category is declared.
+        "group_media_default_types": list(GROUP_MEDIA_TYPES)
     },
     "audio_playback": {
-        "audio_default_speed": 1.0
+        "audio_default_speed": 1.0,
+        # On by default: this is the existing behaviour. Off means a received
+        # voice note is never flagged "played" in the message list when its
+        # playback ends — which also means no row rewrite, and so no screen
+        # reader announcement about a message the user has already moved off.
+        "mark_audio_played_in_list": True
     },
     "audio_devices": {
         "output_device_name": "",
@@ -439,6 +898,16 @@ DEFAULT_SETTINGS = {
     "accessibility": {
         "extended_sr_compat_enabled": True,
         "sapi_fallback_enabled": True
+    },
+    # See core/save_location.py — which folder a Save As dialog opens on.
+    # "last" is the default and is a deliberate change from the old
+    # unconditional Downloads: it degrades to Downloads on the first save of a
+    # fresh install, so nobody has to open the settings to get sensible
+    # behaviour.
+    "files": {
+        "save_dialog_folder_mode": "last",
+        "save_dialog_custom_folder": "",
+        "save_dialog_last_folder": "",
     },
     "speech_content": {
         "announce_typing": True,
@@ -461,6 +930,9 @@ DEFAULT_SETTINGS = {
     "cleared_chats": {},
     "storage": {
         "auto_download_media": True,
+        # Which categories the auto-download covers. All of them by default —
+        # see auto_download_allows(). Links are not a category here.
+        "auto_download_media_types": list(AUTO_DOWNLOAD_MEDIA_TYPES),
         "media_max_days": 30,
         "media_max_mb": 100,
         "probe_video_duration_on_download": False
@@ -632,6 +1104,10 @@ def _slim_quoted_message(quoted):
     qtype = quoted.get("type")
     slim: dict = {}
     if qtype and qtype not in ("chat", "text"):
+        # "audio" carrying a voice-note flag inside is still a voice note; the
+        # type alone would drop that flag and read "áudio" once saved.
+        if qtype == "audio" and is_voice_message(quoted):
+            qtype = "ptt"
         slim["type"] = qtype
         if text:
             slim["caption"] = text
@@ -644,6 +1120,11 @@ def _slim_quoted_message(quoted):
                   "documentMessage", "stickerMessage", "contactMessage"):
             if k in quoted:
                 slim[k] = {}
+                # The one flag the label needs: without it a quoted voice note
+                # was stored as a generic audio file and read "áudio" even with
+                # voice messages distinguished (is_voice_message() reads it).
+                if k == "audioMessage" and is_voice_message(quoted):
+                    slim[k]["ptt"] = True
                 break
     mentioned = _extract_mentioned_jids(quoted)
     if mentioned:
@@ -985,7 +1466,8 @@ def db_fetch_limit(configured_limit: int, unread_count: int, cap: int = 2000, bu
     return visible_page
 
 
-def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
+def paginated_window(total_len: int, limit: int, unread_sep_idx: int,
+                     min_visible: int = 0) -> tuple:
     """Where populate_messages()'s pagination window should start.
 
     Returns ``(offset, adjusted_sep_idx)``: ``offset`` is how many leading
@@ -1003,10 +1485,19 @@ def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
     demonstrably still unread. So the window widens — but only while there is
     something unread to protect (``unread_sep_idx >= 0``); a fully-read
     conversation still respects the configured limit exactly as before.
+
+    ``min_visible`` widens the window for the same kind of reason, but for
+    history the user asked for by hand: Home/scroll-up loads older messages
+    and grows the rendered list past the page size, and a background rebuild
+    (the 60s resync, or the one every new message triggers) recomputing the
+    window from the end alone would throw all of it away and snap back to the
+    configured limit. It is a count of rows already materialized, not an
+    offset, so it stays anchored to the same old point as new messages arrive,
+    and it only grows when the user actually pulls more history in.
     """
-    effective_limit = limit
+    effective_limit = max(limit, min_visible)
     if unread_sep_idx >= 0:
-        effective_limit = max(limit, total_len - unread_sep_idx)
+        effective_limit = max(effective_limit, total_len - unread_sep_idx)
     if total_len <= effective_limit:
         return 0, unread_sep_idx
     offset = total_len - effective_limit
@@ -1014,6 +1505,68 @@ def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
     if adjusted < 0:
         adjusted = -1
     return offset, adjusted
+
+
+def expanded_min_visible(displayable: list, anchor_id: str, fallback_count: int,
+                         cap: int = 0) -> int:
+    """How wide populate_messages() must keep the window it rebuilds.
+
+    ``fallback_count`` is how many rows the list had after the user last pulled
+    older history in. On its own it is not enough: every message that arrives
+    afterwards grows ``displayable``, so a window sized purely by that count
+    slides one row forward per arrival and eats back exactly the history that
+    was loaded. ``anchor_id`` — the oldest message displayed at that moment —
+    pins it instead, and the count stays as the floor for when that message is
+    no longer there (deleted remotely), so a missing anchor widens the window
+    less rather than collapsing it back to the page size.
+
+    ``cap`` is off by default (0, or any non-positive value) and exists only
+    for a caller that has a reason to bound the window. A standing cap must
+    NOT be reintroduced here: it reproduces the original bug with a higher
+    floor. Expanded to 4200 rows, the next arriving message recomputes the
+    window at the cap and 2200 rows vanish under the reader mid-read;
+    ``_expanded_visible_count`` is not rewritten, so every later rebuild
+    performs the same cut, and the Home that follows only reaches
+    ``_load_more_messages()`` and is undone again — above the cap the user can
+    never reach older history at all. Rendering cost was the argument for one,
+    but the multi-second stalls that argument cited were measured to be caused
+    by *frequency*, not window size (see main.py's _schedule_refresh_active_
+    messages(), where an oversized pagination window is recorded as a tested
+    and discarded theory) and are fixed by its 1s debounce. Whether a very
+    large window costs anything on its own has not been measured.
+    """
+    try:
+        floor = max(0, int(fallback_count))
+    except (TypeError, ValueError):
+        floor = 0
+    widened = floor
+    if anchor_id:
+        for idx, msg in enumerate(displayable):
+            if isinstance(msg, dict) and msg.get("key", {}).get("id") == anchor_id:
+                widened = max(floor, len(displayable) - idx)
+                break
+    try:
+        ceiling = int(cap)
+    except (TypeError, ValueError):
+        ceiling = 0
+    return min(widened, ceiling) if ceiling > 0 else widened
+
+
+def history_window(displayable: list, anchor_id: str, expanded_count: int,
+                   limit: int, unread_sep_idx: int, cap: int = 0) -> tuple:
+    """The pagination window populate_messages() should rebuild with.
+
+    Pulled out of populate_messages() whole because it is the entire fix for
+    "the conversation drops the history I loaded": the panel state, the
+    anchoring and the widening only matter together, and testing the two
+    halves separately left the wiring between them — the one line that carries
+    the expanded window into paginated_window() — covered by nothing.
+
+    Returns ``paginated_window()``'s own ``(offset, adjusted_sep_idx)``.
+    """
+    min_visible = expanded_min_visible(displayable, anchor_id, expanded_count, cap)
+    return paginated_window(len(displayable), limit, unread_sep_idx,
+                            min_visible=min_visible)
 
 
 def reaction_targets_status(msg: dict) -> bool:

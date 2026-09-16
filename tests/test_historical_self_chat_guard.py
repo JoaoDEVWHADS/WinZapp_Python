@@ -163,6 +163,7 @@ class _Executor:
 
 class _HistoricalStub:
     on_historical_message = MainWindow.on_historical_message
+    _drop_protocol_edit = MainWindow._drop_protocol_edit
     _redirect_self_chat_artifact = MainWindow._redirect_self_chat_artifact
     _phone_digits_equivalent = staticmethod(MainWindow._phone_digits_equivalent)
     _is_self_jid = MainWindow._is_self_jid

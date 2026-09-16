@@ -30,6 +30,9 @@ commit.
 2. Add the key to **all five** files in `client/languages/`:
    `pt-BR.json`, `pt-PT.json`, `en-US.json`, `es-ES.json`, `pl.json`.
    Every one gets a real translation; a blank value fails the suite.
+   **Before writing each value, grep that locale for the words it already
+   uses for the concept** (conversation, chat, read, status, attachment…) and
+   use exactly those. See "Reuse the established terminology" below.
 3. Call it as a **literal**: `i18n.t("my_key")` / `self.i18n.t("my_key")`. A key
    assembled at runtime (f-string, variable) cannot be resolved statically, so
    it escapes the code-side check entirely and is back to failing silently.
@@ -52,6 +55,16 @@ commit.
   a key to en-US and forgetting pt-BR is exactly as broken as the reverse, and
   the failure lands on the default locale. Whichever file is behind is the one
   that fails.
+- **Reuse the established terminology — no test catches this one.** Each
+  language file's existing vocabulary has been reviewed by native speakers
+  and is the accepted term there; keep it. A Polish PR (f292049f) moved all of
+  `pl.json` from `rozmowa` to `czat` for "conversation", so a new Polish
+  string saying `rozmowy` silently reintroduces what they removed. Follow the
+  file you are writing into, not another locale's choice: en-US says "chats",
+  pt-BR "conversas". Where a file is mixed (es-ES has both "conversaciones"
+  and "chats"), match the closest strings for the same feature. Changing an established term is a
+  native speaker's decision across the whole file, never a side effect of
+  adding one string.
 - **Accessibility outranks brevity.** The string is spoken, not skimmed. Dialog
   titles and list items must resolve a human-readable name (contact/group)
   rather than a raw JID, or NVDA reads phone-number digits aloud.

@@ -93,6 +93,71 @@ def should_count_strike(now: float, last_strike_ts: float,
     return (now - last_strike_ts) >= min_interval
 
 
+# How much a probe's consecutive-strike budget is widened while an initial sync
+# is running. The factor was a bare literal 10 repeated at three call sites in
+# main.py (check_whatsapp_reachable()'s two branches and
+# check_wa_connection_http()'s except branch); it is named here because it is
+# one decision, not three.
+SYNC_TOLERANCE_FACTOR = 10
+
+# How long the widened budget is allowed to hold the old state before the base
+# budget comes back.
+#
+# The widening is generous on purpose, and generous in the wrong units: the
+# health checker runs every _HEALTH_CHECK_INTERVAL (30 s) and
+# _OFFLINE_PROBE_STRIKES is 2, so x10 is ~10 minutes of answering "still
+# connected" to a probe that has said otherwise every single time. During those
+# ten minutes check_wa_connection_http()'s CONNECTED branch never reaches
+# _nudge_whatsapp_socket_stream() or escalates to _restart_wpp_session(), and
+# _should_abort_sync_for_offline() never fires — which is the ghost
+# "conversations synchronized" bug documented at that call site. A real outage
+# in the middle of a sync would be held invisible for the whole window.
+#
+# 180 s is chosen from the two real durations either side of it: comfortably
+# past the measured 28-second WhatsApp Web page reload that this tolerance
+# exists to ride out (see check_whatsapp_reachable()'s session_down branch), and
+# nowhere near the ~10 minutes the raw factor buys. This is a CLOCK and not a
+# strike count for the reason main.py has already had to learn twice (the
+# startup grace window, and STRIKE_MIN_INTERVAL_SECONDS above): a reading count
+# is a proxy for elapsed time that breaks the moment something polls at a
+# different rate.
+SYNC_TOLERANCE_MAX_SECONDS = 180.0
+
+
+def probe_strike_budget(base_strikes: int, *,
+                        initial_sync_running: bool,
+                        first_strike_ts: float = 0.0,
+                        now: float = 0.0,
+                        max_seconds: float | None = SYNC_TOLERANCE_MAX_SECONDS) -> int:
+    """How many consecutive negative probe readings to require before believing
+    the connection is really down.
+
+    Outside an initial sync this is just ``base_strikes``. While one is running
+    it is widened by SYNC_TOLERANCE_FACTOR, because a history download for
+    hundreds of chats keeps the local Node process (and the machine's own
+    network stack) busy enough that a slow or failed probe is far more often
+    that load than a real outage — and reading it as an outage aborts the very
+    sync that caused it.
+
+    ``first_strike_ts`` is when the CURRENT run of consecutive strikes began (0
+    when there is no run yet, i.e. this reading is starting one). Once that run
+    is older than ``max_seconds`` the widened budget expires and the base one
+    comes back: the tolerance is for a busy sync, not for holding a genuine
+    outage invisible for as long as the sync happens to last.
+
+    ``max_seconds=None`` disables the ceiling. That asymmetry is deliberate and
+    only check_wa_connection_http()'s except branch uses it: its x10 is the one
+    already shipped and proven against a Node blocked by a history download,
+    and tightening it now would reintroduce that risk for no reported problem.
+    The two check_whatsapp_reachable() branches are new and take the ceiling.
+    """
+    if not initial_sync_running:
+        return base_strikes
+    if max_seconds is not None and first_strike_ts and (now - first_strike_ts) >= max_seconds:
+        return base_strikes
+    return base_strikes * SYNC_TOLERANCE_FACTOR
+
+
 def is_zombie_session_after_resume(wa_connected: bool, status: str,
                                    host_reachable: bool) -> bool:
     """Decide whether a post-wake session is a 'zombie CONNECTED' worth an
@@ -203,6 +268,14 @@ def reset_state_for_resume(obj, now: float) -> None:
         setattr(obj, attr, False)
     obj._wa_startup_time = now
     obj._last_strike_ts = 0.0
+    # When the current run of offline-probe strikes began, i.e. the clock
+    # probe_strike_budget()'s ceiling is measured against. It has to be zeroed
+    # wherever _offline_probe_strikes is, or a run that ended before the sleep
+    # leaves a stale start time behind and the first post-wake strike is
+    # already "too old" for the widened budget. Set here rather than listed in
+    # _RESET_ZERO_ATTRS because it is a timestamp, and that loop assigns int 0
+    # — same reason _last_strike_ts above is written out.
+    obj._offline_probe_first_strike_ts = 0.0
 
 
 
@@ -241,6 +314,62 @@ def classify_unlink_candidate(
     if logout_strikes >= logout_confirm_strikes:
         return LOGOUT
     return RESUMING  # connected before, brief blip — keep waiting (no wipe)
+
+
+# Why check_wa_connection_http() may NOT answer a CLOSED/DESTROYED/'' status
+# with /start-session. A CLOSED reading is normally an invitation to bring the
+# session back, and three of these four guards exist because something else
+# already owns the browser at that moment; the fourth (a halted unattended QR
+# flood) exists because bringing it back is the whole thing being prevented.
+# The strings are the reason logged by the caller, one per guard, so the log
+# still says which of the four fired.
+AUTO_START_BLOCKED_PAIRING_DIALOG = "pairing dialog is active"
+AUTO_START_BLOCKED_QR_FLOOD = (
+    "session halted after an unattended QR flood; waiting for the user to re-pair"
+)
+AUTO_START_BLOCKED_RECOVERY_RESTART = "recovery restart sequence in progress owns it"
+AUTO_START_BLOCKED_SELF_INFLICTED = "our own close-session teardown is in flight"
+
+
+def auto_start_block_reason(*, pairing_dialog_active: bool,
+                            qr_flood_halted: bool,
+                            recovery_restart_active: bool,
+                            self_inflicted_teardown: bool) -> str | None:
+    """Return the reason /start-session must be skipped for a CLOSED status, or
+    None when starting a fresh session is the right answer.
+
+    Extracted from MainWindow.check_wa_connection_http()'s CLOSED branch — a
+    four-way condition buried in a method that cannot be driven end to end in a
+    test (HTTP, wx, half a dozen other subsystems), while each guard is a
+    one-account-losing-or-not decision:
+
+    * pairing_dialog_active — the pairing flow manages its own session; starting
+      one here spawns a duplicate Chrome alongside it. (Unreachable in practice
+      now that check_wa_connection_http() returns early while the dialog is up,
+      kept as a defensive fallback.)
+    * qr_flood_halted — this CLOSED is MainWindow._halt_unattended_qr_session()'s
+      own doing. Restarting is exactly what that call exists to prevent: the
+      session comes back and resumes asking WhatsApp for a code every ~30s that
+      nobody can scan, which is what got an account banned. Only re-pairing or a
+      genuine reconnect clears the latch.
+    * recovery_restart_active — an active close/kill/start sequence owns the
+      browser; the CLOSED we see is likely ITS close-session in flight, and
+      racing it can spawn a duplicate Chrome / detached frame.
+    * self_inflicted_teardown — the expected result of our own close-session
+      (shutdown, WPPConnect update, session restart): starting here would revive
+      the browser moments before taskkill force-kills it.
+
+    Order matters only for which reason gets logged — any one of them blocks.
+    """
+    if pairing_dialog_active:
+        return AUTO_START_BLOCKED_PAIRING_DIALOG
+    if qr_flood_halted:
+        return AUTO_START_BLOCKED_QR_FLOOD
+    if recovery_restart_active:
+        return AUTO_START_BLOCKED_RECOVERY_RESTART
+    if self_inflicted_teardown:
+        return AUTO_START_BLOCKED_SELF_INFLICTED
+    return None
 
 
 def classify_unlinked(

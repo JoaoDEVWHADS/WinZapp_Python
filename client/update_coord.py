@@ -110,7 +110,24 @@ def _default_proc_create_time(pid: int):
             if kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
                 if code.value != STILL_ACTIVE:
                     return None  # already exited
-            return _CT_UNKNOWN  # alive, unknown create_time
+            # The REAL creation time, not the sentinel. psutil is not shipped,
+            # so this branch is what every installed WinZapp runs, and returning
+            # _CT_UNKNOWN here made every lease and claim record 0.0 — which
+            # lease_alive() accepts for ANY process holding that pid. Windows
+            # reuses pids quickly (measured on one install: svchost,
+            # RuntimeBroker and msedgewebview2 sitting on the pids of WinZapps
+            # that had long exited), so a claim left behind by a finished
+            # update looked alive forever, and "check for updates" said a
+            # dialog was open in another account on machines with one account.
+            # Same conversion as psutil: FILETIME 100 ns ticks since 1601.
+            ft_create, ft_exit, ft_kernel, ft_user = (
+                wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME())
+            if kernel32.GetProcessTimes(h, ctypes.byref(ft_create), ctypes.byref(ft_exit),
+                                        ctypes.byref(ft_kernel), ctypes.byref(ft_user)):
+                ticks = (ft_create.dwHighDateTime << 32) | ft_create.dwLowDateTime
+                if ticks > 116444736000000000:
+                    return (ticks - 116444736000000000) / 10_000_000
+            return _CT_UNKNOWN  # alive, create_time could not be read
         finally:
             kernel32.CloseHandle(h)
     try:
@@ -133,6 +150,28 @@ def lease_alive(pid: int, create_time: float,
         return False
     if ct == 0.0 or create_time == 0.0:
         return True
+    return abs(ct - create_time) < 1e-6
+
+
+def prompt_owner_alive(pid: int, create_time: float,
+                       proc_create_time: Callable[[int], Optional[float]] = _default_proc_create_time) -> bool:
+    """Liveness for the update-PROMPT claim: alive only on a positive match.
+
+    lease_alive() fails CLOSED — unknown counts as alive — because a lease
+    guards the install, and installing under a running account corrupts it.
+    The prompt claim guards against nothing worse than a second dialog, and its
+    reader already fails open for that reason (_read_prompt). Letting an
+    unknown create_time count as alive there is what kept a claim left behind
+    by an update alive for as long as ANY process sat on its old pid, telling
+    people with a single account that another account's dialog was open. So
+    here both sides must be known and equal; a claim recorded as 0.0 by an
+    older build is never trusted, which also clears the ones already stuck.
+    """
+    if create_time == _CT_UNKNOWN:
+        return False
+    ct = proc_create_time(pid)
+    if ct is None or ct == _CT_UNKNOWN:
+        return False
     return abs(ct - create_time) < 1e-6
 
 
@@ -347,6 +386,126 @@ def is_update_in_progress(global_dir: str,
     auto-recovered). Corrupt state file -> True (fail-closed)."""
     with updater_lock(global_dir):
         return _is_update_in_progress_locked(global_dir, is_alive)
+
+
+# ── update-prompt claim (one dialog per machine, not one per account) ────────
+#
+# ``try_begin_update`` guards the INSTALL. Nothing guarded the PROMPT, and the
+# two are different moments: every account runs its own UpdateChecker in its own
+# process, so a release that is newer than the running build is found N times
+# and asked about N times — two accounts open meant two "a new version is
+# available" dialogs, on two windows, for one update. The install could only
+# ever have happened once (the second one's ``try_begin_update`` refuses while
+# the first holds a live runtime lease), so the extra dialogs were never even
+# useful; they were purely a second thing to dismiss.
+#
+# So the prompt is claimed the same way the install is, and released when the
+# dialog closes. Shape deliberately mirrors update_state.json — same lock, same
+# atomic write, same (pid, create_time) liveness so a crashed holder is
+# recovered rather than blocking every account forever.
+_PROMPT_FILE = "update_prompt.json"
+
+
+def _prompt_path(global_dir: str) -> str:
+    return os.path.join(global_dir, _PROMPT_FILE)
+
+
+def _read_prompt(global_dir: str):
+    """Return the claim dict, or _CORRUPT if the file exists but is unreadable
+    or fails validation.
+
+    Fails OPEN where the state file fails closed, and the asymmetry is
+    deliberate: an unreadable update_state must block an install, because
+    installing twice corrupts the installation. An unreadable prompt claim must
+    NOT block the prompt, because the worst case it guards against is a second
+    dialog — while treating it as held would silently suppress update prompts
+    on every account, forever, with nothing to show the user why.
+    """
+    path = _prompt_path(global_dir)
+    if not os.path.lexists(path):
+        return None
+    if not os.path.isfile(path):
+        return _CORRUPT
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return _CORRUPT
+    if not isinstance(data, dict):
+        return _CORRUPT
+    if not _valid_pid(data.get("owner_pid")) or not _valid_ct(data.get("owner_create_time")):
+        return _CORRUPT
+    tok = data.get("owner_token")
+    if not isinstance(tok, str) or len(tok) != 32 or not all(c in "0123456789abcdef" for c in tok):
+        return _CORRUPT
+    return data
+
+
+def _prompt_holder_locked(global_dir: str,
+                          is_alive: Callable[[int, float], bool]) -> "dict | None":
+    """Caller holds updater_lock. Returns the live holder, or None. A dead or
+    corrupt claim is cleared on the way past, so it blocks nobody twice."""
+    claim = _read_prompt(global_dir)
+    if claim is None:
+        return None
+    if claim is _CORRUPT or not is_alive(int(claim["owner_pid"]),
+                                         float(claim["owner_create_time"])):
+        try:
+            os.remove(_prompt_path(global_dir))
+        except OSError:
+            pass
+        return None
+    return claim
+
+
+def try_claim_update_prompt(global_dir: str, version: str,
+                            pid: Optional[int] = None,
+                            create_time: Optional[float] = None,
+                            is_alive: Callable[[int, float], bool] = prompt_owner_alive):
+    """Claim the right to ask the user about an update. Returns an owner-token
+    dict, or None when another live process is already asking.
+
+    Held regardless of which version the holder is asking about: while a dialog
+    is on screen there is nothing useful a second one can add, and the blocked
+    account re-checks on its own retry timer anyway. Re-entrant for the SAME
+    process, so a checker that somehow asks twice replaces its own claim rather
+    than deadlocking against itself.
+    """
+    pid, create_time = _resolve_identity(pid, create_time)
+    with updater_lock(global_dir):
+        holder = _prompt_holder_locked(global_dir, is_alive)
+        if holder is not None and int(holder["owner_pid"]) != pid:
+            return None
+        token = {"owner_pid": pid, "owner_create_time": create_time,
+                 "owner_token": uuid.uuid4().hex}
+        _atomic_write(_prompt_path(global_dir),
+                      {"version": str(version), "claimed_at": int(time.time()), **token})
+        return token
+
+
+def release_update_prompt(global_dir: str, token: dict) -> bool:
+    """Release a claim from try_claim_update_prompt. Only the matching
+    owner_token may release, so a checker that claims again after a decline
+    cannot be cleared by its own earlier dialog closing late."""
+    if not isinstance(token, dict) or not token.get("owner_token"):
+        return False
+    with updater_lock(global_dir):
+        claim = _read_prompt(global_dir)
+        if claim is _CORRUPT or claim is None:
+            return False
+        if claim.get("owner_token") != token["owner_token"]:
+            return False
+        try:
+            os.remove(_prompt_path(global_dir))
+        except OSError:
+            return False
+        return True
+
+
+def update_prompt_holder(global_dir: str,
+                         is_alive: Callable[[int, float], bool] = prompt_owner_alive) -> "dict | None":
+    with updater_lock(global_dir):
+        return _prompt_holder_locked(global_dir, is_alive)
 
 
 # ── pure decision helpers (unit-tested) ──────────────────────────────────────

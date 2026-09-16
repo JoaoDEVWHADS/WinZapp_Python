@@ -125,3 +125,34 @@ class TestGracefulStopBudgetIsBounded:
         sleep (the thing that started this whole chain of fixes, by corrupting
         the WhatsApp Web session) must not either."""
         assert 2 < MainWindow._WPP_GRACEFUL_STOP_SECONDS <= 15
+
+
+class TestPerformShutdownReentrancyIsAtomic:
+    """The gap found by re-reviewing _perform_shutdown() against
+    _on_end_session(): the original `if getattr(self, "_shutting_down",
+    False): return` / `self._shutting_down = True` pair was a plain
+    check-then-set with no lock. A local quit (real_exit()'s background
+    teardown thread) racing a WM_ENDSESSION or an IPC "quit" from another
+    account (both delivered on the wx main thread) could both observe
+    _shutting_down as still False and both proceed into a full
+    _stop_wpp_server() concurrently. _teardown_started_lock closes that."""
+
+    def test_the_check_and_set_are_inside_the_lock(self):
+        src = inspect.getsource(MainWindow._perform_shutdown)
+        lock_pos = src.index("with self._teardown_started_lock:")
+        guard_pos = src.index('getattr(self, "_shutting_down", False)')
+        set_pos = src.index("self._shutting_down = True")
+        assert lock_pos < guard_pos < set_pos, (
+            "the check-then-set must both happen inside the lock, not just "
+            "one of them"
+        )
+
+    def test_the_windows_teardown_uses_the_same_lock(self):
+        """Both Windows handlers delegate here, so this is the one place the
+        WM_QUERYENDSESSION / WM_ENDSESSION side takes the flag."""
+        src = inspect.getsource(MainWindow._run_windows_session_teardown)
+        assert "self._teardown_started_lock" in src, (
+            "the Windows teardown must guard its own _shutting_down "
+            "check-and-set with the same lock _perform_shutdown() uses, or "
+            "the two can still race each other"
+        )

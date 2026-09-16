@@ -10,7 +10,8 @@ from typing import Callable, Optional
 
 import wx
 
-from core.utils import get_downloads_folder, is_voice_message
+from core.save_location import resolve_save_dialog_folder
+from core.utils import is_voice_message
 from core.video_player import VideoPlayer
 from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs, AccessibleMediaViewerSeekBack, AccessibleMediaViewerSeekForward, AccessibleMediaBitmapPanel
 
@@ -361,7 +362,7 @@ class MediaViewerDialog(wx.Dialog):
         elif kind == "audio":
             item = self._current_item()
             is_ptt = is_voice_message(item) or bool(item.get("is_ptt"))
-            vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+            vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "voice_message")
             label = self.i18n.t("message_type_voice_message") if (vm_mode == "voice_message" and is_ptt) else self.i18n.t("message_type_audio")
         elif kind == "text":
             label = self.i18n.t("media_viewer_text_status")
@@ -688,7 +689,14 @@ class MediaViewerDialog(wx.Dialog):
                 return
             self._like_btn.Enable()
             if ok:
-                self._like_btn.SetLabel(self.i18n.t("status_unlike"))
+                liked = bool(
+                    self._is_liked_cb(item)
+                    if self._is_liked_cb is not None
+                    else True
+                )
+                self._like_btn.SetLabel(
+                    self.i18n.t("status_unlike" if liked else "status_like")
+                )
 
         try:
             self._on_like_cb(item, _done)
@@ -734,7 +742,8 @@ class MediaViewerDialog(wx.Dialog):
         with wx.FileDialog(
             self,
             self.i18n.t("save_as"),
-            defaultDir=get_downloads_folder(),
+            defaultDir=resolve_save_dialog_folder(
+                getattr(self.main_window, "settings", {})),
             defaultFile=default_name,
             wildcard=f"{self.i18n.t('all_files')} (*.*)|*.*",
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
@@ -742,6 +751,7 @@ class MediaViewerDialog(wx.Dialog):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             target = dlg.GetPath()
+        self.main_window.remember_save_folder(target)
         try:
             shutil.copyfile(path, target)
         except Exception as exc:

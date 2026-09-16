@@ -16,11 +16,18 @@
 import { create, SocketState, StatusFind } from '@wppconnect-team/wppconnect';
 import { exec, execFile, execSync } from 'child_process';
 import { Request } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 
 import { download } from '../controller/sessionController';
 import { WhatsAppServer } from '../types/WhatsAppServer';
 import chatWootClient from './chatWootClient';
-import { autoDownload, callWebHook, startHelper } from './functions';
+import {
+  autoDownload,
+  callWebHook,
+  probeIsConnected,
+  startHelper,
+} from './functions';
 import { clientsArray, eventEmitter } from './sessionUtil';
 import Factory from './tokenStore/factory';
 
@@ -83,8 +90,109 @@ function forceKillBrowserProcess(page: any, logger?: any): boolean {
  * `taskkill /F /T` the whole Node process tree once its grace period ran
  * out, tearing down Chrome's profile (a LevelDB store) mid-write.
  */
-function forceKillByUserDataDir(userDataDir: string, logger?: any) {
-  if (!userDataDir) return;
+/** How long a graceful browser close gets before the kill takes over. */
+const GRACEFUL_CLOSE_MS = 8000;
+
+/**
+ * Ask this session's browser to close itself, and wait for it to actually go.
+ *
+ * Every force-kill in this file is a SIGKILL-equivalent (`taskkill /F`,
+ * `Stop-Process -Force`, `pkill -9`) delivered to a Chrome that may be
+ * mid-write. What it writes is WhatsApp Web's IndexedDB — the sole carrier of
+ * the login, since WPPConnect's token store is empty on a real install — and
+ * the failure that follows is not a corrupt database. Measured across several
+ * losses on a real install: the profile comes back structurally perfect,
+ * differing from a working snapshot only by ordinary LevelDB compaction, its
+ * shutdown fingerprint identical to the one the next launch reads, and
+ * WhatsApp Web still answers `post_logout=1` seven seconds in while an older
+ * copy of the same profile authenticates. Nothing on disk is broken; the state
+ * in it has stopped matching what the server expects, which is what killing a
+ * browser part-way through a key rotation would produce.
+ *
+ * So: ask first, kill second. `client.close()` is wppconnect's own teardown
+ * (browser.close(), which lets the page run its unload path and flush), and
+ * this waits for the process to be gone rather than trusting the call.
+ *
+ * Returns true only when the browser is confirmed gone. Never throws — a
+ * failure here just means the caller force-kills, which is what it did
+ * unconditionally before.
+ */
+async function closeBrowserGracefully(
+  session: string,
+  logger?: any,
+  timeoutMs: number = GRACEFUL_CLOSE_MS,
+  candidate?: any
+): Promise<boolean> {
+  const client: any = candidate ?? clientsArray[session];
+  const page: any = client?.page;
+  let proc: any;
+  try {
+    proc = page?.browser?.()?.process?.();
+  } catch (e) {}
+  if (!client && !proc) return false;
+  try {
+    if (typeof client?.close === 'function') {
+      await Promise.race([
+        client.close(),
+        new Promise((r) => setTimeout(r, timeoutMs)),
+      ]);
+    } else if (page?.browser) {
+      await Promise.race([
+        page.browser().close(),
+        new Promise((r) => setTimeout(r, timeoutMs)),
+      ]);
+    }
+  } catch (e: any) {
+    logger?.warn?.(
+      `[${session}] graceful browser close raised: ${e?.message || e}`
+    );
+  }
+  // With no process handle there is nothing to observe, and the loop below
+  // would read `alive` as false on its very first pass and report success in
+  // the same millisecond it was called — for a browser it never touched. That
+  // is not a confirmation, it is the absence of one, and the callers treat the
+  // two as opposites: `true` means "the profile is free, go ahead", so a
+  // caller that is about to relaunch skips the kill and walks straight back
+  // into the lock. Measured on 2026-09-10, where it kept an account offline
+  // through every 30s retry for hours. Say so instead; an unconfirmed close
+  // costs the caller a force-kill, which is what it did unconditionally
+  // before this function existed.
+  if (!proc) {
+    logger?.warn?.(
+      `[${session}] no browser process handle to confirm the close against — ` +
+        'treating it as unconfirmed.'
+    );
+    return false;
+  }
+  // The call returning is not the process being gone. Poll for the exit so a
+  // caller that is about to relaunch against this very profile does not race
+  // a Chrome that is still flushing it.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const alive = proc.exitCode === null && proc.signalCode === null;
+    if (!alive) {
+      logger?.info?.(`[${session}] browser closed gracefully.`);
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  logger?.warn?.(
+    `[${session}] browser did not close within ${timeoutMs}ms — falling back to the kill.`
+  );
+  return false;
+}
+
+function forceKillByUserDataDir(
+  userDataDir: string,
+  logger?: any
+): Promise<void> {
+  if (!userDataDir) return Promise.resolve();
+  // Returns a promise so a caller that must not race the kill can await it.
+  // Every pre-existing call site ignores the return value and keeps the old
+  // fire-and-forget behaviour unchanged; only the stale-browser recovery
+  // below needs to know when the process is actually gone, because it relaunches
+  // Chrome against the very profile this is unlocking.
+  return new Promise<void>((resolve) => {
   if (process.platform === 'win32') {
     // Windows has no built-in "kill by command-line substring" either, so
     // this uses PowerShell's CIM/WMI process query — the closest equivalent
@@ -139,10 +247,261 @@ function forceKillByUserDataDir(userDataDir: string, logger?: any) {
             `[forceKillByUserDataDir] PowerShell kill failed: ${err.message}`
           );
         }
+        resolve();
       }
     );
   } else {
-    exec(`pkill -9 -f "${userDataDir}"`, () => {});
+    exec(`pkill -9 -f "${userDataDir}"`, () => resolve());
+  }
+  });
+}
+
+/**
+ * Chrome files that let a profile reopen the tabs it had last time.
+ *
+ * `Sessions/Session_*` and `Sessions/Tabs_*` are the live records; the four
+ * loose files are the legacy pair plus the copy Chrome promotes on startup.
+ * All of them are caches of window state, never credentials — the WhatsApp
+ * login lives in the profile's IndexedDB and nothing here touches it.
+ */
+const RESTORABLE_SESSION_FILES = [
+  'Last Session',
+  'Last Tabs',
+  'Current Session',
+  'Current Tabs',
+];
+
+/**
+ * Stop this session's Chrome profile from restoring the tabs it had open, and
+ * do it before every launch.
+ *
+ * WPPConnect drives exactly one page. A profile that restores tabs hands it
+ * more, and the extra ones are actively harmful rather than merely untidy:
+ * they are opened by Chrome itself, so they never pass through start.js's
+ * document-only interception (they load whatever build Meta is serving right
+ * now, not the pinned one) and never receive wppconnect's user-agent
+ * override, so WhatsApp answers them with "WhatsApp works with Google Chrome
+ * 100 or newer". They still share the profile's IndexedDB and the single
+ * WAWebBackendWorker with the page that matters, and they are enough to push
+ * it past the 30s `injectApi()` waits for `WAPI && Store && WPP.isReady`.
+ *
+ * Measured live on 2026-09-10, by attaching to the wedged browser: three
+ * web.whatsapp.com tabs, two of them on the unsupported-browser screen with
+ * `HeadlessChrome/148.0.0.0` and no wa-js at all, and one — the puppeteer
+ * page, user-agent `Chrome/102.0.5005.63` — fully logged in with
+ * `WPP.isReady === true`, having got there only *after* injectApi had already
+ * timed out. The session was never logged out; it was starved.
+ *
+ * The loop is self-feeding, which is why it never recovered on its own: the
+ * timeout leaves Chrome alive, the recovery force-kills it, a force-killed
+ * Chrome has no clean exit recorded, and the next launch therefore restores
+ * the tabs of the run before — one more each time.
+ *
+ * Two halves, because either one alone leaves a way back in. The files are
+ * removed, and `exit_type` is set to `Normal` in Preferences, since a profile
+ * whose last exit was not recorded as clean is one Chrome offers to restore
+ * regardless of what is left in Sessions/.
+ *
+ * Best-effort by construction: every failure is swallowed. This runs on the
+ * startup path of every session, and a profile that cannot be tidied is not a
+ * reason to refuse to start one.
+ */
+function clearRestorableSession(profileDir: string, logger?: any): void {
+  if (!profileDir) return;
+  try {
+    const defaultDir = path.join(profileDir, 'Default');
+    const sessionsDir = path.join(defaultDir, 'Sessions');
+    let removed = 0;
+    try {
+      for (const name of fs.readdirSync(sessionsDir)) {
+        if (!/^(Session|Tabs)_/.test(name)) continue;
+        try {
+          fs.unlinkSync(path.join(sessionsDir, name));
+          removed++;
+        } catch (e) {}
+      }
+    } catch (e) {}
+    for (const name of RESTORABLE_SESSION_FILES) {
+      try {
+        fs.unlinkSync(path.join(defaultDir, name));
+        removed++;
+      } catch (e) {}
+    }
+
+    // Merge, never rewrite. Preferences carries far more than the exit
+    // record, and replacing the file would drop settings this profile has
+    // accumulated. An unreadable or unparseable file is left exactly as it
+    // is — the file deletions above already do most of the work.
+    const prefsPath = path.join(defaultDir, 'Preferences');
+    try {
+      const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
+      if (prefs && typeof prefs === 'object') {
+        prefs.profile = prefs.profile || {};
+        if (
+          prefs.profile.exit_type !== 'Normal' ||
+          prefs.profile.exited_cleanly !== true
+        ) {
+          prefs.profile.exit_type = 'Normal';
+          prefs.profile.exited_cleanly = true;
+          // Temp + rename, never in place. writeFileSync truncates first, and
+          // this can run while a stale Chrome still owns the profile (rung one
+          // runs before any kill) — a death between the truncate and the write
+          // would hand Chrome an unparseable Preferences and a reset profile.
+          // Chrome writes this file the same way, for the same reason.
+          const prefsTmp = prefsPath + '.winzapp.tmp';
+          fs.writeFileSync(prefsTmp, JSON.stringify(prefs), 'utf8');
+          fs.renameSync(prefsTmp, prefsPath);
+        }
+      }
+    } catch (e) {}
+
+    if (removed) {
+      logger?.info?.(
+        `[clearRestorableSession] dropped ${removed} restorable-tab file(s) ` +
+          `from ${profileDir}`
+      );
+    }
+  } catch (e: any) {
+    logger?.warn?.(
+      `[clearRestorableSession] could not tidy ${profileDir}: ${e?.message || e}`
+    );
+  }
+}
+
+/**
+ * Does this launch failure mean "a Chrome we lost track of still holds the
+ * profile"?
+ *
+ * puppeteer's ChromeLauncher throws it verbatim:
+ *
+ *   The browser is already running for <dir>. Use a different `userDataDir`
+ *   or stop the running browser first.
+ *
+ * Matched on the wording rather than on an error class because puppeteer
+ * throws a plain Error here. Deliberately narrow: it must NOT match
+ * "Session not found"-style messages, for the same reason `chat not found`
+ * is matched by its exact phrase and not by its status code.
+ */
+function isStaleBrowserLockError(error: any): boolean {
+  const message = String(error?.message ?? error ?? '');
+  return /browser is already running for/i.test(message);
+}
+
+// How long to let Windows finish releasing the profile lock after the kill
+// returns. Stop-Process is asynchronous with respect to the file handles the
+// process held: relaunching Chrome the same millisecond hits the identical
+// error and burns the one retry for nothing.
+const STALE_BROWSER_RELEASE_MS = 1500;
+
+/**
+ * Start a session, and if the only thing standing in the way is a Chrome
+ * nobody is holding a handle to any more, kill it and try once more.
+ *
+ * This is a recovery from a state WinZapp can reach on its own and could not
+ * leave. Whenever a session dies *after* its browser launched — the injection
+ * of wa-js timing out is the case that produced this, but a crashed
+ * WPPConnect-side await does it too — the browser stays alive holding
+ * `userDataDir/<session>`, while `client.status` goes to CLOSED. Python's
+ * health checker sees CLOSED and POSTs /start-session, puppeteer refuses
+ * because the profile is locked, the status stays CLOSED, and the next poll
+ * does exactly the same thing 30s later. Forever: nothing in that loop ever
+ * touches the process holding the lock. Measured on a real install
+ * (2026-09-07), identically across two consecutive launches, and only broken
+ * by the user giving up and disconnecting by hand.
+ *
+ * Killing here is safe precisely because of where it sits. createSessionUtil()
+ * has already refused to run for any session whose status is not CLOSED, so a
+ * browser still holding this profile is by definition one no live session
+ * owns — and the profile is per session, so nothing another account is using
+ * can match. That is also why the kill is scoped to this session's
+ * userDataDir and never to "Chrome".
+ *
+ * Exactly one retry: if the relaunch hits the same error, something is holding
+ * that profile that we cannot kill (another Windows user, a debugger, an
+ * antivirus), and a loop would spin Chrome launches forever. Let it fail and
+ * be logged instead.
+ */
+async function launchWithStaleBrowserRecovery(
+  launch: () => Promise<any>,
+  userDataDir: string,
+  session: string,
+  logger?: any,
+  profileDir?: string
+): Promise<any> {
+  // Before every attempt, not just the first: an attempt that got far enough
+  // to start Chrome can write a fresh Sessions/ record on its way down.
+  const attempt = () => {
+    if (profileDir) clearRestorableSession(profileDir, logger);
+    return launch();
+  };
+  try {
+    return await attempt();
+  } catch (error: any) {
+    if (!isStaleBrowserLockError(error)) throw error;
+    logger?.warn?.(
+      `[${session}] Chrome is still holding this session's profile although no ` +
+        'session owns it — killing it and starting once more.'
+    );
+    // The orphan holding this profile very often still has its client object
+    // in clientsArray — createSessionUtil() refuses to run unless the session
+    // reports CLOSED, but a status of CLOSED does not mean the browser went
+    // away. When it is reachable, close it properly rather than SIGKILLing a
+    // Chrome that is holding this session's login database open.
+    let forceKilled = false;
+    if (!(await closeBrowserGracefully(session, logger))) {
+      await forceKillByUserDataDir(userDataDir, logger);
+      forceKilled = true;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, STALE_BROWSER_RELEASE_MS)
+    );
+    try {
+      const client = await attempt();
+      logger?.info?.(
+        `[${session}] Recovered from a stale browser profile lock.`
+      );
+      return client;
+    } catch (retryError: any) {
+      // The graceful close reporting success is not evidence that THIS
+      // profile was released — it only ever speaks for the client object in
+      // clientsArray, and the Chrome holding the lock is very often a
+      // different, older process that no client object points at any more.
+      // Measured on 2026-09-10: the close and its "browser closed gracefully"
+      // line landed in the same millisecond as the warning above (nothing was
+      // actually closed — there was no process handle to watch), the kill was
+      // skipped because of it, the retry hit the identical lock, and the
+      // account stayed offline through fifteen accumulated orphan Chromes.
+      // The profile still being locked is the proof, so escalate on it.
+      if (!forceKilled && isStaleBrowserLockError(retryError)) {
+        logger?.warn?.(
+          `[${session}] the graceful close did not free the profile — ` +
+            'killing whatever still holds it.'
+        );
+        await forceKillByUserDataDir(userDataDir, logger);
+        await new Promise((resolve) =>
+          setTimeout(resolve, STALE_BROWSER_RELEASE_MS)
+        );
+        try {
+          const client = await attempt();
+          logger?.info?.(
+            `[${session}] Recovered from a stale browser profile lock after ` +
+              'the fallback kill.'
+          );
+          return client;
+        } catch (finalError: any) {
+          logger?.error?.(
+            `[${session}] Still could not start after killing the profile ` +
+              `holder: ${finalError?.message ?? finalError}`
+          );
+          throw finalError;
+        }
+      }
+      logger?.error?.(
+        `[${session}] Still could not start after clearing the profile lock: ` +
+          `${retryError?.message ?? retryError}`
+      );
+      throw retryError;
+    }
   }
 }
 
@@ -401,9 +760,46 @@ async function grantPersistentStorage(page: any, logger: any, session: string) {
 }
 
 export default class CreateSessionUtil {
-  forceKillSession(session: string, logger?: any) {
-    const client: any = clientsArray[session];
+  /**
+   * `candidate` is for callers that clear `clientsArray[session]` immediately
+   * after calling this: the graceful close needs the client, and reading it
+   * back off the array would race that clear.
+   *
+   * `graceful` is false only where a close has *already* been tried and
+   * failed — asking twice would just spend the caller's budget again.
+   */
+  async forceKillSession(
+    session: string,
+    logger?: any,
+    candidate?: any,
+    graceful = true,
+    timeoutMs?: number
+  ) {
+    const client: any = candidate ?? clientsArray[session];
+    // Ask before killing — see closeBrowserGracefully() for what a SIGKILL
+    // mid-write costs here.
+    if (graceful && (await closeBrowserGracefully(session, logger, timeoutMs, client)))
+      return;
+    // The precise kill can only ever reach this client's own page, so it is
+    // unconditional. The directory scan cannot: it kills whoever holds the
+    // profile, which after a takeover is a successor's browser — the
+    // 03:55:50 incident killBrowserOrFallback() carries in its own comment.
+    //
+    // This guard is new because the path is new. closeBrowserGracefully()
+    // used to answer `true` for a client with no page at all (during
+    // create(), clientsArray[session] holds a stub and Object.assign() has
+    // not run yet), so this returned early and killed nothing — which is how
+    // the stale lock this branch fixes was reached in the first place. Now it
+    // answers `false`, honestly, and the fallback below actually runs.
     if (!forceKillBrowserProcess(client?.page, logger)) {
+      const current: any = clientsArray[session];
+      if (current && client && current !== client) {
+        logger?.warn?.(
+          `[${session}] not killing the browser by userDataDir: this session ` +
+            'has been taken over by a newer client, and the profile is its.'
+        );
+        return;
+      }
       forceKillByUserDataDir(`userDataDir/${session}`, logger);
     }
   }
@@ -423,9 +819,27 @@ export default class CreateSessionUtil {
     session: string,
     res?: any
   ) {
+    // Resolved once this attempt has taken ownership of the slot, so the catch
+    // at the bottom can tell whether the client it is about to touch is still
+    // its own. `client` itself is declared inside the try and is out of scope
+    // there, which is why the old catch had to re-resolve it through
+    // getClient() — and why it could not tell a superseded attempt apart.
+    let ownClient: any = null;
     try {
       let client = this.getClient(session) as any;
-      if (client.status != null && client.status !== 'CLOSED') return;
+      if (client.status != null && client.status !== 'CLOSED') {
+        // Silent until now, and the silence is most of why the deadlock below
+        // was so hard to see: this returns without starting anything while
+        // startSession() still answers HTTP 200, so WinZapp logs "Sent
+        // auto-start session command" every 30 s for a session that no code
+        // path is ever going to start.
+        req.logger?.info?.(
+          `[${session}] start-session ignored: status is ${client.status}, ` +
+            `not CLOSED — another attempt owns this session.`
+        );
+        return;
+      }
+      ownClient = client;
       client.status = 'INITIALIZING';
       client.config = req.body;
 
@@ -476,15 +890,58 @@ export default class CreateSessionUtil {
       // precise process-tree kill first and only falls back to the
       // userDataDir scan when no live page/pid is reachable yet.
       const killBrowserOrFallback = () => {
+        // Refuse the userDataDir fallback once this create() has been
+        // superseded. That scan kills whatever browser currently holds the
+        // profile, and after a takeover that is somebody else's — measured
+        // live, and it cost a working session:
+        //
+        //   03:55:50  Connected / inChat        (restored profile, syncing)
+        //   03:56:01  Auth probe has failed for 30s straight — giving up
+        //   03:56:02  shouldClose detected in statusFind. Force-killing browser.
+        //   03:56:02  browserClose
+        //
+        // The 30 s auth-probe bound belonged to a create() started 45 s
+        // earlier against the *broken* profile. While it was still counting,
+        // WinZapp restored the profile and the health poll started a second
+        // session that connected and began syncing. The old create() then
+        // timed out, could not reach its own page (`wppClient` is still in the
+        // temporal dead zone during create(), which is why the fallback exists
+        // at all), and killed the profile's browser by directory — the new
+        // one. WhatsApp logged that session out on the next load, and the
+        // once-per-launch profile recovery had already been spent.
+        //
+        // A precise kill stays unconditional: if forceKillBrowserProcess()
+        // can reach this create()'s own page, it is killing its own browser
+        // and cannot touch a successor.
         let killed = false;
         try {
           killed = forceKillBrowserProcess(wppClient?.page, req.logger);
         } catch (e) {}
-        if (!killed)
-          forceKillByUserDataDir(`userDataDir/${session}`, req.logger);
+        if (killed) return;
+        const current: any = clientsArray[session];
+        if (current && current !== client) {
+          req.logger.warn(
+            `[${session}] not killing the browser by userDataDir: this session ` +
+              `start was superseded by a newer one, which owns that profile now.`
+          );
+          return;
+        }
+        forceKillByUserDataDir(`userDataDir/${session}`, req.logger);
       };
 
-      const wppClient = await create(
+      // Same reasoning for the slot itself: clearing it would drop a
+      // successor's client, leaving the session unreachable while its browser
+      // keeps running.
+      const clearSessionSlotIfStillOurs = () => {
+        if (clientsArray[session] === undefined || clientsArray[session] === client) {
+          clientsArray[session] = undefined;
+        }
+      };
+
+      // Wrapped in a thunk purely so the stale-profile recovery below can call
+      // it twice. See launchWithStaleBrowserRecovery() for why that exists.
+      const launchWppClient = () =>
+        create(
         Object.assign(
           {},
           { tokenStore: myTokenStore },
@@ -519,7 +976,7 @@ export default class CreateSessionUtil {
                   `[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`
                 );
                 killBrowserOrFallback();
-                clientsArray[session] = undefined;
+                clearSessionSlotIfStillOurs();
                 return;
               }
               this.exportPhoneCode(req, client.config.phone, code, client, res);
@@ -527,13 +984,17 @@ export default class CreateSessionUtil {
             // Not a WPPConnect option — WinZapp's own host.layer.js patch reads
             // it off `this.options` (create() spreads the caller's options into
             // the Whatsapp instance verbatim, so an unknown key survives). See
-            // client/core/wppconnect_host_layer_patch.py, checkQrCode v4.
+            // client/core/wppconnect_host_layer_patch.py: checkQrCode v4
+            // introduced it, and on wppconnect >= 2.3.2 it is loginByCode and
+            // the two link-code hooks that call it, since that runtime mints
+            // the code from there rather than from checkQrCode.
             catchLinkCodeError: (failure: {
               name?: string;
               message?: string;
               session?: string;
               attempt?: number;
               retryInSeconds?: number;
+              rateLimited?: boolean;
               stack?: string;
               details?: Record<string, string>;
             }) => {
@@ -556,7 +1017,7 @@ export default class CreateSessionUtil {
                   `[${session}] shouldClose detected in catchQR. Force-killing browser.`
                 );
                 killBrowserOrFallback();
-                clientsArray[session] = undefined;
+                clearSessionSlotIfStillOurs();
                 return;
               }
               this.exportQR(req, base64Qr, urlCode, client, res);
@@ -571,7 +1032,7 @@ export default class CreateSessionUtil {
                     `[${session}] shouldClose detected in statusFind. Force-killing browser.`
                   );
                   killBrowserOrFallback();
-                  clientsArray[session] = undefined;
+                  clearSessionSlotIfStillOurs();
                   return;
                 }
                 eventEmitter.emit(
@@ -634,6 +1095,18 @@ export default class CreateSessionUtil {
         )
       );
 
+      const wppClient = await launchWithStaleBrowserRecovery(
+        launchWppClient,
+        `userDataDir/${session}`,
+        session,
+        req.logger,
+        path.resolve(
+          req.serverOptions.customUserDataDir
+            ? req.serverOptions.customUserDataDir + session
+            : `userDataDir/${session}`
+        )
+      );
+
       // Poll every 2s: if shouldClose was set while create() is blocked, close browser immediately
       const shouldClosePoller = setInterval(() => {
         if ((client as any).shouldClose) {
@@ -642,7 +1115,7 @@ export default class CreateSessionUtil {
           );
           clearInterval(shouldClosePoller);
           killBrowserOrFallback();
-          clientsArray[session] = undefined;
+          clearSessionSlotIfStillOurs();
         }
       }, 2000);
 
@@ -711,9 +1184,51 @@ export default class CreateSessionUtil {
       }
     } catch (e) {
       req.logger.error(e);
-      if (e instanceof Error && e.name == 'TimeoutError') {
-        const client = this.getClient(session) as any;
-        client.status = 'CLOSED';
+      // A create() that threw owns no browser: whatever went wrong, this
+      // attempt is over. Leaving the status at INITIALIZING is not neutral,
+      // it is permanent — and it takes the whole account offline in silence.
+      // createSessionUtil() returns early for any status other than CLOSED
+      // (right at the top of this method), and WinZapp's health checker skips
+      // /start-session for every "active" state, so after one failed start
+      // neither side ever starts a session again. Upstream reset the status
+      // only for a TimeoutError, which covers exactly one of the ways create()
+      // can fail.
+      //
+      // Measured on 2026-09-09: a start-session that raced a profile restore
+      // failed with `The browser is already running for <userDataDir>` — an
+      // Error, not a TimeoutError, so the old branch did not fire. The
+      // recovery finished 6 s later and put a profile back that had
+      // authenticated fine hours earlier, and there was nothing left able to
+      // start it. status-session answered INITIALIZING for the rest of the
+      // process's life, with no chrome.exe in existence, while /start-session
+      // kept returning 200 and launching nothing. Only closing the app cleared
+      // it, because the wedged status lives in this process's memory.
+      //
+      // Two conditions, both load-bearing:
+      //
+      // * the slot must still hold OUR client. A create() superseded by a
+      //   newer one must never write CLOSED over the successor's status, or
+      //   the next /start-session launches a duplicate Chrome onto a profile a
+      //   live session is using — the same failure killBrowserOrFallback()
+      //   above refuses the userDataDir scan for, and it cost a working
+      //   session once already.
+      // * the status must still be INITIALIZING. Anything else means something
+      //   already promoted this session to a real state, and the throw came
+      //   from one of the webhook wirings that run past this.start(); reporting
+      //   a connected session as CLOSED would hand it the same duplicate
+      //   launch.
+      const failed: any = ownClient;
+      if (
+        failed &&
+        clientsArray[session] === failed &&
+        failed.status === 'INITIALIZING'
+      ) {
+        failed.status = 'CLOSED';
+        failed.qrcode = null;
+        req.logger.warn(
+          `[${session}] session start failed before it reached a real state — ` +
+            `status reset to CLOSED so the next /start-session can run.`
+        );
       }
     }
   }
@@ -783,6 +1298,7 @@ export default class CreateSessionUtil {
       message?: string;
       attempt?: number;
       retryInSeconds?: number;
+      rateLimited?: boolean;
       stack?: string;
       details?: Record<string, string>;
     },
@@ -798,6 +1314,13 @@ export default class CreateSessionUtil {
     // diagnosable after the fact.
     const attempt = failure?.attempt;
     const retryInSeconds = failure?.retryInSeconds;
+    // Set by the host.layer.js patch when WhatsApp answered rate-overlimit
+    // (429) — checkQrCode on wppconnect <= 2.3.1, loginByCode on 2.3.2. The
+    // quota is per phone number and lives on WhatsApp's side, so it outlives
+    // this session and this process — which is why the first pairing code
+    // after a dropped session fails and the second one works. Forwarded so
+    // the client can say that instead of showing "CompanionHelloError".
+    const rateLimited = failure?.rateLimited === true;
 
     req.logger?.warn(
       `[${client.session}] pairing code request failed: ${name}: ${message}` +
@@ -829,6 +1352,7 @@ export default class CreateSessionUtil {
       session: client.session,
       attempt: attempt,
       retryInSeconds: retryInSeconds,
+      rateLimited: rateLimited,
       stack: failure?.stack || '',
       details: failure?.details || {},
     };
@@ -898,10 +1422,30 @@ export default class CreateSessionUtil {
     // and skip status=CONNECTED entirely, leaving the session stuck reporting
     // INITIALIZING forever even though it connected seconds later. Bounded retry
     // until wa-js answers, and only accept an explicit `true`.
-    const maxAttempts = 20; // ~10s total; a warning, never a disconnect proof
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    //
+    // Bounded by wall clock rather than by attempt count, and each probe is
+    // raced against what is left of the budget. `attempts * sleep` was a fair
+    // estimate of the total while isConnected() answered straight away;
+    // wppconnect 2.3.2 made it await waitForPageLoad(), which sits on
+    // puppeteer's default 30s timeout waiting for WPP.isReady — so on a page
+    // that loads but never becomes ready one attempt cost ~30s and the loop
+    // ran for ~10 minutes, with everything registered after start()
+    // (onParticipantsChanged / onReactionMessage / onRevokedMessage /
+    // onPollResponse, back in createSessionUtil()) waiting behind all of it.
+    // message/ack/presence are safe either way: wireListeners() runs above
+    // this loop, deliberately.
+    const RETRY_WINDOW_MS = 10000; // ~10s total; a warning, never a disconnect proof
+    const deadline = Date.now() + RETRY_WINDOW_MS;
+    for (let attempt = 1; Date.now() < deadline; attempt++) {
+      // With a sliver of the window left, probeIsConnected() would resolve its
+      // own timer immediately and answer undefined: an attempt spent on
+      // nothing that still leaves one more isConnected() pending in the page.
+      if (deadline - Date.now() < 250) break;
       try {
-        const connected = await client.isConnected();
+        const connected = await probeIsConnected(
+          client,
+          deadline - Date.now()
+        );
         if (connected === true) {
           // Only promote if the state listener hasn't already moved us to a
           // newer terminal state (UNPAIRED/TIMEOUT/etc). The event wins.
@@ -916,7 +1460,7 @@ export default class CreateSessionUtil {
         // "WAPI is not defined" is an initialization race, NOT a session error.
         // Do not emit session-error for it; just wait for wa-js to load.
         req.logger.info(
-          `[${client.session}] isConnected() not ready yet (attempt ${attempt}/${maxAttempts})`
+          `[${client.session}] isConnected() not ready yet (attempt ${attempt})`
         );
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -1083,10 +1627,43 @@ export default class CreateSessionUtil {
           // like the MsgKey._serialized and status sender shims. See this
           // method's own doc comment for why a single attempt was never
           // enough here.
+          // One timer per page, and it settles exactly once — neither of which
+          // clearInterval() can be trusted to deliver here.
+          //
+          // Measured on a user's session: a SINGLE scheduled installer logged
+          // "installed after 0 retries" every 500ms for three minutes and ten
+          // seconds, stopping only when the session was torn down. One timer,
+          // 364 lines. So the `if` body ran 364 times, which means
+          // clearInterval(timer) ran 364 times and did not stop it. The likely
+          // reason is that WhatsApp Web wraps setInterval for its own
+          // scheduler and returns a handle the native clearInterval does not
+          // recognise — but the fix must not depend on knowing that, because
+          // whatever the cause, a page.evaluate'd loop running at 2 Hz inside
+          // WhatsApp Web is not something to leave to a call that has already
+          // been observed to fail.
+          //
+          // `settled` closes over this one timer, so the callback becomes a
+          // bare return the moment its work is done. The interval may keep
+          // ticking; it can no longer do anything or say anything.
+          const w = window as any;
+          if (w.__winzappUnreadListenerScheduled) {
+            // A second installer would stack a second uncancellable timer on
+            // top of the first. page.on('load') can fire this repeatedly.
+            return 'already scheduled';
+          }
+          w.__winzappUnreadListenerScheduled = true;
           let tries = 0;
+          let settled = false;
           const timer = setInterval(() => {
+            if (settled) return;
             if (install() || ++tries > 60) {
-              clearInterval(timer);
+              settled = true;
+              w.__winzappUnreadListenerScheduled = false;
+              try {
+                clearInterval(timer);
+              } catch (e) {
+                /* see above — the timer is disarmed by `settled` regardless */
+              }
               // The evaluate below can only ever log 'scheduled' — it returns
               // long before this loop resolves — so without this line the log
               // cannot tell "installed three seconds later" apart from "gave

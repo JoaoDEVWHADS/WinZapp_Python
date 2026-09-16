@@ -43,7 +43,7 @@ import wx
 from app_paths import _is_frozen
 from core.i18n import I18n
 from core.message_queue import PendingMessage
-from core.utils import looks_like_binary_blob, link_preview_text
+from core.utils import looks_like_binary_blob, link_preview_text, is_voice_message
 
 
 def _notif_duration(seconds) -> str:
@@ -221,6 +221,27 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
     if msg_type == "audioMessage":
         audio = msg_obj.get("audioMessage") or {}
         dur   = _notif_duration(audio.get("seconds"))
+        # user_interface.voice_message_mode, the same setting the message list,
+        # the chat-list preview and the quoted-message preview already read.
+        # This branch used to answer "voice message" for every audioMessage
+        # unconditionally, so a plain audio file was announced as a voice note
+        # in the toast while the conversation itself called it an audio file,
+        # and nothing the user could pick in Settings changed it. A toast is
+        # often the ONLY announcement a backgrounded message gets (see this
+        # module's header: speaking it through AO2 as well would deliver the
+        # message twice), which makes it the worst place for that label to be
+        # the one that disagrees.
+        #
+        # main_window is None in tests and reachable as None here, so the read
+        # is defensive; the fallback matches DEFAULT_SETTINGS deliberately, and
+        # test_voice_vs_audio_distinction scans for a fallback that drifts.
+        settings = getattr(main_window, "settings", None) if main_window else None
+        ui = settings.get("user_interface", {}) if isinstance(settings, dict) else {}
+        if not isinstance(ui, dict):
+            ui = {}
+        vm_mode = ui.get("voice_message_mode", "voice_message")
+        if vm_mode == "voice_message" and not is_voice_message(msg):
+            return f"{i18n.t('notif_audio')} ({dur})"
         return f"{i18n.t('notif_voice_message')} ({dur})"
 
     # ── Video ─────────────────────────────────────────────────────────────────
@@ -571,6 +592,13 @@ def announce_background_message(main_window, i18n, title: str, body: str) -> Non
     Safe to call from any thread: the AO2 call is marshalled onto the wx main
     thread.
     """
+    # Do Not Disturb silences the spoken announcement as well as the sound.
+    # For a user on a screen reader this announcement *is* the notification —
+    # honouring DND for the sound alone would have left the app talking over a
+    # Do Not Disturb the user had deliberately turned on. Both halves are
+    # gated, and only here, on the background path: main.py returns before
+    # reaching any of this while the window is active, so a message in the open
+    # conversation still speaks under DND.
     from core.quiet_hours import is_quiet_hours_active
     if is_quiet_hours_active():
         return
@@ -843,6 +871,23 @@ class NotificationManager:
         announce_background_message(self.main_window, self.i18n, title, body)
 
     def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
+        # Do Not Disturb suppresses the whole background notification — banner,
+        # sound and spoken announcement alike. Gating only the sound left the
+        # banner popping up during a Do Not Disturb the user had deliberately
+        # turned on, which is the one thing that setting exists to stop.
+        #
+        # Returning here rather than further down is what makes that true of
+        # all three: _announce_unshown() below speaks whenever no banner was
+        # produced, so an early return that skipped only show_toast() would
+        # have traded the banner for speech instead of silence.
+        from core.quiet_hours import is_quiet_hours_active
+        if is_quiet_hours_active():
+            logging.info(
+                "[notify] %s suppressed entirely — Windows is in a "
+                "do-not-disturb state.", remote_jid,
+            )
+            return
+
         if not self._toaster:
             # _setup_toaster() exhausted every AUMID candidate (or
             # windows_toasts is not importable at all): there will be no
@@ -886,9 +931,7 @@ class NotificationManager:
             # between hearing the notification and seeing the banner. Not
             # perfect — Windows' own toast pipeline still isn't instant — but
             # this removes the part of the delay that was our own doing.
-            from core.quiet_hours import is_quiet_hours_active
-            if not is_quiet_hours_active():
-                wx.CallAfter(self._play_sound, remote_jid)
+            wx.CallAfter(self._play_sound, remote_jid)
 
             # Clear whatever WinZapp notification is currently on screen (or
             # waiting to be shown) before posting the new one.  This is what
@@ -1033,6 +1076,10 @@ class NotificationManager:
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
     def _play_sound(self, remote_jid: str = ""):
+        # WinZapp plays this itself, outside the Windows toast audio pipeline,
+        # so nothing else honours Do Not Disturb for it. Single decision point
+        # for the sound half of a background notification — see
+        # announce_background_message() for the spoken half.
         from core.quiet_hours import is_quiet_hours_active
         if is_quiet_hours_active():
             return

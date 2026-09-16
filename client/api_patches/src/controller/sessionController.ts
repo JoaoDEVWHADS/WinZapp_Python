@@ -29,7 +29,11 @@ import {
 } from '../middleware/instrumentation';
 import { resolveMessageForMedia } from '../services/messageResolver';
 import CreateSessionUtil from '../util/createSessionUtil';
-import { callWebHook, contactToArray } from '../util/functions';
+import {
+  callWebHook,
+  contactToArray,
+  probeIsConnected,
+} from '../util/functions';
 import getAllTokens from '../util/getAllTokens';
 import { clientsArray, deleteSessionOnArray } from '../util/sessionUtil';
 
@@ -276,7 +280,15 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
       );
       client.shouldClose = true;
       try {
-        SessionUtil.forceKillSession(session, req.logger);
+        // Awaited, and with the client handed over explicitly: the slot is
+        // cleared on the next line, and the graceful close needs it.
+        //
+        // A QRCODE/notLogged status does not mean there is nothing to lose.
+        // That is exactly what a *paired* install reports when its profile
+        // has stopped being accepted — and force-killing there SIGKILLs a
+        // Chrome holding the login database open. Five seconds keeps this
+        // inside WinZapp's own 10s POST budget.
+        await SessionUtil.forceKillSession(session, req.logger, client, true, 5000);
       } catch (e) {}
       (clientsArray as any)[session] = undefined;
       return await res
@@ -308,7 +320,8 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
     // status honest: connection_state.session_closed_after_flush() rejects it,
     // so the poll waits for the `finally` below, which only runs once close()
     // has actually returned.
-    (clientsArray as any)[session] = { status: 'CLOSING' };
+    const closingMarker = { status: 'CLOSING' };
+    (clientsArray as any)[session] = closingMarker;
 
     try {
       if (req.client && typeof req.client.close === 'function') {
@@ -328,28 +341,47 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
         //
         // Racing it keeps the slot self-clearing. WinZapp's own POST budget
         // (_WPP_GRACEFUL_STOP_SECONDS) is 10s, so this has to answer first.
-        await Promise.race([
-          req.client.close(),
-          new Promise((resolve) => setTimeout(resolve, 8000)).then(() => {
+        // Promise.race does not cancel its losing promise. The old inline
+        // setTimeout therefore still fired eight seconds after close() had
+        // already won, by which time WinZapp could have started a replacement
+        // browser under the same session name. forceKillSession(session) then
+        // killed that brand-new browser and left the session in INITIALIZING
+        // with a detached Puppeteer frame. Keep the handle and explicitly
+        // cancel the timeout as soon as close() settles.
+        let closeTimeout: ReturnType<typeof setTimeout> | undefined;
+        const closeTimeoutPromise = new Promise<void>((resolve) => {
+          closeTimeout = setTimeout(() => {
             req.logger?.warn?.(
               `[${session}] close() did not settle in 8s — force killing so ` +
                 `the session slot is not left stuck in CLOSING.`
             );
             try {
-              SessionUtil.forceKillSession(session, req.logger);
+              // graceful=false: close() has already had its eight seconds.
+              SessionUtil.forceKillSession(session, req.logger, undefined, false);
             } catch (e) {}
-          }),
-        ]);
+            resolve();
+          }, 8000);
+        });
+        try {
+          await Promise.race([req.client.close(), closeTimeoutPromise]);
+        } finally {
+          if (closeTimeout !== undefined) clearTimeout(closeTimeout);
+        }
       }
     } catch (closeErr) {
       req.logger?.warn?.(
         `[${session}] Error during req.client.close(): ${closeErr}. Force killing session.`
       );
       try {
-        SessionUtil.forceKillSession(session, req.logger);
+        // graceful=false: the close is what just raised.
+        SessionUtil.forceKillSession(session, req.logger, undefined, false);
       } catch (e) {}
     } finally {
-      (clientsArray as any)[session] = undefined;
+      // Do not let an old close request erase a replacement client that may
+      // have claimed this session slot after an exceptional teardown path.
+      if ((clientsArray as any)[session] === closingMarker) {
+        (clientsArray as any)[session] = undefined;
+      }
     }
 
     req.io.emit('whatsapp-status', false);
@@ -430,6 +462,18 @@ export async function logOutSession(req: Request, res: Response): Promise<any> {
   }
 }
 
+// How long this route waits for isConnected() before answering without it.
+// Deliberately under the 10 s check_whatsapp_reachable() gives this request:
+// on wppconnect 2.3.2 isConnected() awaits waitForPageLoad(), which sits on
+// puppeteer's default 30 s waiting for WPP.isReady — and never returns at all
+// on a page whose 'load' event never fired. Unbounded, the client always gave
+// up first, and a client-side timeout raises into an `except` that counts no
+// strike at all: the page stayed "connected" forever, every send came back
+// probe_timeout and got requeued in silence, and the whole recovery ladder
+// (_nudge_whatsapp_socket_stream -> _restart_wpp_session) was unreachable
+// because it is gated on this route answering false.
+const CONNECTION_PROBE_BUDGET_MS = 8000;
+
 export async function checkConnectionSession(
   req: Request,
   res: Response
@@ -446,9 +490,23 @@ export async function checkConnectionSession(
      }
    */
   try {
-    await req.client.isConnected();
+    // An unanswered probe is reported as Disconnected, exactly as a thrown
+    // one is — which is what 2.3.1 did for this same state, when isConnected()
+    // evaluated WAPI.isConnected() directly and threw straight away. Python
+    // needs two consecutive negatives before it acts on this
+    // (_OFFLINE_PROBE_STRIKES, widened again during an initial sync), so a
+    // WhatsApp Web reload that happens to overlap one tick is still ridden
+    // out rather than announced.
+    const connected = await probeIsConnected(
+      req.client,
+      CONNECTION_PROBE_BUDGET_MS
+    );
 
-    res.status(200).json({ status: true, message: 'Connected' });
+    if (connected === true) {
+      res.status(200).json({ status: true, message: 'Connected' });
+    } else {
+      res.status(200).json({ status: false, message: 'Disconnected' });
+    }
   } catch (error) {
     res.status(200).json({ status: false, message: 'Disconnected' });
   }
@@ -593,6 +651,132 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
       error: e,
     });
   }
+}
+
+/**
+ * Download a message's media while reporting real progress, then decrypt it.
+ *
+ * `client.decryptFile()` is a black box: one axios GET of the whole file from
+ * WhatsApp's CDN, then `magix()` to decrypt. Nothing observes the bytes, so
+ * WinZapp's download gauge had nothing to watch but the localhost hop that
+ * follows — which is the *fast* part. The bar sat at 0% for the entire real
+ * wait and then flashed to 100% as the finished file crossed a loopback
+ * socket. Users noticed, and they were right.
+ *
+ * This is the same two steps with the download counted. It reaches into
+ * wppconnect's own decrypt helper for `makeOptions`/`magix` rather than
+ * reimplementing either: that file is already one WinZapp patches by name
+ * (api_patches/decrypt.js), so the coupling exists and the exact-version pin
+ * on @wppconnect-team/wppconnect is what keeps it honest.
+ *
+ * Every failure falls back to `client.decryptFile()`. A progress bar is worth
+ * exactly nothing if wanting one can cost the download.
+ */
+async function downloadMediaWithProgress(
+  req: Request,
+  client: any,
+  message: any
+): Promise<Buffer> {
+  const progressId = req.body?.progressId;
+  const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
+  if (!mediaUrl) return await client.decryptFile(message);
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const decrypt = require('@wppconnect-team/wppconnect/dist/api/helpers/decrypt');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const axios = require('axios').default;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Same two internals whatsapp.js's own decryptFile() uses, by the same
+    // paths — verified importable against the pinned runtime rather than
+    // assumed from the source.
+    const ua = require('@wppconnect-team/wppconnect/dist/config/WAuserAgente');
+    if (typeof decrypt?.magix !== 'function' ||
+        typeof decrypt?.makeOptions !== 'function') {
+      return await client.decryptFile(message);
+    }
+
+    const options = decrypt.makeOptions(ua?.useragentOverride);
+    let lastSent = 0;
+    if (progressId) {
+      // Throttled to whole percent AND to a minimum interval: a 200 MB file
+      // produces thousands of progress events, and every one of them would be
+      // a Socket.IO frame plus a wx.CallAfter on the UI thread of a client
+      // whose screen reader is already announcing the value.
+      options.onDownloadProgress = (event: any) => {
+        const total = Number(event?.total) || Number(message.size) || 0;
+        const loaded = Number(event?.loaded) || 0;
+        if (total <= 0 || loaded <= 0) return;
+        const fraction = Math.min(1, loaded / total);
+        const now = Date.now();
+        if (fraction < 1 && now - lastSent < 250) return;
+        lastSent = now;
+        req.io?.emit('media-download-progress', {
+          progressId,
+          progress: fraction,
+          session: client.session,
+        });
+      };
+    }
+
+    const response = await axios.get(String(mediaUrl).trim(), options);
+    if (response.status !== 200) return await client.decryptFile(message);
+    const buffer = Buffer.from(response.data, 'binary');
+    return decrypt.magix(buffer, message.mediaKey, message.type, message.size);
+  } catch (progressErr) {
+    req.logger.warn(
+      `[getMediaByMessage] progress-reporting download failed, falling back to ` +
+        `decryptFile: ${progressErr}`
+    );
+    return await client.decryptFile(message);
+  }
+}
+
+/**
+ * Send a decrypted media buffer back, as raw bytes when the caller can take
+ * them and as the historical base64 JSON otherwise.
+ *
+ * `res.json({ base64: buffer.toString('base64') })` is what every media
+ * download used to do, and it is why a large document could not be downloaded
+ * at all. For a 200 MB file it holds, at once: the 200 MB Buffer, a 267 MB
+ * base64 string, and the ~267 MB string JSON.stringify builds from it — and it
+ * produces not one byte of response until all three exist. The client, which
+ * has a read timeout measured between bytes, sees total silence for minutes
+ * and gives up; Node keeps working on the abandoned request, which is the
+ * memory the user watches fill. Past roughly 400 MB it cannot work at all:
+ * `toString('base64')` exceeds V8's maximum string length and throws.
+ *
+ * Raw bytes remove both extra copies and start flowing immediately, which is
+ * the same change that made large *uploads* work — see
+ * wppconnect_sender_layer_patch.py, where the fix was to stop handing one
+ * enormous argument across a boundary that cannot take it.
+ *
+ * Negotiated rather than switched, because `client/api/` is reinstalled
+ * independently of the Python app: a newer server must keep answering an older
+ * client, which only knows how to read `{base64, mimetype}`.
+ */
+function sendMediaBuffer(
+  req: Request,
+  res: Response,
+  buffer: Buffer,
+  mimetype?: string
+) {
+  const resolved = mimetype || 'application/octet-stream';
+  const accept = String(req.headers['accept'] || '');
+  if (accept.includes('application/octet-stream')) {
+    res.status(200);
+    res.setHeader('Content-Type', resolved);
+    // The mimetype rides in its own header because the body is now the file
+    // itself. Named x-winzapp-* so it cannot be confused with a standard
+    // header a proxy might rewrite.
+    res.setHeader('x-winzapp-mimetype', resolved);
+    res.setHeader('Content-Length', String(buffer.length));
+    return res.end(buffer);
+  }
+  return res.status(200).json({
+    base64: buffer.toString('base64'),
+    mimetype: mimetype || 'audio/ogg',
+  });
 }
 
 export async function getMediaByMessage(req: Request, res: Response) {
@@ -762,11 +946,8 @@ export async function getMediaByMessage(req: Request, res: Response) {
     }
 
     try {
-      const buffer = await client.decryptFile(message);
-      res.status(200).json({
-        base64: buffer.toString('base64'),
-        mimetype: message.mimetype || 'audio/ogg',
-      });
+      const buffer = await downloadMediaWithProgress(req, client, message);
+      return sendMediaBuffer(req, res, buffer, message.mimetype);
     } catch (decryptErr) {
       req.logger.error(
         `decryptFile failed, trying browser-side recovery: ${decryptErr}`
@@ -804,11 +985,8 @@ export async function getMediaByMessage(req: Request, res: Response) {
           req.logger.info(
             `Found fresh message in browser for ${cleanMsgId}, attempting decryption...`
           );
-          const buffer = await client.decryptFile(freshMessage);
-          return res.status(200).json({
-            base64: buffer.toString('base64'),
-            mimetype: freshMessage.mimetype || 'audio/ogg',
-          });
+          const buffer = await downloadMediaWithProgress(req, client, freshMessage);
+          return sendMediaBuffer(req, res, buffer, freshMessage.mimetype);
         } catch (freshDecryptErr) {
           req.logger.error(
             `Decryption of fresh browser message failed: ${freshDecryptErr}`

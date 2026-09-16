@@ -72,17 +72,25 @@ class _Queue:
 
 class _Stub:
     _set_wa_connected = MainWindow._set_wa_connected
+    _self_inflicted_teardown_expected = MainWindow._self_inflicted_teardown_expected
     _reset_startup_probe = MainWindow._reset_startup_probe
+    # Not what this file is testing — a real connect just needs these two to
+    # exist so _set_wa_connected()'s own profile-recovery re-arm (issue #202,
+    # see tests/test_qr_flood_rearm_counter.py) doesn't AttributeError here.
+    _profile_recovery_generation = lambda self: 0
+    _set_profile_recovery_generation = lambda self, value: None
     # The real recompute, not a spy: self.offline_mode is precisely what
     # MessageQueue._run reads before sending, so the tests assert the thing
     # that actually holds the message rather than a flag they invented.
     _apply_offline_state = MainWindow._apply_offline_state
 
     def __init__(self, updating=False):
+        self.token = "tok"
         self._wpp_updating = updating
         self._wa_connected = True
         self._wa_offline_strikes = 0
         self._wa_connect_announced = True
+        self._send_capabilities_checked = True
         self._auto_offline = False
         self._user_offline = False
         self.offline_mode = False

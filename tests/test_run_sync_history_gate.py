@@ -55,7 +55,7 @@ def _settled_stub(unblock_result, wait_result, outcome=None):
     def _unblock(timeout=60):
         return unblock_result
 
-    def _wait(timeout=600):
+    def _wait(timeout=600, should_stop=None):
         stub.waits += 1
         if outcome is not None:
             stub._history_wait_outcome = outcome

@@ -865,3 +865,339 @@ class TestInteractiveHistoryWait:
             timeout=5, should_continue=lambda: False)
         assert got is None
         assert stub.calls == []
+
+
+class TestAPhoneWithNothingOlderIsNotAsked:
+    """Issue #108: the iPhone flickering sync notifications while WinZapp works.
+
+    Every on-demand request is a peer-data-operation the PHONE reacts to, and
+    the phone tells its owner about it — iOS shows "Synchronizing WhatsApp with
+    Google Chrome (Windows)…" on the lock screen and follows it, when the
+    request yields nothing, with "Sync paused. Open WhatsApp to resume."
+
+    WhatsApp Web already computes whether the phone has anything older
+    (`primaryHasMoreMessagesReadyToLoad`), and deviceController.ts computed it
+    and then sent the request anyway — `primaryHasMore` reached Python as a log
+    field and nothing else. Measured on a real, fully-synced account: 34
+    requests in one launch, SEVENTEEN answered primaryHasMore=false, and the
+    same chats asked again in a later pass because nothing retired them.
+
+    The verdict has to be False rather than None: False is the terminal answer
+    _backfill_empty_chats() reads as "this chat has no older history", which is
+    what drops it from the queue for good. None keeps it queued and asks again
+    after the grace period — which is the loop being fixed.
+    """
+
+    def test_a_refusal_for_lack_of_older_history_is_terminal(self, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.post",
+            lambda *a, **k: _Response(500, {"status": "error", "response": {
+                "primaryHasMore": False,
+                "error": "primary has no older messages for this chat",
+            }}),
+        )
+        assert stub.request_older_messages("120363000000000000@g.us") is False
+
+    def test_it_is_logged_as_the_ordinary_outcome_it_is(self, monkeypatch, caplog):
+        """Roughly half the queue answers this way. A log full of 500s that are
+        really "nothing to do" costs a diagnosis the next time something here
+        is genuinely wrong."""
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.post",
+            lambda *a, **k: _Response(500, {"status": "error", "response": {
+                "primaryHasMore": False,
+                "error": "primary has no older messages for this chat",
+            }}),
+        )
+        with caplog.at_level("INFO"):
+            stub.request_older_messages("120363000000000000@g.us")
+        assert any("no older messages" in r.message for r in caplog.records)
+        assert not any("did not go out" in r.message for r in caplog.records)
+
+    def test_an_unknown_answer_is_not_read_as_nothing_older(self, monkeypatch):
+        """null means the lookup failed, not that the phone is empty. Treating
+        it as terminal would silently write off chats that do have history."""
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.post",
+            lambda *a, **k: _Response(200, {"status": "success", "response": {
+                "primaryHasMore": None, "requested": True,
+            }}),
+        )
+        assert stub.request_older_messages("120363000000000000@g.us") is True
+
+    def test_a_successful_send_still_reports_true(self, monkeypatch):
+        """primaryHasMore true is the case the request exists for."""
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.post",
+            lambda *a, **k: _Response(200, {"status": "success", "response": {
+                "primaryHasMore": True, "requested": True,
+            }}),
+        )
+        assert stub.request_older_messages("120363000000000000@g.us") is True
+
+    def test_the_deferral_for_an_unfinished_recent_pass_still_wins(self, monkeypatch):
+        """That one must stay None — the chat has to be asked again once RECENT
+        finishes, so it may not be retired."""
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.post",
+            lambda *a, **k: _Response(500, {"status": "error", "response": {
+                "error": "recent history sync is not complete yet",
+            }}),
+        )
+        assert stub.request_older_messages("120363000000000000@g.us") is None
+
+
+class TestTheNodeSideRefusesBeforeSending:
+    """The Python verdict above is only half of it: the point is that the
+    request never reaches the phone, because the notification is raised by the
+    send itself."""
+
+    @staticmethod
+    def _source():
+        from pathlib import Path
+        return (Path(__file__).resolve().parents[1] / "client" / "api_patches"
+                / "src" / "controller" / "deviceController.ts").read_text(
+                    encoding="utf-8")
+
+    def test_the_refusal_precedes_the_send(self):
+        # Scoped to requestOlderMessages' own body: the file mentions
+        # sendPeerDataOperationRequest elsewhere, and a whole-file index would
+        # compare against the wrong one.
+        source = self._source()
+        source = source[source.index("export async function requestOlderMessages("):]
+        refusal = source.index("primary has no older messages for this chat")
+        # The actual invocation, not the capability guard higher up that only
+        # checks `typeof sender?.sendPeerDataOperationRequest`.
+        send = source.index("await sender.sendPeerDataOperationRequest(")
+        assert refusal < send, (
+            "the primaryHasMore check must come before the send, or the phone "
+            "is notified anyway and only the bookkeeping changes"
+        )
+
+    def test_only_an_explicit_false_refuses(self):
+        """`null` is "the lookup failed". Refusing on it would silently stop
+        all history backfill the day WhatsApp renames that internal module."""
+        source = self._source()
+        assert "if (out.primaryHasMore === false) {" in source
+
+
+class TestBackfillPhoneRequestBudget:
+    """The backfill may not ask the phone about one chat forever.
+
+    Every request that actually goes out lights up the phone's lock screen
+    ("Synchronizing WhatsApp with Google Chrome (Windows)…", then "Sync
+    paused. Open WhatsApp to resume." when it yields nothing — issue #108).
+    The primaryHasMore gate stopped the requests the phone itself refuses, but
+    a chat whose endOfHistoryTransferType claims more history, that is asked,
+    and that gains nothing, stays short of history_page_target() forever — so
+    the every-15-minute re-ask never retires. Measured on a real account: the
+    same four groups asked at 10:08, 10:23 and 10:38 in one run.
+    """
+
+    GRACE = MainWindow._OLDER_REQUEST_GRACE
+    MAX = MainWindow._MAX_PHONE_HISTORY_REQUESTS
+
+    def test_a_chat_never_asked_before_is_due(self):
+        assert MainWindow._phone_history_request_due(
+            None, 0, 1000.0, self.GRACE, self.MAX) is True
+
+    def test_a_chat_asked_moments_ago_is_not_due(self):
+        assert MainWindow._phone_history_request_due(
+            1000.0, 1, 1000.0 + self.GRACE - 1, self.GRACE, self.MAX) is False
+
+    def test_the_grace_elapsing_makes_a_second_ask_due(self):
+        assert MainWindow._phone_history_request_due(
+            1000.0, 1, 1000.0 + self.GRACE, self.GRACE, self.MAX) is True
+
+    def test_the_attempt_budget_outranks_the_elapsed_grace(self):
+        # This is the whole fix: without it the same chat is asked again every
+        # _OLDER_REQUEST_GRACE for as long as the backfill runs.
+        assert MainWindow._phone_history_request_due(
+            1000.0, self.MAX, 1000.0 + self.GRACE * 100,
+            self.GRACE, self.MAX) is False
+
+    def test_the_budget_allows_one_genuine_retry(self):
+        # A single lost request must not write the chat off, so the bound is a
+        # retry rather than a one-shot.
+        assert self.MAX >= 2
+        assert MainWindow._phone_history_request_due(
+            1000.0, self.MAX - 1, 1000.0 + self.GRACE,
+            self.GRACE, self.MAX) is True
+
+    def test_resetting_the_history_walk_clears_the_attempt_counters(self):
+        # F5 / "resync everything" is the only escape from a wrong conclusion,
+        # and it has to reach this bound too.
+        stub = _Stub()
+        stub._older_request_attempts = {"5511@s.whatsapp.net": 2}
+        stub._persist_exhausted_chats = lambda: None
+        stub._persist_older_requested = lambda: None
+        MainWindow._forget_history_exhaustion(stub)
+        assert stub._older_request_attempts == {}
+
+
+class TestPhoneRequestsAreSpacedNotBunched:
+    """Every phone-history request is a notification on the user's phone.
+
+    Read off a real install on 2026-09-08, running the bounded-attempts fix:
+    the requests were *productive* (one chat walked 50 -> 63 -> 113 -> 163
+    messages, another 2 -> 52 -> 102), so the answer is not to stop asking.
+    What the user actually reported was the bunching — four requests inside
+    900 ms, and bursts that kept arriving while he was using the app.
+
+    Two things caused that, and both are gone:
+
+      * ten requests per pass, fired back to back;
+      * a backoff that collapsed to _BACKFILL_FIRST_DELAY whenever a pass made
+        progress — and a chunk landing *is* progress, so every productive
+        request bought itself another pass 30 s later. On that install the
+        passes had settled at the 5-minute ceiling and then ran at 32 s
+        intervals for three passes as soon as chunks began landing.
+    """
+
+    GAP = MainWindow._PHONE_REQUEST_MIN_GAP
+
+    def test_only_one_request_leaves_per_pass(self):
+        assert MainWindow._OLDER_REQUESTS_PER_PASS == 1
+
+    def test_the_first_request_of_a_run_is_never_held_back(self):
+        assert MainWindow._phone_request_gap_elapsed(None, 10_000.0, self.GAP) is True
+
+    def test_a_second_request_inside_the_gap_is_refused(self):
+        assert MainWindow._phone_request_gap_elapsed(
+            1000.0, 1000.0 + self.GAP - 1, self.GAP) is False
+
+    def test_the_gap_elapsing_lets_the_next_one_through(self):
+        assert MainWindow._phone_request_gap_elapsed(
+            1000.0, 1000.0 + self.GAP, self.GAP) is True
+
+    def test_the_measured_burst_would_now_be_one_request(self):
+        # The four requests the install actually sent, in monotonic seconds
+        # relative to the first: 0.000, 0.045, 0.249, 0.448.
+        last = None
+        sent = 0
+        for offset in (0.0, 0.045, 0.249, 0.448):
+            if MainWindow._phone_request_gap_elapsed(last, offset, self.GAP):
+                sent += 1
+                last = offset
+        assert sent == 1
+
+    def test_the_gap_is_long_enough_to_separate_two_notifications(self):
+        # Short enough that the backfill still finishes in the same order of
+        # time (16 requests in 20 minutes on the measured install), long
+        # enough that two notifications never stack.
+        assert 60 <= MainWindow._PHONE_REQUEST_MIN_GAP <= 300
+
+
+class TestAChatThePhoneCannotHelpIsRetiredForGood:
+    """The phone answers "I have nothing older" two ways, and only one of them
+    used to be durable.
+
+    An explicit `primaryHasMore=false` is a refusal, costs no notification and
+    retires the chat. The other answer is *silence*: the request goes out, the
+    phone tells its owner it is synchronising, delivers nothing, and follows up
+    with "Sync paused. Open WhatsApp to resume." — an error notification, on an
+    account synced for weeks, for a conversation the user never opened.
+
+    Measured on a real install on 2026-09-08: two groups holding 1 and 2
+    messages, each asked twice, `oldestMsgKey` byte-identical across both asks
+    and twelve get-messages rounds in between. `_older_request_attempts` is in
+    memory, so every launch handed them a fresh budget and asked again.
+    """
+
+    GRACE = MainWindow._OLDER_REQUEST_GRACE
+    MAX = MainWindow._MAX_PHONE_HISTORY_REQUESTS
+
+    def test_a_budget_still_unspent_is_not_a_verdict(self):
+        assert MainWindow._older_history_is_exhausted(
+            1000.0, self.MAX - 1, 1000.0 + self.GRACE * 10,
+            self.GRACE, self.MAX) is False
+
+    def test_a_chat_never_asked_is_not_a_verdict(self):
+        assert MainWindow._older_history_is_exhausted(
+            None, self.MAX, 10_000.0, self.GRACE, self.MAX) is False
+
+    def test_the_reply_window_must_close_first(self):
+        # The request is fire-and-forget and the chunk lands minutes later;
+        # a verdict inside that window is a guess, and this one is permanent.
+        assert MainWindow._older_history_is_exhausted(
+            1000.0, self.MAX, 1000.0 + self.GRACE - 1,
+            self.GRACE, self.MAX) is False
+
+    def test_budget_spent_and_window_closed_is_the_verdict(self):
+        assert MainWindow._older_history_is_exhausted(
+            1000.0, self.MAX, 1000.0 + self.GRACE,
+            self.GRACE, self.MAX) is True
+
+    def test_the_verdict_only_follows_a_full_budget(self):
+        # Gaining older history clears the budget (see the caller), so
+        # reaching the cap already means every ask came back with nothing.
+        assert self.MAX >= 2
+        for spent in range(self.MAX):
+            assert MainWindow._older_history_is_exhausted(
+                1000.0, spent, 1000.0 + self.GRACE * 5,
+                self.GRACE, self.MAX) is False
+
+
+class TestRetirementIsWrittenDownAndRespected:
+    class _Stub:
+        _retire_chat_without_older_history = MainWindow._retire_chat_without_older_history
+        _jid_address_forms = MainWindow._jid_address_forms
+        _canonical_backfill_jid = MainWindow._canonical_backfill_jid
+        _MAX_PHONE_HISTORY_REQUESTS = MainWindow._MAX_PHONE_HISTORY_REQUESTS
+
+        def __init__(self):
+            self._exhausted_chats = set()
+            self._history_gap_jids = set()
+            self._lid_to_phone = {}
+            self._phone_to_lid = {}
+            self._chats_awaiting_messages = set()
+            self._partial_history_counts = {}
+            self.persisted = 0
+            self.removed = []
+
+        def _persist_exhausted_chats(self):
+            self.persisted += 1
+
+        def _remove_backfill_pending(self, jid):
+            self.removed.append(jid)
+
+        class _Guard:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *a):
+                return False
+
+        def _backfill_state_guard(self):
+            return self._Guard()
+
+    JID = "120363166461067873@g.us"
+
+    def test_the_verdict_is_persisted_not_just_remembered(self):
+        stub = self._Stub()
+        stub._retire_chat_without_older_history(self.JID)
+        assert self.JID in stub._exhausted_chats
+        assert stub.persisted == 1
+
+    def test_it_leaves_the_backfill_queue(self):
+        stub = self._Stub()
+        stub._retire_chat_without_older_history(self.JID)
+        assert stub.removed == [self.JID]
+
+    def test_the_history_gap_is_cleared_under_every_address(self):
+        stub = self._Stub()
+        stub._lid_to_phone = {self.JID: "5511@s.whatsapp.net"}
+        stub._history_gap_jids = {self.JID, "5511@s.whatsapp.net"}
+        stub._retire_chat_without_older_history(self.JID)
+        assert stub._history_gap_jids == set()
+
+    def test_retiring_twice_writes_once(self):
+        stub = self._Stub()
+        stub._retire_chat_without_older_history(self.JID)
+        stub._retire_chat_without_older_history(self.JID)
+        assert stub.persisted == 1

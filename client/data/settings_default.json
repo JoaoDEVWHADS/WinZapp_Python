@@ -13,6 +13,7 @@
         "updates_enabled": true,
         "alpha_updates_enabled": false,
         "noise_reduction_enabled": false,
+        "spell_check_mode": "windows",
         "first_run": true,
         "api_type_first_run_asked": false,
         "hotkey_first_run_asked": false,
@@ -56,10 +57,12 @@
         "forwarded_prefix_enabled": false,
         "conversation_video_media_viewer_dialog": true,
         "status_media_viewer_dialog": true,
-        "voice_message_mode": "audio"
+        "voice_message_mode": "voice_message",
+        "group_media_default_types": ["photos", "videos", "audios", "voice_messages", "documents", "links"]
     },
     "audio_playback": {
-        "audio_default_speed": 1.0
+        "audio_default_speed": 1.0,
+        "mark_audio_played_in_list": true
     },
     "audio_devices": {
         "output_device_name": "",
@@ -70,9 +73,16 @@
         "extended_sr_compat_enabled": true,
         "sapi_fallback_enabled": true
     },
+    "files": {
+        "save_dialog_folder_mode": "last",
+        "save_dialog_custom_folder": "",
+        "save_dialog_last_folder": ""
+    },
     "speech_content": {
         "announce_typing": true,
         "announce_recording": true,
+        "announce_conversations_update_start": true,
+        "announce_conversations_update_complete": true,
         "speak_active_conv_messages": true,
         "speak_other_conv_messages": true,
         "silence_while_recording": false
@@ -89,6 +99,13 @@
     "cleared_chats": {},
     "storage": {
         "auto_download_media": true,
+        "auto_download_media_types": [
+            "photos",
+            "videos",
+            "audios",
+            "voice_messages",
+            "documents"
+        ],
         "media_max_days": 30,
         "media_max_mb": 100,
         "probe_video_duration_on_download": false

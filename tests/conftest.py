@@ -14,6 +14,113 @@ from cryptography.fernet import Fernet
 # ── Fixtures: wx ────────────────────────────────────────────────────────────
 
 
+
+# ── wxgui: opt-in, because the default must be safe for a blind developer ────
+#
+# A plain `pytest` has to be safe to run on the machine somebody is using.
+# Tests marked `wxgui` construct a real top-level wx dialog, which takes
+# foreground focus away from whatever the developer is doing - and has crashed
+# NVDA outright: NVDA takes focus on the throwaway window and is still
+# enumerating its children over COM (event_gainFocus -> getDialogText ->
+# IAccessible._get_children -> oleacc.AccessibleObjectFromEvent) when the test
+# destroys it. Confirmed live from NVDA's own traceback.
+#
+# WinZapp exists for blind users and is maintained by blind developers, so
+# "remember to pass -m 'not wxgui'" is the wrong default: the cost of
+# forgetting falls on the person least able to absorb it, and it is not their
+# test run that breaks - it is whatever they were doing in another window.
+#
+# So these are skipped unless explicitly asked for, by `--run-wx-gui` or
+# WINZAPP_RUN_WX_GUI_TESTS=1. Every CI workflow passes the flag (enforced by
+# tests/test_no_desktop_visible_windows.py), so the coverage is never actually
+# lost - it just stops running on a human's desktop by accident.
+_WX_GUI_OPT_IN_ENV = "WINZAPP_RUN_WX_GUI_TESTS"
+
+
+#: Repeats behind fastest_of()/fastest_of_async(). Enough to find the floor
+#: without making a load test noticeably slower.
+TIMING_REPEATS = 7
+
+
+def fastest_of(call, repeats: int = TIMING_REPEATS) -> float:
+    """Seconds taken by the quickest of *repeats* runs of ``call``.
+
+    The load tests assert that doubling the data does not more than double the
+    work. Timing a single run makes that assertion unreliable in exactly one
+    direction: noise is one-sided — a sample can only ever come out slower than
+    the truth, never faster — so one unlucky garbage collection inside the
+    larger measurement inflates the ratio without any code having changed.
+
+    Measured in a full suite run on 2026-09-10: the 2,000-chat planning call
+    was recorded at 69.9 ms against a median of 6.5 ms on the same machine,
+    while the 500-chat call was recorded at its clean 1.6 ms — "44.1x for 4x
+    the chats", failing the build over an implementation that is perfectly
+    linear (3.2 microseconds per chat, flat from 250 to 4,000 chats).
+
+    That is worth a helper rather than a local fix, because a red run is not
+    the worst outcome: release.yml builds nothing when its test job fails, so a
+    test that fails at random blocks a good stable release (and an alpha).
+
+    The minimum is the right statistic precisely because of the one-sidedness:
+    it converges on the cost of the work itself, and it still grows when the
+    work genuinely grows, which is all these assertions read.
+    """
+    best = None
+    for _ in range(repeats):
+        started = time.perf_counter()
+        call()
+        elapsed = time.perf_counter() - started
+        if best is None or elapsed < best:
+            best = elapsed
+    return best
+
+
+async def fastest_of_async(make_awaitable, repeats: int = TIMING_REPEATS) -> float:
+    """fastest_of() for async work. ``make_awaitable`` is called once per
+    repeat and must return a FRESH awaitable — an already-created coroutine
+    cannot be awaited twice, and a factory also lets a caller vary anything
+    that must differ between runs (a fresh chat id per insert, say)."""
+    best = None
+    for index in range(repeats):
+        started = time.perf_counter()
+        await make_awaitable(index)
+        elapsed = time.perf_counter() - started
+        if best is None or elapsed < best:
+            best = elapsed
+    return best
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-wx-gui",
+        action="store_true",
+        default=False,
+        help="Run the tests marked `wxgui`, which open a real top-level wx "
+             "dialog and steal foreground focus. Safe on CI and on a machine "
+             "nobody is using; on a developer's own desktop it can crash a "
+             "running screen reader. CI passes this.",
+    )
+
+
+def _wx_gui_requested(config) -> bool:
+    return bool(
+        config.getoption("--run-wx-gui")
+        or os.environ.get(_WX_GUI_OPT_IN_ENV, "").strip() not in ("", "0", "false", "False")
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if _wx_gui_requested(config):
+        return
+    skip = pytest.mark.skip(
+        reason="opens a real top-level wx dialog and steals focus - pass "
+               "--run-wx-gui (or set WINZAPP_RUN_WX_GUI_TESTS=1) to run it"
+    )
+    for item in items:
+        if "wxgui" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture(scope="session")
 def wx_app():
     """A single wx.App shared by every test in the run that needs a real
@@ -32,6 +139,46 @@ def wx_app():
     """
     import wx
     return wx.App()
+
+
+# ── Fixtures: Windows notification state ─────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _no_do_not_disturb(request, monkeypatch):
+    """Pin Windows' do-not-disturb state to OFF for the whole suite.
+
+    core.quiet_hours.is_quiet_hours_active() reads the REAL machine: registry
+    notification switches, WNF, WinRT and SHQueryUserNotificationState. That
+    makes any test touching the notification path pass or fail according to
+    whatever the machine running it happens to be doing — and a headless
+    GitHub Actions runner is not doing the same thing as a developer desktop.
+
+    It cost an alpha release to learn that twice. The gate started out
+    covering only the background sound, so a handful of files monkeypatched it
+    one by one and that was enough. Then it grew to suppress the entire
+    notification — banner included — and every _dispatch() test in
+    test_notifications.py started failing on CI only, with the local suite
+    green: on the runner the real state reads as suppressed, so no toast was
+    ever shown and the assertions had nothing to look at.
+
+    Pinning it here rather than per file is the point: the next test to touch
+    _dispatch() will not have to know this exists. A test that genuinely wants
+    do-not-disturb ON monkeypatches it back, which still works because every
+    caller imports the function inside the function body.
+
+    test_quiet_hours.py is exempt — it is the module that tests this very
+    function, and stubbing it there would test the stub.
+    """
+    import core.quiet_hours as quiet_hours
+    exempt = request.node.fspath.purebasename == "test_quiet_hours"
+    quiet_hours.invalidate_cache()
+    if not exempt:
+        monkeypatch.setattr(quiet_hours, "is_quiet_hours_active", lambda: False)
+    # A generator fixture must yield on every path — returning early makes
+    # pytest raise "did not yield a value" for the exempt module.
+    yield
+    quiet_hours.invalidate_cache()
 
 
 # ── Fixtures: Keys / Encryption ───────────────────────────────────────────────
@@ -144,6 +291,45 @@ def sample_data(
     }
 
 
+# ── Helpers: a chat as the warm cache holds it ───────────────────────────────
+
+
+def warm_cached_chat(jid: str, t: int = 100, records: int = 1) -> dict:
+    """One chat in the shape the incremental sync planner compares against.
+
+    Shared rather than copied because the three modules that drive a sync
+    round — tests/test_run_sync_warm_path.py, tests/test_periodic_poll_delta.py
+    and tests/test_repair_state_durability.py — all need the same two fields
+    and both are load-bearing in a way that is easy to get subtly wrong in a
+    private copy: `t` is the activity marker the plan diffs, and the record
+    count is what tells "unchanged" apart from "missing-local-history"
+    (core/incremental_sync.classify_chat_sync). A chat built with no records
+    is classified full on every path, which is exactly the shape that cannot
+    tell a warm round from a cold one — so `records=0` is a deliberate choice
+    a test makes, never an accident of which copy of the helper it used.
+
+    The records carry `t` as their own timestamp, because that is what a chat
+    that is actually up to date looks like: the activity the chat list claims
+    is the timestamp of the newest message we stored. A record older than `t`
+    means the server has something we never stored, and
+    incremental_sync.local_history_behind_server() reads it as exactly that —
+    a chat built that way is not "unchanged", it is one of the broken ones.
+
+    Lives in conftest (imported as tests.conftest — tests/ is a package) for
+    the same reason set_clipboard_data() below does.
+    """
+    return {
+        "remoteJid": jid,
+        "t": t,
+        "messages": {"messages": {"records": [{
+            "key": {"remoteJid": jid, "id": f"{jid}-m{n}", "fromMe": False},
+            "message": {"conversation": "x"},
+            "messageType": "conversation",
+            "messageTimestamp": t,
+        } for n in range(records)]}},
+    }
+
+
 # ── Fixtures: Temporary files / directories ───────────────────────────────────
 
 
@@ -219,6 +405,39 @@ def set_clipboard_data(make_data_object, attempts=10, delay=0.05):
         time.sleep(delay)
     return False
 
+
+
+def hidden_frame(**kwargs):
+    """A real wx.Frame for tests that need a live parent window, created so
+    the DESKTOP never sees it.
+
+    A plain `wx.Frame(None)` is a normal top-level window: Windows gives it a
+    taskbar button and, as it is created and destroyed, moves the foreground
+    around. A screen reader reacts to that. Running the suite on a machine
+    with NVDA active crashed NVDA repeatedly, and its traceback named the
+    mechanism exactly - event_gainFocus -> reportFocus -> getDialogText ->
+    IAccessible _get_children -> oleacc.AccessibleObjectFromEvent: NVDA got
+    focus on one of these windows and was still enumerating its children over
+    COM when the test destroyed it, so the object it was reading vanished
+    mid-call. Dozens of these windows appear and disappear within a single
+    pytest run, which makes that race very easy to lose.
+
+    Off-screen (well outside any real monitor), WS_EX_TOOLWINDOW and no
+    taskbar button: the window is fully real - it has an HWND, children lay
+    out and size normally, and every test that needs a parent still works -
+    but it never becomes the foreground window, so no focus event is ever
+    raised for a screen reader to chase.
+
+    Tests must still Destroy() what they create; this only stops the window
+    being visible to the desktop while it lives.
+    """
+    import wx
+
+    kwargs.setdefault("pos", (-32000, -32000))
+    kwargs.setdefault(
+        "style", wx.FRAME_TOOL_WINDOW | wx.FRAME_NO_TASKBAR | wx.DEFAULT_FRAME_STYLE
+    )
+    return wx.Frame(None, **kwargs)
 
 def set_clipboard_text(text):
     """Write plain text to the clipboard, with the same retry guarantee."""

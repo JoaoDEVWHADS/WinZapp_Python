@@ -15,8 +15,10 @@ from ui.accessible import (
     AccessibleSendVoiceMessage, AccessiblePlayRecordedAudio,
 )
 from core.api_client import api_get, api_post, redact_api_url
-from core.utils import format_number, get_downloads_folder, normalize_line_separators, is_voice_message
+from core.save_location import resolve_save_dialog_folder
+from core.utils import format_number, normalize_line_separators, is_voice_message
 from core.video_player import VideoPlayer
+from core.focus_cloak import cloak_focus_announcement
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
@@ -87,7 +89,7 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n, settings: dict = N
         caption = ((msg_obj.get("videoMessage") or {}).get("caption") or "").strip()
         return f"{i18n.t('video')}: {caption}" if caption else i18n.t("video")
     if msg_type in ("audioMessage", "audio", "ptt"):
-        vm_mode = (settings.get("user_interface", {}) if isinstance(settings, dict) else {}).get("voice_message_mode", "audio")
+        vm_mode = (settings.get("user_interface", {}) if isinstance(settings, dict) else {}).get("voice_message_mode", "voice_message")
         if vm_mode == "voice_message":
             is_ptt = is_voice_message(msg_obj) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
             return i18n.t("message_type_voice_message") if is_ptt else i18n.t("message_type_audio")
@@ -1577,7 +1579,7 @@ class StatusPanel(wx.Panel):
             item.update(kind="text", text=text)
             return item
 
-        vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "audio")
+        vm_mode = (self.main_window.settings.get("user_interface", {}) if hasattr(self, "main_window") and self.main_window and hasattr(self.main_window, "settings") else {}).get("voice_message_mode", "voice_message")
         is_ptt = is_voice_message(msg_obj) or bool(isinstance(msg_obj, dict) and is_voice_message({"messageType": "audioMessage", "message": msg_obj}))
         audio_label_key = "message_type_voice_message" if (vm_mode == "voice_message" and is_ptt) else "message_type_audio"
         type_map = {
@@ -1625,7 +1627,7 @@ class StatusPanel(wx.Panel):
         return self._is_status_liked(item.get("status_id", ""))
 
     def _viewer_like_status(self, item: dict, done):
-        """Send a status like and report completion back to MediaViewer."""
+        """Toggle the native status reaction from the separate media viewer."""
         status = item.get("status") or {}
         entry = item.get("entry") or {}
         status_key = status.get("key", {})
@@ -1633,25 +1635,32 @@ class StatusPanel(wx.Panel):
         if not status_id:
             wx.CallAfter(done, False)
             return
-        if self._is_status_liked(status_id):
-            self._on_unlike_status_attempted()
-            wx.CallAfter(done, False)
-            return
+
+        is_liked = self._is_status_liked(status_id)
 
         sender_jid = status_key.get("participant", "") or entry.get("jid", "")
         if not sender_jid:
             wx.CallAfter(done, False)
             return
 
+        reaction_key = dict(status_key)
+        reaction_key["remoteJid"] = "status@broadcast"
+        if not reaction_key.get("participant"):
+            reaction_key["participant"] = sender_jid
+
         mw = self.main_window
 
         def _send_like():
             try:
-                ok = bool(mw.send_text_message(sender_jid, "❤️"))
+                ok = bool(mw.send_reaction(
+                    "status@broadcast",
+                    reaction_key,
+                    "" if is_liked else "❤️",
+                ))
             except Exception:
                 ok = False
             if ok:
-                wx.CallAfter(self._on_like_sent, status_id)
+                wx.CallAfter(self._on_like_sent, status_id, not is_liked)
                 wx.CallAfter(done, True)
             else:
                 wx.CallAfter(
@@ -1674,7 +1683,9 @@ class StatusPanel(wx.Panel):
 
         def _send():
             try:
-                result = self.main_window.send_text_message(poster_jid, text)
+                result = self.main_window.send_text_message(
+                    poster_jid, text, quoted=status
+                )
                 ok = bool(result) and not isinstance(result, dict)
             except Exception:
                 ok = False
@@ -2105,7 +2116,7 @@ class StatusPanel(wx.Panel):
 
         with wx.FileDialog(
             self, mw.i18n.t("status_save_media"),
-            defaultDir=get_downloads_folder(),
+            defaultDir=resolve_save_dialog_folder(mw.settings),
             defaultFile=f"status{ext}",
             wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
@@ -2113,6 +2124,7 @@ class StatusPanel(wx.Panel):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             save_path = dlg.GetPath()
+        mw.remember_save_folder(save_path)
 
         threading.Thread(
             target=self._save_status_media_bg,
@@ -2535,28 +2547,55 @@ class StatusPanel(wx.Panel):
             self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
             self._voice_send_btn.Show()
             self.Layout()
-            self._voice_send_btn.SetFocus()
-            self._silence_send_voice_focus_if_enabled()
+            self._focus_recording_button_silently(self._voice_send_btn)
 
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 
+    def _voice_recording_silence_enabled(self):
+        """True when Settings > Conteúdo Falado asks for silence while
+        recording a voice message.
+
+        Keyed ONLY on that toggle, matching ConversationsPanel. This copy used
+        to also fire when extended_sr_compat_enabled was OFF — i.e. exactly
+        when the user had told WinZapp never to talk to their screen reader,
+        the app started interrupting it instead. The conversation panel's copy
+        was fixed for that; this one was left behind.
+        """
+        settings = getattr(self.main_window, "settings", None) or {}
+        return bool(
+            settings.get("speech_content", {}).get("silence_while_recording", False)
+        )
+
+    def _focus_recording_button_silently(self, button):
+        """Move focus to a recording button without the screen reader
+        announcing it. See ConversationsPanel._focus_recording_button_silently
+        for why the cloak, and not the silence() burst, is the mechanism."""
+        if self._voice_recording_silence_enabled():
+            # Armed BEFORE SetFocus(), or the screen reader reads the real
+            # (focused) state and speaks.
+            cloak_focus_announcement(button)
+        button.SetFocus()
+        self._silence_send_voice_focus_if_enabled()
+
     def _silence_send_voice_focus_if_enabled(self):
-        settings = self.main_window.settings
-        silence_while_recording = settings.get("speech_content", {}).get(
-            "silence_while_recording", False
-        )
-        extended_enabled = settings.get("accessibility", {}).get(
-            "extended_sr_compat_enabled", True
-        )
-        if not silence_while_recording and extended_enabled:
+        """Fallback for an announcement the cloak did not stop."""
+        if not self._voice_recording_silence_enabled():
             return
         speak_output = getattr(self.main_window, "speak_output", None)
         silence_focus = getattr(speak_output, "silence_screen_reader_focus", None)
         if not callable(silence_focus):
             return
-        silence_focus()
-        wx.CallAfter(silence_focus)
-        wx.CallLater(80, silence_focus)
+        silence_all = getattr(speak_output, "silence", None)
+
+        def _silence_now():
+            silence_focus()
+            if callable(silence_all):
+                silence_all()
+
+        _silence_now()
+        wx.CallAfter(_silence_now)
+        for delay_ms in (40, 90, 160, 260, 400):
+            wx.CallLater(delay_ms, _silence_now)
 
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:

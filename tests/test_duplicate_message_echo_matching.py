@@ -71,6 +71,7 @@ def _make_panel(msg):
     panel._played_sent_local_ids = set()
     panel._outgoing_virtual_messages = {"loc-1": msg}
     panel._media_upload_progress = {}
+    panel._upload_stages_seen = {}
     panel._media_transfer_started = set()
     panel.gauge_hidden = False
     def _hide():
@@ -181,6 +182,7 @@ class _SyncExecutor:
 
 class _Stub:
     on_new_message = MainWindow.on_new_message
+    _drop_protocol_edit = MainWindow._drop_protocol_edit
 
     def __init__(self, chat, own_sent_ids=()):
         self.chats = {REMOTE: chat}

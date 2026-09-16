@@ -1,0 +1,187 @@
+V1.1.2.0
+
+Esta versión corrige situaciones en las que WinZapp pedía vincular de nuevo sin necesidad.
+
+CORRECCIONES
+
+- Cuando WhatsApp rechazaba la conexión justo al abrir el programa, la copia de seguridad del perfil nunca llegaba a restaurarse: si los códigos de vinculación empezaban a llegar en los primeros segundos, WinZapp cerraba la sesión y pedía vincular de nuevo aunque hubiera una copia buena guardada. Ahora restaura la copia en cuanto aparece el primer código, y solo pide vincular cuando la restauración no lo resuelve.
+
+V1.1.1.0
+
+Esta versión trata de mantener tu cuenta conectada. WinZapp ahora guarda una copia de seguridad del perfil del navegador — que es donde vive realmente tu conexión con WhatsApp — y la restaura por su cuenta cuando deja de ser aceptada, avisando de lo ocurrido. Junto a ella llegan las correcciones de las situaciones que rompían la sesión y hacían que el programa pidiera vincular de nuevo: apagar el ordenador, suspender y reanudar, y el propio programa reiniciando la conexión. También llegan la corrección ortográfica en el campo de mensaje y las acciones sobre enlaces.
+
+NOVEDADES
+
+- Recuperación automática del perfil del navegador. Tu conexión con WhatsApp se guarda en el perfil del navegador que WinZapp usa por debajo, y cuando ese perfil dejaba de ser aceptado solo quedaba vincular de nuevo. Ahora WinZapp guarda una copia de seguridad, conserva también la copia anterior, y la restaura por su cuenta cuando detecta que la conexión fue rechazada — diciendo en voz alta que la restauró y que está reconectando. Nunca vuelve a ofrecer una copia que WhatsApp ya rechazó, y cuando no hay ninguna copia aprovechable lo dice claramente, en lugar de dejarte sin conexión y sin explicación.
+
+- Corrección ortográfica en el campo de mensaje. En Configuración eliges entre seguir la configuración de ortografía del propio Windows (predeterminado), siempre activada o siempre desactivada. También hay un sonido propio para el error de ortografía, configurable junto con los demás sonidos.
+
+- Acciones sobre enlaces en los mensajes. Cuando el mensaje contiene enlaces, el menú contextual ofrece Abrir enlace y Copiar enlace para el enlace en el que estás, y Ctrl+C copia ese enlace en lugar del mensaje entero.
+
+- Aviso cuando el navegador interno está incompleto. Si el navegador que WinZapp usa para conectarse a WhatsApp no consigue iniciarse — normalmente porque un antivirus eliminó parte de él — el programa lo dice con todas las letras y explica qué hacer, en lugar de parecer un problema de WhatsApp.
+
+- Aviso de envío no confirmado. Cuando WhatsApp acepta un mensaje pero no confirma la entrega, WinZapp te avisa para que revises la conversación antes de reenviar, en lugar de arriesgarse a entregar el mismo mensaje dos veces.
+
+MEJORAS
+
+- Iniciar junto con Windows ahora conecta mucho antes. El programa esperaba la conexión solo después de haber intentado usarla, y pasaba bastante tiempo mostrando "desconectado de WhatsApp" sin motivo. Ahora espera a que todo esté listo antes de aparecer en la bandeja del sistema.
+
+- La lista de mensajes ya no se reconstruye entera cada minuto. Solo se reescriben las líneas que realmente cambiaron, así que el lector de pantalla deja de releer el mensaje en el que estás y el sonido de selección ya no suena solo.
+
+- Menos notificaciones de sincronización en tu teléfono. WinZapp solo pide historial antiguo al teléfono para las conversaciones que has abierto, de una en una, y deja de pedirlo cuando la conversación ya ha respondido que no tiene nada más.
+
+- Las conversaciones que la sincronización había dejado de mirar vuelven a revisarse solas, sin depender de que actualices con F5.
+
+- Con varias cuentas abiertas a la vez, la actualización de WinZapp abre una sola ventana en lugar de una por cuenta.
+
+- Audio: WinZapp pregunta al micrófono cuál es su propia frecuencia de muestreo antes de probar las fijas, y la salida de sonido se recupera sola cuando el dispositivo predeterminado cambia o se desconecta.
+
+- Las reacciones que llegaron mientras la conversación estaba cerrada aparecen al abrirla.
+
+- Los saltos de línea en el cuadro de mensaje ya pueden navegarse con normalidad con el lector de pantalla.
+
+- Conexión con WhatsApp actualizada (WPPConnect 2.10.21), incluyendo correcciones de seguridad, y WinZapp detecta por su cuenta cuando esa conexión se ha desviado y necesita reinstalarse.
+
+CORRECCIONES
+
+- Apagar el ordenador ya no rompe la sesión. WinZapp cerraba la conexión con WhatsApp demasiado tarde durante el apagado de Windows, cuando el proceso que la mantiene ya había sido terminado — y el perfil volvía inservible, pidiendo vincular de nuevo la próxima vez. Ahora cierra todo mientras Windows todavía está preguntando si puede apagarse.
+
+- Suspender el ordenador ya no rompe la sesión. Al reanudar, WinZapp reiniciaba la conexión sin esperar a que el navegador terminara de escribir lo que tenía entre manos, y eso bastaba para perder la vinculación. Ahora espera.
+
+- Responder a un estado vuelve a funcionar. La respuesta fallaba diciendo que no se pudo enviar.
+
+- Un fallo de envío ambiguo ya no produce mensajes duplicados: cuando no hay forma de saber si WhatsApp lo recibió, WinZapp no reenvía por su cuenta.
+
+- Descargar documentos grandes vuelve a ser posible. Archivos de unos cientos de megabytes anunciaban "descargando" y no producían nada.
+
+- El indicador de progreso de envío y descarga ahora muestra la transferencia que está ocurriendo de verdad, y ya no sigue girando en un mensaje que terminó ni aparece en la línea equivocada.
+
+- Cancelar o cerrar la pantalla de vinculación ya no borra tus conversaciones, y un fallo momentáneo de autenticación al abrir el programa tampoco. El historial solo se borra cuando se conecta realmente otro número de teléfono — y en ese caso WinZapp te avisa.
+
+- El código QR solo se anuncia cuando está realmente en pantalla. WinZapp decía "el código QR se ha actualizado" antes de que se hubiera mostrado código alguno, lo que hacía parecer que el código solo aparecía al segundo intento. Ahora la pantalla de vinculación avisa de que el código se está generando, lo anuncia cuando aparece de verdad, y dice cuándo no se pudo generar o cuándo ha caducado el código de vinculación — en lugar de quedarse en silencio o anunciar una actualización que no hubo.
+
+- Recuento de no leídos: las conversaciones ya no vuelven a aparecer como no leídas sin que haya llegado un mensaje nuevo.
+
+- El carácter fantasma que aparecía en el campo de mensaje al volver de otro programa con NVDA activo ya no aparece.
+
+- Copiar un mensaje de voz ya funciona.
+
+- Las conversaciones que mostraban el número en lugar del nombre ahora se resuelven.
+
+- Cambiar de cuenta ahora borra correctamente los archivos multimedia de la cuenta anterior, que antes podían quedarse en el ordenador.
+
+V1.1.0.0
+
+Esta versión incorpora la pestaña de multimedia, el visor de multimedia en su propia ventana, las vistas previas de enlaces, las acciones en lote y una pestaña de Accesibilidad en la configuración. La sincronización de conversaciones es mucho más rápida, y la lista de conversaciones ya no se reconstruye con cada mensaje, lo que reduce bastante la relectura por parte del lector de pantalla.
+
+NOVEDADES
+
+- Pestaña Multimedia en las conversaciones y en los grupos. Muestra fotos, vídeos, audios, mensajes de voz, documentos y enlaces, con filtro por tipo y por descargados o no descargados, carga del historial completo y acciones de abrir, guardar y eliminar en cada mensaje. Los audios y los mensajes de voz son dos filtros separados: puedes ver solo unos o solo otros, y elegir si la descarga automática obtiene unos, otros o ambos.
+
+- Visor de multimedia en su propia ventana, con reproducir y pausar, avanzar y retroceder 10 segundos, posición, volumen y velocidad. Puedes elegir en la configuración si los vídeos de las conversaciones y los estados se abren en él.
+
+- Vistas previas de enlaces en los mensajes. Cuando un mensaje tiene dos o más enlaces, estos se convierten en una lista que puedes recorrer. Tus mensajes enviados también incluyen ahora una vista previa.
+
+- Acciones en lote sobre mensajes y conversaciones: copiar, destacar, fijar, reenviar, guardar y eliminar mensajes; marcar conversaciones como leídas o no leídas, archivarlas y vaciarlas. Cada acción tiene su propio atajo, y Ctrl+C copia la selección.
+
+- Pestaña Accesibilidad en la configuración, con la compatibilidad ampliada con el lector de pantalla y la opción de usar la voz SAPI cuando no haya ningún lector activo.
+
+- Pestaña Archivos y guardado, para elegir si los cuadros de diálogo de guardado se abren en la última carpeta usada, en la carpeta de Descargas o en una carpeta que tú indiques.
+
+- Reacciones: ahora puedes ver cuál es tu reacción actual y quitarla seleccionándola de nuevo.
+
+- Guardar como contacto un mensaje de contacto recibido, con Intro o Espacio.
+
+- Reproducir el audio ya grabado mientras la grabación está en pausa, con Ctrl+P.
+
+- Selector de país del emparejamiento rehecho: usa el país y el idioma configurados en Windows, se ordena alfabéticamente, admite búsqueda escribiendo varias letras y protege el código de país frente a ediciones accidentales.
+
+- Nuevas opciones en la configuración: mostrar "ayer" en lugar de la fecha, anunciar "Reenviado" antes del remitente, distinguir los mensajes de voz de los archivos de audio, que ahora es lo predeterminado en vez de leerlo todo como audio, averiguar la duración del vídeo al descargarlo, elegir qué tipos de multimedia se muestran de forma predeterminada y no marcar los audios como reproducidos.
+
+- Búsqueda en las listas de contactos ("Adjuntar contacto" y "Añadir miembro"): el campo tiene el foco en cuanto se abre la lista, filtra por nombre (incluidos los apellidos) y por número mientras escribes, y al borrarlo vuelven a verse todos los contactos.
+
+- Tarjeta de contacto recibida: menú contextual con ver nombre y número, copiar el número con Ctrl+C y conversar. Cuando la tarjeta trae más de un número, WinZapp pregunta cuál usar.
+
+MEJORAS
+
+- Los documentos ya pueden ocupar hasta 2 GB, que es el límite real de WhatsApp. WinZapp los cortaba en 1 GB sin motivo. Las fotos, los vídeos y los audios siguen en 1 GB, que es el límite de WhatsApp para ellos.
+
+- Sincronización incremental de las conversaciones. Abrir el programa y actualizar es mucho más rápido, y WinZapp avisa cuando la actualización empieza y cuando termina.
+
+- La lista de conversaciones es mucho más rápida. Un mensaje nuevo o una confirmación de entrega actualiza solo esa fila en lugar de rehacer la lista entera. En la práctica, el lector de pantalla relee mucho menos.
+
+- Las acciones sobre un mensaje también actualizan solo la fila de ese mensaje, y editar un mensaje ya no bloquea la interfaz.
+
+- Las notificaciones respetan el Asistente de concentración de Windows.
+
+- Grupos: aviso cuando solo los administradores pueden enviar mensajes, con el campo de mensaje en solo lectura. El cuadro de diálogo para añadir miembros muestra nombres en lugar de números e informa de quién no pudo añadirse.
+
+- Adjuntar contacto: la lista no tiene duplicados, está ordenada y ya no muestra entradas sin resolver.
+
+- Audio: los archivos OGG que el programa no podía descodificar se convierten automáticamente, y el envío de archivos WAV ya funciona.
+
+CORRECCIONES
+
+- Sesión desconectada por WhatsApp: WinZapp ahora avisa al momento y abre el emparejamiento, en lugar de seguir mostrando la lista de conversaciones y repetir que el código QR se ha actualizado. Si nadie está en la pantalla de emparejamiento, la sesión se cierra en vez de seguir pidiendo códigos nuevos a WhatsApp sin parar; esa petición interminable podía provocar el baneo de la cuenta. Además, WinZapp avisa en voz alta de que ha cerrado la sesión y de que tienes que conectarte de nuevo.
+
+- Recuento de no leídos: los mensajes ya leídos no vuelven a aparecer como nuevos, se respeta la lectura hecha en el móvil y la conversación abierta ya no pierde el contador.
+
+- El separador de mensajes no leídos y tu posición de lectura ya no se pierden mientras lees. La conversación abierta se estaba reconstruyendo cada cierto tiempo, lo que interrumpía al lector de pantalla en mitad de la lectura.
+
+- Sesión: cerrar y volver a abrir WinZapp ya no pide emparejar de nuevo. El cierre ahora espera a que la sesión se guarde antes de terminar.
+
+- Emparejamiento: cuando WhatsApp rechaza el código se muestra el motivo real, y la actualización del servidor ya no interrumpe un emparejamiento en curso.
+
+- Las actualizaciones automáticas vuelven a funcionar cuando el programa está instalado en una carpeta con acentos u otros caracteres especiales.
+
+- Privacidad: el programa ya no guarda el contenido de los mensajes ni credenciales en el archivo de registro.
+
+- Envío: cancelar un mensaje que ya se había enviado se explica ahora con claridad, y los envíos grandes no se pierden por el camino.
+
+- Los vídeos sin duración indicada ya no muestran "0 segundos".
+
+- El primer mensaje de un contacto ya no desaparece al abrir la conversación.
+
+- Accesibilidad: el atajo de los emojis ahora se comunica al lector de pantalla, Alt+T vuelve a funcionar dentro de la conversación y el habla ya no se corta con cada confirmación de entrega.
+
+- La sincronización ya no vuelve a empezar una y otra vez. Bastaba una conversación que WhatsApp no reconoce, y que nunca fue una conversación real, para que WinZapp creyera que la sincronización no había terminado nunca: empezaba de cero cada pocos minutos y se anunciaba de nuevo cada vez, aun con todo ya cargado.
+
+- La actualización rápida de las conversaciones ya no se salta las que recibieron mensajes nuevos. Se quedaban con el contenido antiguo hasta que pulsabas F5 y sincronizabas todo, lo que anulaba la ganancia de velocidad.
+
+- WinZapp ahora conoce la fecha de caducidad de la versión de WhatsApp Web que utiliza. Cuando vence, busca la que WhatsApp está sirviendo en ese momento en lugar de insistir en una que ya no se acepta. Eso era lo que bloqueaba la sincronización, dejaba la lista de conversaciones vacía y acababa haciendo que WhatsApp desconectara el ordenador de tus dispositivos vinculados.
+
+- El primer código de vinculación tras una caída de conexión ya no falla. WinZapp pedía códigos por su cuenta, en segundo plano, hasta que WhatsApp los rechazaba por exceso de peticiones; ahora espera entre una petición y otra, y cuando WhatsApp rechaza, el mensaje explica el motivo en vez de mostrar un error interno.
+
+- El filtro de multimedia no descargada mostraba mensajes de voz que ya estaban en el ordenador, incluidos los que ya habías escuchado dentro del programa.
+
+- Un documento que envías ahora muestra el tamaño del archivo en cuanto aparece en la lista de mensajes, igual que ya ocurría con los recibidos.
+
+- WinZapp ahora prefiere una versión estable de WhatsApp Web en vez de una alpha cuando hay ambas disponibles: usar una alpha estaba provocando que el dispositivo se desvinculara horas después de emparejarse. La sincronización inicial también es más tolerante con la lentitud antes de dar la conexión por caída.
+
+- La conversación Mensajes para mí ya no muestra confirmaciones de entrega ni de lectura, ni la marca de audio reproducido: no tienen sentido en una conversación contigo mismo.
+
+- Eliminar para todos en la conversación Mensajes para mí ahora funciona de verdad. Antes el mensaje solo desaparecía localmente y volvía a aparecer en la siguiente sincronización.
+
+- Alt+2, Alt+3 y Ctrl+W sin ninguna conversación abierta ahora avisan "No hay ninguna conversación abierta", en vez de no hacer nada.
+
+- Alt+2 en una conversación vacía avisa "Esta conversación está vacía", en vez de quedarse en silencio.
+
+- La lista de conversaciones vuelve a la fila en la que estaba el foco, y no siempre a la conversación que se había abierto.
+
+- El separador de mensajes no leídos dejó de desaparecer o de mostrar un recuento incorrecto cuando el programa se minimiza a la bandeja del sistema con la conversación abierta.
+
+- Una conversación archivada ya no se anuncia en voz alta cuando llega un mensaje nuevo con el programa en primer plano.
+
+- Reproducir audios uno detrás de otro ya no lee la fila entera del audio anterior encima del aviso del nuevo.
+
+- La opción de silenciar el lector de pantalla al grabar un audio ahora impide el anuncio en el origen, en vez de intentar cancelarlo después de que ya haya empezado a hablar.
+
+- Agregar un contacto nuevo desde WinZapp podía duplicar la conversación y dejar el primer mensaje siempre como "no confirmado", cuando WhatsApp reconocía ese número en otro formato (por ejemplo, con o sin el 9.º dígito).
+
+- El nombre de un grupo cambiado en WhatsApp ahora se actualiza en WinZapp, incluso al resincronizar con F5. Antes, el nombre anterior nunca se reemplazaba.
+
+- Cambiar el dispositivo de salida de sonido en Configuración mientras un audio estaba reproduciéndose podía hacer que el primer intento de reproducir otro audio fallara sin aviso; ahora se reproduce ya en el primer intento.
+
+- Desconectar desde Archivo > Desconectar ya no reproduce otra vez los sonidos de conectado e inicio de sincronización, ni intenta reconectar por su cuenta: la cuenta queda realmente desconectada.
+
+- El registro de instalación de actualizaciones ahora se guarda dentro de la carpeta de registros de la cuenta (junto con log.log y shutdown_audit.log), en vez de suelto en la carpeta del programa.

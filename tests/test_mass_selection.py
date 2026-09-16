@@ -96,6 +96,12 @@ class _FakeMainWindow:
         self.saves = 0
         self.pin_calls = []
         self.pin_results = None
+        # Every save dialog reports the folder it wrote into, so
+        # Configuracoes > Arquivos e salvamento can reopen there next time.
+        self.remembered_folders = []
+
+    def remember_save_folder(self, saved_path):
+        self.remembered_folders.append(saved_path)
 
     def output(self, text, interrupt=False):
         self.announced.append(text)
@@ -109,8 +115,8 @@ class _FakeMainWindow:
     def archive_chat(self, jid, archived):
         self.archived.append((jid, archived))
 
-    def mark_conversation_as_read(self, jid, read):
-        self.marked_read.append((jid, read))
+    def mark_conversations_as_read(self, jids, force=False):
+        self.marked_read.extend((jid, force) for jid in jids)
 
     def mark_conversation_as_unread(self, jid):
         self.marked_unread.append(jid)
@@ -135,6 +141,12 @@ class _FakeMainWindow:
 
     def add_chats_to_ui(self):
         pass
+
+    def _is_self_jid(self, jid):
+        # Overridden per-test (monkeypatch/attribute set) for the self-chat
+        # ("Me") bulk-delete cases; every other test's conversation is a
+        # regular group/individual chat.
+        return False
 
 
 class _FakeEvent:
@@ -171,12 +183,17 @@ class _Panel:
     _on_mass_forward_messages = ConversationsPanel._on_mass_forward_messages
     _on_mass_save_messages = ConversationsPanel._on_mass_save_messages
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
+    _confirm_local_only_delete = ConversationsPanel._confirm_local_only_delete
+    _delete_target_jid = ConversationsPanel._delete_target_jid
     _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
     _on_mass_star_messages = ConversationsPanel._on_mass_star_messages
     _on_mass_pin_messages = ConversationsPanel._on_mass_pin_messages
     _on_mass_pin_failed = ConversationsPanel._on_mass_pin_failed
     _mass_message_targets = ConversationsPanel._mass_message_targets
     _on_accel_copy_message = ConversationsPanel._on_accel_copy_message
+    # Ctrl+C now asks whether a link has focus before anything else.
+    _focused_link_url      = ConversationsPanel._focused_link_url
+    _link_url_for          = ConversationsPanel._link_url_for
     _bulk_shortcuts_enabled = ConversationsPanel._bulk_shortcuts_enabled
     _group_admin_delete_override = ConversationsPanel._group_admin_delete_override
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)
@@ -735,6 +752,35 @@ def fake_delete_dialog(monkeypatch):
     return state
 
 
+@pytest.fixture
+def fake_confirm_dialog(monkeypatch):
+    """Fakes the wx.MessageDialog _confirm_local_only_delete() builds (the
+    plain Delete/Cancel prompt for the "Me" chat's local-only delete — no
+    running wx.App needed). Returns a dict the test sets before calling the
+    handler: result (wx.ID_OK/wx.ID_CANCEL, default OK) and captures the
+    prompt/title/labels/style actually passed in."""
+    state = {"result": wx.ID_OK, "prompt": None, "title": None,
+             "labels": None, "style": None}
+
+    class _FakeMessageDialog:
+        def __init__(self, parent, message, caption, style):
+            state["prompt"] = message
+            state["title"] = caption
+            state["style"] = style
+
+        def SetOKCancelLabels(self, ok, cancel):
+            state["labels"] = (ok, cancel)
+
+        def ShowModal(self):
+            return state["result"]
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(wx, "MessageDialog", _FakeMessageDialog)
+    return state
+
+
 class TestMassChatActions:
     def test_clearing_applies_to_every_selected_chat(self, confirm_yes):
         panel = _Panel()
@@ -880,6 +926,17 @@ class TestMassMessageActions:
         for _msg_obj, save_path in panel.saved:
             assert os.path.dirname(save_path) == str(choose_folder)
         assert panel.selected_messages == set()
+
+    def test_the_chosen_folder_is_remembered(self, choose_folder, run_threads_inline):
+        """Configuracoes > Arquivos e salvamento defaults to reopening the last
+        folder used, so every save dialog has to report where it went — bulk
+        save included, which is the one that picks a folder rather than a file."""
+        panel = _Panel(messages=[_saveable_msg("m1")])
+        panel.selected_messages = {"m1"}
+        panel._on_mass_save_messages(None)
+        remembered = panel.main_window.remembered_folders
+        assert len(remembered) == 1
+        assert os.path.dirname(remembered[0]) == str(choose_folder)
 
     def test_saving_skips_non_saveable_messages_in_the_selection(
         self, choose_folder, run_threads_inline
@@ -1036,6 +1093,83 @@ class TestMassMessageActions:
         assert panel.removed_locally == []
         assert panel.starred == []
         assert panel.pinned == []
+
+
+class TestSelfChatBulkDelete:
+    """Issue #95: the "Me" chat has only one participant, so "delete for
+    everyone" is a no-op there for every message (same reasoning as issue
+    #73's single-message fix). Bulk delete on that chat must skip the
+    for-me/for-everyone dialog entirely and go straight to a plain
+    Delete/Cancel confirmation, always deleting locally only."""
+
+    def test_skips_the_scope_dialog_and_deletes_locally_only(
+        self, fake_confirm_dialog, run_threads_inline
+    ):
+        panel = _Panel(messages=[_msg("m1", jid="me@s.whatsapp.net", from_me=True),
+                                  _msg("m2", jid="me@s.whatsapp.net", from_me=True)])
+        panel.conversation = {"remoteJid": "me@s.whatsapp.net"}
+        panel.main_window._is_self_jid = lambda jid: True
+        panel.selected_messages = {"m1", "m2"}
+
+        panel._on_mass_delete_messages(None)
+
+        assert sorted(k["id"] for _jid, k in panel.main_window.deleted_messages) == ["m1", "m2"]
+        assert panel.main_window.deleted_for_everyone == []
+        (removed, focus_previous), = panel.removed_locally
+        assert removed == {"m1", "m2"}
+        assert focus_previous is True
+        assert panel.selected_messages == set()
+        assert panel.main_window.announced == ["success_delete"]
+
+    def test_confirmation_names_the_count_not_a_single_message(self, fake_confirm_dialog, run_threads_inline):
+        panel = _Panel(messages=[_msg("m1", jid="me@s.whatsapp.net", from_me=True),
+                                  _msg("m2", jid="me@s.whatsapp.net", from_me=True)])
+        panel.conversation = {"remoteJid": "me@s.whatsapp.net"}
+        panel.main_window._is_self_jid = lambda jid: True
+        panel.selected_messages = {"m1", "m2"}
+
+        panel._on_mass_delete_messages(None)
+
+        assert fake_confirm_dialog["prompt"] == "Delete 2 selected messages?"
+        assert fake_confirm_dialog["title"] == "delete_messages_bulk_title"
+        assert fake_confirm_dialog["labels"] == ("delete_msg_confirm_yes", "cancel")
+        # Escape must dismiss it (wxMSW only allows that when wx.CANCEL is
+        # present) and the destructive button must not be the default —
+        # this dialog is one keystroke away from a focused message.
+        assert fake_confirm_dialog["style"] & wx.CANCEL
+        assert fake_confirm_dialog["style"] & wx.CANCEL_DEFAULT
+
+    def test_an_unrewritten_artifact_key_is_deleted_against_the_chat(
+        self, fake_confirm_dialog, run_threads_inline
+    ):
+        """A self-chat record can still carry the raw "<my digits>@g.us"
+        artifact JID in its key (_redirect_self_chat_artifact() files it under
+        my_jid, deduplicate_chats()'s Pass 0a merges a stored phantom chat's
+        records in, and neither rewrites the key). Deleting against that key
+        addresses a chat that does not exist server-side, so the message came
+        back on the next resync — the issue #73 symptom."""
+        panel = _Panel(messages=[_msg("m1", jid="5511999999999@g.us", from_me=True)])
+        panel.conversation = {"remoteJid": "me@s.whatsapp.net"}
+        panel.main_window._is_self_jid = lambda jid: jid == "me@s.whatsapp.net"
+        panel.selected_messages = {"m1"}
+
+        panel._on_mass_delete_messages(None)
+
+        (jid, _key), = panel.main_window.deleted_messages
+        assert jid == "me@s.whatsapp.net"
+
+    def test_declining_the_confirmation_deletes_nothing(self, fake_confirm_dialog, run_threads_inline):
+        fake_confirm_dialog["result"] = wx.ID_CANCEL
+        panel = _Panel(messages=[_msg("m1", jid="me@s.whatsapp.net", from_me=True)])
+        panel.conversation = {"remoteJid": "me@s.whatsapp.net"}
+        panel.main_window._is_self_jid = lambda jid: True
+        panel.selected_messages = {"m1"}
+
+        panel._on_mass_delete_messages(None)
+
+        assert panel.main_window.deleted_messages == []
+        assert panel.removed_locally == []
+        assert panel.selected_messages == {"m1"}
 
 
 class _CapturedThread:

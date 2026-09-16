@@ -114,6 +114,7 @@ class _StubMainWindow:
     """Minimal stub of MainWindow for testing on_new_message and _maybe_notify_reaction."""
 
     on_new_message = MainWindow.on_new_message
+    _drop_protocol_edit = MainWindow._drop_protocol_edit
     _maybe_notify_reaction = MainWindow._maybe_notify_reaction
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _is_self_jid = MainWindow._is_self_jid

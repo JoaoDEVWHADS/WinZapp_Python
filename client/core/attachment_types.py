@@ -34,7 +34,6 @@ _FALLBACK_EXTENSION_TYPES = {
     ".mpg": "video",
     ".mpeg": "video",
     ".m2v": "video",
-    ".ts": "video",
     ".mts": "video",
     ".m2ts": "video",
     ".wmv": "video",

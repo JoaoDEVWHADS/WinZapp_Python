@@ -9,6 +9,8 @@ fixes that by consulting registry, WNF, WinRT, and SHQueryUserNotificationState,
 isolated behind stubs so these tests never touch real Win32 APIs.
 """
 
+import pytest
+
 from core import quiet_hours
 
 
@@ -18,8 +20,17 @@ class TestShouldSuppressNotificationSound:
         only) surfaces as — the exact state this feature exists for."""
         assert quiet_hours.should_suppress_notification_sound(6) is True
 
-    def test_busy_is_suppressed(self):
-        assert quiet_hours.should_suppress_notification_sound(2) is True
+    def test_busy_is_NOT_suppressed(self):
+        """QUNS_BUSY was in the suppressed set and had to come out.
+
+        Reported live: Do Not Disturb off, banners appearing normally, and the
+        notification sound never playing. On that machine
+        SHQueryUserNotificationState returned QUNS_BUSY while WNF reported
+        Focus Assist off and Windows itself was still rendering its own toasts
+        — if Windows were really suppressing, no banner would have appeared.
+        Its documented meaning (fullscreen app / presentation settings) is
+        already covered by the two specific values below."""
+        assert quiet_hours.should_suppress_notification_sound(2) is False
 
     def test_fullscreen_d3d_is_suppressed(self):
         assert quiet_hours.should_suppress_notification_sound(3) is True
@@ -39,11 +50,20 @@ class TestShouldSuppressNotificationSound:
 
 
 class TestIsQuietHoursActive:
+    @pytest.fixture(autouse=True)
+    def _drop_cache(self):
+        """is_quiet_hours_active() memoizes for a second — without this, the
+        first test in the class would answer for all the others."""
+        quiet_hours.invalidate_cache()
+        yield
+        quiet_hours.invalidate_cache()
+
     def test_true_when_registry_reports_disabled(self, monkeypatch):
         monkeypatch.setattr(quiet_hours, "_query_registry_notifications_disabled", lambda: True)
         monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 5)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
         assert quiet_hours.is_quiet_hours_active() is True
 
     def test_true_when_wnf_reports_active(self, monkeypatch):
@@ -51,6 +71,7 @@ class TestIsQuietHoursActive:
         monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: True)
         monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 5)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
         assert quiet_hours.is_quiet_hours_active() is True
 
     def test_true_when_winrt_policy_reports_active(self, monkeypatch):
@@ -58,6 +79,7 @@ class TestIsQuietHoursActive:
         monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: False)
         monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: True)
         monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 5)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
         assert quiet_hours.is_quiet_hours_active() is True
 
     def test_true_when_the_query_reports_quiet_time(self, monkeypatch):
@@ -65,6 +87,7 @@ class TestIsQuietHoursActive:
         monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 6)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
         assert quiet_hours.is_quiet_hours_active() is True
 
     def test_false_when_all_report_accepts_notifications(self, monkeypatch):
@@ -72,6 +95,7 @@ class TestIsQuietHoursActive:
         monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: False)
         monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: False)
         monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 5)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
         assert quiet_hours.is_quiet_hours_active() is False
 
     def test_fails_open_when_queries_fail(self, monkeypatch):
@@ -81,6 +105,7 @@ class TestIsQuietHoursActive:
         monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: None)
         monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: None)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
         assert quiet_hours.is_quiet_hours_active() is False
 
 
@@ -171,7 +196,7 @@ class TestWinRtNotificationSetting:
 
     def test_falls_back_to_winsdk_module(self, monkeypatch):
         monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
-        module = self._module_with_setting(1)
+        module = self._module_with_setting(2)
         imported = []
 
         def fake_import(name):
@@ -199,3 +224,169 @@ class TestCloudStoreQuietHours:
 
     def test_unknown_blob_is_inconclusive(self):
         assert quiet_hours._parse_cloudstore_quiet_hours(b"\x02\x00unknown") is None
+
+
+class TestFailingOpenOnAmbiguousSignals:
+    """Every probe must yield "don't know" rather than "suppress" when it is
+    not actually sure. A false positive here does not cost one sound: it
+    silences WinZapp's background notifications — sound *and* speech — for as
+    long as the misreading lasts, with nothing in the UI to explain it. For a
+    user who relies on the spoken announcement that means silently not being
+    told messages are arriving at all."""
+
+    def test_cloudstore_blob_naming_several_profiles_is_inconclusive(self):
+        """A blob carrying the whole profile list, not just the active one,
+        contains "PriorityOnly" whether or not DND is on."""
+        data = b"".join(
+            name.encode("utf-16-le") for name in (
+                "Microsoft.QuietHoursProfile.Unrestricted",
+                "Microsoft.QuietHoursProfile.PriorityOnly",
+                "Microsoft.QuietHoursProfile.AlarmsOnly",
+            )
+        )
+        assert quiet_hours._parse_cloudstore_quiet_hours(data) is None
+
+    def test_cloudstore_blob_naming_exactly_one_profile_still_decides(self):
+        data = b"junk" + "Microsoft.QuietHoursProfile.AlarmsOnly".encode("utf-16-le")
+        assert quiet_hours._parse_cloudstore_quiet_hours(data) is True
+
+    def test_winrt_disabled_for_application_is_not_trusted(self, monkeypatch):
+        """DisabledForApplication answers about the AUMID this module passes,
+        which is a literal and need not be the one NotificationManager
+        actually registered."""
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        module = TestWinRtNotificationSetting._module_with_setting(1)
+        monkeypatch.setattr(quiet_hours.importlib, "import_module", lambda *_: module)
+        assert quiet_hours._query_winrt_notification_policy() is False
+
+    def test_winrt_disabled_by_manifest_is_not_trusted(self, monkeypatch):
+        """Meaningless for an unpackaged app like WinZapp."""
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        module = TestWinRtNotificationSetting._module_with_setting(4)
+        monkeypatch.setattr(quiet_hours.importlib, "import_module", lambda *_: module)
+        assert quiet_hours._query_winrt_notification_policy() is False
+
+    def test_winrt_disabled_by_group_policy_still_suppresses(self, monkeypatch):
+        monkeypatch.setattr(quiet_hours.sys, "platform", "win32")
+        module = TestWinRtNotificationSetting._module_with_setting(3)
+        monkeypatch.setattr(quiet_hours.importlib, "import_module", lambda *_: module)
+        assert quiet_hours._query_winrt_notification_policy() is True
+
+    def test_registry_dnd_heuristics_are_ignored_when_wnf_answers(self, monkeypatch):
+        """WNF saying DND is off is the live shell state; a stale
+        FocusAssistMode or CloudStore blob must not override it."""
+        quiet_hours.invalidate_cache()
+        monkeypatch.setattr(quiet_hours, "_query_registry_notifications_disabled", lambda: False)
+        monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: False)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: True)
+        monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: False)
+        monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 5)
+        try:
+            assert quiet_hours.is_quiet_hours_active() is False
+        finally:
+            quiet_hours.invalidate_cache()
+
+    def test_registry_dnd_heuristics_apply_when_wnf_cannot_answer(self, monkeypatch):
+        quiet_hours.invalidate_cache()
+        monkeypatch.setattr(quiet_hours, "_query_registry_notifications_disabled", lambda: False)
+        monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: None)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: True)
+        monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: False)
+        monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: 5)
+        try:
+            assert quiet_hours.is_quiet_hours_active() is True
+        finally:
+            quiet_hours.invalidate_cache()
+
+    def test_registry_dnd_probe_is_inconclusive_off_windows(self, monkeypatch):
+        monkeypatch.setattr(quiet_hours.sys, "platform", "linux")
+        assert quiet_hours._query_registry_dnd_active() is None
+
+
+class TestReadingIsMemoized:
+    """The probe sequence costs registry opens, a WNF query, a WinRT/COM
+    round-trip and a shell call, and _play_sound() runs it on the wx main
+    thread once per notification. A burst of messages must not turn into a
+    burst of those."""
+
+    def test_repeated_calls_probe_once(self, monkeypatch):
+        quiet_hours.invalidate_cache()
+        calls = []
+        monkeypatch.setattr(
+            quiet_hours, "_compute_quiet_hours_active",
+            lambda: (calls.append(1), False)[1],
+        )
+        try:
+            assert quiet_hours.is_quiet_hours_active() is False
+            assert quiet_hours.is_quiet_hours_active() is False
+            assert quiet_hours.is_quiet_hours_active() is False
+            assert len(calls) == 1
+        finally:
+            quiet_hours.invalidate_cache()
+
+    def test_invalidate_cache_forces_a_fresh_probe(self, monkeypatch):
+        quiet_hours.invalidate_cache()
+        answers = iter([False, True])
+        monkeypatch.setattr(
+            quiet_hours, "_compute_quiet_hours_active", lambda: next(answers)
+        )
+        try:
+            assert quiet_hours.is_quiet_hours_active() is False
+            quiet_hours.invalidate_cache()
+            assert quiet_hours.is_quiet_hours_active() is True
+        finally:
+            quiet_hours.invalidate_cache()
+
+    def test_cache_expires(self, monkeypatch):
+        quiet_hours.invalidate_cache()
+        answers = iter([False, True])
+        monkeypatch.setattr(
+            quiet_hours, "_compute_quiet_hours_active", lambda: next(answers)
+        )
+        clock = iter([0.0, 0.0, 99.0, 99.0])
+        monkeypatch.setattr(quiet_hours.time, "monotonic", lambda: next(clock))
+        try:
+            assert quiet_hours.is_quiet_hours_active() is False
+            assert quiet_hours.is_quiet_hours_active() is True
+        finally:
+            quiet_hours.invalidate_cache()
+
+
+class TestTheLegacyApiDoesNotOverrideTheLiveState:
+    """SHQueryUserNotificationState predates Focus Assist entirely, so when WNF
+    — the state the shell itself updates — says Do Not Disturb is off, a
+    QUNS_QUIET_TIME out of the legacy API is a stale reading, not a second
+    opinion."""
+
+    @pytest.fixture(autouse=True)
+    def _drop_cache(self):
+        quiet_hours.invalidate_cache()
+        yield
+        quiet_hours.invalidate_cache()
+
+    def _probe(self, monkeypatch, wnf, legacy_state):
+        monkeypatch.setattr(quiet_hours, "_query_registry_notifications_disabled", lambda: False)
+        monkeypatch.setattr(quiet_hours, "_query_wnf_quiet_hours", lambda: wnf)
+        monkeypatch.setattr(quiet_hours, "_query_registry_dnd_active", lambda: None)
+        monkeypatch.setattr(quiet_hours, "_query_winrt_notification_policy", lambda: None)
+        monkeypatch.setattr(quiet_hours, "_query_notification_state", lambda: legacy_state)
+        return quiet_hours.is_quiet_hours_active()
+
+    def test_legacy_quiet_time_is_ignored_when_wnf_says_dnd_is_off(self, monkeypatch):
+        assert self._probe(monkeypatch, wnf=False, legacy_state=6) is False
+
+    def test_legacy_quiet_time_still_counts_when_wnf_cannot_answer(self, monkeypatch):
+        assert self._probe(monkeypatch, wnf=None, legacy_state=6) is True
+
+    def test_fullscreen_still_suppresses_even_with_dnd_off(self, monkeypatch):
+        """Not a Do Not Disturb signal at all — a specific, documented state
+        that WNF has no opinion about."""
+        assert self._probe(monkeypatch, wnf=False, legacy_state=3) is True
+
+    def test_presentation_mode_still_suppresses_even_with_dnd_off(self, monkeypatch):
+        assert self._probe(monkeypatch, wnf=False, legacy_state=4) is True
+
+    def test_the_reported_machine_now_plays_its_sound(self, monkeypatch):
+        """The exact reading measured on the machine that reported this: DND
+        off everywhere, legacy API saying QUNS_BUSY, banners still appearing."""
+        assert self._probe(monkeypatch, wnf=False, legacy_state=2) is False

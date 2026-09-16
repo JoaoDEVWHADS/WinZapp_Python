@@ -99,12 +99,18 @@ class _MainWindow:
     def _set_wa_token(self, value):
         self._wa_token = value
 
+    def _abandon_closed_session(self, token):
+        # _close_active_session() now marks the store entry of the session it
+        # just closed as abandoned; this stub only has to accept the call.
+        self.abandoned = token
+
 
 class _ConnectStub:
     def __init__(self, main_window):
         self.main_window = main_window
         self.raw_token = None
         self._last_started_qr_token = None
+        self._started_new_session_token = ""
 
     def _wpp_headers(self, use_global_key=False):
         return {}
@@ -241,6 +247,10 @@ class TestTheHostDeviceProbeMasksItsTransportError:
             token=TOKEN, wpp_server="http://127.0.0.1", wpp_port=6300)
         stub._still_linked_on_server = types.MethodType(
             main.MainWindow._still_linked_on_server, stub)
+        # The sibling holding the request itself, and the log line
+        # this test is about.
+        stub._host_device_link_probe = types.MethodType(
+            main.MainWindow._host_device_link_probe, stub)
         return stub
 
     @pytest.fixture

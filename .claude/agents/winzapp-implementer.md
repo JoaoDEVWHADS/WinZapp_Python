@@ -60,7 +60,10 @@ file written in a foreign dialect is worse than a consistent imperfect one:
 
 - **A test, in the same commit.** CLAUDE.md requires it. See `write-test`.
 - **Every user-facing string in all five locales**, placeholders matching,
-  `&&` for a literal ampersand. See `i18n-ui-string`.
+  `&&` for a literal ampersand, and **worded with the terms that locale
+  already uses** for the concept (grep the file first — e.g. Polish says
+  `czat`, not `rozmowa`, since f292049f). Existing terminology was judged by
+  native speakers and stays. See `i18n-ui-string`.
 - **Speech through `main_window.speak_output`**; list mutations inside
   `Freeze()`/`try`/`finally: Thaw()`; plain controls. See `accessible-ui`.
 - **Node-side edits in `client/api_patches/`, never `client/api/`.** See

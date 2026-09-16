@@ -1,4 +1,4 @@
-"""Windows notification-suppression detection for background sounds.
+"""Windows notification-suppression detection for background notifications.
 
 WinZapp plays its background message sound itself, outside the Windows toast
 audio pipeline. Before doing that it must mirror the Windows notification state:
@@ -9,14 +9,26 @@ audio pipeline. Before doing that it must mirror the Windows notification state:
   fallbacks for the Windows Notifications switches.
 * Full-screen, presentation, and busy states: SHQueryUserNotificationState.
 
-This gate is deliberately limited to background notification sounds. Sounds for
-the currently focused conversation and incoming-call alerts are separate UX and
-are not changed here.
+This gate covers the *background* notification path only — both its sound and
+its spoken announcement. For a blind user the spoken announcement IS the
+notification, so gating one without the other would have left Do Not Disturb
+half-honoured; both are silenced together, and only on the path taken after
+main.py's `if window_active: ... return`. Sounds and speech for the currently
+focused conversation, foreground sounds for other conversations, and incoming
+call alerts never reach this gate and are deliberately unchanged.
+
+Every probe below is written to fail OPEN. A false negative here costs one
+notification sound the user did not want; a false positive silences WinZapp
+indefinitely for a reason nothing in the UI explains, which for this app's
+users means silently not knowing that messages are arriving at all. Where a
+signal is ambiguous or undocumented, it must yield None (unknown), never True.
 """
 
 import importlib
 import logging
 import sys
+import threading
+import time
 from typing import Optional
 
 # QUERY_USER_NOTIFICATION_STATE values (shellapi.h)
@@ -29,11 +41,24 @@ _QUNS_QUIET_TIME = 6
 _QUNS_APP = 7
 
 # States in which Windows would itself suppress a toast's sound/banner: a
-# fullscreen app/game, a presentation, or Focus Assist (both "Priority only"
-# and "Alarms only" surface here as QUNS_QUIET_TIME — Windows doesn't expose
-# a finer-grained value through this API).
+# fullscreen D3D app/game, a presentation, or Focus Assist (both "Priority
+# only" and "Alarms only" surface here as QUNS_QUIET_TIME — Windows doesn't
+# expose a finer-grained value through this API).
+#
+# QUNS_BUSY is deliberately NOT in this set. Reported live: Do Not Disturb
+# off, banners appearing normally, and WinZapp's notification sound never
+# playing. Measured on that machine, SHQueryUserNotificationState returned
+# QUNS_BUSY (2) while WNF reported Focus Assist off and Windows itself was
+# still rendering — and sounding — its own toasts. That is the whole argument:
+# if Windows were really suppressing, the banner would not have appeared
+# either. The documented meaning ("a full-screen application is running or
+# Presentation Settings are applied") is already covered by
+# QUNS_RUNNING_D3D_FULL_SCREEN and QUNS_PRESENTATION_MODE, which are specific;
+# QUNS_BUSY is the vague one, it is what this legacy Vista-era API returns in
+# assorted modern situations it was never updated for, and acting on it
+# silenced the app indefinitely for a reason nothing in the UI explained.
 _SUPPRESSED_STATES = {
-    _QUNS_BUSY, _QUNS_RUNNING_D3D_FULL_SCREEN,
+    _QUNS_RUNNING_D3D_FULL_SCREEN,
     _QUNS_PRESENTATION_MODE, _QUNS_QUIET_TIME,
 }
 
@@ -137,7 +162,17 @@ def _query_wnf_quiet_hours() -> Optional[bool]:
 
 
 def _parse_cloudstore_quiet_hours(data) -> Optional[bool]:
-    """Parse the named quiet-hours profile from a Windows 11 CloudStore blob."""
+    """Parse the named quiet-hours profile from a Windows 11 CloudStore blob.
+
+    Returns None — not a decision — whenever the blob names more than one
+    profile. This is the difference between a probe and a guess: the blob is
+    documented nowhere, and a payload that happens to carry the *list* of
+    available profiles alongside (or instead of) the active one contains
+    "PriorityOnly" whether or not Do Not Disturb is on. Picking the first
+    restrictive name out of such a blob silences WinZapp permanently on a
+    machine with DND off, which is exactly the failure this module must not
+    have. One name is a reading; several names are noise.
+    """
     if not isinstance(data, (bytes, bytearray)):
         return None
 
@@ -147,10 +182,13 @@ def _parse_cloudstore_quiet_hours(data) -> Optional[bool]:
         "Microsoft.QuietHoursProfile.Unrestricted": False,
     }
     raw = bytes(data)
-    for profile, is_restricted in profiles.items():
-        if profile.encode("utf-16-le") in raw or profile.encode("utf-8") in raw:
-            return is_restricted
-    return None
+    found = [
+        is_restricted for profile, is_restricted in profiles.items()
+        if profile.encode("utf-16-le") in raw or profile.encode("utf-8") in raw
+    ]
+    if len(found) != 1:
+        return None
+    return found[0]
 
 
 def _query_registry_notifications_disabled() -> bool:
@@ -194,11 +232,14 @@ def _query_registry_notifications_disabled() -> bool:
         except OSError:
             pass
 
-        # 4. App-specific toggle in Windows Settings
+        # 4. App-specific toggle in Windows Settings.
+        #
+        # WinZapp's own AUMID only. The "python"/"pythonw" keys were tried here
+        # and removed: in a dev run WinZapp *is* python.exe, so any unrelated
+        # Python script the user had ever silenced in Windows Settings silenced
+        # WinZapp too — a per-app switch the user never set for this app.
         for app_key in (
             r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\WinZapp",
-            r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\python",
-            r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\pythonw",
         ):
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, app_key) as k:
@@ -208,16 +249,40 @@ def _query_registry_notifications_disabled() -> bool:
             except OSError:
                 pass
 
-        # 5. Focus Assist Mode in registry
+    except Exception:
+        pass
+    return False
+
+
+def _query_registry_dnd_active() -> Optional[bool]:
+    """Best-effort Do Not Disturb / Focus Assist state read out of the registry.
+
+    Split out from _query_registry_notifications_disabled() because the two
+    have very different standing. The keys above are the documented Windows
+    notification switches: reading one means the user turned notifications off.
+    The keys here are undocumented shell implementation detail, and their
+    meaning drifts between builds — so this is only ever consulted as a
+    *fallback*, when WNF (the state the shell itself updates when the active
+    quiet-hours profile changes) could not answer at all. Returns None for
+    "don't know", which is not the same as False and must not collapse into it.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+
+        # Focus Assist Mode: 0 = off, 1 = priority only, 2 = alarms only.
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\FocusAssist") as k:
                 val, _ = winreg.QueryValueEx(k, "FocusAssistMode")
                 if val in (1, 2):
                     return True
+                if val == 0:
+                    return False
         except OSError:
             pass
 
-        # 6. QuietHours profile/enabled in registry
+        # QuietHours profile/enabled.
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Notifications\QuietHours") as k:
                 try:
@@ -235,7 +300,7 @@ def _query_registry_notifications_disabled() -> bool:
         except OSError:
             pass
 
-        # 7. Windows 11 DND profile in CloudStore.
+        # Windows 11 DND profile in CloudStore.
         cloud_paths = (
             r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
             r"\$$windows.data.notifications.quiethourssettings\Current",
@@ -252,10 +317,9 @@ def _query_registry_notifications_disabled() -> bool:
             cloud_state = _parse_cloudstore_quiet_hours(data)
             if cloud_state is not None:
                 return cloud_state
-
     except Exception:
         pass
-    return False
+    return None
 
 
 def _query_winrt_notification_policy() -> Optional[bool]:
@@ -294,8 +358,22 @@ def _query_winrt_notification_policy() -> Optional[bool]:
             if notifier is None:
                 continue
             setting = notifier.setting
-            setting_value = getattr(setting, "value", setting)
-            return int(setting_value) != 0
+            setting_value = int(getattr(setting, "value", setting))
+            # NotificationSetting: 0 Enabled, 1 DisabledForApplication,
+            # 2 DisabledForUser, 3 DisabledByGroupPolicy, 4 DisabledByManifest.
+            #
+            # Only 2 and 3 are read as suppression. They are user- and
+            # machine-wide, so they hold whatever AUMID this call resolved —
+            # which matters, because the AUMID here is a literal while
+            # NotificationManager._setup_toaster() picks its own from a list of
+            # candidates and may well have registered a different one. 1 would
+            # be an answer about an app that isn't necessarily us, and 4
+            # (DisabledByManifest) is meaningless for an unpackaged app like
+            # WinZapp and has been seen reported spuriously. Treating either as
+            # "suppress" silences the app permanently for no visible reason.
+            if setting_value in (2, 3):
+                return True
+            return False
         except Exception as exc:
             logging.debug(
                 "[quiet_hours] WinRT notification setting query failed via %s: %s",
@@ -305,36 +383,105 @@ def _query_winrt_notification_policy() -> Optional[bool]:
     return None
 
 
+def _compute_quiet_hours_active() -> bool:
+    """Uncached probe sequence behind is_quiet_hours_active(). See that.
+
+    Every "suppressed" branch logs at INFO, not DEBUG, and that level is
+    deliberate: log.log runs at INFO, so a decision taken here is otherwise
+    invisible in the only artefact a user sends when reporting a problem. What
+    this gate silences is a background notification's sound AND its spoken
+    announcement — for a user on a screen reader, the whole notification — and
+    two of the probes below read undocumented Windows state (the WNF state name
+    and its value semantics are reverse-engineered). A misreading therefore
+    presents as "WinZapp stopped telling me messages arrive", with no visible
+    cause. One line in the log is the difference between diagnosing that in
+    minutes and not diagnosing it at all."""
+    # 1. Documented Windows notification switches (global, policy, per-app).
+    if _query_registry_notifications_disabled():
+        logging.info("[quiet_hours] Suppressed via registry check (notifications disabled)")
+        return True
+
+    # 2. WNF: the state the shell itself updates when the active quiet-hours
+    #    profile changes. When it answers it is authoritative for DND, and the
+    #    undocumented registry heuristics below are not consulted at all — a
+    #    stale FocusAssistMode value or a CloudStore blob must never override
+    #    the live state saying Do Not Disturb is off.
+    wnf_state = _query_wnf_quiet_hours()
+    if wnf_state is True:
+        logging.info("[quiet_hours] Suppressed via WNF state (Focus Assist / DND active)")
+        return True
+    if wnf_state is None and _query_registry_dnd_active() is True:
+        logging.info("[quiet_hours] Suppressed via registry DND fallback (WNF unavailable)")
+        return True
+
+    # 3. WinRT ToastNotifier setting (user-wide / group policy only).
+    if _query_winrt_notification_policy() is True:
+        logging.info("[quiet_hours] Suppressed via WinRT ToastNotifier setting")
+        return True
+
+    # 4. Legacy Win32 state: fullscreen game, presentation mode, quiet time.
+    #
+    # Subordinate to WNF for the same reason the registry heuristics are: this
+    # API predates Focus Assist entirely, so when the live shell state says Do
+    # Not Disturb is off, a QUNS_QUIET_TIME out of here is a stale reading, not
+    # a second opinion. The fullscreen/presentation values remain useful on
+    # their own and are still honoured.
+    state = _query_notification_state()
+    if state is not None and should_suppress_notification_sound(state):
+        if state == _QUNS_QUIET_TIME and wnf_state is False:
+            logging.info(
+                "[quiet_hours] Ignoring legacy QUNS_QUIET_TIME — WNF reports "
+                "Do Not Disturb is off."
+            )
+        else:
+            logging.info(
+                "[quiet_hours] Suppressed via SHQueryUserNotificationState: %d", state)
+            return True
+
+    return False
+
+
+# The probe sequence above costs up to seven registry opens plus a WNF query,
+# a WinRT/COM round-trip and a shell call. It runs per notification, and
+# _play_sound() reaches it from the wx main thread — a burst of messages was
+# enough to show up as UI stutter. Windows' own DND state does not change on a
+# sub-second scale, so one reading is reused for a short window; the ceiling on
+# how stale an answer can be is _CACHE_TTL_SECONDS, which is far below the time
+# it takes a user to toggle Do Not Disturb and expect the next message to obey.
+_CACHE_TTL_SECONDS = 1.0
+_cache_lock = threading.Lock()
+_cached_answer: Optional[bool] = None
+_cached_at: float = 0.0
+
+
+def invalidate_cache() -> None:
+    """Drop the memoized reading. For tests, and for any caller that knows the
+    Windows notification state just changed."""
+    global _cached_answer, _cached_at
+    with _cache_lock:
+        _cached_answer = None
+        _cached_at = 0.0
+
+
 def is_quiet_hours_active() -> bool:
-    """True if Windows is currently in a state where toast notifications / sounds
-    should be suppressed (Do Not Disturb / "Não Incomodar", Focus Assist,
-    notifications toggled off in Windows Settings, fullscreen games, presentation mode).
+    """True if Windows is currently in a state where the *background*
+    notification (its sound and its spoken announcement) should be suppressed:
+    Do Not Disturb / "Não Incomodar", Focus Assist, notifications toggled off
+    in Windows Settings, fullscreen games, presentation mode.
 
     Fails open (False) off-Windows or on any API failure — an API failure is
     a reason to fall back to the pre-existing behavior (always play), not to
-    go silent for a reason nobody can see.
+    go silent for a reason nobody can see. Memoized for _CACHE_TTL_SECONDS.
     """
-    # 1. Check if notifications are disabled in Windows Settings (Registry)
-    if _query_registry_notifications_disabled():
-        logging.debug("[quiet_hours] Suppressed via registry check (notifications/DND disabled)")
-        return True
-
-    # 2. Check WNF state for real-time Windows 10/11 Do Not Disturb / Focus Assist
-    if _query_wnf_quiet_hours() is True:
-        logging.debug("[quiet_hours] Suppressed via WNF state (Focus Assist / DND active)")
-        return True
-
-    # 3. Check the supported WinRT ToastNotifier setting.
-    if _query_winrt_notification_policy() is True:
-        logging.debug("[quiet_hours] Suppressed via WinRT ToastNotifier setting")
-        return True
-
-    # 4. Check legacy Win32 SHQueryUserNotificationState (fullscreen games, presentation mode)
-    state = _query_notification_state()
-    if state is not None and should_suppress_notification_sound(state):
-        logging.debug("[quiet_hours] Suppressed via SHQueryUserNotificationState: %d", state)
-        return True
-
-    return False
+    global _cached_answer, _cached_at
+    now = time.monotonic()
+    with _cache_lock:
+        if _cached_answer is not None and (now - _cached_at) < _CACHE_TTL_SECONDS:
+            return _cached_answer
+    answer = _compute_quiet_hours_active()
+    with _cache_lock:
+        _cached_answer = answer
+        _cached_at = time.monotonic()
+    return answer
 
 

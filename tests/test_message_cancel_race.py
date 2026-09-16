@@ -822,6 +822,7 @@ class _EchoMainWindow(_MainWindow):
     """_MainWindow plus the state MainWindow.on_new_message() reads."""
 
     on_new_message = MainWindow.on_new_message
+    _drop_protocol_edit = MainWindow._drop_protocol_edit
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _counts_as_last_message = MainWindow._counts_as_last_message
     # The real guard, not a no-op: on_new_message() routes every message
@@ -920,6 +921,7 @@ def _make_panel(main_window, msg=None):
     panel.main_window = main_window
     panel._outgoing_virtual_messages = {msg["_local_id"]: msg} if msg else {}
     panel._media_upload_progress = {}
+    panel._upload_stages_seen = {}
     panel._media_transfer_started = set()
     panel._cancelled_pending_messages = {}
     panel._hide_media_transfer_gauge = lambda: None

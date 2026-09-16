@@ -114,12 +114,17 @@ class _SyncIfMediaStub:
     _MEDIA_MAX_AGE_SECONDS = MainWindow._MEDIA_MAX_AGE_SECONDS
     sync_if_media = MainWindow.sync_if_media
 
-    def __init__(self, connected=True, offline=False):
+    def __init__(self, connected=True, offline=False, allowed_types=None):
         self._wa_connected = connected
         self.offline_mode = offline
         self._media_failed_ids = {}
         self.audio_result = True
         self.media_result = True
+        # Configuracoes > Armazenamento > "Tipos de midia a serem baixados
+        # automaticamente". No key at all means every category is allowed,
+        # which is what a settings.json predating the option looks like.
+        self.settings = ({"storage": {"auto_download_media_types": list(allowed_types)}}
+                         if allowed_types is not None else {})
 
     def _media_max_download_days(self):
         return 0
@@ -178,3 +183,67 @@ class TestSyncIfMediaReturnValue:
         msg = self._msg()
         msg["_local_pending"] = True
         assert s.sync_if_media(msg) is False
+
+
+class TestAutoDownloadTypeFilter:
+    """Configuracoes > Armazenamento > "Tipos de midia a serem baixados
+    automaticamente".
+
+    Checked inside sync_if_media() because that is the single funnel every
+    automatic download passes through — the live-message path and the sync
+    sweep both land here. Opening the media by hand is unaffected: this is
+    about what the app fetches without being asked.
+    """
+
+    def _msg(self, message_type="imageMessage", inner=None):
+        msg = {"key": {"id": "3EB0AA"}, "messageType": message_type,
+               "messageTimestamp": int(time.time())}
+        if inner is not None:
+            msg["message"] = inner
+        return msg
+
+    def test_an_unchecked_category_is_not_downloaded(self):
+        stub = _SyncIfMediaStub(allowed_types=["videos", "audios", "documents"])
+        assert stub.sync_if_media(self._msg("imageMessage")) is False
+
+    def test_a_checked_category_still_is(self):
+        stub = _SyncIfMediaStub(allowed_types=["videos", "audios", "documents"])
+        assert stub.sync_if_media(self._msg("videoMessage")) is True
+
+    def test_everything_is_allowed_when_the_setting_was_never_written(self):
+        """A settings.json predating this option must not read as "nothing
+        selected" — that would silently stop all media downloads."""
+        assert _SyncIfMediaStub().sync_if_media(self._msg()) is True
+
+    def test_unchecking_everything_is_honoured(self):
+        """Not the same as never having chosen."""
+        stub = _SyncIfMediaStub(allowed_types=[])
+        assert stub.sync_if_media(self._msg("documentMessage")) is False
+
+    def test_stickers_follow_the_photos_checkbox(self):
+        """group_media_category() groups them there, and the Media tab shows
+        them there — "Fotos" has to mean the same thing in both places."""
+        stub = _SyncIfMediaStub(allowed_types=["videos"])
+        assert stub.sync_if_media(self._msg("stickerMessage")) is False
+        stub = _SyncIfMediaStub(allowed_types=["photos"])
+        assert stub.sync_if_media(self._msg("stickerMessage")) is True
+
+    def test_each_category_can_be_switched_off_on_its_own(self):
+        from core.utils import AUTO_DOWNLOAD_MEDIA_TYPES
+        # A voice note is an audioMessage like any other — the ptt flag, not
+        # the message type, is what puts it in its own category, so that one
+        # sample carries a payload rather than just a type name.
+        sample = {"photos": {"message_type": "imageMessage"},
+                  "videos": {"message_type": "videoMessage"},
+                  "audios": {"message_type": "audioMessage"},
+                  "voice_messages": {"message_type": "audioMessage",
+                                     "inner": {"audioMessage": {"ptt": True}}},
+                  "documents": {"message_type": "documentMessage"}}
+        assert set(sample) == set(AUTO_DOWNLOAD_MEDIA_TYPES), \
+            "a new category needs a message type here"
+        for category, kwargs in sample.items():
+            others = [k for k in AUTO_DOWNLOAD_MEDIA_TYPES if k != category]
+            assert _SyncIfMediaStub(allowed_types=others).sync_if_media(
+                self._msg(**kwargs)) is False
+            assert _SyncIfMediaStub(allowed_types=[category]).sync_if_media(
+                self._msg(**kwargs)) is True

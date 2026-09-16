@@ -49,7 +49,7 @@ class _Stub:
     def _set_status(self, text):
         self.status_calls.append(text)
 
-    def _run_sync(self):
+    def _run_sync(self, run_id=None):
         self.ran += 1
         if self._run_duration:
             time.sleep(self._run_duration)
@@ -86,7 +86,7 @@ class TestTheStampIsMadeOnTheWayOut:
         """The stamp lives in the finally block for the same reason the
         running flag does: a round that dies mid-way must not leave the next
         one free to start instantly."""
-        def _boom():
+        def _boom(run_id=None):
             stub.ran += 1
             raise RuntimeError("sync exploded")
         stub._run_sync = _boom
@@ -98,7 +98,7 @@ class TestTheStampIsMadeOnTheWayOut:
     def test_the_entry_stamp_is_kept_as_well(self, stub):
         """A round that returns immediately (no connection, for instance) is
         still covered — the entry stamp is what stops it spinning."""
-        stub._run_sync = lambda: None
+        stub._run_sync = lambda run_id=None: None
         before = time.time()
         stub.start_sync()
         assert stub._last_sync_attempt_ts >= before

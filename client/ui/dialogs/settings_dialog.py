@@ -2,6 +2,7 @@ import ctypes
 import os
 import wx
 from core.i18n import LANGUAGE_NAMES
+from core.combo_search import bind_incremental_search
 from core.sound_system import (
     SOUND_EVENTS, discover_alert_tone_choices, resolve_alert_tone_path,
     DEFAULT_PACK_ID, import_soundpack, AlertPreviewController,
@@ -9,6 +10,7 @@ from core.sound_system import (
 from core.audio_devices import (
     enumerate_output_devices, enumerate_input_devices, test_input_device,
 )
+from core.spell_checker import SPELL_CHECK_MODES, spell_check_mode
 
 # Win32 modifier constants for RegisterHotKey
 _MOD_ALT     = 0x0001
@@ -113,7 +115,8 @@ class _HotkeyCapture(wx.TextCtrl):
         self.SetValue(_vk_mod_to_str(vk, mod))
 
 
-from core.utils import DEFAULT_SETTINGS, SEARCH_NORMALIZATION_MODES, search_normalization_mode
+from core.utils import DEFAULT_SETTINGS, SEARCH_NORMALIZATION_MODES, search_normalization_mode, GROUP_MEDIA_TYPES, AUTO_DOWNLOAD_MEDIA_TYPES
+from core import save_location
 
 
 def ensure_default_settings_file():
@@ -217,6 +220,13 @@ class SettingsDialog(wx.Dialog):
             style=wx.CB_READONLY,
             choices=list(LANGUAGE_NAMES.values()),
         )
+        # Same multi-character type-ahead as the pairing dialog's country
+        # combo and the first-run language picker — see
+        # core.combo_search.bind_incremental_search()'s own docstring for
+        # why a read-only wx.ComboBox needs this reimplemented by hand at
+        # all. No on_select needed: nothing reacts live to this combo, its
+        # selection is only read at Save/Apply time (_on_apply()).
+        bind_incremental_search(self._lang_combo)
         gen_sizer.Add(self._lang_combo, 0, wx.EXPAND | wx.ALL, 8)
 
         self._notifications_check = wx.CheckBox(
@@ -233,6 +243,30 @@ class SettingsDialog(wx.Dialog):
             self._general_page, label=i18n.t("announce_sync_events_label")
         )
         gen_sizer.Add(self._announce_sync_check, 0, wx.ALL, 8)
+
+        # Turns the checking itself off, not just its sound: set to off, the
+        # message field never calls into the Windows spell-check COM service
+        # at all (see ConversationsPanel._spell_check_enabled()). Silencing
+        # only the cue is already possible per-event under Eventos Sonoros.
+        #
+        # Radio group, not a checkbox: Windows has a spelling setting of its
+        # own (Settings > Time & language > Typing > Spelling), and following
+        # it is the right default — but a checkbox that silently lost to
+        # Windows would announce a state the app does not actually have, and
+        # every control here is read out loud. Three options say what is
+        # really going on and leave the override available.
+        self._spell_check_radio = wx.RadioBox(
+            self._general_page,
+            label=i18n.t("spell_check_label"),
+            choices=[
+                i18n.t("spell_check_mode_windows"),
+                i18n.t("spell_check_mode_on"),
+                i18n.t("spell_check_mode_off"),
+            ],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_COLS,
+        )
+        gen_sizer.Add(self._spell_check_radio, 0, wx.EXPAND | wx.ALL, 8)
 
         # Radio group, not a checkbox: the two folding levels are different
         # trades, not "more of the same", so the user picks one rather than
@@ -539,6 +573,53 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(voice_msg_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._group_media_types_label = wx.StaticText(
+            self._ui_page, label=i18n.t("ui_group_media_default_types_label")
+        )
+        ui_sizer.Add(self._group_media_types_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        # wx.ListCtrl + EnableCheckBoxes - the same widget the reaction picker
+        # uses, deliberately NOT wx.CheckListBox. NVDA does not reliably expose
+        # a CheckListBox item's checked state or checkbox role on Windows,
+        # which is why the sound-events list a few tabs over spells its state
+        # out in the item text instead (see _sound_event_label). A ListCtrl's
+        # own checkboxes do carry the role, so the state is readable without
+        # that workaround.
+        self._group_media_types_list = wx.ListCtrl(
+            self._ui_page, style=wx.LC_REPORT | wx.LC_SINGLE_SEL, size=(-1, 110)
+        )
+        self._group_media_types_list.InsertColumn(
+            0, i18n.t("ui_group_media_default_types_label").replace("&", ""), width=360
+        )
+        self._group_media_types_list.EnableCheckBoxes(True)
+        for _key in GROUP_MEDIA_TYPES:
+            self._group_media_types_list.Append((i18n.t(f"group_media_type_{_key}"),))
+        # Start on the first row. Select/Focus move the item cursor inside the
+        # control and nothing else — SetFocus() is deliberately NOT called, so
+        # opening this tab does not yank the keyboard caret out of wherever the
+        # user was. Without it the list sits with nothing selected: Enter and
+        # Space have no row to toggle, and a screen reader arriving by Tab
+        # announces an empty selection instead of the first media type. Same
+        # convention the conversation list and the group data dialog's own
+        # lists follow.
+        if self._group_media_types_list.GetItemCount() > 0:
+            self._group_media_types_list.Focus(0)
+            self._group_media_types_list.Select(0)
+        # Space is the ListCtrl's native toggle; Enter is bound as well because
+        # every other list in this app activates with Enter, and the user should
+        # not have to know which of the two a given list wants.
+        # Space does NOT toggle a wx.ListCtrl checkbox on wxMSW — the
+        # native control treats it as a selection key and swallows it, so
+        # the box only ever moved with Enter. Handled explicitly here.
+        self._group_media_types_list.Bind(wx.EVT_KEY_DOWN, self._on_media_type_key_down)
+        self._group_media_types_list.Bind(
+            wx.EVT_LIST_ITEM_ACTIVATED, self._on_group_media_type_activated
+        )
+        ui_sizer.Add(
+            self._group_media_types_list, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8,
+        )
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -794,6 +875,55 @@ class SettingsDialog(wx.Dialog):
         )
         storage_sizer.Add(self._auto_download_media_check, 0, wx.ALL, 8)
 
+        self._auto_download_types_label = wx.StaticText(
+            self._storage_page,
+            label=i18n.t("storage_auto_download_media_types_label"),
+        )
+        storage_sizer.Add(
+            self._auto_download_types_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8
+        )
+
+        # wx.ListCtrl + EnableCheckBoxes, same as the group-media-types list a
+        # few tabs over — see the comment there for why not wx.CheckListBox.
+        #
+        # Links are not offered: a link is a text message with no file behind
+        # it, it never reaches the download path, and a checkbox that changes
+        # nothing is worse than an absent one. AUTO_DOWNLOAD_MEDIA_TYPES is
+        # derived from GROUP_MEDIA_TYPES so this stays in step with it.
+        self._auto_download_types_list = wx.ListCtrl(
+            self._storage_page, style=wx.LC_REPORT | wx.LC_SINGLE_SEL, size=(-1, 110)
+        )
+        self._auto_download_types_list.InsertColumn(
+            0,
+            i18n.t("storage_auto_download_media_types_label").replace("&", ""),
+            width=360,
+        )
+        self._auto_download_types_list.EnableCheckBoxes(True)
+        for _key in AUTO_DOWNLOAD_MEDIA_TYPES:
+            self._auto_download_types_list.Append(
+                (i18n.t(f"group_media_type_{_key}"),)
+            )
+        # First row selected, but no SetFocus() — opening this tab must not
+        # yank the caret out of wherever the user was. Same convention as every
+        # other list in this dialog.
+        if self._auto_download_types_list.GetItemCount() > 0:
+            self._auto_download_types_list.Focus(0)
+            self._auto_download_types_list.Select(0)
+        # Space does NOT toggle a wx.ListCtrl checkbox on wxMSW — the native
+        # control treats it as a selection key and swallows it — so it is
+        # handled explicitly, and Enter is bound too because every other list
+        # in this app activates with Enter.
+        self._auto_download_types_list.Bind(
+            wx.EVT_KEY_DOWN, self._on_media_type_key_down
+        )
+        self._auto_download_types_list.Bind(
+            wx.EVT_LIST_ITEM_ACTIVATED, self._on_auto_download_type_activated
+        )
+        storage_sizer.Add(
+            self._auto_download_types_list, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8,
+        )
+
         self._media_max_days_label = wx.StaticText(
             self._storage_page, label=i18n.t("media_max_days_label")
         )
@@ -836,6 +966,63 @@ class SettingsDialog(wx.Dialog):
             group=_alert_preview_group,
         )
 
+        # ── Files and saving tab ────────────────────────────────────────────
+        # Placed right after Armazenamento, which is the neighbouring subject.
+        # Inserting here shifts the two tabs below it, so the SetPageText
+        # indices in _retranslate() move with it — but every hardcoded
+        # SetSelection() in this file and in main.py targets a tab at index 8
+        # or lower, so none of them needed touching. Adding a tab ABOVE index 8
+        # would be a different job.
+        self._files_page = wx.Panel(self._notebook)
+        files_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Radio group rather than a checkbox pair: the three answers are
+        # mutually exclusive and none is "more of" another. This is only about
+        # the folder the Explorer dialog opens on — nothing here saves without
+        # asking. See core/save_location.py for why it is a setting at all.
+        self._save_folder_radio = wx.RadioBox(
+            self._files_page,
+            label=i18n.t("save_folder_mode_label"),
+            choices=[
+                i18n.t("save_folder_mode_last"),
+                i18n.t("save_folder_mode_downloads"),
+                i18n.t("save_folder_mode_custom"),
+            ],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_COLS,
+        )
+        files_sizer.Add(self._save_folder_radio, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._save_folder_custom_label = wx.StaticText(
+            self._files_page, label=i18n.t("save_folder_custom_label")
+        )
+        files_sizer.Add(
+            self._save_folder_custom_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8
+        )
+
+        # Field and button on one row, with the field taking the slack: the
+        # path is the long part and the button is a fixed word.
+        custom_row = wx.BoxSizer(wx.HORIZONTAL)
+        self._save_folder_custom_field = wx.TextCtrl(
+            self._files_page, style=wx.TE_DONTWRAP
+        )
+        custom_row.Add(self._save_folder_custom_field, 1, wx.EXPAND | wx.RIGHT, 8)
+        self._save_folder_browse_btn = wx.Button(
+            self._files_page, label=i18n.t("save_folder_browse_btn")
+        )
+        custom_row.Add(self._save_folder_browse_btn, 0)
+        files_sizer.Add(custom_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._save_folder_radio.Bind(
+            wx.EVT_RADIOBOX, self._on_save_folder_mode_changed
+        )
+        self._save_folder_browse_btn.Bind(
+            wx.EVT_BUTTON, self._on_browse_save_folder
+        )
+
+        self._files_page.SetSizer(files_sizer)
+        self._notebook.AddPage(self._files_page, i18n.t("tab_files_saving"))
+
         # ── Audio playback tab ───────────────────────────────────────────────
         self._audio_page = wx.Panel(self._notebook)
         audio_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -851,6 +1038,16 @@ class SettingsDialog(wx.Dialog):
             choices=[self._format_speed(s) for s in self._AUDIO_SPEED_STEPS],
         )
         audio_sizer.Add(self._audio_speed_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        # On by default — the existing behaviour. Off means a received voice
+        # note is never flagged "played" in the message list when playback
+        # ends, which also removes the row rewrite that a screen reader
+        # announces as a change on a message the user has usually already
+        # moved off (the next voice note in a chain).
+        self._mark_audio_played_check = wx.CheckBox(
+            self._audio_page, label=i18n.t("audio_mark_played_in_list_label")
+        )
+        audio_sizer.Add(self._mark_audio_played_check, 0, wx.ALL, 8)
 
         self._audio_page.SetSizer(audio_sizer)
         self._notebook.AddPage(self._audio_page, i18n.t("tab_audio_playback"))
@@ -896,6 +1093,23 @@ class SettingsDialog(wx.Dialog):
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
+    def _apply_spell_check_mode(self):
+        """Select the stored spell-check mode in the radio group.
+
+        Shows the user's own choice, never Windows' current reading: the
+        "follow Windows" option is what expresses the deference, so seeding
+        the control from the registry instead would leave no way to tell the
+        two apart — and no way to keep following Windows once it changed.
+        spell_check_mode() (core/spell_checker.py) resolves the default and
+        migrates the legacy `spell_check_enabled` bool.
+
+        Its own method, rather than inline in _load_values(), so it can be
+        exercised against a stub carrying just the radio — SettingsDialog is
+        a wx.Dialog and cannot be built without a running wx.App.
+        """
+        mode = spell_check_mode(self.main_window.settings.get("general", {}))
+        self._spell_check_radio.SetSelection(SPELL_CHECK_MODES.index(mode))
+
     def _load_values(self):
         """Populate controls from current settings."""
         lang_code = self.main_window.settings.get("general", {}).get("language", "pt-BR")
@@ -912,6 +1126,17 @@ class SettingsDialog(wx.Dialog):
         self._call_popup_check.SetValue(call_settings.get("popup_enabled", True))
         self._update_call_fields_state()
 
+        files_settings = self.main_window.settings.get(save_location.SECTION, {})
+        self._save_folder_radio.SetSelection(
+            save_location.mode_index(
+                files_settings.get(save_location.MODE_KEY, save_location.DEFAULT_MODE)
+            )
+        )
+        self._save_folder_custom_field.SetValue(
+            files_settings.get(save_location.CUSTOM_KEY, "") or ""
+        )
+        self._sync_save_folder_controls()
+
         keep_muted_silent = self.main_window.settings.get("general", {}).get(
             "keep_muted_chats_silent_when_open", True
         )
@@ -919,6 +1144,8 @@ class SettingsDialog(wx.Dialog):
 
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
         self._announce_sync_check.SetValue(announce_sync)
+
+        self._apply_spell_check_mode()
 
         # "off" unless the user chose otherwise — including for installs
         # whose settings.json predates the option and has no key at all.
@@ -1059,12 +1286,18 @@ class SettingsDialog(wx.Dialog):
         self._status_media_viewer_dialog_cb.SetValue(bool(status_media_viewer_dialog))
 
         voice_message_mode = self.main_window.settings.get("user_interface", {}).get(
-            "voice_message_mode", "audio"
+            "voice_message_mode", "voice_message"
         )
         if voice_message_mode == "voice_message":
             self._voice_msg_mode_voice_rb.SetValue(True)
         else:
             self._voice_msg_mode_audio_rb.SetValue(True)
+
+        self._load_group_media_types(
+            self.main_window.settings.get("user_interface", {}).get(
+                "group_media_default_types"
+            )
+        )
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1147,6 +1380,12 @@ class SettingsDialog(wx.Dialog):
         self._media_max_mb_field.SetValue(str(storage.get("media_max_mb", 100)))
         self._probe_video_duration_check.SetValue(
             storage.get("probe_video_duration_on_download", False)
+        )
+        self._load_auto_download_types(storage.get("auto_download_media_types"))
+
+        audio_playback = self.main_window.settings.get("audio_playback", {})
+        self._mark_audio_played_check.SetValue(
+            audio_playback.get("mark_audio_played_in_list", True)
         )
 
     def _set_alert_combo(self, combo, choice_key: str):
@@ -1342,6 +1581,56 @@ class SettingsDialog(wx.Dialog):
         self._reload_alert_tone_choices()
         event.Skip()
 
+    # ── Files and saving tab ────────────────────────────────────────────────
+
+    def _sync_save_folder_controls(self):
+        """Enable the custom-folder controls only for the mode that uses them.
+
+        Disabled rather than hidden: hiding reflows the tab every time the
+        radio moves, and a control that appears and disappears under a screen
+        reader is harder to follow than one that is consistently there and
+        consistently unavailable. Disabling also takes them out of the tab
+        order, so they are not dead stops for someone arrowing through.
+        """
+        is_custom = (
+            save_location.mode_from_index(self._save_folder_radio.GetSelection())
+            == save_location.MODE_CUSTOM
+        )
+        for control in (self._save_folder_custom_label,
+                        self._save_folder_custom_field,
+                        self._save_folder_browse_btn):
+            control.Enable(is_custom)
+
+    def _on_save_folder_mode_changed(self, event):
+        self._sync_save_folder_controls()
+        event.Skip()
+
+    def _on_browse_save_folder(self, event):
+        """Pick the custom folder through Explorer's own folder picker.
+
+        defaultPath is whatever the field currently holds, when that is still a
+        real directory — reopening the picker on the folder the user already
+        chose is the difference between adjusting a choice and making it again
+        from the drive root.
+        """
+        i18n = self.main_window.i18n
+        current = (self._save_folder_custom_field.GetValue() or "").strip()
+        try:
+            default_path = current if current and os.path.isdir(current) else ""
+        except (OSError, ValueError):
+            default_path = ""
+        with wx.DirDialog(
+            self,
+            message=i18n.t("save_folder_browse_dialog_title"),
+            defaultPath=default_path,
+            style=wx.DD_DEFAULT_STYLE,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            chosen = dlg.GetPath()
+        self._save_folder_custom_field.SetValue(chosen)
+        self._save_folder_custom_field.SetFocus()
+
     def _on_import_sound_pack_folder(self, event):
         i18n = self.main_window.i18n
         with wx.DirDialog(
@@ -1518,6 +1807,31 @@ class SettingsDialog(wx.Dialog):
 
     def _validate(self) -> bool:
         """Return True if all values are valid; show an error and return False otherwise."""
+        # Custom save folder: only meaningful when that mode is the one
+        # selected, and only worth refusing when the folder does not exist.
+        # Saying so here beats accepting it silently — resolve_save_dialog_folder()
+        # would fall back to Downloads and the user would be left thinking the
+        # setting does not work.
+        if (save_location.mode_from_index(self._save_folder_radio.GetSelection())
+                == save_location.MODE_CUSTOM):
+            custom = (self._save_folder_custom_field.GetValue() or "").strip()
+            try:
+                custom_ok = bool(custom) and os.path.isdir(custom)
+            except (OSError, ValueError):
+                custom_ok = False
+            if not custom_ok:
+                wx.MessageBox(
+                    self.main_window.i18n.t("save_folder_custom_missing"),
+                    self.main_window.i18n.t("error").format(
+                        app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                self._notebook.SetSelection(
+                    self._notebook.FindPage(self._files_page))
+                self._save_folder_custom_field.SetFocus()
+                return False
+
         page_size_str = self._messages_page_size_field.GetValue().strip()
         try:
             page_size = int(page_size_str)
@@ -1734,6 +2048,77 @@ class SettingsDialog(wx.Dialog):
 
         return True
 
+    def _on_group_media_type_activated(self, event):
+        """Enter on a row toggles its checkbox, matching Space."""
+        idx = event.GetIndex()
+        if 0 <= idx < self._group_media_types_list.GetItemCount():
+            self._group_media_types_list.CheckItem(
+                idx, not self._group_media_types_list.IsItemChecked(idx)
+            )
+
+    def _on_auto_download_type_activated(self, event):
+        """Enter on a row toggles its checkbox, matching Space."""
+        idx = event.GetIndex()
+        if 0 <= idx < self._auto_download_types_list.GetItemCount():
+            self._auto_download_types_list.CheckItem(
+                idx, not self._auto_download_types_list.IsItemChecked(idx)
+            )
+
+    def _selected_auto_download_types(self) -> list:
+        """The checked categories, in AUTO_DOWNLOAD_MEDIA_TYPES order."""
+        return [
+            key for idx, key in enumerate(AUTO_DOWNLOAD_MEDIA_TYPES)
+            if self._auto_download_types_list.IsItemChecked(idx)
+        ]
+
+    def _load_auto_download_types(self, saved):
+        """Check the saved categories.
+
+        A missing or non-list value checks everything — that is the default,
+        and it is what a settings.json predating this option looks like.
+        Reading that as "nothing selected" would silently stop every media
+        download for existing installs. An explicitly empty list is honoured:
+        unchecking everything is a legitimate choice, and it is not the same as
+        never having chosen. Mirrors core.utils.auto_download_allows().
+        """
+        if not isinstance(saved, (list, tuple)):
+            saved = AUTO_DOWNLOAD_MEDIA_TYPES
+        for idx, key in enumerate(AUTO_DOWNLOAD_MEDIA_TYPES):
+            self._auto_download_types_list.CheckItem(idx, key in saved)
+
+    def _on_media_type_key_down(self, event):
+        """Space toggles the focused checkbox, matching Enter."""
+        if event.GetKeyCode() != wx.WXK_SPACE:
+            event.Skip()
+            return
+        lst = event.GetEventObject()
+        idx = lst.GetFocusedItem()
+        if idx is not None and 0 <= idx < lst.GetItemCount():
+            lst.CheckItem(idx, not lst.IsItemChecked(idx))
+            # Nothing to refresh here — this list only records a default.
+
+    def _selected_group_media_types(self) -> list:
+        """The checked categories, in GROUP_MEDIA_TYPES order."""
+        return [
+            key for idx, key in enumerate(GROUP_MEDIA_TYPES)
+            if self._group_media_types_list.IsItemChecked(idx)
+        ]
+
+    def _load_group_media_types(self, saved):
+        """Check the saved categories.
+
+        A missing or non-list value checks everything: that is the documented
+        default, and it is also what a settings.json written by a build
+        predating this option looks like - reading it as "nothing selected"
+        would leave the Media tab permanently empty for every existing user.
+        An explicitly empty list is honoured, since unchecking everything is a
+        choice the user can legitimately make.
+        """
+        if not isinstance(saved, (list, tuple)):
+            saved = GROUP_MEDIA_TYPES
+        for idx, key in enumerate(GROUP_MEDIA_TYPES):
+            self._group_media_types_list.CheckItem(idx, key in saved)
+
     def _apply_values(self) -> bool:
         """Validate, save, and apply all settings. Returns True on success."""
         if not self._validate():
@@ -1752,6 +2137,18 @@ class SettingsDialog(wx.Dialog):
         page_jump_size = int(self._page_jump_size_field.GetValue().strip())
         self.main_window.settings.setdefault("user_interface", {})["page_jump_size"] = page_jump_size
         self.main_window.settings.setdefault("user_interface", {})["page_up_down_step"] = page_jump_size
+
+        # Files and saving: which folder a Save As dialog opens on.
+        # save_dialog_last_folder is deliberately NOT written here — it is
+        # owned by the save dialogs themselves (see
+        # save_location.remember_save_dialog_folder), and overwriting it from
+        # this dialog would discard the folder the user last actually saved to.
+        files_section = self.main_window.settings.setdefault(
+            save_location.SECTION, {})
+        files_section[save_location.MODE_KEY] = save_location.mode_from_index(
+            self._save_folder_radio.GetSelection())
+        files_section[save_location.CUSTOM_KEY] = (
+            self._save_folder_custom_field.GetValue() or "").strip()
 
         # UI: focus on open
         focus_on_open = (
@@ -1815,11 +2212,15 @@ class SettingsDialog(wx.Dialog):
         ] = self._status_media_viewer_dialog_cb.GetValue()
         # UI: reading voice messages in chats and status
         voice_message_mode = "voice_message" if self._voice_msg_mode_voice_rb.GetValue() else "audio"
-        old_vm_mode = self.main_window.settings.get("user_interface", {}).get("voice_message_mode", "audio")
+        old_vm_mode = self.main_window.settings.get("user_interface", {}).get("voice_message_mode", "voice_message")
         vm_mode_changed = (old_vm_mode != voice_message_mode)
         self.main_window.settings.setdefault("user_interface", {})[
             "voice_message_mode"
         ] = voice_message_mode
+
+        self.main_window.settings.setdefault("user_interface", {})[
+            "group_media_default_types"
+        ] = self._selected_group_media_types()
 
         # UI: how to refer to the user's own messages/replies in the messages list
         if self._self_ref_voce_rb.GetValue():
@@ -1941,6 +2342,13 @@ class SettingsDialog(wx.Dialog):
             self._announce_sync_check.GetValue()
         )
 
+        # Spell checking in the message field. Read live on every keystroke by
+        # ConversationsPanel, so this takes effect immediately — no restart,
+        # and no need to rebuild the panel's checker here.
+        self.main_window.settings.setdefault("general", {})["spell_check_mode"] = (
+            SPELL_CHECK_MODES[self._spell_check_radio.GetSelection()]
+        )
+
         # Unicode folding in searches
         _sel = self._search_norm_radio.GetSelection()
         self.main_window.settings.setdefault("general", {})["search_normalization"] = (
@@ -2041,7 +2449,12 @@ class SettingsDialog(wx.Dialog):
             "media_max_days": int(self._media_max_days_field.GetValue().strip()),
             "media_max_mb": int(self._media_max_mb_field.GetValue().strip()),
             "probe_video_duration_on_download": self._probe_video_duration_check.GetValue(),
+            "auto_download_media_types": self._selected_auto_download_types(),
         })
+
+        self.main_window.settings.setdefault("audio_playback", {})[
+            "mark_audio_played_in_list"
+        ] = self._mark_audio_played_check.GetValue()
 
         # Persist and propagate
         self.main_window.save_settings()
@@ -2104,8 +2517,9 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(6, i18n.t("tab_sound_events"))
         self._notebook.SetPageText(7, i18n.t("tab_alert_tones"))
         self._notebook.SetPageText(8, i18n.t("tab_storage"))
-        self._notebook.SetPageText(9, i18n.t("tab_audio_playback"))
-        self._notebook.SetPageText(10, i18n.t("tab_calls"))
+        self._notebook.SetPageText(9, i18n.t("tab_files_saving"))
+        self._notebook.SetPageText(10, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(11, i18n.t("tab_calls"))
         self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
         self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
         self._audio_effects_label.SetLabel(i18n.t("audio_effects_output_device_label"))
@@ -2116,6 +2530,13 @@ class SettingsDialog(wx.Dialog):
         self._call_popup_check.SetLabel(i18n.t("calls_popup_enabled_label"))
         self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
+        self._spell_check_radio.SetLabel(i18n.t("spell_check_label"))
+        for _i, _key in enumerate((
+            "spell_check_mode_windows",
+            "spell_check_mode_on",
+            "spell_check_mode_off",
+        )):
+            self._spell_check_radio.SetItemLabel(_i, i18n.t(_key))
         self._search_norm_radio.SetLabel(i18n.t("search_normalization_label"))
         for _i, _key in enumerate((
             "search_normalization_off",
@@ -2123,6 +2544,15 @@ class SettingsDialog(wx.Dialog):
             "search_normalization_nfkd",
         )):
             self._search_norm_radio.SetItemLabel(_i, i18n.t(_key))
+        self._save_folder_radio.SetLabel(i18n.t("save_folder_mode_label"))
+        for _i, _key in enumerate((
+            "save_folder_mode_last",
+            "save_folder_mode_downloads",
+            "save_folder_mode_custom",
+        )):
+            self._save_folder_radio.SetItemLabel(_i, i18n.t(_key))
+        self._save_folder_custom_label.SetLabel(i18n.t("save_folder_custom_label"))
+        self._save_folder_browse_btn.SetLabel(i18n.t("save_folder_browse_btn"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
@@ -2150,6 +2580,23 @@ class SettingsDialog(wx.Dialog):
             i18n.t("ui_conversation_video_media_viewer_dialog_label")
         )
         self._status_media_viewer_dialog_cb.SetLabel(i18n.t("ui_status_media_viewer_dialog_label"))
+        self._group_media_types_label.SetLabel(
+            i18n.t("ui_group_media_default_types_label")
+        )
+        for _idx, _key in enumerate(GROUP_MEDIA_TYPES):
+            self._group_media_types_list.SetItem(
+                _idx, 0, i18n.t(f"group_media_type_{_key}")
+            )
+        self._mark_audio_played_check.SetLabel(
+            i18n.t("audio_mark_played_in_list_label")
+        )
+        self._auto_download_types_label.SetLabel(
+            i18n.t("storage_auto_download_media_types_label")
+        )
+        for _idx, _key in enumerate(AUTO_DOWNLOAD_MEDIA_TYPES):
+            self._auto_download_types_list.SetItem(
+                _idx, 0, i18n.t(f"group_media_type_{_key}")
+            )
         self._voice_msg_mode_box.SetLabel(i18n.t("ui_voice_message_mode_label"))
         self._voice_msg_mode_audio_rb.SetLabel(i18n.t("ui_voice_message_mode_audio"))
         self._voice_msg_mode_voice_rb.SetLabel(i18n.t("ui_voice_message_mode_voice_message"))
