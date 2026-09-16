@@ -250,13 +250,48 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
       if (action === 'offer') {
         let call: any = null;
+        const storeBeforeOffer = getCallStore();
+        const preexistingIds = new Set(
+          getModels(storeBeforeOffer).map((model) => callIdOf(model)).filter(Boolean)
+        );
+        const previousActiveId = callIdOf(storeBeforeOffer?.activeCall);
+
         for (let attempt = 0; attempt < 3 && !call; attempt += 1) {
           await ensureVoipRuntimeReady();
           const offered = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
-          call = offered || null;
-          for (let waitAttempt = 0; waitAttempt < 30 && !call; waitAttempt += 1) {
+
+          // Current WhatsApp Web promotes the real ongoing call through
+          // CallStore.activeCall.  The value returned by the legacy collection
+          // lookup may point at an older call model, so prefer a newly-active
+          // call and only trust the direct return value when it is not stale.
+          for (let waitAttempt = 0; waitAttempt < 50 && !call; waitAttempt += 1) {
+            const store = getCallStore();
+            const active = store?.activeCall;
+            const activeId = callIdOf(active);
+            if (
+              active &&
+              isOutgoingOrLiveCall(active) &&
+              (!previousActiveId || activeId !== previousActiveId)
+            ) {
+              call = active;
+              break;
+            }
+
+            const offeredId = callIdOf(offered);
+            if (offered && offeredId && !preexistingIds.has(offeredId)) {
+              call = offered;
+              break;
+            }
+
+            const freshModel = getModels(store).find((model) => {
+              const modelId = callIdOf(model);
+              return !!modelId && !preexistingIds.has(modelId) && isOutgoingOrLiveCall(model);
+            });
+            if (freshModel) {
+              call = freshModel;
+              break;
+            }
             await delay(100);
-            call = findCall();
           }
           if (!call && attempt < 2) await delay(300 * (attempt + 1));
         }

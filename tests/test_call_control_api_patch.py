@@ -105,3 +105,14 @@ def test_outgoing_call_allows_native_voip_more_than_generic_http_timeout():
     main_py = _source("client/main.py")
 
     assert '"offer",\n                        {"to": peer_jid, "isVideo": False},\n                        timeout=75,' in main_py
+
+
+def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    assert "const preexistingIds = new Set(" in controller
+    assert "const previousActiveId = callIdOf(storeBeforeOffer?.activeCall)" in controller
+    assert "const active = store?.activeCall" in controller
+    assert "activeId !== previousActiveId" in controller
+    assert "!preexistingIds.has(offeredId)" in controller
+    assert "!preexistingIds.has(modelId)" in controller
