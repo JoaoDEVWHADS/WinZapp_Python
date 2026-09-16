@@ -1067,10 +1067,17 @@ class SettingsDialog(wx.Dialog):
             self._calls_page, label=i18n.t("calls_popup_enabled_label")
         )
         calls_sizer.Add(self._call_popup_check, 0, wx.ALL, 8)
+        self._call_audio_settings_button = wx.Button(
+            self._calls_page, label="Configurações de áudio da chamada"
+        )
+        calls_sizer.Add(self._call_audio_settings_button, 0, wx.ALL, 8)
 
         self._calls_page.SetSizer(calls_sizer)
         self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
         self._call_alerts_check.Bind(wx.EVT_CHECKBOX, self._on_call_alerts_toggle)
+        self._call_audio_settings_button.Bind(
+            wx.EVT_BUTTON, self.main_window.open_call_audio_settings
+        )
 
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
