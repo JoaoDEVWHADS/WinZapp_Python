@@ -960,7 +960,7 @@
     "status_view_reactions": "Ver reações",
     "status_no_reactions": "Ainda sem reações.",
     "ui_self_reference_eu": "Eu",
-    "forward_multiselect_hint": "Ctrl+Espaço: marcar/desmarcar contacto. Ctrl+Shift+Espaço: marcar/desmarcar todos. Sem seleção, reencaminha para o contacto focado.",
+    "forward_multiselect_hint": "Ctrl+Espaço: marcar/desmarcar contacto. Espaço: quando já existir algo marcado, marca/desmarca o contacto focado. Ctrl+Shift+Espaço: marcar/desmarcar todos. Sem seleção, reencaminha para o contacto focado.",
     "forward_selected_messages_title": "Reencaminhar mensagens selecionadas",
     "selected": "Selecionado",
     "selected_suffix": "selecionado",

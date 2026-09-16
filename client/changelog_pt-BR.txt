@@ -1,8 +1,18 @@
 V1.1.2.0
 
-Esta versão corrige situações em que o WinZapp pedia para parear de novo sem necessidade.
+Esta versão corrige situações em que o WinZapp pedia para parear de novo sem necessidade, e traz um jeito mais rápido de marcar vários itens de uma vez.
+
+NOVIDADES
+
+- O Espaço reproduz e pausa o áudio ou o vídeo em foco. Antes essa tecla não fazia nada na lista de mensagens. Ela continua mais restrita que o Enter: nunca abre link, documento, visualizador nem conversa de contato.
+
+- Modo de seleção. Depois de marcar o primeiro item com Ctrl+Espaço, o Espaço sozinho passa a marcar e desmarcar os seguintes — na lista de conversas, na lista de mensagens e na janela de encaminhar — sem precisar segurar o Ctrl a cada um. O leitor de tela avisa quando o modo liga e quando desliga, e ele desliga sozinho assim que nada mais fica marcado. Se preferir que o Espaço sempre reproduza, desmarque "Usar Espaço para marcar/desmarcar enquanto houver algo marcado" em Configurações, Interface do usuário.
+
+- O Esc desmarca antes de fechar. Com mensagens marcadas, o primeiro Esc apenas desmarca todas e só o segundo fecha a conversa. Também pode ser desativado em Configurações, Interface do usuário.
 
 CORREÇÕES
+
+- As mensagens marcadas em uma conversa continuavam marcadas depois de fechá-la, e reapareciam marcadas ao abri-la de novo. Agora a seleção termina junto com a conversa.
 
 - Quando o WhatsApp recusava a conexão logo ao abrir o programa, a cópia de segurança do perfil não chegava a ser restaurada: se os códigos de pareamento começavam a aparecer nos primeiros segundos, o WinZapp encerrava a sessão e mandava parear de novo mesmo com uma cópia boa guardada. Agora ele restaura a cópia assim que o primeiro código aparece, e só pede para parear quando a restauração não resolve.
 

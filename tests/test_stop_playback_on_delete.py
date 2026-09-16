@@ -90,6 +90,9 @@ class _Stub:
         self._all_sorted_messages = list(self._sorted_messages)
         self._unread_sep_idx = -1
         self._messages_offset = 0
+        # A removed id also leaves the selection — see
+        # tests/test_selection_mode.py for why that matters.
+        self.selected_messages = set()
         self._current_audio_id = current_audio_id
         self._audio_stream = audio_stream
         self._current_video_msg_id = current_video_msg_id

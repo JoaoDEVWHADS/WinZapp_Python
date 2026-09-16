@@ -1269,7 +1269,7 @@ class SettingsDialog(wx.Dialog):
         )
         self._escape_clears_selection_cb.SetValue(bool(escape_clears_selection))
 
-        auto_focus_next_audio =self.main_window.settings.get("user_interface", {}).get(
+        auto_focus_next_audio = self.main_window.settings.get("user_interface", {}).get(
             "auto_focus_next_audio", True
         )
         self._auto_focus_next_audio_cb.SetValue(bool(auto_focus_next_audio))

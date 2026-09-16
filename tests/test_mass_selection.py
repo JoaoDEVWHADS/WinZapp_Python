@@ -211,6 +211,7 @@ class _Panel:
     _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
     _select_chat_at = ConversationsPanel._select_chat_at
     _all_chat_jids = ConversationsPanel._all_chat_jids
+    _chat_selection_visible = ConversationsPanel._chat_selection_visible
     _refresh_message_rows_by_ids = ConversationsPanel._refresh_message_rows_by_ids
     _set_message_row_texts = ConversationsPanel._set_message_row_texts
     _render_message_line = lambda self, msg, index=None, total=None: msg.get("key", {}).get("id", "")

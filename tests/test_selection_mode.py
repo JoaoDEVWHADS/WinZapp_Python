@@ -11,6 +11,11 @@ Also covered here: Esc clearing an active message selection before it closes
 the conversation, and the unconditional bug fix that stops a selection leaking
 into the next conversation (which ignores both settings on purpose).
 
+And the three ways the derived mode can go wrong, each found in review: an id
+left in the set by a message that was deleted underneath it, a filter hiding
+every selected chat while the mode stays on, and plain Space being consumed by
+a toggle that could not happen.
+
 ConversationsPanel is a wx.Panel and cannot be instantiated without a running
 wx.App, so the methods under test are bound onto plain stubs carrying only the
 attributes each one touches — same pattern as tests/test_bulk_selection.py and
@@ -23,7 +28,7 @@ from unittest.mock import Mock
 
 import wx
 
-from ui.conversations import ConversationsPanel
+from ui.conversations import ConversationsPanel, toggle_jid_selection
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,6 +113,7 @@ class _Stub:
     _toggle_message_selection = ConversationsPanel._toggle_message_selection
     _space_toggles_playback = ConversationsPanel._space_toggles_playback
     _toggle_chat_selection = ConversationsPanel._toggle_chat_selection
+    _chat_selection_visible = ConversationsPanel._chat_selection_visible
     _select_message_at = ConversationsPanel._select_message_at
     _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
     _on_messages_list_key_down = ConversationsPanel._on_messages_list_key_down
@@ -314,6 +320,211 @@ class TestConversationsListPlainSpace:
         assert stub.selected_chats == {"a@s.whatsapp.net"}
         stub.main_window.add_chats_to_ui.assert_called_once()
         assert stub.main_window.outputs == ["Selecionado. Modo de seleção ativado"]
+
+
+class TestADeletedMessageLeavesTheSelection:
+    """The mode is derived from selected_messages being non-empty, so an id
+    left behind by a message that no longer exists keeps plain Space silently
+    in selecting mode with nothing selected — and nothing ever announced the
+    mode turning on. Reachable with no user action at all, through
+    _mirror_remote_deletions()' 60s poll."""
+
+    def test_a_deletion_drops_the_id_from_the_selection(self):
+        from tests.test_phone_side_sync import _RemovalStub, _msg as _removal_msg
+
+        panel = _RemovalStub([_removal_msg("A1"), _removal_msg("A2")])
+        panel.selected_messages = {"A1", "A2"}
+
+        panel.remove_messages_by_id({"A1"})
+
+        assert panel.selected_messages == {"A2"}
+
+    def test_removing_the_only_selected_one_empties_the_set(self):
+        from tests.test_phone_side_sync import _RemovalStub, _msg as _removal_msg
+
+        panel = _RemovalStub([_removal_msg("A1"), _removal_msg("A2")])
+        panel.selected_messages = {"A1"}
+
+        panel.remove_messages_by_id({"A1"})
+
+        assert panel.selected_messages == set()
+
+    def test_an_id_with_no_row_on_screen_leaves_the_selection_too(self):
+        # The ordinary shape of a mirrored phone-side deletion: the ids are
+        # routinely not rendered rows (paginated out, or non-displayable).
+        from tests.test_phone_side_sync import _RemovalStub, _msg as _removal_msg
+
+        panel = _RemovalStub([_removal_msg("A1")])
+        panel.selected_messages = {"A1", "gone"}
+
+        panel.remove_messages_by_id({"gone"})
+
+        assert panel.selected_messages == {"A1"}
+
+
+class TestAFilteredChatListTakesSpaceBack:
+    """chats_list is reassigned to the filtered view whenever the conversation
+    filter or the search box changes, and nothing clears selected_chats. With
+    every selected chat hidden the user sees no selection and was told nothing,
+    so plain Space must be the native key again rather than quietly adding a
+    third chat to a selection they believe does not exist."""
+
+    def test_a_visible_selected_chat_keeps_the_mode_on(self):
+        stub = _Stub(chats_list=[{"remoteJid": "a@s.whatsapp.net"},
+                                 {"remoteJid": "b@s.whatsapp.net"}])
+        stub.selected_chats.add("a@s.whatsapp.net")
+
+        assert stub._chat_selection_visible() is True
+
+    def test_a_selection_hidden_by_the_filter_does_not(self):
+        stub = _Stub(chats_list=[{"remoteJid": "c@s.whatsapp.net"}])
+        stub.selected_chats.add("a@s.whatsapp.net")
+
+        assert stub._chat_selection_visible() is False
+
+    def test_an_empty_selection_is_not_visible_either(self):
+        stub = _Stub(chats_list=[{"remoteJid": "a@s.whatsapp.net"}])
+
+        assert stub._chat_selection_visible() is False
+
+    def test_space_falls_through_while_every_selected_chat_is_hidden(self):
+        stub = _Stub(chats_list=[{"remoteJid": "c@s.whatsapp.net"}])
+        stub.selected_chats.add("a@s.whatsapp.net")
+        event = _key_event(wx.WXK_SPACE)
+
+        stub._on_conv_list_key_down(event)
+
+        event.Skip.assert_called_once()
+        # Untouched: the mass actions still act on everything the user picked,
+        # filtered out of the list or not.
+        assert stub.selected_chats == {"a@s.whatsapp.net"}
+
+    def test_ctrl_space_is_unaffected_by_the_filter(self):
+        stub = _Stub(chats_list=[{"remoteJid": "c@s.whatsapp.net"}])
+        stub.selected_chats.add("a@s.whatsapp.net")
+
+        stub._on_conv_list_key_down(_key_event(wx.WXK_SPACE, ctrl=True))
+
+        assert stub.selected_chats == {"a@s.whatsapp.net", "c@s.whatsapp.net"}
+
+
+class TestPlainSpaceIsNeverSwallowedForNothing:
+    """Space is the one key people press by accident, so consuming it with no
+    sound, no speech and no effect is worse than doing nothing with it."""
+
+    def test_the_unread_separator_hands_the_key_back(self):
+        stub = _Stub(sorted_messages=[_msg("A1", "audioMessage", seconds=3),
+                                      _separator()],
+                     focused=1)
+        stub.selected_messages.add("A1")
+        event = _key_event(wx.WXK_SPACE)
+
+        stub._on_messages_list_key_down(event)
+
+        event.Skip.assert_called_once()
+        assert stub.selected_messages == {"A1"}
+
+    def test_a_message_with_no_id_hands_the_key_back(self):
+        stub = _Stub(sorted_messages=[_msg("A1"), _msg("")], focused=1)
+        stub.selected_messages.add("A1")
+        event = _key_event(wx.WXK_SPACE)
+
+        stub._on_messages_list_key_down(event)
+
+        event.Skip.assert_called_once()
+        assert stub.selected_messages == {"A1"}
+
+    def test_a_real_toggle_still_consumes_it(self):
+        stub = _Stub(sorted_messages=[_msg("A1"), _msg("A2")], focused=1)
+        stub.selected_messages.add("A1")
+        event = _key_event(wx.WXK_SPACE)
+
+        stub._on_messages_list_key_down(event)
+
+        event.Skip.assert_not_called()
+        assert stub.selected_messages == {"A1", "A2"}
+
+    def test_no_focused_chat_hands_the_key_back(self):
+        stub = _Stub(chats_list=[{"remoteJid": "a@s.whatsapp.net"}], focused=-1)
+        stub.selected_chats.add("a@s.whatsapp.net")
+        event = _key_event(wx.WXK_SPACE)
+
+        stub._on_conv_list_key_down(event)
+
+        event.Skip.assert_called_once()
+
+    def test_a_chat_row_with_no_jid_hands_the_key_back(self):
+        stub = _Stub(chats_list=[{"remoteJid": "a@s.whatsapp.net"}, {}], focused=1)
+        stub.selected_chats.add("a@s.whatsapp.net")
+        event = _key_event(wx.WXK_SPACE)
+
+        stub._on_conv_list_key_down(event)
+
+        event.Skip.assert_called_once()
+
+    def test_ctrl_space_keeps_swallowing_it(self):
+        # Out of scope for the fix — Ctrl+Space is deliberate, so a user who
+        # presses it on the separator is not surprised by silence.
+        stub = _Stub(sorted_messages=[_msg("A1"), _separator()], focused=1)
+        event = _key_event(wx.WXK_SPACE, ctrl=True)
+
+        stub._on_messages_list_key_down(event)
+
+        event.Skip.assert_not_called()
+        assert stub.selected_messages == set()
+
+
+class TestForwardDialogSelectionMode:
+    """The third surface. Its toggle lives in a closure inside
+    _on_menu_forward() (the selection set is local to the dialog), so
+    only the pure bookkeeping is reachable — the closure keeps the row repaint,
+    the sound and the announcement, none of which the set alone decides."""
+
+    def test_the_first_selection_turns_the_mode_on(self):
+        selected = set()
+
+        now_selected, was_active = toggle_jid_selection(selected, "a@s.whatsapp.net")
+
+        assert (now_selected, was_active) == (True, False)
+        assert selected == {"a@s.whatsapp.net"}
+
+    def test_deselecting_the_last_one_turns_it_off(self):
+        selected = {"a@s.whatsapp.net"}
+
+        now_selected, was_active = toggle_jid_selection(selected, "a@s.whatsapp.net")
+
+        assert (now_selected, was_active) == (False, True)
+        assert selected == set()
+
+    def test_a_middle_toggle_reports_no_transition(self):
+        selected = {"a@s.whatsapp.net", "b@s.whatsapp.net"}
+
+        now_selected, was_active = toggle_jid_selection(selected, "c@s.whatsapp.net")
+
+        assert (now_selected, was_active) == (True, True)
+        assert selected == {"a@s.whatsapp.net", "b@s.whatsapp.net", "c@s.whatsapp.net"}
+
+    def test_the_announcement_names_the_mode_the_same_way(self):
+        # What the closure does with the two booleans, against the shared
+        # helper the other two surfaces use.
+        stub = _Stub()
+        selected = set()
+
+        now_selected, was_active = toggle_jid_selection(selected, "a@s.whatsapp.net")
+        assert stub._selection_mode_announcement(
+            "Selecionado", was_active, bool(selected)
+        ) == "Selecionado. Modo de seleção ativado"
+
+        now_selected, was_active = toggle_jid_selection(selected, "a@s.whatsapp.net")
+        assert stub._selection_mode_announcement(
+            "Desmarcado", was_active, bool(selected)
+        ) == "Desmarcado. Modo de seleção desativado"
+
+    def test_the_dialog_actually_goes_through_it(self):
+        # The extraction is only worth anything while the closure still calls
+        # it — the dialog itself builds real widgets and cannot be run here.
+        assert "toggle_jid_selection(selected_jids, jid)" in _method_source(
+            "ConversationsPanel", "_on_menu_forward")
 
 
 class TestEscape:
