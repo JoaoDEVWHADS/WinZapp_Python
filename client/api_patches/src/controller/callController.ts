@@ -464,6 +464,16 @@ export async function callDiagnostics(req: Request, res: Response) {
           : '',
         emitterReady: backend?.WAWebVoipInit?.VoipInitEventEmitter?.getIsVoipInited?.(),
         emitterFailed: backend?.WAWebVoipInit?.VoipInitEventEmitter?.getDidVoipInitError?.(),
+        callMediaBridge: (() => {
+          const bridge = win.__winzappCallMediaBridge;
+          return bridge ? {
+            enabled: !!bridge.enabled,
+            micFramesPushed: bridge.micFramesPushed || 0,
+            micBytesPushed: bridge.micBytesPushed || 0,
+            micSamplesConsumed: bridge.micSamplesConsumed || 0,
+            micTrackLive: bridge.micDestination?.stream?.getAudioTracks?.()[0]?.readyState === 'live',
+          } : null;
+        })(),
         retryFunction: typeof backend?.WAWebVoipInit?.retryWAWebVoipInitAfterFailure,
         isVoipInitialized: conn?.isVoipInitialized,
         connectionKeys: conn ? Object.keys(conn).filter((key) => /voip|call/i.test(key)).sort() : [],
