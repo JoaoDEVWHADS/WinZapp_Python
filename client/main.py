@@ -22155,6 +22155,10 @@ class MainWindow(wx.Frame):
         for a round that has been superseded fills media/ with files nothing on
         disk refers to. Downloads already running finish.
         """
+        if getattr(self, "_active_voice_call", None):
+            logging.info("[sync_media_for_all_chats] paused during active voice call")
+            return 0
+
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
                         "stickerMessage", "videoMessage",
                         "audio", "ptt", "document", "doc", "image", "sticker", "video"}
@@ -22172,6 +22176,8 @@ class MainWindow(wx.Frame):
         downloaded = 0
         timeout = self._MEDIA_SYNC_TIMEOUT
         def _download(msg):
+            if getattr(self, "_active_voice_call", None):
+                return False
             if should_stop is not None and should_stop():
                 return False
             return self.sync_if_media(msg, timeout)
