@@ -2656,10 +2656,10 @@ class MainWindow(wx.Frame):
         )
         self.voice_call_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
         self.voice_call_settings_button = wx.Button(
-            self.voice_call_bar, label="Configurações"
+            self.voice_call_bar, label=self.i18n.t("voice_call_settings_button")
         )
         self.voice_call_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
-        self.voice_call_mute_button = wx.Button(self.voice_call_bar, label="Silenciar microfone")
+        self.voice_call_mute_button = wx.Button(self.voice_call_bar, label=self.i18n.t("voice_call_mute_button"))
         self.voice_call_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
         voice_call_sizer.Add(
             self.voice_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
@@ -2678,15 +2678,15 @@ class MainWindow(wx.Frame):
         # Calls live in their own modeless window so changing focus back to
         # the conversation never leaves call controls stranded in the main UI.
         self.voice_call_window = wx.Frame(
-            self, title="Voice call", size=(430, 150),
+            self, title=self.i18n.t("voice_call_window_title"), size=(560, 150),
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
         )
         call_panel = wx.Panel(self.voice_call_window)
         call_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.voice_call_window_label = wx.StaticText(call_panel, label="")
-        self.voice_call_window_end_button = wx.Button(call_panel, label="Desligar")
-        self.voice_call_window_settings_button = wx.Button(call_panel, label="Configurações")
-        self.voice_call_window_mute_button = wx.Button(call_panel, label="Silenciar microfone")
+        self.voice_call_window_end_button = wx.Button(call_panel, label=self.i18n.t("voice_call_end_button"))
+        self.voice_call_window_settings_button = wx.Button(call_panel, label=self.i18n.t("voice_call_settings_button"))
+        self.voice_call_window_mute_button = wx.Button(call_panel, label=self.i18n.t("voice_call_mute_button"))
         self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
         self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
         self.voice_call_window_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
@@ -6142,7 +6142,7 @@ class MainWindow(wx.Frame):
     def open_call_audio_settings(self, _event=None):
         """Open the focused, keyboard-friendly device chooser for calls."""
         import sounddevice as sd
-        dialog = wx.Dialog(getattr(self, "voice_call_window", self), title="Configurações da chamada", size=(560, 390))
+        dialog = wx.Dialog(getattr(self, "voice_call_window", self), title=self.i18n.t("voice_call_settings_title"), size=(560, 390))
         root = wx.BoxSizer(wx.VERTICAL)
         notebook = wx.Notebook(dialog)
         cfg = self.settings.get("audio_devices", {})
@@ -6154,12 +6154,12 @@ class MainWindow(wx.Frame):
         input_names = [name for _, name in enumerate_input_devices()]
         lists = []
         for title, names, selected in (
-            ("Dispositivos de reprodução", output_names, cfg.get("output_device_name", "")),
-            ("Dispositivos de gravação", input_names, cfg.get("input_device_name", "")),
+            (self.i18n.t("voice_call_playback_devices"), output_names, cfg.get("output_device_name", "")),
+            (self.i18n.t("voice_call_recording_devices"), input_names, cfg.get("input_device_name", "")),
         ):
             page = wx.Panel(notebook)
             page_sizer = wx.BoxSizer(wx.VERTICAL)
-            listing = wx.ListBox(page, choices=["Padrão"] + names, style=wx.LB_SINGLE)
+            listing = wx.ListBox(page, choices=[self.i18n.t("audio_device_default")] + names, style=wx.LB_SINGLE)
             listing.SetSelection((names.index(selected) + 1) if selected in names else 0)
             page_sizer.Add(listing, 1, wx.EXPAND | wx.ALL, 12)
             page.SetSizer(page_sizer)
@@ -6182,19 +6182,22 @@ class MainWindow(wx.Frame):
             listing.Bind(wx.EVT_KEY_DOWN, on_key)
         root.Add(notebook, 1, wx.EXPAND | wx.ALL, 8)
         buttons = wx.StdDialogButtonSizer()
-        apply_button = wx.Button(dialog, wx.ID_APPLY, "Aplicar")
-        ok_button = wx.Button(dialog, wx.ID_OK, "OK")
-        buttons.AddButton(apply_button); buttons.AddButton(ok_button); buttons.Realize()
+        cancel_button = wx.Button(dialog, wx.ID_CANCEL, self.i18n.t("cancel"))
+        apply_button = wx.Button(dialog, wx.ID_APPLY, self.i18n.t("apply"))
+        ok_button = wx.Button(dialog, wx.ID_OK, self.i18n.t("ok"))
+        buttons.AddButton(cancel_button); buttons.AddButton(apply_button); buttons.AddButton(ok_button); buttons.Realize()
         root.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         def apply(_evt=None):
             out = lists[0][0].GetStringSelection()
             inp = lists[1][0].GetStringSelection()
-            self.settings.setdefault("audio_devices", {})["output_device_name"] = "" if out == "Padrão" else out
-            self.settings.setdefault("audio_devices", {})["input_device_name"] = "" if inp == "Padrão" else inp
+            default_name = self.i18n.t("audio_device_default")
+            self.settings.setdefault("audio_devices", {})["output_device_name"] = "" if out == default_name else out
+            self.settings.setdefault("audio_devices", {})["input_device_name"] = "" if inp == default_name else inp
             self.effective_input_device_name = self.settings["audio_devices"]["input_device_name"]
             self.save_settings()
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
+        cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
         dialog.SetSizer(root)
         lists[0][0].SetFocus()
         dialog.ShowModal()
@@ -6277,7 +6280,7 @@ class MainWindow(wx.Frame):
             self.Layout()
             return
         muted = bool(getattr(getattr(self, "_call_audio_session", None), "microphone_muted", False))
-        mute_label = "Ativar microfone" if muted else "Silenciar microfone"
+        mute_label = self.i18n.t("voice_call_unmute_button" if muted else "voice_call_mute_button")
         for button_name in ("voice_call_mute_button", "voice_call_window_mute_button"):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -6292,7 +6295,7 @@ class MainWindow(wx.Frame):
             if not window.IsShown():
                 window.Show()
                 window.Raise()
-            self.voice_call_window_end_button.SetFocus()
+            self.voice_call_window_mute_button.SetFocus()
         bar.Hide()
         self.Layout()
 
@@ -6302,6 +6305,7 @@ class MainWindow(wx.Frame):
             return
         session.set_microphone_muted(not session.microphone_muted)
         self._sync_voice_call_bar()
+        wx.CallAfter(self.voice_call_window_mute_button.SetFocus)
 
     def on_voice_call_state_event(self, event: dict):
         """Apply the complete call lifecycle emitted by the page CallStore."""
