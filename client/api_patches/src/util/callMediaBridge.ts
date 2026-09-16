@@ -348,6 +348,20 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
             }
             const stack = await getStack();
             if (stack) {
+              // WA-JS exposes the stack before WhatsApp's worker-side
+              // initialization has completed.  The connection model is the
+              // only public readiness signal in newer builds; accepting the
+              // stack object alone causes RPC attempted without successful
+              // voipInit during the first call.
+              const conn =
+                win.WPP?.whatsapp?.ConnStore ||
+                win.Store?.Conn ||
+                win.WPP?.whatsapp?.Conn;
+              if (conn && conn.isVoipInitialized === false) {
+                lastError = 'WhatsApp VoIP connection initialization is pending';
+                await delay(250 * (attempt + 1));
+                continue;
+              }
               return {
                 ready: true,
                 acceptCall: typeof stack.acceptCall === 'function',
