@@ -57,6 +57,8 @@
         "preserve_typed_text_as_attachment_caption": true,
         "bulk_action_shortcuts": true,
         "confirm_mark_all_read": true,
+        "space_selects_in_selection_mode": true,
+        "escape_clears_selection": true,
         "auto_focus_next_audio": true,
         "selected_announcement_position": "end",
         "show_yesterday_label": true,

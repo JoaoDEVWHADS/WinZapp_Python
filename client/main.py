@@ -5748,8 +5748,47 @@ class MainWindow(wx.Frame):
         """
         if self._window_hidden:
             self.restore_window()
-        if hasattr(self, "conversations_panel"):
-            self.conversations_panel.navigate_to_jid(jid)
+        if not hasattr(self, "conversations_panel"):
+            return
+        # Same bug on_alt_1() fixed for its own hotkey, reached from a
+        # different entry point: a toast click (or the participant-list
+        # dialog) can call this while Status or the Archived list is the
+        # panel actually shown, and both navigate_to_jid()/
+        # navigate_to_conversation() SetFocus()/Select() controls inside
+        # conversations_panel regardless of whether it's visible — leaving
+        # NVDA focus stuck on an invisible control that only Alt+1 could
+        # recover. Make the correct top-level panel visible first.
+        if self.is_chat_archived(jid) and hasattr(self, "archived_conversations_panel"):
+            chat = None
+            for candidate in self.archived_conversations_panel.chats_list:
+                if candidate.get("remoteJid", "") == jid:
+                    chat = candidate
+                    break
+            if chat is not None:
+                # Mirrors ArchivedConversationsPanel.on_conversation_selected()'s
+                # panel dance, plus hiding status_panel — that method never
+                # needs to because it only runs while Status is already
+                # hidden, but we can be called from there directly.
+                self.archived_conversations_panel.Hide()
+                if hasattr(self, "status_panel"):
+                    self.status_panel.Hide()
+                self.conversations_panel.conversations_label.Hide()
+                self.conversations_panel.conversations_list.Hide()
+                self.conversations_panel.Show()
+                self.content_panel.Layout()
+                self.conversations_panel.navigate_to_conversation(chat)
+                return
+            # Stale archived state (or panel missing) — fall through to the
+            # non-archived path below as a defensive fallback.
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.Hide()
+        if hasattr(self, "status_panel"):
+            self.status_panel.Hide()
+        self.conversations_panel.conversations_label.Show()
+        self.conversations_panel.conversations_list.Show()
+        self.conversations_panel.Show()
+        self.content_panel.Layout()
+        self.conversations_panel.navigate_to_jid(jid)
 
     # ── Incoming real-time messages ───────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 V1.1.2.0
 
-Esta versão corrige situações em que o WinZapp pedia para emparelhar de novo sem necessidade, e traz opções nas confirmações de limpar uma conversa e de marcar todas as conversas como lidas.
+Esta versão corrige situações em que o WinZapp pedia para emparelhar de novo sem necessidade, traz uma forma mais rápida de marcar vários itens de uma vez e opções nas confirmações de limpar uma conversa e de marcar todas as conversas como lidas.
 
 NOVIDADES
 
@@ -12,7 +12,15 @@ NOVIDADES
 
 - Exportar e importar as definições. No menu Ficheiro, “Exportar definições” guarda as suas preferências num ficheiro, e “Importar definições” aplica esse ficheiro aqui, de imediato, sem reiniciar. Serve para levar tudo para outro computador ou outra conta. A sua ligação ao WhatsApp e o que pertence a cada conta, como as conversas limpas e os sons por conversa, não vão no ficheiro. Se usa uma API própria, o endereço, a porta e a chave dela vão juntos.
 
+- O Espaço reproduz e pausa o áudio ou o vídeo em foco. Antes esta tecla não fazia nada na lista de mensagens. Continua mais restrita do que o Enter: nunca abre ligação, documento, visualizador nem conversa de contacto.
+
+- Modo de seleção. Depois de marcar o primeiro item com Ctrl+Espaço, o Espaço sozinho passa a marcar e desmarcar os seguintes — na lista de conversas, na lista de mensagens e na janela de reencaminhar — sem ter de manter o Ctrl premido em cada um. O leitor de ecrã avisa quando o modo liga e quando desliga, e ele desliga sozinho assim que nada fica marcado. Se preferir que o Espaço reproduza sempre, desmarque "Utilizar Espaço para marcar/desmarcar enquanto existir algo marcado" nas Definições, Interface do utilizador.
+
+- O Esc desmarca antes de fechar. Com mensagens marcadas, o primeiro Esc apenas desmarca todas e só o segundo fecha a conversa. Também pode ser desativado nas Definições, Interface do utilizador.
+
 CORREÇÕES
+
+- As mensagens marcadas numa conversa continuavam marcadas depois de a fechar, e reapareciam marcadas ao abri-la de novo. Agora a seleção termina juntamente com a conversa.
 
 - Quando o WhatsApp recusava a ligação logo ao abrir o programa, a cópia de segurança do perfil não chegava a ser restaurada: se os códigos de emparelhamento começavam a aparecer nos primeiros segundos, o WinZapp terminava a sessão e mandava emparelhar de novo mesmo com uma cópia boa guardada. Agora restaura a cópia assim que o primeiro código aparece, e só pede para emparelhar quando a restauração não resolve.
 

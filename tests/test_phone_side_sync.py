@@ -95,6 +95,9 @@ class _RemovalStub:
         self._all_sorted_messages = list(sorted_messages)
         self._messages_offset = 0
         self._unread_sep_idx = -1
+        # A removed id also leaves the selection — see
+        # tests/test_selection_mode.py for why that matters.
+        self.selected_messages = set()
         # Not under test here (see tests/test_stop_playback_on_delete.py) —
         # just need _stop_playback_for_removed_messages() to find nothing
         # playing and no-op.

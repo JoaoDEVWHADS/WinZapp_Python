@@ -1,0 +1,40 @@
+name: New feature
+description: Propose a new feature for WinZapp.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user's need and desired outcome. Do not include personal data, messages, or phone numbers.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this feature solve?
+      description: Explain the current situation and who it affects.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How should it work?
+      description: Describe the expected flow or behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Share solutions or workarounds you have already tried.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched for existing issues before opening this one.
+          required: true
+        - label: I did not include personal data, messages, or credentials.
+          required: true

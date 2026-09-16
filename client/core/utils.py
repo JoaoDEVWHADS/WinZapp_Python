@@ -878,6 +878,13 @@ DEFAULT_SETTINGS = {
         "preserve_typed_text_as_attachment_caption": True,
         "bulk_action_shortcuts": True,
         "confirm_mark_all_read": True,
+        # Once a selection exists, plain Space keeps selecting instead of
+        # playing/pausing the focused message ("selection mode"), and Esc
+        # clears the message selection before it closes the conversation.
+        # Both on by default, both opt-out: they change muscle memory for
+        # users who already learned the previous behaviour.
+        "space_selects_in_selection_mode": True,
+        "escape_clears_selection": True,
         "auto_focus_next_audio": True,
         "selected_announcement_position": "end",
         "show_yesterday_label": True,

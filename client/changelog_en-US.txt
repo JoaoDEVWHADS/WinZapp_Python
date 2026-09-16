@@ -1,6 +1,6 @@
 V1.1.2.0
 
-This release fixes situations where WinZapp asked you to pair again when it did not need to, and adds options to the confirmations for clearing a chat and for marking all chats as read.
+This release fixes situations where WinZapp asked you to pair again when it did not need to, brings a faster way to select several items at once, and adds options to the confirmations for clearing a chat and for marking all chats as read.
 
 WHAT'S NEW
 
@@ -12,7 +12,15 @@ WHAT'S NEW
 
 - Export and import your settings. In the File menu, “Export settings” writes your preferences to a file and “Import settings” applies that file here, right away, without restarting — for moving everything to another computer or another account. Your WhatsApp connection, and what belongs to one account such as cleared chats and per-chat sounds, stay out of the file. If you run your own API, its address, port and key travel with it.
 
+- Space plays and pauses the focused audio or video. That key did nothing in the message list before. It stays narrower than Enter: it never opens a link, a document, the viewer or a contact's conversation.
+
+- Selection mode. Once you have selected the first item with Ctrl+Space, Space on its own selects and deselects the following ones — in the chat list, in the message list and in the forward window — without holding Ctrl for every one of them. The screen reader says when the mode turns on and when it turns off, and it turns off by itself as soon as nothing is selected any more. If you would rather Space always played, untick "Use Space to select/deselect whenever a selection already exists" in Settings, User Interface.
+
+- Esc deselects before closing. With messages selected, the first Esc only deselects them all and just the second one closes the conversation. It can be turned off in Settings, User Interface too.
+
 FIXES
+
+- Messages you had selected in a conversation stayed selected after you closed it, and came back selected when you opened it again. The selection now ends with the conversation.
 
 - When WhatsApp refused the connection right after the app was opened, the backup copy of the browser profile was never restored: if pairing codes started arriving in the first few seconds, WinZapp closed the session and sent you to pair again even with a good copy saved. It now restores the copy as soon as the first code appears, and only asks you to pair when the restore does not help.
 

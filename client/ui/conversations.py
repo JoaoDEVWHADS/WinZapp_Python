@@ -346,6 +346,54 @@ def _fmt_last_seen(ts, i18n) -> str:
         return ""
 
 
+def toggle_jid_selection(selected: set, jid: str) -> "tuple[bool, bool]":
+    """Add/remove *jid* in *selected* and return (now_selected, was_active).
+
+    The pure half of the forward dialog's Ctrl+Space/Space toggle, which lives
+    inside a closure in _on_menu_forward() (its selection set is local to the
+    dialog, not a panel attribute) and was therefore the one selection-mode
+    surface no test could reach. The caller keeps the wx work — the row
+    repaint, the sound, the announcement — since none of that is decidable
+    from the set alone.
+
+    *was_active* is the state BEFORE the toggle, i.e. whether anything at all
+    was selected. That is deliberately NOT what names the mode in the forward
+    dialog: its list is filtered by its own search box, and a selection the
+    filter hides is not a mode the user is in, so the caller derives both
+    booleans from visible_jid_selected() and ignores this one. It stays part of
+    the answer because it is the whole-set reading the caller is choosing
+    against, and because getting the two confused is the bug this pair of
+    helpers exists to keep apart.
+    """
+    was_active = bool(selected)
+    now_selected = jid not in selected
+    if now_selected:
+        selected.add(jid)
+    else:
+        selected.discard(jid)
+    return now_selected, was_active
+
+
+def visible_jid_selected(selected: set, listed_jids) -> bool:
+    """Whether any of *listed_jids* is in *selected*.
+
+    The forward dialog's equivalent of
+    ConversationsPanel._chat_selection_visible(), and it exists for the same
+    reason: that dialog has its own search box, which rebuilds the rows while
+    selected_jids survives untouched. Gating plain Space on the raw set let a
+    user select a contact, type a query that hides it, press Space on another
+    one, and forward the message to both — including one they could not see
+    they had picked. This surface is the one that actually sends, so it is the
+    one where an invisible selection costs most.
+
+    *listed_jids* is any iterable (the dialog passes a generator over the rows
+    currently in the ListBox), and the scan short-circuits on the first hit.
+    """
+    if not selected:
+        return False
+    return any(jid in selected for jid in listed_jids)
+
+
 class ConversationsPanel(wx.Panel):
     # Windows' native SysListView32 (the classic wx.ListCtrl) reads each item's
     # text through a 512-character buffer whose last slot holds the terminating
@@ -1490,7 +1538,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_focus_list,           id=self.ID_ALT_FOCUS_LIST)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message,       id=self.ID_CTRL_R)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_last,           id=self.ID_ALT_2)
-        self.Bind(wx.EVT_MENU, self.close_conversation,            id=self.ID_ESC)
+        self.Bind(wx.EVT_MENU, self._on_escape_conversation,        id=self.ID_ESC)
         self.Bind(wx.EVT_MENU, self.close_conversation,            id=self.CTRL_W)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,              id=self.ID_CTRL_SHIFT_D)
         self.Bind(wx.EVT_MENU, self.on_add_attachment,             id=self.ID_CTRL_SHIFT_A)
@@ -1725,6 +1773,10 @@ class ConversationsPanel(wx.Panel):
         # is the opposite: scoped to one conversation, so switching away from
         # it is exactly when it must go.
         self._msg_temp_bookmarks.clear()
+        # Same for the message selection: activating another chat's row goes
+        # straight here without ever closing, so without this the selection
+        # leaks into the conversation being opened (issue #99).
+        self.selected_messages.clear()
         self._first_unread_msg_id = None
         self._first_unread_count = 0
         self._unread_sep_marked_read = False
@@ -3999,12 +4051,47 @@ class ConversationsPanel(wx.Panel):
         # _msg_bookmarks is intentionally NOT reset here — see __init__.
         # _msg_temp_bookmarks is, for the same reason spelled out there.
         self._msg_temp_bookmarks.clear()
+        # The message selection is scoped to the conversation that was open:
+        # leaving it behind made a reopened conversation come back with rows
+        # still selected (issue #99). Unconditional — a user who unticked the
+        # Esc option would otherwise still hit that.
+        self.selected_messages.clear()
         self._reset_expanded_window()
         closed_jid = self._last_open_jid
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
         return True, closed_jid
+
+    def _on_escape_conversation(self, event):
+        """First Esc clears an active message selection instead of closing
+        (issue #99); the next one closes as it always did.
+
+        Deliberately a separate handler rather than a check inside
+        close_conversation(): that method is also called programmatically and
+        from other commands (Ctrl+W, the panel switch), and teaching it to
+        refuse to close would break every one of them. Scoped to the message
+        selection only — a chat-list selection must not change what Esc does
+        inside a conversation.
+        """
+        # The mention-suggestions popup keeps winning Esc: it is an overlay
+        # right in front of the user, and _close_conversation_core() already
+        # answers that press by just dismissing it (and leaving the
+        # conversation open).
+        mention_open = (hasattr(self, "_mention_panel")
+                        and self._mention_panel.IsShown())
+        if not mention_open and self._escape_clears_selection_enabled() and self.selected_messages:
+            cleared = list(self.selected_messages)
+            self.selected_messages.clear()
+            # Pass the ids just cleared: their rows still carry the
+            # " selecionado" marker and are what needs re-rendering.
+            self._refresh_message_rows_by_ids(cleared)
+            self.main_window.output(
+                self._selection_mode_announcement(
+                    self.main_window.i18n.t("all_unselected"), True, False),
+                interrupt=True)
+            return
+        self.close_conversation(event)
 
     def close_conversation(self, event=None):
         closed, closed_jid = self._close_conversation_core()
@@ -4376,8 +4463,11 @@ class ConversationsPanel(wx.Panel):
     def _do_activate_message(self, index: int):
         """Core activation logic shared by Enter and double-click.
 
-        Space no longer reaches here: it toggles the row's selection for the
-        mass actions instead (see _on_messages_list_key_down).
+        Space does not come through here. It reaches playback directly via
+        _space_toggles_playback() — which covers only the audio/video half of
+        what follows, because Space stays strictly narrower than Enter — and
+        only while no selection exists, since a selection turns it back into a
+        selecting key (see _on_messages_list_key_down).
         """
         if index < 0 or index >= len(self._sorted_messages):
             return
@@ -4428,17 +4518,7 @@ class ConversationsPanel(wx.Panel):
             return
 
         if msg_type == "audioMessage":
-            duration = (msg_obj.get("audioMessage") or {}).get("seconds", 0) or 0
-            clean_msg_id = msg_id
-            if "_" in msg_id:
-                parts = msg_id.split("_")
-                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-            logging.info(f"[UI Audio Activation] msg_id={msg_id}, clean_msg_id={clean_msg_id}, duration={duration}, file={data_path('voice_messages', f'{clean_msg_id}.msv')}")
-            self._toggle_playback(
-                msg_id, duration, msg,
-                file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
-                audio_ext=".ogg",
-            )
+            self._toggle_audio_message_playback(msg)
 
         elif msg_type == "videoMessage" and not self._use_conversation_video_media_viewer_dialog():
             # Classic mode (Settings > Interface do usuário > "Mostrar vídeos
@@ -4463,11 +4543,57 @@ class ConversationsPanel(wx.Panel):
             self.open_media_message(msg)
 
         elif msg_type == "contactMessage":
-            # Enter/Space on a contact message → open a conversation with
-            # that contact, same as clicking the "Conversar" button.
+            # Enter on a contact message → open a conversation with that
+            # contact, same as clicking the "Conversar" button. Space
+            # deliberately does NOT do this — see _space_toggles_playback().
             contact = msg_obj.get("contactMessage") or {}
             jid = self._jid_from_vcard(contact.get("vcard", ""))
             self._on_contact_converse(None, jid=jid)
+
+    def _toggle_audio_message_playback(self, msg: dict) -> None:
+        """Start/pause playback of an audioMessage row. Split out of
+        activate_message() so Enter and plain Space share one copy of the
+        clean_msg_id derivation and the _toggle_playback() call."""
+        msg_id   = msg.get("key", {}).get("id", "")
+        msg_obj  = msg.get("message") or {}
+        duration = (msg_obj.get("audioMessage") or {}).get("seconds", 0) or 0
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        logging.info(f"[UI Audio Activation] msg_id={msg_id}, clean_msg_id={clean_msg_id}, duration={duration}, file={data_path('voice_messages', f'{clean_msg_id}.msv')}")
+        self._toggle_playback(
+            msg_id, duration, msg,
+            file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
+            audio_ext=".ogg",
+        )
+
+    def _space_toggles_playback(self, msg: dict) -> bool:
+        """Play/pause *msg* if plain Space can, and return whether it did.
+
+        Space stays strictly narrower than Enter (issue #99): it never opens a
+        link, a text popup, the media viewer, a document or a contact's
+        conversation. Those all put a window on screen *as their purpose*, and
+        a blind user reasonably expects that only from an explicit Enter — so
+        Space only ever starts or pauses playback, and returns False (the
+        caller then skips the key) for everything else. It is not a promise
+        that nothing can appear: _play_toggle_video_message()'s background
+        worker still reports a decode/IO failure in a wx.MessageBox, which is
+        an error and not an activation.
+        """
+        if not isinstance(msg, dict) or self._is_separator(msg):
+            return False
+        msg_type = msg.get("messageType", "")
+        if msg_type == "audioMessage":
+            self._toggle_audio_message_playback(msg)
+            return True
+        if msg_type == "videoMessage" and not self._use_conversation_video_media_viewer_dialog():
+            video = (msg.get("message") or {}).get("videoMessage") or {}
+            if video.get("gifPlayback"):
+                return False  # GIFs have no audio track to play
+            self._play_toggle_video_message(msg)
+            return True
+        return False
 
     def on_messages_context_menu(self, event):
         index = self.messages_list.GetFirstSelected()
@@ -6571,25 +6697,42 @@ class ConversationsPanel(wx.Panel):
 
     # ── Selection helpers (messages list) ───────────────────────────────────
 
-    def _toggle_message_selection(self, msg: dict) -> None:
+    def _toggle_message_selection(self, msg: dict) -> bool:
         """Toggle *msg*'s membership in self.selected_messages, refresh its
         row, and play/announce the change. Shared by Ctrl+Space
         (_on_messages_list_key_down) and the "Selecionar mensagem"/
-        "Desselecionar mensagem" context menu item."""
+        "Desselecionar mensagem" context menu item.
+
+        Returns whether anything was actually toggled, so plain Space can hand
+        the key back to the control (event.Skip()) instead of swallowing it in
+        silence on a row this refuses — the unread separator, or a message with
+        no id. The context-menu caller ignores it: the item is only built for a
+        row that has one.
+        """
         if self._is_separator(msg):
-            return
+            return False
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id:
-            return
+            return False
+        was_active = bool(self.selected_messages)
         if msg_id in self.selected_messages:
             self.selected_messages.remove(msg_id)
             self._refresh_message_rows_by_ids([msg_id])
-            self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+            self.main_window.output(
+                self._selection_mode_announcement(
+                    self.main_window.i18n.t("unselected"),
+                    was_active, bool(self.selected_messages)),
+                interrupt=True)
         else:
             self.selected_messages.add(msg_id)
             self._refresh_message_rows_by_ids([msg_id])
             self.selection_sound.play()
-            self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            self.main_window.output(
+                self._selection_mode_announcement(
+                    self.main_window.i18n.t("selected"),
+                    was_active, bool(self.selected_messages)),
+                interrupt=True)
+        return True
 
     def _select_message_at(self, idx: int) -> bool:
         """Add the message at *idx* to self.selected_messages, if it's a real
@@ -6644,9 +6787,12 @@ class ConversationsPanel(wx.Panel):
 
     def _on_messages_list_key_down(self, event):
         """Ctrl+Space toggles the focused row's membership in
-        self.selected_messages (the mass actions act on that set) — kept off
-        plain Space, which is reserved for playing/pausing the focused audio
-        or video message. Shift+Down/Shift+Up extend the selection to the
+        self.selected_messages (the mass actions act on that set). Plain Space
+        plays/pauses the focused audio or video message — except while a
+        selection already exists, where it goes on selecting instead
+        ("selection mode", issue #99, off via
+        user_interface.space_selects_in_selection_mode).
+        Shift+Down/Shift+Up extend the selection to the
         next/previous row; Shift+Home/Shift+End select every row above/below the focused one and
         move focus to the first/last row (falling back to their previous
         meaning — seeking the active playback to its start/end — whenever
@@ -6703,6 +6849,7 @@ class ConversationsPanel(wx.Panel):
             if total > 0:
                 idx0 = idx if idx >= 0 else 0
                 lo, hi = (idx0, total - 1) if to_end else (0, idx0)
+                was_active = bool(self.selected_messages)
                 newly_selected = []
                 for i in range(lo, hi + 1):
                     if self._select_message_at(i):
@@ -6714,20 +6861,29 @@ class ConversationsPanel(wx.Panel):
                 if newly_selected:
                     self._refresh_message_rows_by_ids(newly_selected)
                     self.selection_sound.play()
-                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                    self.main_window.output(
+                        self._selection_mode_announcement(
+                            self.main_window.i18n.t("selected"),
+                            was_active, bool(self.selected_messages)),
+                        interrupt=True)
             return
 
         # Shift+Down: extend the selection to the next row and move focus to it.
         if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
             target = (idx + 1) if idx >= 0 else 0
             if target < total:
+                was_active = bool(self.selected_messages)
                 self.messages_list.Focus(target)
                 self.messages_list.Select(target, True)
                 self.messages_list.EnsureVisible(target)
                 if self._select_message_at(target):
                     self._refresh_message_rows_by_ids([self._sorted_messages[target].get("key", {}).get("id", "")])
                     self.selection_sound.play()
-                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                    self.main_window.output(
+                        self._selection_mode_announcement(
+                            self.main_window.i18n.t("selected"),
+                            was_active, bool(self.selected_messages)),
+                        interrupt=True)
             return
 
         # Shift+Up: extend the selection to the previous row and move focus to
@@ -6742,28 +6898,60 @@ class ConversationsPanel(wx.Panel):
         if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
             target = (idx - 1) if idx >= 0 else 0
             if target >= 0:
+                was_active = bool(self.selected_messages)
                 self.messages_list.Focus(target)
                 self.messages_list.Select(target, True)
                 self.messages_list.EnsureVisible(target)
                 if self._select_message_at(target):
                     self._refresh_message_rows_by_ids([self._sorted_messages[target].get("key", {}).get("id", "")])
                     self.selection_sound.play()
-                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                    self.main_window.output(
+                        self._selection_mode_announcement(
+                            self.main_window.i18n.t("selected"),
+                            was_active, bool(self.selected_messages)),
+                        interrupt=True)
             return
 
         # Ctrl+Shift+Space: select every message, or clear the selection if
         # everything selectable is already selected.
         if ctrl and shift and key == wx.WXK_SPACE:
             all_ids = self._all_selectable_message_ids()
+            was_active = bool(self.selected_messages)
             if all_ids and all(mid in self.selected_messages for mid in all_ids):
                 self.selected_messages.clear()
                 self._refresh_message_rows_by_ids(all_ids)
-                self.main_window.output(self.main_window.i18n.t("all_unselected"), interrupt=True)
+                self.main_window.output(
+                    self._selection_mode_announcement(
+                        self.main_window.i18n.t("all_unselected"),
+                        was_active, bool(self.selected_messages)),
+                    interrupt=True)
             elif all_ids:
                 self.selected_messages.update(all_ids)
                 self._refresh_message_rows_by_ids(all_ids)
                 self.selection_sound.play()
-                self.main_window.output(self.main_window.i18n.t("all_selected"), interrupt=True)
+                self.main_window.output(
+                    self._selection_mode_announcement(
+                        self.main_window.i18n.t("all_selected"),
+                        was_active, bool(self.selected_messages)),
+                    interrupt=True)
+            return
+
+        # Plain Space: once a selection exists it keeps selecting ("selection
+        # mode", issue #99) — otherwise it plays/pauses the focused audio or
+        # video, which is what a095fca5 freed it for but never implemented.
+        if key == wx.WXK_SPACE and not ctrl and not shift:
+            if 0 <= idx < len(self._sorted_messages):
+                msg = self._sorted_messages[idx]
+                # Both branches fall through to Skip() when they did nothing —
+                # the focused row can be the unread separator or carry no id,
+                # and consuming Space there leaves the one key people press by
+                # accident dead: no sound, no speech, no effect.
+                if self._selection_mode_enabled() and self.selected_messages:
+                    if self._toggle_message_selection(msg):
+                        return
+                elif self._space_toggles_playback(msg):
+                    return
+            event.Skip()
             return
 
         if ctrl and not shift and key == wx.WXK_SPACE:
@@ -6814,6 +7002,77 @@ class ConversationsPanel(wx.Panel):
     def _all_chat_jids(self) -> list:
         return [c.get("remoteJid", "") for c in self.chats_list if c.get("remoteJid", "")]
 
+    def _chat_selection_visible(self) -> bool:
+        """Whether any chat currently listed in chats_list is selected.
+
+        The gate for the conversations list's selection mode (issue #99), and
+        deliberately narrower than `bool(self.selected_chats)`: chats_list is
+        reassigned to the *filtered* list every time the conversation filter
+        RadioBox or the search box changes (MainWindow.add_chats_to_ui, which
+        rebuilds it from the unfiltered _all_chats_list on every pass), and
+        nothing clears selected_chats when it does. So a user who selects two
+        chats and then switches to "Não lidas" sees no selection and was told
+        nothing, yet plain Space would still have quietly added a third chat to
+        a selection they believe does not exist. Hiding every selected chat now
+        takes Space back to its native behaviour, which is what the user
+        perceives; clearing the filter brings the mode back.
+
+        The mass actions deliberately still act on the whole set — a user who
+        selects and then filters expects them to hit everything they picked,
+        and that behaviour predates the selection mode. This only gates what
+        the unmodified Space key does.
+        """
+        if not self.selected_chats:
+            return False
+        return any(
+            c.get("remoteJid", "") in self.selected_chats for c in self.chats_list
+        )
+
+    def _toggle_chat_selection(self, idx: int) -> bool:
+        """Toggle the chat at *idx* in self.selected_chats, repaint the list
+        and announce the change. Shared by Ctrl+Space and, once a selection
+        exists, plain Space (_on_conv_list_key_down).
+
+        Returns whether anything was actually toggled — plain Space hands the
+        key back to the control when it wasn't (no focused row, or a row with
+        no jid), rather than consuming a keystroke with no sound, speech or
+        effect. Ctrl+Space keeps swallowing it, as it always has.
+
+        The was_active/is_active bookkeeping below reads
+        _chat_selection_visible(), not the raw set, because that is what
+        _on_conv_list_key_down() gates plain Space on — and the announcement
+        has to name the mode the gate actually enforces. Reading the raw set
+        here left the two disagreeing: with one selected chat hidden by the
+        filter, Ctrl+Space on a visible one announced no mode change (the raw
+        set was already non-empty), deselecting it again announced none
+        either, and the next plain Space then fell through to the control with
+        nothing to show for it — the silent dead key, one surface over.
+        """
+        if not (0 <= idx < len(self.chats_list)):
+            return False
+        jid = self.chats_list[idx].get("remoteJid", "")
+        if not jid:
+            return False
+        was_active = self._chat_selection_visible()
+        if jid in self.selected_chats:
+            self.selected_chats.remove(jid)
+            self.main_window.add_chats_to_ui()
+            self.main_window.output(
+                self._selection_mode_announcement(
+                    self.main_window.i18n.t("unselected"),
+                    was_active, self._chat_selection_visible()),
+                interrupt=True)
+        else:
+            self.selected_chats.add(jid)
+            self.main_window.add_chats_to_ui()
+            self.selection_sound.play()
+            self.main_window.output(
+                self._selection_mode_announcement(
+                    self.main_window.i18n.t("selected"),
+                    was_active, self._chat_selection_visible()),
+                interrupt=True)
+        return True
+
     def _bulk_shortcuts_enabled(self) -> bool:
         """Settings > User Interface > "Substituir atalhos por ações em massa
         ao selecionar conversas e mensagens" (default on). When enabled and a
@@ -6823,10 +7082,55 @@ class ConversationsPanel(wx.Panel):
             "bulk_action_shortcuts", True
         )
 
+    def _selection_mode_enabled(self) -> bool:
+        """Settings > User Interface > "Usar Espaço para marcar/desmarcar
+        enquanto houver algo marcado" (default on). When enabled and the
+        surface already has a selection, plain Space keeps selecting instead of
+        doing its normal job (issue #99)."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "space_selects_in_selection_mode", True
+        )
+
+    def _escape_clears_selection_enabled(self) -> bool:
+        """Settings > User Interface > "Esc desmarca as mensagens marcadas
+        antes de fechar a conversa" (default on) — see
+        _on_escape_conversation()."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "escape_clears_selection", True
+        )
+
+    def _selection_mode_announcement(self, base: str, was_active: bool, is_active: bool) -> str:
+        """Append the selection-mode transition to *base* when the mode just
+        turned on or off, and return the combined line.
+
+        One string rather than a second output() call: every announcement here
+        goes through output(..., interrupt=True), so speaking twice would cut
+        "Selecionado" off mid-word with "Modo de seleção ativado".
+
+        *base* is already-translated text and the two booleans are passed
+        explicitly, so the forward dialog can use this against its own local
+        set — the mode is derived from whether a selection exists, never
+        stored.
+
+        Deliberately not called from the mass actions (forward, save, delete,
+        ...): they clear the selection as a side effect of acting on it and
+        already announce their own result, and "5 mensagens encaminhadas. Modo
+        de seleção desativado" is noise. The derived mode still ends correctly
+        there, since it only ever reads the set.
+        """
+        if not self._selection_mode_enabled():
+            return base
+        if is_active and not was_active:
+            return f"{base}. {self.main_window.i18n.t('selection_mode_on')}"
+        if was_active and not is_active:
+            return f"{base}. {self.main_window.i18n.t('selection_mode_off')}"
+        return base
+
     def _on_conv_list_key_down(self, event):
         """Ctrl+Space toggles the focused chat's membership in
-        self.selected_chats (the mass actions act on that set) — kept off
-        plain Space for consistency with the messages list. Shift+Up/Down
+        self.selected_chats (the mass actions act on that set). Plain Space
+        does the same once a selection already exists ("selection mode",
+        issue #99) and otherwise keeps its old non-meaning here. Shift+Up/Down
         extend the selection to the previous/next row; Shift+Home/Shift+End select
         every row above/below the focused one and move focus to the
         first/last row; Ctrl+Shift+Space selects every chat, or clears the
@@ -6842,18 +7146,10 @@ class ConversationsPanel(wx.Panel):
         if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
             target = (idx + 1) if idx >= 0 else 0
             if target < total:
-                self.conversations_list.Focus(target)
-                self.conversations_list.Select(target, True)
-                self.conversations_list.EnsureVisible(target)
-                if self._select_chat_at(target):
-                    self.main_window.add_chats_to_ui()
-                    self.selection_sound.play()
-                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
-            return
-
-        if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
-            target = (idx - 1) if idx >= 0 else 0
-            if target >= 0:
+                # Every announcement on this list derives the mode from
+                # _chat_selection_visible(), the same predicate plain Space is
+                # gated on below — see _toggle_chat_selection().
+                was_active = self._chat_selection_visible()
                 self.conversations_list.Focus(target)
                 self.conversations_list.Select(target, True)
                 self.conversations_list.EnsureVisible(target)
@@ -6861,7 +7157,27 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.add_chats_to_ui()
                     self.selection_sound.play()
                     self.main_window.output(
-                        self.main_window.i18n.t("selected"), interrupt=True)
+                        self._selection_mode_announcement(
+                            self.main_window.i18n.t("selected"),
+                            was_active, self._chat_selection_visible()),
+                        interrupt=True)
+            return
+
+        if shift and key in (wx.WXK_UP, wx.WXK_NUMPAD_UP):
+            target = (idx - 1) if idx >= 0 else 0
+            if target >= 0:
+                was_active = self._chat_selection_visible()
+                self.conversations_list.Focus(target)
+                self.conversations_list.Select(target, True)
+                self.conversations_list.EnsureVisible(target)
+                if self._select_chat_at(target):
+                    self.main_window.add_chats_to_ui()
+                    self.selection_sound.play()
+                    self.main_window.output(
+                        self._selection_mode_announcement(
+                            self.main_window.i18n.t("selected"),
+                            was_active, self._chat_selection_visible()),
+                        interrupt=True)
             return
 
         if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
@@ -6869,6 +7185,7 @@ class ConversationsPanel(wx.Panel):
             if total > 0:
                 idx0 = idx if idx >= 0 else 0
                 lo, hi = (idx0, total - 1) if to_end else (0, idx0)
+                was_active = self._chat_selection_visible()
                 selected_any = False
                 for i in range(lo, hi + 1):
                     if self._select_chat_at(i):
@@ -6880,36 +7197,49 @@ class ConversationsPanel(wx.Panel):
                 if selected_any:
                     self.main_window.add_chats_to_ui()
                     self.selection_sound.play()
-                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                    self.main_window.output(
+                        self._selection_mode_announcement(
+                            self.main_window.i18n.t("selected"),
+                            was_active, self._chat_selection_visible()),
+                        interrupt=True)
             return
 
         if ctrl and shift and key == wx.WXK_SPACE:
             all_jids = self._all_chat_jids()
+            was_active = self._chat_selection_visible()
             if all_jids and all(j in self.selected_chats for j in all_jids):
                 self.selected_chats.clear()
                 self.main_window.add_chats_to_ui()
-                self.main_window.output(self.main_window.i18n.t("all_unselected"), interrupt=True)
+                self.main_window.output(
+                    self._selection_mode_announcement(
+                        self.main_window.i18n.t("all_unselected"),
+                        was_active, self._chat_selection_visible()),
+                    interrupt=True)
             elif all_jids:
                 self.selected_chats.update(all_jids)
                 self.main_window.add_chats_to_ui()
                 self.selection_sound.play()
-                self.main_window.output(self.main_window.i18n.t("all_selected"), interrupt=True)
+                self.main_window.output(
+                    self._selection_mode_announcement(
+                        self.main_window.i18n.t("all_selected"),
+                        was_active, self._chat_selection_visible()),
+                    interrupt=True)
+            return
+
+        # Plain Space keeps selecting once a selection exists (issue #99).
+        # With nothing selected it has no meaning here, so it keeps falling
+        # through to the native control exactly as before — and so it does when
+        # the toggle itself refuses (no focused row, or a row with no jid),
+        # rather than swallowing the key with nothing to show for it.
+        if (key == wx.WXK_SPACE and not ctrl and not shift
+                and self._selection_mode_enabled() and self._chat_selection_visible()):
+            if self._toggle_chat_selection(idx):
+                return
+            event.Skip()
             return
 
         if ctrl and not shift and key == wx.WXK_SPACE:
-            if idx >= 0 and idx < len(self.chats_list):
-                chat = self.chats_list[idx]
-                jid = chat.get("remoteJid", "")
-                if jid:
-                    if jid in self.selected_chats:
-                        self.selected_chats.remove(jid)
-                        self.main_window.add_chats_to_ui()
-                        self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
-                    else:
-                        self.selected_chats.add(jid)
-                        self.main_window.add_chats_to_ui()
-                        self.selection_sound.play()
-                        self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            self._toggle_chat_selection(idx)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
             self._jump_list_by(self.conversations_list, -self._page_jump_size())
         elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
@@ -11618,6 +11948,40 @@ class ConversationsPanel(wx.Panel):
 
         lst.Bind(wx.EVT_LISTBOX, _on_listbox_select)
 
+        def _selection_visible():
+            """Whether any selected contact is among the rows listed right
+            now — this dialog's search box rebinds _filtered_chats, and
+            selected_jids survives it. Everything here derives the selection
+            mode from this, gate and announcement alike."""
+            return visible_jid_selected(
+                selected_jids, (_jid_at(i) for i in range(lst.GetCount())))
+
+        def _toggle_at(row):
+            """Toggle the contact on *row*, exactly as Ctrl+Space always has —
+            shared with plain Space once a selection exists (issue #99).
+
+            Returns whether anything was toggled, so plain Space can hand the
+            key back instead of dying on a row with no jid (an empty search
+            result focuses nothing at all). Ctrl+Space ignores it and keeps
+            swallowing the key, as it always has.
+            """
+            jid = _jid_at(row)
+            if not jid:
+                return False
+            was_active = _selection_visible()
+            # The set bookkeeping is the pure helper's; its own was_active is
+            # the raw-set answer, which is the one this dialog must not use.
+            now_selected, _ = toggle_jid_selection(selected_jids, jid)
+            _refresh_row(row)
+            if now_selected:
+                self.selection_sound.play()
+            mw.output(
+                self._selection_mode_announcement(
+                    i18n.t("selected" if now_selected else "unselected"),
+                    was_active, _selection_visible()),
+                interrupt=True)
+            return True
+
         def _on_list_key_down(event):
             key   = event.GetKeyCode()
             ctrl  = event.ControlDown()
@@ -11631,10 +11995,14 @@ class ConversationsPanel(wx.Panel):
                     lst.SetSelection(target)
                     jid = _jid_at(target)
                     if jid and jid not in selected_jids:
+                        was_active = _selection_visible()
                         selected_jids.add(jid)
                         _refresh_row(target)
                         self.selection_sound.play()
-                        mw.output(i18n.t("selected"), interrupt=True)
+                        mw.output(
+                            self._selection_mode_announcement(
+                                i18n.t("selected"), was_active, _selection_visible()),
+                            interrupt=True)
                 return
 
             if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
@@ -11642,6 +12010,7 @@ class ConversationsPanel(wx.Panel):
                 if count > 0:
                     focus0 = focus if focus >= 0 else 0
                     lo, hi = (focus0, count - 1) if to_end else (0, focus0)
+                    was_active = _selection_visible()
                     newly = []
                     for i in range(lo, hi + 1):
                         jid = _jid_at(i)
@@ -11654,7 +12023,10 @@ class ConversationsPanel(wx.Panel):
                         _refresh_row(i)
                     if newly:
                         self.selection_sound.play()
-                        mw.output(i18n.t("selected"), interrupt=True)
+                        mw.output(
+                            self._selection_mode_announcement(
+                                i18n.t("selected"), was_active, _selection_visible()),
+                            interrupt=True)
                 return
 
             if ctrl and shift and key == wx.WXK_SPACE:
@@ -11663,6 +12035,7 @@ class ConversationsPanel(wx.Panel):
                 row_jids = [_jid_at(i) for i in range(count)]
                 real_jids = [j for j in row_jids if j]
                 all_selected = bool(real_jids) and all(j in selected_jids for j in real_jids)
+                was_active = _selection_visible()
                 for i, jid in enumerate(row_jids):
                     if not jid:
                         continue
@@ -11674,22 +12047,26 @@ class ConversationsPanel(wx.Panel):
                 if real_jids:
                     if not all_selected:
                         self.selection_sound.play()
-                    mw.output(i18n.t("all_unselected" if all_selected else "all_selected"), interrupt=True)
+                    mw.output(
+                        self._selection_mode_announcement(
+                            i18n.t("all_unselected" if all_selected else "all_selected"),
+                            was_active, _selection_visible()),
+                        interrupt=True)
                 return
 
             if ctrl and not shift and key == wx.WXK_SPACE:
-                jid = _jid_at(focus)
-                if jid:
-                    now_selected = jid not in selected_jids
-                    if now_selected:
-                        selected_jids.add(jid)
-                    else:
-                        selected_jids.discard(jid)
-                    _refresh_row(focus)
-                    if now_selected:
-                        self.selection_sound.play()
-                    mw.output(i18n.t("selected" if now_selected else "unselected"), interrupt=True)
+                _toggle_at(focus)
                 return
+
+            # Plain Space keeps selecting once a selection the user can SEE
+            # exists (issue #99); with nothing selected — or with every
+            # selected contact hidden by the search box — it stays the native
+            # key it always was, and so it does when the toggle itself refuses
+            # (an empty search result focuses no row at all).
+            if (key == wx.WXK_SPACE and not ctrl and not shift
+                    and self._selection_mode_enabled() and _selection_visible()):
+                if _toggle_at(focus):
+                    return
 
             event.Skip()  # Arrows, letter type-ahead, everything else: native behavior
 
@@ -12324,6 +12701,13 @@ class ConversationsPanel(wx.Panel):
         # can scroll it out while it keeps playing in the background), so
         # this must not be gated on the row actually being found below.
         self._stop_playback_for_removed_messages(msg_ids)
+        # Drop the removed ids from the selection too. The selection mode
+        # (issue #99) is *derived* from this set being non-empty, so an id left
+        # behind by a message that no longer exists keeps plain Space silently
+        # in selecting mode on a conversation where nothing is selected and
+        # nothing ever announced the mode turning on — reachable without any
+        # user action at all, via _mirror_remote_deletions()'s 60s poll.
+        self.selected_messages.difference_update(msg_ids)
         indices = sorted(
             i for i, m in enumerate(self._sorted_messages)
             if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids

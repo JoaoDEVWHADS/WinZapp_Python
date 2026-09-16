@@ -509,6 +509,20 @@ class SettingsDialog(wx.Dialog):
             self._confirm_mark_all_read_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._space_selects_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_space_selects_in_selection_mode")
+        )
+        ui_sizer.Add(
+            self._space_selects_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._escape_clears_selection_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_escape_clears_selection")
+        )
+        ui_sizer.Add(
+            self._escape_clears_selection_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._auto_focus_next_audio_cb = wx.CheckBox(
             self._ui_page, label=i18n.t("ui_auto_focus_next_audio")
         )
@@ -1322,6 +1336,16 @@ class SettingsDialog(wx.Dialog):
             "confirm_mark_all_read", True
         )
         self._confirm_mark_all_read_cb.SetValue(bool(confirm_mark_all_read))
+
+        space_selects = self.main_window.settings.get("user_interface", {}).get(
+            "space_selects_in_selection_mode", True
+        )
+        self._space_selects_cb.SetValue(bool(space_selects))
+
+        escape_clears_selection = self.main_window.settings.get("user_interface", {}).get(
+            "escape_clears_selection", True
+        )
+        self._escape_clears_selection_cb.SetValue(bool(escape_clears_selection))
 
         auto_focus_next_audio = self.main_window.settings.get("user_interface", {}).get(
             "auto_focus_next_audio", True
@@ -2326,6 +2350,12 @@ class SettingsDialog(wx.Dialog):
             "confirm_mark_all_read"
         ] = self._confirm_mark_all_read_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
+            "space_selects_in_selection_mode"
+        ] = self._space_selects_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "escape_clears_selection"
+        ] = self._escape_clears_selection_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
             "auto_focus_next_audio"
         ] = self._auto_focus_next_audio_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
@@ -2779,6 +2809,8 @@ class SettingsDialog(wx.Dialog):
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
         self._confirm_mark_all_read_cb.SetLabel(i18n.t("ui_confirm_mark_all_read"))
+        self._space_selects_cb.SetLabel(i18n.t("ui_space_selects_in_selection_mode"))
+        self._escape_clears_selection_cb.SetLabel(i18n.t("ui_escape_clears_selection"))
         self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))
         self._selected_announce_box.SetLabel(i18n.t("ui_selected_announce_position_label"))
         self._selected_announce_start_rb.SetLabel(i18n.t("ui_selected_announce_position_start"))

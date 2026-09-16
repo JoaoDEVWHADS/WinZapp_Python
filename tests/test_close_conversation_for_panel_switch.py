@@ -71,6 +71,9 @@ class _Stub:
         self._search_result_idx = -1
         self._msg_bookmarks = {}
         self._msg_temp_bookmarks = {}
+        # Cleared on close like the temporary bookmarks — see
+        # tests/test_selection_mode.py for what that clear is for.
+        self.selected_messages = set()
         self._expanded_visible_count = 0
         self._expanded_oldest_msg_id = ""
         self.conversation_panel = _FakeWidget(shown=True)
