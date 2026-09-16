@@ -74,6 +74,16 @@ def test_headless_chromium_auto_grants_webrtc_media_permission():
     for source in (start_js, config, session_util):
         assert "--use-fake-ui-for-media-stream" in source
 
+    assert "--use-fake-device-for-media-stream" in start_js
+
+
+def test_runtime_user_agent_matches_the_launched_chromium_for_voip():
+    start_js = _source("client/api_patches/start.js")
+
+    assert "WAuserAgente" in start_js
+    assert "uaModule.useragentOverride" in start_js
+    assert "Chromium user-agent aligned" in start_js
+
 
 def test_chromium_keeps_rendering_backend_available_for_voip_runtime():
     session_util = "\n".join(

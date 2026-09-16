@@ -210,6 +210,23 @@ const distPath = path.join(__dirname, 'dist');
 const configDefault = require(path.join(distPath, 'config')).default;
 const { initServer } = require(path.join(distPath, 'index'));
 
+// WPPConnect 2.3.3 still hard-codes Chrome/102 in WAuserAgente.  Current
+// WhatsApp Web uses that UA while deciding whether its VoIP backend worker may
+// initialize; overriding the feature checks later exposes the call methods but
+// leaves their RPC transport without a successful voipInit.  Advertise the
+// Chromium version we actually launch instead of an unrelated legacy build.
+try {
+  const uaModule = require('@wppconnect-team/wppconnect/dist/config/WAuserAgente');
+  const versionMatch = String(chromeExecutable || '').match(/(?:win64-|chrome-)(\d+\.\d+\.\d+\.\d+)/i);
+  const chromeVersion = versionMatch?.[1] || '148.0.7778.97';
+  uaModule.useragentOverride =
+    `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ` +
+    `(KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  console.log(`[WinZapp] Chromium user-agent aligned to Chrome/${chromeVersion}`);
+} catch (error) {
+  console.warn(`[WinZapp] Could not align Chromium user-agent: ${error.message || error}`);
+}
+
 // Carrega as configurações personalizadas de config.json
 let customConfig = {};
 const customConfigPath = path.join(__dirname, 'config.json');
@@ -281,6 +298,7 @@ const optimizedBrowserArgs = [
   '--metrics-recording-only',
   '--autoplay-policy=no-user-gesture-required',
   '--use-fake-ui-for-media-stream',
+  '--use-fake-device-for-media-stream',
   '--mute-audio',
   '--no-first-run',
   '--safebrowsing-disable-auto-update',
