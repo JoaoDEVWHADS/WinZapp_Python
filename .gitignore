@@ -211,6 +211,10 @@ db.sqlite3-journal
 
 wppconnect_repos/
 
+# Local dependency clones and bundled Git runtime used for diagnostics.
+/rm download/
+/client/git/
+
 # Windows build scaffolding (local only)
 /venv_build/
 /_build_*.bat
