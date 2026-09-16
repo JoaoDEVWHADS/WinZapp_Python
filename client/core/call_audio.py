@@ -83,6 +83,8 @@ class CallAudioSession:
         self._stop_event = threading.Event()
         self._sender_thread: Optional[threading.Thread] = None
         self._player_thread: Optional[threading.Thread] = None
+        self._mic_frames_sent = 0
+        self._mic_bytes_sent = 0
 
     @property
     def running(self) -> bool:
@@ -260,6 +262,13 @@ class CallAudioSession:
                         "pcm": base64.b64encode(pcm).decode("ascii"),
                     },
                 )
+                self._mic_frames_sent += 1
+                self._mic_bytes_sent += len(pcm)
+                if self._mic_frames_sent == 1 or self._mic_frames_sent % 50 == 0:
+                    logging.info(
+                        "[call_audio] microphone sent session=%s frames=%s bytes=%s",
+                        self._config.session, self._mic_frames_sent, self._mic_bytes_sent,
+                    )
             except Exception:
                 logging.exception("[call_audio] failed to send microphone audio")
                 time.sleep(0.05)

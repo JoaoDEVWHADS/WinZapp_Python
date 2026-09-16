@@ -24,6 +24,8 @@ function installCallMediaBridgeInPage(): boolean {
     micQueue: [] as Float32Array[],
     micOffset: 0,
     remotePipelines: new Map<string, any>(),
+    micFramesPushed: 0,
+    micBytesPushed: 0,
   };
 
   const ensureContext = () => {
@@ -115,6 +117,8 @@ function installCallMediaBridgeInPage(): boolean {
     const samples = decodePcm16(base64);
     if (!samples.length) return;
     state.micQueue.push(samples);
+    state.micFramesPushed += 1;
+    state.micBytesPushed += Math.floor(base64.length * 3 / 4);
     while (state.micQueue.length > 16) state.micQueue.shift();
   };
 
