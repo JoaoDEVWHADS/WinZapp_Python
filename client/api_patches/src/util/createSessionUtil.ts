@@ -22,7 +22,7 @@ import * as path from 'path';
 import { download } from '../controller/sessionController';
 import { WhatsAppServer } from '../types/WhatsAppServer';
 import chatWootClient from './chatWootClient';
-import { ensureCallMediaBridge } from './callMediaBridge';
+import { ensureCallMediaBridge, warmCallVoipRuntime } from './callMediaBridge';
 import {
   autoDownload,
   callWebHook,
@@ -1164,6 +1164,12 @@ export default class CreateSessionUtil {
           // The Python-owned call audio bridge lives in the page context and
           // therefore has to be recreated after every WhatsApp Web reload.
           ensureCallMediaBridge(client, req.io, req.logger);
+          // Warm the lazy WhatsApp VoIP backend after each page reload. This is
+          // deliberately fire-and-forget: normal messaging startup must never
+          // depend on the private calling backend becoming available.
+          setTimeout(() => {
+            void warmCallVoipRuntime(client, req.logger);
+          }, 1200);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
         await restoreStatusSender(client.page, req.logger, session);
@@ -1171,6 +1177,9 @@ export default class CreateSessionUtil {
         await ensureCallMediaBridge(client, req.io, req.logger);
       }
       await this.start(req, client);
+      // WhatsApp's VoIP bundle is lazy. Preload it while the session is idle so
+      // accepting an incoming call does not have to win the initialization race.
+      void warmCallVoipRuntime(client, req.logger);
 
       if (req.serverOptions.webhook.onParticipantsChanged) {
         await this.onParticipantsChanged(req, client);

@@ -116,3 +116,15 @@ def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
     assert "activeId !== previousActiveId" in controller
     assert "!preexistingIds.has(offeredId)" in controller
     assert "!preexistingIds.has(modelId)" in controller
+
+
+def test_session_prewarms_lazy_whatsapp_voip_runtime():
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+    create_session = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    assert "export async function warmCallVoipRuntime" in bridge
+    assert "requireVoipJsBackend" in bridge
+    assert "initWAWebVoip" in bridge
+    assert "getVoipStackInterface" in bridge
+    assert "void warmCallVoipRuntime(client, req.logger)" in create_session
+
