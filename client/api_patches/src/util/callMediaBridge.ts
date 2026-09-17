@@ -14,6 +14,33 @@ const linuxAudioProcesses = new Map<
 >();
 const LINUX_PULSE_SERVER = 'unix:/run/pulse/winzapp-native';
 
+/*
+ * Everything below down to ensureLinuxCallAudio() is for ONE deployment, and
+ * it is not the one it looks like: WinZapp itself never runs on Linux.
+ *
+ * With local API mode off, the user points WinZapp at a WPPConnect Server
+ * running on their own Linux host, so the Chrome holding the WhatsApp session
+ * is on that host and not on the machine the person is sitting at. The page
+ * bridge further down cannot help there: it hands PCM to and from the *page*,
+ * but on a headless Linux server there is no audio device for Chrome to talk
+ * to at all. So each session gets its own pair of virtual PulseAudio devices
+ * (a null sink plus a remapped source, named winzapp_<kind>_<session> so
+ * nothing here can touch another application's), Chrome is bound to them
+ * through PULSE_SOURCE/PULSE_SINK, and `pacat`/`parec` move the bytes between
+ * those devices and the Socket.IO stream the Windows client is on.
+ *
+ * Which is why every function in this block starts by refusing to run unless
+ * process.platform is 'linux' AND PULSE_SERVER is the socket above: on the
+ * normal Windows install the page bridge is the whole mechanism and none of
+ * this exists. Reading it as dead Linux code and deleting it would silently
+ * remove calls from remote-API installs, where they would go on *appearing*
+ * to work — signaling, ringing and the call window all come from the page.
+ *
+ * pulse_audio_lifecycle.py at the repository root is the other half: the
+ * modules loaded here outlive a crashed Node, so the start/stop scripts sweep
+ * the winzapp_-prefixed ones before a new session creates its own.
+ */
+
 function linuxDeviceName(kind: 'mic' | 'speaker', session: string): string {
   return `winzapp_${kind}_${session.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48)}`;
 }
