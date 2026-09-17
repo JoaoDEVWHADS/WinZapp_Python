@@ -18,6 +18,7 @@ type CallActionPayload = {
   callId?: string;
   to?: string;
   isVideo?: boolean;
+  participants?: string[];
 };
 
 function getWhatsappPage(req: Request): any {
@@ -48,7 +49,16 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
       const callIdOf = (call: any): string => serializeId(call?.id);
       const peerJidOf = (call: any): string => serializeId(call?.peerJid || call?.sender || call?.from);
-      const getCallStore = () => win.WPP?.whatsapp?.CallStore || win.Store?.Call;
+      const getCallStore = () => {
+        const publicStore = win.WPP?.whatsapp?.CallStore || win.Store?.Call;
+        if (publicStore) return publicStore;
+        try {
+          const module = win.require?.('WAWebCallCollection');
+          return module?.get?.() || module;
+        } catch (_) {
+          return null;
+        }
+      };
       const sameCallId = (call: any, wanted: string): boolean => {
         if (!call || !wanted) return false;
         return callIdOf(call) === wanted || serializeId(call?.id?._serialized) === wanted;
@@ -300,6 +310,55 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return result;
       }
 
+      if (action === 'offer-group') {
+        if (payload.isVideo) {
+          throw new Error('Video group calls are not supported by WinZapp');
+        }
+        const participantIds = Array.isArray(payload.participants)
+          ? payload.participants.map((value) => String(value || '').trim()).filter(Boolean)
+          : [];
+        if (participantIds.length < 2) {
+          throw new Error('At least two participants are required to start a group voice call');
+        }
+
+        await ensureVoipRuntimeReady();
+
+        const widFactory =
+          win.WPP?.whatsapp?.WidFactory ||
+          win.Store?.WidFactory ||
+          win.require?.('WAWebWidFactory');
+        const createWid = widFactory?.createWid;
+        if (typeof createWid !== 'function') {
+          throw new Error('WhatsApp contact ID factory is not available');
+        }
+
+        const participantWids = participantIds.map((participantId) => {
+          const wid = createWid.call(widFactory, participantId);
+          if (!wid || wid.isGroup?.() || (typeof wid.isUser === 'function' && !wid.isUser())) {
+            throw new Error(`Invalid group call participant: ${participantId}`);
+          }
+          return wid;
+        });
+
+        const callStart = win.require?.('WAWebVoipStartCall');
+        if (typeof callStart?.startWAWebVoipGroupCallFromWids !== 'function') {
+          throw new Error(
+            'Group WhatsApp calls are not supported by this WhatsApp Web version: ' +
+            'no supported internal call controller was detected'
+          );
+        }
+
+        await callStart.startWAWebVoipGroupCallFromWids(participantWids, false);
+
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 5000) {
+          const call = getCallStore()?.activeCall;
+          if (call?.outgoing && call?.isGroup) return summarizeCall(call);
+          await delay(100);
+        }
+        throw new Error('Outgoing WhatsApp group call was not promoted to an active call');
+      }
+
       if (action === 'offer') {
         let call: any = null;
         const storeBeforeOffer = getCallStore();
@@ -420,6 +479,28 @@ export async function endCall(req: Request, res: Response) {
     ok(res, await evaluateWppCall(req, 'end', req.body || {}));
   } catch (error) {
     fail(req, res, 'endCall', error);
+  }
+}
+
+export async function offerGroupCall(req: Request, res: Response) {
+  try {
+    const body = req.body || {};
+    if (!Array.isArray(body.participants) || body.participants.length < 2) {
+      res.status(400).json({
+        status: 'error',
+        message: 'At least two participants are required!',
+      });
+      return;
+    }
+    if (body.isVideo === true) {
+      res.status(400).json({ status: 'error', message: 'Video group calls are not supported!' });
+      return;
+    }
+    await prepareAudioBridge(req);
+    ok(res, await evaluateWppCall(req, 'offer-group', body));
+  } catch (error) {
+    await stopAudioBridge(req);
+    fail(req, res, 'offerGroupCall', error);
   }
 }
 

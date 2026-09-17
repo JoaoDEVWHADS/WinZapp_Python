@@ -211,3 +211,19 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "delete (client as any).__winzappVoipWarmupPromise" in bridge
     assert "winzapp_session_warmup" in bridge
     assert "getDidVoipInitError" in bridge
+
+
+def test_group_voice_call_offer_uses_whatsapp_web_native_group_controller():
+    routes = _source("client/api_patches/src/routes/index.ts")
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    assert '/api/:session/call/group/offer' in routes
+    assert 'CallController.offerGroupCall' in routes
+    assert "action === 'offer-group'" in controller
+    assert "WAWebVoipStartCall" in controller
+    assert "startWAWebVoipGroupCallFromWids" in controller
+    assert "WAWebWidFactory" in controller
+    assert "call?.outgoing && call?.isGroup" in controller
+    assert "At least two participants are required" in controller
+    assert "Video group calls are not supported" in controller
+    assert "prepareAudioBridge(req)" in controller
