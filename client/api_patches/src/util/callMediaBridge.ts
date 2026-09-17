@@ -1,4 +1,5 @@
 import { Socket } from 'socket.io';
+import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_process';
 
 import { clientsArray } from './sessionUtil';
 
@@ -7,6 +8,113 @@ const MAX_MIC_QUEUE_FRAMES = 75;
 const micQueues = new Map<string, Buffer[]>();
 const micDraining = new Set<string>();
 const micReceived = new Map<string, number>();
+const linuxAudioProcesses = new Map<
+  string,
+  { playback: ChildProcessWithoutNullStreams; capture: ChildProcessWithoutNullStreams }
+>();
+const LINUX_PULSE_SERVER = 'unix:/run/winzapp-pulse/native';
+
+function linuxDeviceName(kind: 'mic' | 'speaker', session: string): string {
+  return `winzapp_${kind}_${session.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48)}`;
+}
+
+function pulseEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, PULSE_SERVER: LINUX_PULSE_SERVER };
+}
+
+export function prepareLinuxCallAudioEnvironment(session: string, logger: any): boolean {
+  if (process.platform !== 'linux') return false;
+  const mic = linuxDeviceName('mic', session);
+  const speaker = linuxDeviceName('speaker', session);
+  try {
+    const sinks = execFileSync('pactl', ['list', 'short', 'sinks'], {
+      env: pulseEnv(),
+      encoding: 'utf8',
+    });
+    for (const sink of [mic, speaker]) {
+      if (!sinks.split(/\r?\n/).some((line) => line.split(/\s+/)[1] === sink)) {
+        execFileSync(
+          'pactl',
+          [
+            'load-module',
+            'module-null-sink',
+            `sink_name=${sink}`,
+            'format=s16le',
+            'rate=48000',
+            'channels=1',
+          ],
+          { env: pulseEnv(), stdio: 'ignore' }
+        );
+      }
+    }
+    // Chromium inherits these variables from this account's dedicated Node
+    // process. Its microphone is the monitor of the sink Python writes to;
+    // its speaker is another sink whose monitor Node streams back to Python.
+    process.env.PULSE_SERVER = LINUX_PULSE_SERVER;
+    process.env.PULSE_SOURCE = `${mic}.monitor`;
+    process.env.PULSE_SINK = speaker;
+    logger?.info?.(`[${session}] Linux call audio devices ready mic=${mic}.monitor speaker=${speaker}`);
+    return true;
+  } catch (error: any) {
+    logger?.warn?.(`[${session}] Linux call audio unavailable: ${error?.message || error}`);
+    return false;
+  }
+}
+
+function stopLinuxCallAudio(session: string): void {
+  const processes = linuxAudioProcesses.get(session);
+  if (!processes) return;
+  linuxAudioProcesses.delete(session);
+  for (const child of [processes.playback, processes.capture]) {
+    try { child.kill('SIGTERM'); } catch (_) {}
+  }
+}
+
+function ensureLinuxCallAudio(
+  session: string,
+  socket: Socket,
+  logger: any
+): { playback: ChildProcessWithoutNullStreams; capture: ChildProcessWithoutNullStreams } | null {
+  if (process.platform !== 'linux' || process.env.PULSE_SERVER !== LINUX_PULSE_SERVER) return null;
+  const existing = linuxAudioProcesses.get(session);
+  if (existing && !existing.playback.killed && !existing.capture.killed) return existing;
+
+  stopLinuxCallAudio(session);
+  const common = ['--raw', '--format=s16le', '--rate=48000', '--channels=1', '--latency-msec=20'];
+  const playback = spawn(
+    'pacat',
+    ['--playback', ...common, `--device=${linuxDeviceName('mic', session)}`],
+    { env: pulseEnv() }
+  );
+  const capture = spawn(
+    'parec',
+    ['--record', ...common, `--device=${linuxDeviceName('speaker', session)}.monitor`],
+    { env: pulseEnv() }
+  );
+  const processes = { playback, capture };
+  linuxAudioProcesses.set(session, processes);
+  let remoteFrames = 0;
+  capture.stdout.on('data', (chunk: Buffer) => {
+    for (let offset = 0; offset < chunk.length; offset += MAX_AUDIO_FRAME_BYTES) {
+      const pcm = chunk.subarray(offset, offset + MAX_AUDIO_FRAME_BYTES);
+      if (!pcm.length) continue;
+      remoteFrames += 1;
+      socket.emit('call:audio:remote', {
+        session,
+        sampleRate: 48000,
+        encoding: 'base64',
+        pcm: pcm.toString('base64'),
+      });
+    }
+    if (remoteFrames === 1 || remoteFrames % 250 === 0) {
+      logger?.info?.(`[${session}] Linux call speaker captured frames=${remoteFrames}`);
+    }
+  });
+  playback.stderr.on('data', (data: Buffer) => logger?.debug?.(`[${session}] pacat: ${data}`));
+  capture.stderr.on('data', (data: Buffer) => logger?.debug?.(`[${session}] parec: ${data}`));
+  logger?.info?.(`[${session}] Linux call audio relay started`);
+  return processes;
+}
 
 function installCallMediaBridgeInPage(): boolean {
   const win = window as any;
@@ -413,6 +521,9 @@ function toBuffer(value: any): Buffer | null {
 }
 
 export async function ensureCallMediaBridge(client: any, io: any, logger: any): Promise<boolean> {
+  if (process.platform === 'linux' && process.env.PULSE_SERVER === LINUX_PULSE_SERVER) {
+    return true;
+  }
   const page = client?.waPage || client?.page;
   if (!page) return false;
 
@@ -591,6 +702,9 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
 }
 
 export async function setCallMediaBridgeActive(client: any, active: boolean): Promise<boolean> {
+  if (process.platform === 'linux' && process.env.PULSE_SERVER === LINUX_PULSE_SERVER) {
+    return true;
+  }
   const page = client?.waPage || client?.page;
   if (!page) return false;
   try {
@@ -656,6 +770,18 @@ export function registerCallAudioSocket(
       pcm.length > MAX_AUDIO_FRAME_BYTES
     ) return;
     if (!(clientsArray as any)[session]) return;
+    const linuxAudio = ensureLinuxCallAudio(session, socket, logger);
+    if (linuxAudio) {
+      if (!linuxAudio.playback.stdin.write(pcm)) {
+        linuxAudio.playback.stdin.once('drain', () => undefined);
+      }
+      const received = (micReceived.get(session) || 0) + 1;
+      micReceived.set(session, received);
+      if (received === 1 || received % 250 === 0) {
+        logger?.info?.(`[${session}] call microphone relayed to Linux audio frames=${received}`);
+      }
+      return;
+    }
     const queue = micQueues.get(session) || [];
     queue.push(pcm);
     while (queue.length > MAX_MIC_QUEUE_FRAMES) queue.shift();
@@ -673,10 +799,13 @@ export function registerCallAudioSocket(
     if (!session || session !== authenticatedSession) return;
     micQueues.delete(session);
     micReceived.delete(session);
+    stopLinuxCallAudio(session);
     const client: any = (clientsArray as any)[session];
     const page = client?.waPage || client?.page;
     page
       ?.evaluate(() => (window as any).__winzappCallMediaBridge?.reset?.())
       .catch(() => undefined);
   });
+
+  socket.on('disconnect', () => stopLinuxCallAudio(authenticatedSession));
 }

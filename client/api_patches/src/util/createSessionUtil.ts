@@ -22,7 +22,11 @@ import * as path from 'path';
 import { download } from '../controller/sessionController';
 import { WhatsAppServer } from '../types/WhatsAppServer';
 import chatWootClient from './chatWootClient';
-import { ensureCallMediaBridge, warmCallVoipRuntime } from './callMediaBridge';
+import {
+  ensureCallMediaBridge,
+  prepareLinuxCallAudioEnvironment,
+  warmCallVoipRuntime,
+} from './callMediaBridge';
 import {
   autoDownload,
   callWebHook,
@@ -944,8 +948,9 @@ export default class CreateSessionUtil {
 
       // Wrapped in a thunk purely so the stale-profile recovery below can call
       // it twice. See launchWithStaleBrowserRecovery() for why that exists.
-      const launchWppClient = () =>
-        create(
+      const launchWppClient = () => {
+        prepareLinuxCallAudioEnvironment(session, req.logger);
+        return create(
         Object.assign(
           {},
           { tokenStore: myTokenStore },
@@ -1098,6 +1103,7 @@ export default class CreateSessionUtil {
           }
         )
       );
+      };
 
       const wppClient = await launchWithStaleBrowserRecovery(
         launchWppClient,
