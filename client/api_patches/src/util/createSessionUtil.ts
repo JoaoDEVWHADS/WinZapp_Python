@@ -949,7 +949,22 @@ export default class CreateSessionUtil {
       // Wrapped in a thunk purely so the stale-profile recovery below can call
       // it twice. See launchWithStaleBrowserRecovery() for why that exists.
       const launchWppClient = () => {
-        prepareLinuxCallAudioEnvironment(session, req.logger);
+        if (prepareLinuxCallAudioEnvironment(session, req.logger)) {
+          const puppeteerOptions = req.serverOptions.createOptions.puppeteerOptions || {};
+          // Puppeteer passes `puppeteerOptions.env` verbatim when it exists;
+          // changing process.env after server startup is therefore not enough.
+          // Bind this account's Chrome explicitly to its PulseAudio devices.
+          req.serverOptions.createOptions.puppeteerOptions = {
+            ...puppeteerOptions,
+            env: {
+              ...process.env,
+              ...(puppeteerOptions.env || {}),
+              PULSE_SERVER: process.env.PULSE_SERVER,
+              PULSE_SOURCE: process.env.PULSE_SOURCE,
+              PULSE_SINK: process.env.PULSE_SINK,
+            },
+          };
+        }
         return create(
         Object.assign(
           {},
