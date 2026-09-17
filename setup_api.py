@@ -178,11 +178,7 @@ def ensure_portable_git():
         os.environ["PATH"] = f"{git_cmd_dir};{git_bin_dir};" + os.environ.get("PATH", "")
 
 
-from core.wppconnect_host_layer_patch import (
-    ORIGINAL_CHECK_QR_CODE as _HOST_LAYER_ORIGINAL_CHECK_QR_CODE,
-    V1_CHECK_QR_CODE as _HOST_LAYER_V1_CHECK_QR_CODE,
-    PATCHED_CHECK_QR_CODE as _HOST_LAYER_PATCHED_CHECK_QR_CODE,
-)
+from core.wppconnect_host_layer_patch import patch_host_layer_source
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
 from core.wppconnect_sender_layer_patch import patch_sender_layer_source
 from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
@@ -195,25 +191,7 @@ from core.wpp_dependency_setup import (
 
 
 def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
-    """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
-    phone-number pairing code stops regenerating on every QR-code rotation,
-    WITHOUT freezing forever if it should ever need a refresh — see
-    client/core/wppconnect_host_layer_patch.py's module docstring for the
-    full v0 (upstream bug)/v1 (WinZapp's first, unsafe attempt)/v2 (current)
-    history. WinZapp issue #8.
-
-    This lives in node_modules (a vendored dependency of WPPConnect Server,
-    not WPPConnect Server itself), so it can't go through the
-    api_patches/ full-file-restore mechanism — npm install rebuilds
-    node_modules from scratch every time, so this must run AFTER npm
-    install, same as the existing decrypt.js patch right above this call.
-
-    Idempotent (a no-op if v2 is already applied — including automatically
-    upgrading a machine that still has v1 installed) and best-effort: if
-    the installed wppconnect version doesn't match either known source text
-    (e.g. a future upstream release), it logs a warning and leaves the file
-    untouched rather than corrupting it or crashing setup_api.py.
-    """
+    """Apply the shared host.layer.js pairing fixes to the installed runtime."""
     if client_api_dir is None:
         client_api_dir = CLIENT_API_DIR
     host_layer_path = os.path.join(
@@ -223,35 +201,23 @@ def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
     if not os.path.isfile(host_layer_path):
         print("[WARNING] host.layer.js not found — skipping pairing-code patch.")
         return False
+
     try:
         with open(host_layer_path, "r", encoding="utf-8") as f:
-            src = f.read()
-    except Exception as e:
-        print(f"[WARNING] Could not read host.layer.js: {e}")
-        return False
-    if _HOST_LAYER_PATCHED_CHECK_QR_CODE in src:
-        return True  # already v2 — idempotent no-op
-    if _HOST_LAYER_ORIGINAL_CHECK_QR_CODE in src:
-        patched = src.replace(
-            _HOST_LAYER_ORIGINAL_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE
-        )
-    elif _HOST_LAYER_V1_CHECK_QR_CODE in src:
-        patched = src.replace(
-            _HOST_LAYER_V1_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE
-        )
-    else:
-        print(
-            "[WARNING] host.layer.js does not match any known source text — "
-            "skipping pairing-code patch (unsupported wppconnect version?)."
-        )
-        return False
-    try:
-        with open(host_layer_path, "w", encoding="utf-8") as f:
-            f.write(patched)
-        print("[OK] Patched host.layer.js (pairing-code rotation).")
+            source = f.read()
+        patched, notes, ok = patch_host_layer_source(source)
+        for note in notes:
+            prefix = "[WARNING]" if "DID NOT MATCH" in note else "[INFO]"
+            print(f"{prefix} host.layer.js: {note}")
+        if not ok:
+            return False
+        if patched != source:
+            with open(host_layer_path, "w", encoding="utf-8") as f:
+                f.write(patched)
+            print("[OK] Patched host.layer.js pairing/auth flow.")
         return True
     except Exception as e:
-        print(f"[WARNING] Could not write host.layer.js: {e}")
+        print(f"[WARNING] Could not patch host.layer.js: {e}")
         return False
 
 
