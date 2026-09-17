@@ -2467,9 +2467,20 @@ class WebSocketClient:
         if not pcm:
             return
         try:
+            # Keep the remote media transport JSON-safe.  Sending raw Socket.IO
+            # binary here is not stable across polling/websocket upgrades and
+            # python-socketio versions (it can arrive in Node as an
+            # ArrayBuffer/placeholder and be discarded by the bridge).  The
+            # bridge already accepts base64 and this also makes the payload
+            # observable and reproducible across local/remote deployments.
             self.sio.emit(
                 "call:audio:mic",
-                {"session": self.instance_name, "pcm": bytes(pcm)},
+                {
+                    "session": self.instance_name,
+                    "encoding": "base64",
+                    "sampleRate": 48000,
+                    "pcm": base64.b64encode(bytes(pcm)).decode("ascii"),
+                },
             )
         except Exception:
             logging.exception("[WebSocketClient] failed to emit call microphone audio")

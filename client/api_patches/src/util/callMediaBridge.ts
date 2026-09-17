@@ -6,6 +6,7 @@ const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
 const MAX_MIC_QUEUE_FRAMES = 75;
 const micQueues = new Map<string, Buffer[]>();
 const micDraining = new Set<string>();
+const micReceived = new Map<string, number>();
 
 function installCallMediaBridgeInPage(): boolean {
   const win = window as any;
@@ -628,6 +629,11 @@ export function registerCallAudioSocket(
     queue.push(pcm);
     while (queue.length > MAX_MIC_QUEUE_FRAMES) queue.shift();
     micQueues.set(session, queue);
+    const received = (micReceived.get(session) || 0) + 1;
+    micReceived.set(session, received);
+    if (received === 1 || received % 250 === 0) {
+      logger?.info?.(`[${session}] call microphone received frames=${received} bytes=${pcm.length}`);
+    }
     void drainMicrophoneQueue(session, logger);
   });
 
@@ -635,6 +641,7 @@ export function registerCallAudioSocket(
     const session = String(payload?.session || '');
     if (!session || session !== authenticatedSession) return;
     micQueues.delete(session);
+    micReceived.delete(session);
     const client: any = (clientsArray as any)[session];
     const page = client?.waPage || client?.page;
     page
