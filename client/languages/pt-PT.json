@@ -354,6 +354,7 @@
     "settings_export_failed": "Não foi possível guardar o ficheiro de definições.",
     "settings_import_confirm_title": "Importar definições",
     "settings_import_confirm": "Importar as definições deste ficheiro? As suas definições passam a ser as do ficheiro e ficam válidas de imediato. Se o ficheiro trouxer uma API própria, o WinZapp passa a usar esse servidor, e opções como o idioma e as atualizações aplicam-se a todas as contas deste computador. A sua ligação ao WhatsApp mantém-se.",
+    "settings_import_api_confirm": "Este ficheiro faz o WinZapp usar a API em {server}. Toda a comunicação desta conta com o WhatsApp, incluindo a chave de acesso da sessão, passará por esse servidor. Só aceite se o servidor for seu ou de alguém em quem confia. Usar esse servidor? Se escolher Não, as restantes definições são importadas e a ligação mantém-se.",
     "settings_import_done": "{count} definições importadas, já em vigor.",
     "settings_import_unreadable": "Não foi possível ler esse ficheiro.",
     "settings_import_not_an_export": "Esse ficheiro não é uma exportação de definições do WinZapp.",

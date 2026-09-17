@@ -64,14 +64,23 @@ EXCLUDED_KEYS = frozenset({
 
 #: The API this account talks to, which travels only for a custom one.
 #:
-#: With WinZapp’s own bundled API these two are this install’s alone: the port
+#: With WinZapp’s own bundled API these are this install’s alone: the port
 #: is allocated per account and re-resolved at every launch
 #: (MainWindow._resolve_wpp_port), so another machine’s port is at best
 #: overwritten and at worst claimed by a second account here; and the key is the
 #: local REST credential. With a custom API they are the opposite — the address,
 #: port and key of a server the person runs, which is exactly what they want on
 #: the other computer too, so the whole block travels together.
-CUSTOM_API_KEYS = ("wpp_port", "wpp_api_key")
+#:
+#: The addresses are in this list too, not only port and key. Every request
+#: WinZapp makes carries the session token to `wpp_server`, so a file that
+#: could set it while claiming the bundled API would point this install at any
+#: host with nothing on screen to say so. Changing the API at all is also
+#: confirmed separately, naming the server (api_change(), and
+#: MainWindow._on_import_settings).
+CUSTOM_API_KEYS = ("wpp_server", "wpp_ws_server", "wpp_port", "wpp_api_key")
+
+_CONNECTION_KEYS = ("wpp_custom_api",) + CUSTOM_API_KEYS
 
 
 #: One-shot migration flags (core/utils.py). Carrying one would stop the
@@ -231,18 +240,44 @@ def read_export(payload):
     return settings, ""
 
 
-def merge_settings(current, incoming):
+def api_change(current, incoming):
+    """The server an import would move this install to, or None.
+
+    Not None only when the file describes a custom API and applying it would
+    change anything about the API this install talks to. That is the one import
+    that decides where the session token is sent from now on, so it is asked
+    about on its own, with the address in front of the person, instead of
+    riding along with the language and the sounds. Moving back to the bundled
+    API is not asked about: that sends nothing anywhere new.
+    """
+    if not uses_custom_api(incoming):
+        return None
+    section = incoming.get("connection") if isinstance(incoming, dict) else None
+    here = (current or {}).get("connection") if isinstance(current, dict) else None
+    section = section if isinstance(section, dict) else {}
+    here = here if isinstance(here, dict) else {}
+    if all(section.get(key, here.get(key)) == here.get(key) for key in _CONNECTION_KEYS):
+        return None
+    server = section.get("wpp_server", here.get("wpp_server"))
+    return str(server) if server else ""
+
+
+def merge_settings(current, incoming, include_connection=True):
     """(the settings to save, how many values were applied, what was ignored).
 
     Applied onto a copy of `current`, so anything the file does not mention —
     including everything the export leaves behind — keeps the value this
-    install already had.
+    install already had. `include_connection` False leaves the API this
+    install talks to exactly as it is (the person declined api_change()).
     """
     merged = copy.deepcopy(current or {})
     applied = 0
     ignored = []
     for section, value in (incoming or {}).items():
         if is_excluded(section, None) or section not in DEFAULT_SETTINGS:
+            ignored.append(str(section))
+            continue
+        if section == "connection" and not include_connection:
             ignored.append(str(section))
             continue
         if _is_free_form(section):

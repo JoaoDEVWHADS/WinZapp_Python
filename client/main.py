@@ -11445,11 +11445,31 @@ class MainWindow(wx.Frame):
                 return
         finally:
             confirm.Destroy()
-        error, applied = self.import_settings_from_file(path)
+        error, applied = self.import_settings_from_file(
+            path, confirm_api_change=self._confirm_imported_api)
         if error:
             self._announce_settings_transfer(error, error=True)
             return
         self._announce_settings_transfer("settings_import_done", count=applied)
+
+    def _confirm_imported_api(self, server: str) -> bool:
+        """Ask, naming the server, before an import moves this install to
+        another API. Every request carries the session token to that server, so
+        this is not one more preference among the rest. No is the default, and
+        No still imports everything else (import_settings_from_file())."""
+        t = self.i18n.t
+        dlg = wx.MessageDialog(
+            self, t("settings_import_api_confirm").format(server=server or "?"),
+            t("settings_import_confirm_title"),
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+        )
+        # The message tells the person what No does, so the button has to say
+        # the same word in WinZapp's language, not in Windows'.
+        dlg.SetYesNoLabels(t("yes_button"), t("no_button"))
+        try:
+            return dlg.ShowModal() == wx.ID_YES
+        finally:
+            dlg.Destroy()
 
     def _announce_settings_transfer(self, key: str, error: bool = False, **fields):
         """Show the outcome: this is a rare, deliberate action whose result the
@@ -11488,14 +11508,19 @@ class MainWindow(wx.Frame):
             logging.exception("[settings-transfer] export failed")
             return "settings_export_failed"
 
-    def import_settings_from_file(self, path: str):
+    def import_settings_from_file(self, path: str, confirm_api_change=None):
         """Apply the settings in `path`. Returns (i18n error key or '', count).
 
         Nothing is written until the file has been read and understood, so a
         file that is not an export, or holds nothing this build knows, leaves
         the install exactly as it was.
+
+        `confirm_api_change(server) -> bool` is asked when the file would move
+        this install to another API (core/settings_transfer.api_change). With
+        no callback, or a No, the connection is left exactly as it is and the
+        rest is still imported — never the other way round.
         """
-        from core.settings_transfer import merge_settings, read_export
+        from core.settings_transfer import api_change, merge_settings, read_export
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
                 payload = json.load(f)
@@ -11506,7 +11531,19 @@ class MainWindow(wx.Frame):
         if error:
             logging.warning("[settings-transfer] refused %s: %s", path, error)
             return error, 0
-        merged, applied, ignored = merge_settings(self.settings, incoming)
+        server = api_change(self.settings, incoming)
+        include_connection = server is None
+        if server is not None and confirm_api_change is not None:
+            try:
+                include_connection = bool(confirm_api_change(server))
+            except Exception:
+                logging.exception("[settings-transfer] could not ask about the API")
+                include_connection = False
+        if server is not None:
+            logging.info("[settings-transfer] file moves the API to %s: %s",
+                         server, "accepted" if include_connection else "kept as it was")
+        merged, applied, ignored = merge_settings(
+            self.settings, incoming, include_connection=include_connection)
         if ignored:
             # Not an error: a newer export, or one carrying this install's own
             # state, simply leaves those alone.

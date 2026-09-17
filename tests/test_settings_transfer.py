@@ -60,7 +60,8 @@ class TestWhatStaysBehind:
         exported = transfer.exportable_settings(_settings())
         assert exported["general"]["language"] == "pt-BR"
         assert exported["user_interface"]["messages_page_size"] == 200
-        assert exported["connection"]["wpp_server"] == "http://127.0.0.1"
+        # The bundled API's address is this install's own (CUSTOM_API_KEYS).
+        assert "wpp_server" not in exported["connection"]
         assert exported["profile_backup"]["close_snapshot_min_hours"] == 24
 
     def test_a_section_this_build_never_declared_is_not_exported(self):
@@ -128,6 +129,43 @@ class TestTheApiThisAccountTalksTo:
         assert merged["connection"]["wpp_api_key"] == current["connection"]["wpp_api_key"]
         assert applied == 1        # only wpp_custom_api itself
         assert sorted(ignored) == ["connection.wpp_api_key", "connection.wpp_port"]
+
+    def test_a_file_on_the_bundled_api_cannot_set_the_server_either(self):
+        """Every request carries the session token to wpp_server. A file that
+        says "bundled API" while naming a server used to move it anyway, with
+        nothing on screen to say so."""
+        incoming = {"connection": {"wpp_custom_api": False,
+                                   "wpp_server": "http://atacante.exemplo",
+                                   "wpp_ws_server": "ws://atacante.exemplo"}}
+        current = _settings()
+        merged, _applied, ignored = transfer.merge_settings(current, incoming)
+        assert merged["connection"]["wpp_server"] == current["connection"]["wpp_server"]
+        assert merged["connection"]["wpp_ws_server"] == current["connection"]["wpp_ws_server"]
+        assert "connection.wpp_server" in ignored
+        assert transfer.api_change(current, incoming) is None
+
+    def test_the_bundled_api_exports_no_address(self):
+        exported = transfer.exportable_settings(_settings())
+        assert "wpp_server" not in exported["connection"]
+        assert "wpp_ws_server" not in exported["connection"]
+
+    def test_api_change_names_the_server_a_custom_file_moves_to(self):
+        incoming, _ = transfer.read_export(transfer.build_export(self._custom()))
+        assert transfer.api_change(_settings(), incoming) == "https://api.exemplo.com"
+
+    def test_api_change_is_none_when_nothing_about_the_api_changes(self):
+        custom = self._custom()
+        incoming, _ = transfer.read_export(transfer.build_export(custom))
+        assert transfer.api_change(custom, incoming) is None
+
+    def test_declining_keeps_the_connection_and_still_merges_the_rest(self):
+        incoming, _ = transfer.read_export(transfer.build_export(self._custom()))
+        current = _settings()
+        merged, applied, ignored = transfer.merge_settings(
+            current, incoming, include_connection=False)
+        assert merged["connection"] == current["connection"]
+        assert "connection" in ignored
+        assert applied
 
     def test_uses_custom_api_reads_the_flag_it_is_given(self):
         assert transfer.uses_custom_api(self._custom()) is True

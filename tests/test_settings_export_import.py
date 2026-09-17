@@ -176,7 +176,12 @@ class TestACustomApiTravels:
 
     def test_importing_it_points_this_install_at_that_server(self, tmp_path):
         stub = _Stub()      # the real apply_settings_live(), not the counter
-        stub.import_settings_from_file(self._custom_file(tmp_path))
+        asked = []
+        stub.import_settings_from_file(
+            self._custom_file(tmp_path),
+            confirm_api_change=lambda server: asked.append(server) or True)
+
+        assert asked == ["https://api.exemplo.com"]
 
         assert stub.wpp_server == "https://api.exemplo.com"
         assert stub.wpp_port == 8443
@@ -186,6 +191,51 @@ class TestACustomApiTravels:
         assert connection["wpp_server"] == "https://api.exemplo.com"
         assert connection["wpp_port"] == 8443
         assert connection["wpp_api_key"] == "minha-chave"
+
+
+class TestMovingToAnotherApiIsAskedSeparately:
+    """Every request carries the session token to the API's server, so an
+    import that changes it is confirmed on its own, naming the server — and a
+    No keeps the connection while everything else is still imported."""
+
+    def _custom_file(self, tmp_path):
+        return TestACustomApiTravels()._custom_file(tmp_path)
+
+    def test_declining_keeps_the_connection_and_imports_the_rest(self, tmp_path):
+        stub = _Stub()
+        before = copy.deepcopy(stub.settings["connection"])
+        error, applied = stub.import_settings_from_file(
+            self._custom_file(tmp_path), confirm_api_change=lambda server: False)
+
+        assert error == "" and applied
+        assert stub.settings["connection"] == before
+        assert stub.wpp_server == "http://127.0.0.1"
+        assert stub.wpp_api_key == "install-key"
+
+    def test_without_a_callback_the_connection_is_never_moved(self, tmp_path):
+        stub = _Stub()
+        before = copy.deepcopy(stub.settings["connection"])
+        stub.import_settings_from_file(self._custom_file(tmp_path))
+        assert stub.settings["connection"] == before
+
+    def test_a_callback_that_raises_counts_as_no(self, tmp_path):
+        stub = _Stub()
+        before = copy.deepcopy(stub.settings["connection"])
+
+        def _boom(server):
+            raise RuntimeError("dialog failed")
+
+        error, _applied = stub.import_settings_from_file(
+            self._custom_file(tmp_path), confirm_api_change=_boom)
+        assert error == ""
+        assert stub.settings["connection"] == before
+
+    def test_a_file_that_changes_nothing_about_the_api_asks_nothing(self, tmp_path):
+        stub = _Stub()
+        asked = []
+        stub.import_settings_from_file(
+            _export_file(tmp_path), confirm_api_change=lambda s: asked.append(s) or True)
+        assert asked == []
 
 
 class TestImporting:

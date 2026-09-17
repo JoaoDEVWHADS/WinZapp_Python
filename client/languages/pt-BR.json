@@ -354,6 +354,7 @@
     "settings_export_failed": "Não foi possível salvar o arquivo de configurações.",
     "settings_import_confirm_title": "Importar configurações",
     "settings_import_confirm": "Importar as configurações deste arquivo? As suas configurações passam a ser as do arquivo e valem na hora. Se o arquivo trouxer uma API própria, o WinZapp passa a usar esse servidor, e opções como idioma e atualizações valem para todas as contas deste computador. A sua conexão com o WhatsApp continua a mesma.",
+    "settings_import_api_confirm": "Este arquivo faz o WinZapp usar a API em {server}. Toda a comunicação desta conta com o WhatsApp, incluindo a chave de acesso da sessão, passará por esse servidor. Só aceite se o servidor for seu ou de alguém em quem você confia. Usar esse servidor? Se escolher Não, as outras configurações são importadas e a conexão continua como está.",
     "settings_import_done": "{count} configurações importadas, já valendo.",
     "settings_import_unreadable": "Não foi possível ler esse arquivo.",
     "settings_import_not_an_export": "Esse arquivo não é uma exportação de configurações do WinZapp.",
