@@ -825,6 +825,7 @@
     "voice_call_starting": "Dzwonię do {name}.",
     "voice_call_start_failed": "Nie udało się rozpocząć połączenia: {error}",
     "voice_call_connected": "Połączenie nawiązane.",
+    "voice_call_reconnecting": "Połączenie jest ponownie nawiązywane.",
     "voice_call_ended": "Połączenie zakończone.",
     "incoming_call_close_button": "&Zamknij okno",
     "emoji_button": "Emoji",
