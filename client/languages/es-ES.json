@@ -848,7 +848,7 @@
     "incoming_call_answer_failed": "No se pudo contestar la llamada: {error}",
     "incoming_call_reject_failed": "No se pudo rechazar la llamada: {error}",
     "incoming_call_end_failed": "No se pudo finalizar la llamada: {error}",
-    "voice_call_button": "&Llamar",
+    "voice_call_button": "&Llamada de voz",
     "voice_call_end_button": "&Colgar",
     "voice_call_settings_button": "&Configuración",
     "voice_call_mute_button": "&Silenciar micrófono",
