@@ -259,7 +259,7 @@ function installCallMediaBridgeInPage(): boolean {
     class BridgedRTCPeerConnection extends NativeRTCPeerConnection {
       constructor(...args: any[]) {
         super(...args);
-        attachPeerConnection(this);
+        attachPeerConnection(this as unknown as RTCPeerConnection);
       }
     }
     Object.setPrototypeOf(BridgedRTCPeerConnection, NativeRTCPeerConnection);
