@@ -859,6 +859,7 @@
     "voice_call_recording_devices": "Dispositivos de grabación",
     "calls_audio_settings_button": "Configuración de audio de la llamada",
     "voice_call_active_label": "Llamada de voz con {name}.",
+    "voice_group_call_active_label": "Llamada de voz grupal: {name}.",
     "voice_call_individual_only": "Por ahora, WinZapp solo admite llamadas de voz individuales.",
     "voice_call_already_active": "Ya hay una llamada de voz en curso.",
     "voice_call_starting": "Llamando a {name}.",

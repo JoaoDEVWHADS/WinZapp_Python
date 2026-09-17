@@ -859,6 +859,7 @@
     "voice_call_recording_devices": "Urządzenia nagrywania",
     "calls_audio_settings_button": "Ustawienia dźwięku połączenia",
     "voice_call_active_label": "Połączenie głosowe z {name}.",
+    "voice_group_call_active_label": "Grupowe połączenie głosowe: {name}.",
     "voice_call_individual_only": "Na razie WinZapp obsługuje tylko indywidualne połączenia głosowe.",
     "voice_call_already_active": "Połączenie głosowe już trwa.",
     "voice_call_starting": "Dzwonię do {name}.",
