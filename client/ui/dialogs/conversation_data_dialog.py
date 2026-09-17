@@ -206,6 +206,16 @@ class ConversationDataDialog(wx.Dialog):
         self._name = subject
         self.SetTitle(self._dialog_title(subject))
 
+    def Destroy(self):
+        # Marked here, not only on EVT_WINDOW_DESTROY: a top-level window's
+        # Destroy() is deferred to the next idle cycle, so the event arrives
+        # late, and the background resolution kept going for another whole
+        # chunk after the dialog was gone — caught running the real dialog in
+        # CI. The event stays as the net for destruction that does not come
+        # through here (the parent being destroyed first).
+        self._closed.set()
+        return super().Destroy()
+
     def _on_window_destroy(self, event):
         # wxWindowDestroyEvent propagates up from every child as well; only
         # the dialog's own destruction means nobody is looking any more.

@@ -292,3 +292,13 @@ class TestThePopulateNoLongerResolves:
         assert "self._closed.set()" in inspect.getsource(
             ConversationDataDialog._on_window_destroy
         )
+
+    def test_destroy_marks_it_closed_before_destroying(self):
+        """A top-level Destroy() is deferred to idle, so the destroy event
+        alone let a whole further chunk of API calls run after closing —
+        measured with the real dialog in CI. (super() needs a real instance,
+        hence source order rather than a call on a stub.)"""
+        import inspect
+
+        src = inspect.getsource(ConversationDataDialog.Destroy)
+        assert src.index("self._closed.set()") < src.index("super().Destroy()")
