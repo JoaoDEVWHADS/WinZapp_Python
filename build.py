@@ -1,4 +1,4 @@
-"""
+r"""
 WinZapp build script — PyInstaller variant.
 
 Build modes:
@@ -7,14 +7,14 @@ Build modes:
 
   --onefile:           PyInstaller --onefile -> WinZapp.exe (single file)
                        All Python deps + external resources (node/, api/, lib/,
-                       sounds/, languages/, data/, .env) are embedded in the exe
+                       sounds/, languages/, data/) are embedded in the exe
                        and extracted to a temp directory at runtime.
 
 Steps (onedir default):
   1. Check required tools (pyinstaller, gcc, windres) and pre-built api/ + client/node/
   2. Compile client with PyInstaller -> build/pyinstaller_out/
   3. Assemble staging dir -> WinZapp.exe + _internal/ + lib/ + sounds/ + languages/
-                            + data/ + .env + node/ + api/
+                            + data/ + node/ + api/
   4. Compile uninstaller -> build/uninstall.exe
   5. Create payload ZIP (ZIP_STORED) from staging/
   6. Compile installer stub -> build/installer_stub.exe
@@ -26,25 +26,29 @@ Steps (onefile):
   2. Compile client with PyInstaller --onefile -> dist/WinZapp.exe
   3. Create portable dist/WinZapp.zip from the single .exe
 
-Before running this script you must prepare:
-  venv/  - activate the venv and install pyinstaller:
-             venv\Scripts\pip install pyinstaller
+Before running this script, install its Python dependencies, either way:
+  uv sync
+  -- or --
+  python -m venv venv
+  venv\Scripts\pip install -r requirements.txt -r requirements-dev.txt
 
-  client/node/  - download the Windows x64 portable Node.js zip from
-                  https://nodejs.org/dist/ (node-vXX.X.X-win-x64.zip)
-                  and extract its contents into client/node/.
-
-  client/api/ - run setup_api.py, then inside client/api/ run:
-                  npm install
-                  npm run build
-                Verify: client/api/dist/server.js must exist.
+The script downloads the checksum-verified portable Node.js runtime (replacing
+a client/node/ that is not exactly the homologated version) and runs
+setup_api.py automatically when client/api/dist/server.js is absent.
 
 Usage:
-  venv\Scripts\python.exe build.py                  (onedir, default)
-  venv\Scripts\python.exe build.py --onefile         (single-file exe)
+  uv run build-installer                  (onedir, default)
+  uv run build-onefile                    (single-file exe)
+  venv\Scripts\python.exe build.py        (onedir, default)
+  venv\Scripts\python.exe build.py --onefile
+
+Whichever interpreter starts it, the build runs under the one
+winzapp_tools.build_env.select_build_python() picks: WINZAPP_VENV, then the
+running virtual environment, then venv\ or .venv\ in the repository.
 """
 
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -54,6 +58,10 @@ import io
 import glob
 import tarfile
 import urllib.request
+import importlib.util
+import sysconfig
+import hashlib
+import tempfile
 
 # -- Paths -------------------------------------------------------------------
 
@@ -62,17 +70,55 @@ CLIENT_DIR    = os.path.join(ROOT_DIR, "client")
 INSTALLER_DIR = os.path.join(ROOT_DIR, "installer")
 BUILD_DIR     = os.path.join(ROOT_DIR, "build")
 DIST_DIR      = os.path.join(ROOT_DIR, "dist")
-# VENV_DIR defaults to ./venv but can be overridden via WINZAPP_VENV so a
-# Windows build venv can coexist with a separate (e.g. WSL/Linux) test venv.
-VENV_DIR      = os.environ.get("WINZAPP_VENV") or os.path.join(ROOT_DIR, "venv")
-
 # External pre-built assets
-NODE_DIR         = os.path.join(CLIENT_DIR, "node")
-API_DIR          = os.path.join(CLIENT_DIR, "api")
-API_PATCHES_DIR  = os.path.join(CLIENT_DIR, "api_patches")
+NODE_DIR      = os.path.join(CLIENT_DIR, "node")
+API_DIR       = os.path.join(CLIENT_DIR, "api")
 
-PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
-PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+from winzapp_tools.build_env import (  # noqa: E402
+    hand_over_to_build_python,
+    portable_node_needs_replacing,
+    portable_node_version,
+)
+
+# Before uv, build.py hardcoded venv\ and worked from any interpreter. Now it
+# builds with the one running it, so a bare `python build.py` is handed to
+# venv\ (or .venv\) here — before anything below reads site-packages.
+if __name__ == "__main__":
+    hand_over_to_build_python(__file__, ROOT_DIR)
+
+
+def _load_node_download_config():
+    """client/node_download_config.py, loaded by path.
+
+    Putting client/ on sys.path instead would let its modules (config,
+    version, updater...) shadow anything this script imports afterwards.
+    """
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location(
+        "_winzapp_node_download_config",
+        os.path.join(CLIENT_DIR, "node_download_config.py"),
+    )
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Keep the build on the exact portable runtime the application downloads for
+# end users. build-windows.yml reads the same file.
+_node_config  = _load_node_download_config()
+NODE_VERSION     = _node_config.NODE_VERSION
+NODE_FILENAME    = _node_config.NODE_FILENAME
+NODE_SHASUMS_URL = _node_config.NODE_SHASUMS_URL
+NODE_TOP_DIR     = _node_config.NODE_TOP_DIR
+NODE_URL         = _node_config.NODE_URL
+
+# The interpreter running this script is the build environment (see
+# _hand_over_to_build_python). Invoking PyInstaller as a module keeps it and
+# its installed packages in lockstep, under uv and venv alike.
+PYTHON_CMD      = sys.executable
+PYINSTALLER_CMD = [PYTHON_CMD, "-m", "PyInstaller"]
 GCC_CMD         = "gcc"
 WINDRES_CMD     = "windres"
 
@@ -99,15 +145,187 @@ PORTABLE_ZIP    = os.path.join(DIST_DIR,  "WinZapp.zip")
 
 SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
 
-SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
+SITE_PACKAGES = sysconfig.get_paths()["purelib"]
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
+# libopus-0.dll — required by client/core/ogg_opus.py for OGG Opus encoding.
+# libopus is a native C library (NOT a Python package).  On Windows it ships
+# with MSYS2 (mingw-w64-ucrt-x86_64-opus) or can be installed via Chocolatey /
+# vcpkg.  build.py searches common locations; if not found it auto-downloads the
+# DLL from the MSYS2 package mirror and saves it to client/lib/.
+
+def _find_opus_dll_on_disk():
+    """Search known filesystem locations for libopus-0.dll / opus.dll."""
+    candidates = [
+        os.path.join(CLIENT_DIR, "lib", "libopus-0.dll"),
+        os.path.join(CLIENT_DIR, "lib", "opus.dll"),
+        r"C:\msys64\ucrt64\bin\libopus-0.dll",         # MSYS2 UCRT64 (CI + local)
+        r"C:\msys64\mingw64\bin\libopus-0.dll",         # MSYS2 MinGW64
+        r"C:\msys2\ucrt64\bin\libopus-0.dll",           # alternate MSYS2 root
+        r"C:\msys2\mingw64\bin\libopus-0.dll",
+        r"C:\ProgramData\chocolatey\bin\libopus-0.dll", # Chocolatey
+        r"C:\ProgramData\scoop\shims\libopus-0.dll",    # Scoop
+    ]
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        if path_dir:
+            candidates.append(os.path.join(path_dir, "libopus-0.dll"))
+            candidates.append(os.path.join(path_dir, "opus.dll"))
+    return next((p for p in candidates if os.path.isfile(p)), None)
+
+
+def _download_opus_dll():
+    """Download libopus-0.dll from the MSYS2 package mirror.
+
+    Uses the MSYS2 packages API to find the latest package URL, then downloads
+    and extracts the DLL from the .tar.zst archive into client/lib/.
+    Requires the ``zstandard`` package (pyproject.toml / requirements.txt).
+    """
+    dst_dir = os.path.join(CLIENT_DIR, "lib")
+    dst     = os.path.join(dst_dir, "libopus-0.dll")
+
+    print("  [opus] libopus-0.dll not found locally — downloading from MSYS2...")
+
+    try:
+        import zstandard  # pyproject.toml / requirements.txt
+    except ImportError:
+        print("  [WARN] 'zstandard' package not installed; cannot auto-download libopus.")
+        print("         Run: uv sync  (or: pip install -r requirements.txt)")
+        return None
+
+    # Query the MSYS2 package API to discover the download URL for the latest
+    # opus package in the UCRT64 repository.
+    api_url = (
+        "https://packages.msys2.org/api/packages/ucrt64/"
+        "mingw-w64-ucrt-x86_64-opus"
+    )
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "WinZapp-build"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            import json
+            info = json.loads(resp.read())
+        # The API returns a list; pick the first (most recent).
+        entry = info[0] if isinstance(info, list) else info
+        pkg_filename = entry.get("filename") or entry.get("name") or ""
+        pkg_url = (
+            entry.get("url")
+            or entry.get("download_url")
+            or (
+                f"https://mirror.msys2.org/mingw/ucrt64/{pkg_filename}"
+                if pkg_filename else ""
+            )
+        )
+    except Exception as exc:
+        # API query failed — fall back to a pinned version URL.
+        print(f"  [opus] MSYS2 API unavailable ({exc}); using pinned version 1.5.2.")
+        pkg_url = (
+            "https://mirror.msys2.org/mingw/ucrt64/"
+            "mingw-w64-ucrt-x86_64-opus-1.5.2-1-any.pkg.tar.zst"
+        )
+
+    if not pkg_url:
+        print("  [WARN] Could not determine libopus package URL.")
+        return None
+
+    print(f"  [opus] Downloading {pkg_url} ...")
+    try:
+        req = urllib.request.Request(pkg_url, headers={"User-Agent": "WinZapp-build"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            pkg_data = resp.read()
+    except Exception as exc:
+        print(f"  [WARN] Download failed: {exc}")
+        return None
+
+    # The .pkg.tar.zst archive is a zstd-compressed tar.
+    # Inside, the DLL lives at  ucrt64/bin/libopus-0.dll
+    print("  [opus] Extracting libopus-0.dll ...")
+    try:
+        dctx = zstandard.ZstdDecompressor()
+        with dctx.stream_reader(io.BytesIO(pkg_data)) as zst_reader:
+            with tarfile.open(fileobj=zst_reader) as tar:
+                dll_member = next(
+                    (m for m in tar.getmembers()
+                     if m.name.endswith("/libopus-0.dll") or m.name == "libopus-0.dll"),
+                    None,
+                )
+                if dll_member is None:
+                    print("  [WARN] libopus-0.dll not found inside the package.")
+                    return None
+                f = tar.extractfile(dll_member)
+                os.makedirs(dst_dir, exist_ok=True)
+                with open(dst, "wb") as out:
+                    out.write(f.read())
+    except Exception as exc:
+        print(f"  [WARN] Extraction failed: {exc}")
+        return None
+
+    print(f"  [opus] Saved to {dst}")
+    return dst
+
+
+def _find_opus_dll():
+    """Find or auto-download libopus-0.dll for bundling."""
+    found = _find_opus_dll_on_disk()
+    if found:
+        return found
+    # Not found locally — attempt auto-download.
+    downloaded = _download_opus_dll()
+    if downloaded:
+        return downloaded
+    print(
+        "  [WARN] libopus-0.dll not found and auto-download failed.\n"
+        "         Voice messages will not work in the built app.\n"
+        "         To fix: install MSYS2 and run:\n"
+        "           pacman -S mingw-w64-ucrt-x86_64-opus\n"
+        "         Or copy libopus-0.dll to client/lib/libopus-0.dll"
+    )
+    return None
+
+OPUS_DLL = _find_opus_dll()
+
+
+def _prepare_ffmpeg():
+    """Find or download ffmpeg.exe and place it in client/lib/ for bundling."""
+    lib_dir = os.path.join(CLIENT_DIR, "lib")
+    os.makedirs(lib_dir, exist_ok=True)
+    dst = os.path.join(lib_dir, "ffmpeg.exe")
+    if os.path.isfile(dst):
+        return dst
+
+    import glob as _glob
+    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
+    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
+    if not hits:
+        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
+
+    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+        try:
+            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
+            import zipfile, tempfile, urllib.request
+            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
+            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
+            urllib.request.urlretrieve(dl_url, temp_zip)
+            with zipfile.ZipFile(temp_zip, "r") as zf:
+                zf.extract("ffmpeg.exe", lib_dir)
+            if os.path.isfile(dst):
+                return dst
+        except Exception as dl_err:
+            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
+
+    if ffmpeg_src and os.path.isfile(ffmpeg_src):
+        shutil.copy2(ffmpeg_src, dst)
+        return dst
+    return None
+
+FFMPEG_EXE = _prepare_ffmpeg()
+
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {
-    "wppconnect_tokens", "userDataDir", ".git", "__pycache__",
+    "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
     ".github", ".husky", ".vscode", "src", "log", "tokens", "uploads",
     "WhatsAppImages", "tests", "coverage",
+    ".cache",
 }
 API_EXCLUDE_FILES = {
     ".gitignore", "README-SETUP.md", ".babelrc", ".eslintignore", ".eslintrc.js",
@@ -120,7 +338,7 @@ API_EXCLUDE_FILES = {
     "Dockerfile", "docker-compose.yml", "requests.http",
     "swagger-backup.json",
 }
-API_EXCLUDE_SUB_DIRS = {"tests"}
+API_EXCLUDE_SUB_DIRS = {"tests", "types"}
 
 # WinZapp's own patches on top of upstream wppconnect-server (same list as
 # setup_api.py's custom_files). API_EXCLUDE_DIRS skips all of src/ wholesale
@@ -129,36 +347,17 @@ API_EXCLUDE_SUB_DIRS = {"tests"}
 # folder too (alongside .env/start.js/package.json/config.json) so they're
 # visible/patchable directly from an extracted install, not just at dev time.
 API_CUSTOM_SRC_FILES = [
-    ".babelrc",
-    "start.js",
-    "config.json",
-    ".eslintrc.json",
-    ".prettierrc",
-    ".prettierignore",
-    "jest.config.js",
-    "decrypt.js",
     "src/config.ts",
-    "src/index.ts",
     "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
     "src/util/functions.ts",
+    "src/util/tokenStore/fileTokenStory.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
-    "src/middleware/socketAuth.ts",
-    "src/dto/sync.ts",
-    "src/middleware/instrumentation.ts",
-    "src/errors/domain.ts",
-    "src/middleware/errorHandler.ts",
-    "src/services/messageResolver.ts",
-    "src/types/express/index.d.ts",
-    "src/tests/middleware/instrumentation.test.ts",
-    "src/tests/dto/sync.test.ts",
-    "src/tests/middleware/errorHandler.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
     "src/controller/statusController.ts",
-    "src/routes/index.ts",
+    "dist/middleware/auth.js",
 ]
 
 # -- CLI --------------------------------------------------------------------
@@ -179,24 +378,6 @@ def step(msg):
     print(f"\n{'-'*60}")
     print(f"  {msg}")
     print('-'*60)
-
-def read_client_version() -> str:
-    """Read __version__ out of client/version.py without importing it.
-
-    Used to embed the real app version into the compiled installer stub
-    (Add/Remove Programs' DisplayVersion), which used to be hardcoded to a
-    permanent placeholder no build ever updated.
-    """
-    version_path = os.path.join(CLIENT_DIR, "version.py")
-    with open(version_path, "r", encoding="utf-8") as f:
-        contents = f.read()
-    import re
-    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', contents)
-    if not m:
-        print(f"[WARN] Could not find __version__ in {version_path}; "
-              f"installer will report version 0.0.0")
-        return "0.0.0"
-    return m.group(1)
 
 def run(cmd, cwd=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
@@ -274,19 +455,98 @@ def _resync_api_patches(out_of_sync):
     run([PYTHON_CMD, os.path.join(ROOT_DIR, "setup_api.py")])
 
 
+def _download_portable_node():
+    """Download and checksum-verify the runtime bundled into local builds."""
+    print(f"  [bootstrap] Downloading portable Node.js v{NODE_VERSION}...")
+    # ignore_cleanup_errors: a scanner briefly holding a file in the retired
+    # runtime must not fail a build whose Node.js was already replaced.
+    with tempfile.TemporaryDirectory(prefix="winzapp-node-", dir=ROOT_DIR,
+                                     ignore_cleanup_errors=True) as tmp:
+        archive = os.path.join(tmp, NODE_FILENAME)
+        checksums = os.path.join(tmp, "SHASUMS256.txt")
+        urllib.request.urlretrieve(NODE_URL, archive)
+        urllib.request.urlretrieve(NODE_SHASUMS_URL, checksums)
+
+        with open(checksums, encoding="utf-8") as fh:
+            expected = next(
+                (line.split()[0] for line in fh if line.rstrip().endswith(NODE_FILENAME)),
+                None,
+            )
+        with open(archive, "rb") as fh:
+            actual = hashlib.sha256(fh.read()).hexdigest()
+        if not expected or actual.lower() != expected.lower():
+            raise RuntimeError(
+                f"Node.js checksum mismatch for {NODE_FILENAME}: "
+                f"expected {expected or 'missing'}, got {actual}"
+            )
+
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(tmp)
+        extracted = os.path.join(tmp, NODE_TOP_DIR)
+        if not os.path.isfile(os.path.join(extracted, "node.exe")):
+            raise RuntimeError("Node.js archive did not contain node.exe")
+        retired = None
+        if os.path.isdir(NODE_DIR):
+            # Rename first: it fails atomically while node.exe is running,
+            # where rmtree would delete half the folder and then stop on the
+            # locked exe, leaving no working Node.js at all.
+            retired = os.path.join(tmp, "node-previous")
+            try:
+                os.rename(NODE_DIR, retired)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Could not replace {NODE_DIR} ({exc}). Is a WinZapp or "
+                    "node.exe started from it still running?"
+                ) from exc
+        try:
+            shutil.move(extracted, NODE_DIR)
+        except OSError:
+            # Put the previous runtime back rather than leave none at all.
+            if retired and not os.path.exists(NODE_DIR):
+                os.rename(retired, NODE_DIR)
+            raise
+    print(f"  [bootstrap] Portable Node.js ready at {NODE_DIR}")
+
+
+def ensure_build_assets():
+    """Prepare generated runtime inputs that a local build should not require manually."""
+    # Checked before the bootstrap below, which can spend minutes downloading
+    # Node.js and running setup_api.py only for check_tools() to then report
+    # that the onedir build was never possible on this machine.
+    if not ONEFILE:
+        missing_native = [t for t in (GCC_CMD, WINDRES_CMD) if shutil.which(t) is None]
+        if missing_native:
+            print(
+                f"\n[ERROR] {', '.join(missing_native)} not found in PATH. The installer "
+                "build needs MSYS2 UCRT64 (gcc + binutils); use --onefile to build "
+                "without them."
+            )
+            sys.exit(1)
+    installed = portable_node_version(os.path.join(NODE_DIR, "node.exe"))
+    if portable_node_needs_replacing(installed, NODE_VERSION):
+        if installed:
+            print(
+                f"  [bootstrap] client/node/ is Node.js v{installed}; "
+                f"the homologated runtime is v{NODE_VERSION}."
+            )
+        _download_portable_node()
+    if not os.path.isfile(os.path.join(API_DIR, "dist", "server.js")):
+        print("  [bootstrap] WPPConnect API is missing; running setup_api.py...")
+        run([PYTHON_CMD, os.path.join(ROOT_DIR, "setup_api.py")])
+
+
 # -- Step 1: Check tools and pre-built assets --------------------------------
 
 def check_tools():
     step("1/8  Checking required tools and pre-built assets")
     missing = []
 
-    if not os.path.isfile(PYINSTALLER_CMD):
+    if importlib.util.find_spec("PyInstaller") is None:
         missing.append(
-            f"pyinstaller  (expected at {PYINSTALLER_CMD})\n"
-            f"    Install with: venv\\Scripts\\pip install pyinstaller"
+            f"pyinstaller  (not installed for {PYTHON_CMD})\n"
+            "    Install with: uv sync\n"
+            "    or: pip install -r requirements.txt -r requirements-dev.txt"
         )
-    if not os.path.isfile(PYTHON_CMD):
-        missing.append(f"python  (expected at {PYTHON_CMD})")
 
     if not ONEFILE:
         for tool, name in [(GCC_CMD, "gcc"), (WINDRES_CMD, "windres")]:
@@ -313,11 +573,18 @@ def check_tools():
     api_main = os.path.join(API_DIR, "dist", "server.js")
     if not os.path.isfile(api_main):
         missing.append(
-            "client/api/dist/server.js  -- WPPConnect Server API not built.\n"
-            "    1. Run:  venv\\Scripts\\python.exe setup_api.py\n"
-            "    2. Then inside client/api/ run:\n"
-            "         npm install\n"
-            "         npm run build"
+            "client/api/dist/server.js  -- WPPConnect Server API not built,\n"
+            "    even after running setup_api.py. Check its output above, then\n"
+            "    retry with:  uv run setup-api  (or: python setup_api.py)"
+        )
+
+    if OPUS_DLL:
+        print(f"  [opus] libopus found: {OPUS_DLL}")
+    else:
+        print(
+            "  [WARN] libopus-0.dll not found — voice messages will fail in the built app.\n"
+            "         Install MSYS2 and run: pacman -S mingw-w64-ucrt-x86_64-opus\n"
+            "         Or copy libopus-0.dll to client/lib/"
         )
 
     if missing:
@@ -329,6 +596,91 @@ def check_tools():
     print("  All tools and assets found.")
 
 # -- Step 2: PyInstaller compile --------------------------------------------
+
+
+# -- Windows VERSIONINFO resource --------------------------------------------
+
+def _app_version_tuple():
+    """(major, minor, patch, build) read off client/version.py.
+
+    Windows VERSIONINFO wants exactly four 16-bit integers, and WinZapp's own
+    version string may carry a pre-release suffix ("0.25.0.0beta",
+    "1.0.0.2154alpha" — see the auto-updater section of CLAUDE.md), which has
+    no place in the resource. Only the numeric components are read; a missing
+    or unparseable one becomes 0 rather than failing the build, and each is
+    clamped to 65535 because an alpha's fourth component is a commit count and
+    will eventually pass that.
+    """
+    version = ""
+    version_py = os.path.join(CLIENT_DIR, "version.py")
+    try:
+        with io.open(version_py, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip().startswith("__version__"):
+                    version = line.split("=", 1)[1].strip().strip("\"'")
+                    break
+    except OSError:
+        pass
+    parts = []
+    for chunk in re.split(r"[.\-+]", version):
+        m = re.match(r"^(\d+)", chunk.strip())
+        parts.append(min(int(m.group(1)), 65535) if m else 0)
+    parts = (parts + [0, 0, 0, 0])[:4]
+    return version or "0.0.0.0", tuple(parts)
+
+
+def _write_version_file(work_dir):
+    """Generate the PyInstaller --version-file that fills in Windows'
+    Properties > Details for WinZapp.exe (issue #88).
+
+    Without it the built exe carries no VERSIONINFO resource at all: Windows
+    shows blank File description / File version / Product name, which also
+    makes the process indistinguishable in Task Manager and unhelpful to
+    anyone reporting a bug ("which version are you running?"). Generated on
+    every build from client/version.py, so it cannot drift from the version
+    the app itself displays — that is the "updated automatically as part of
+    the build process" half of the request.
+
+    Note this covers WinZapp.exe only. The onedir installer/uninstaller stubs
+    are C, compiled through installer/*.rc by windres, and would need their own
+    (generated) VERSIONINFO block there.
+    """
+    display, (maj, minr, patch, build) = _app_version_tuple()
+    os.makedirs(work_dir, exist_ok=True)
+    path = os.path.join(work_dir, "winzapp_version_info.txt")
+    content = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({maj}, {minr}, {patch}, {build}),
+    prodvers=({maj}, {minr}, {patch}, {build}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [StringStruct('CompanyName', 'WinZapp'),
+         StringStruct('FileDescription', 'WinZapp - accessible WhatsApp client'),
+         StringStruct('FileVersion', '{display}'),
+         StringStruct('InternalName', 'WinZapp'),
+         StringStruct('LegalCopyright', '© 2026 WinZapp - LGPLv3'),
+         StringStruct('OriginalFilename', 'WinZapp.exe'),
+         StringStruct('ProductName', 'WinZapp'),
+         StringStruct('ProductVersion', '{display}')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    print(f"  [versioninfo] {display} -> {path}")
+    return path
+
 
 def pyinstaller_compile():
     mode = "onefile" if ONEFILE else "onedir"
@@ -361,16 +713,16 @@ def pyinstaller_compile():
         "winrt",
         "pyaudio",
         "aiosqlite",
-        "numpy",
     ]
 
     cmd = [
-        PYINSTALLER_CMD,
+        *PYINSTALLER_CMD,
         "--onefile" if ONEFILE else "--onedir",
         "--windowed",
         "--name", "WinZapp",
         "--distpath", DIST_DIR if ONEFILE else PYINST_OUTDIR,
         "--workpath", work_dir,
+        "--version-file", _write_version_file(work_dir),
         "--noconfirm",
     ]
 
@@ -384,23 +736,25 @@ def pyinstaller_compile():
         add_data_pairs = [
             (NODE_DIR, "node"),
             (API_DIR, "api"),
-            (API_PATCHES_DIR, "api_patches"),
             (SOUND_LIB_X64, "lib"),
             (AO2_LIB, "lib"),
             (os.path.join(CLIENT_DIR, "sounds"), "sounds"),
             (os.path.join(CLIENT_DIR, "languages"), "languages"),
             (SETTINGS_DEFAULT, os.path.join("data", "settings_default.json")),
         ]
-        if os.path.isfile(os.path.join(CLIENT_DIR, ".env")):
-            add_data_pairs.append(
-                (os.path.join(CLIENT_DIR, ".env"), ".env")
-            )
-        for changelog_src in glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt")):
-            add_data_pairs.append((changelog_src, os.path.basename(changelog_src)))
+        wpp_min_version_file = os.path.join(CLIENT_DIR, "wpp_minimum_version.txt")
+        if os.path.isfile(wpp_min_version_file):
+            add_data_pairs.append((wpp_min_version_file, "wpp_minimum_version.txt"))
 
         for src, dst in add_data_pairs:
             if os.path.exists(src):
                 cmd += ["--add-data", f"{src};{dst}"]
+
+        # libopus DLL must be bundled as a binary so ctypes can load it at runtime
+        if OPUS_DLL:
+            cmd += ["--add-binary", f"{OPUS_DLL};lib"]
+        if FFMPEG_EXE:
+            cmd += ["--add-binary", f"{FFMPEG_EXE};lib"]
 
     # Multi-account modules that may be reached only via lazy imports — pin them
     # as hidden imports so PyInstaller always bundles them even if a top-level
@@ -466,72 +820,37 @@ def assemble_staging():
                 shutil.copy2(os.path.join(AO2_LIB, fname),
                              os.path.join(lib_dir, fname))
                 dll_count += 1
-
-
-    # Copy all DLLs directly present in client/lib (bassopus.dll, libopus-0.dll, opus.dll, bass_aac.dll, screen reader DLLs, etc.)
-    client_lib_dir = os.path.join(CLIENT_DIR, "lib")
-    if os.path.isdir(client_lib_dir):
-        for fname in os.listdir(client_lib_dir):
-            if fname.lower().endswith(".dll"):
-                dst_file = os.path.join(lib_dir, fname)
-                shutil.copy2(os.path.join(client_lib_dir, fname), dst_file)
-                dll_count += 1
-
-    # bassopus.dll — BASS plugin for OGG Opus *playback* (audio messages)
-    _bassopus_src_names = ["bassopus.dll", "bass_opus.dll"]
-    _bassopus_copied = os.path.isfile(os.path.join(lib_dir, "bassopus.dll"))
-    for _bname in _bassopus_src_names:
-        if _bassopus_copied:
-            break
-        _bsrc = os.path.join(CLIENT_DIR, "lib", _bname)
+    # libopus for OGG Opus encoding (client/core/ogg_opus.py)
+    if OPUS_DLL:
+        shutil.copy2(OPUS_DLL, os.path.join(lib_dir, "libopus-0.dll"))
+        dll_count += 1
+        print(f"  -> lib/libopus-0.dll")
+    else:
+        print("  [WARN] libopus-0.dll not found — voice message encoding will fail")
+    # bassopus.dll for sound_lib BASS_PluginLoad
+    _bassopus_candidates = [
+        os.path.join(CLIENT_DIR, "lib", "bassopus.dll"),
+        os.path.join(CLIENT_DIR, "lib", "bass_opus.dll"),
+    ]
+    _bassopus_copied = False
+    for _bsrc in _bassopus_candidates:
         if os.path.isfile(_bsrc):
-            # Always write as bassopus.dll (the name sound_lib/BASS_PluginLoad expects)
             shutil.copy2(_bsrc, os.path.join(lib_dir, "bassopus.dll"))
             dll_count += 1
-            print(f"  -> lib/bassopus.dll  (from {_bname})")
+            print(f"  -> lib/bassopus.dll (from {os.path.basename(_bsrc)})")
             _bassopus_copied = True
             break
     if not _bassopus_copied:
         print("  [WARN] bassopus.dll not found in client/lib — OGG Opus audio playback will fail")
 
     # Copy ffmpeg binary to staging/lib/ to support audio conversion on remote API setups
-    import glob as _glob
-    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
-    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
-    if not hits:
-        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
-    
-    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
-
-    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
-        # Attempt automatic download for Windows target build
-        try:
-            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
-            import zipfile
-            import tempfile
-            import urllib.request
-            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
-            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
-            urllib.request.urlretrieve(dl_url, temp_zip)
-            with zipfile.ZipFile(temp_zip, "r") as zf:
-                zf.extract("ffmpeg.exe", lib_dir)
-            ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
-            if os.path.isfile(ffmpeg_dst):
-                ffmpeg_src = ffmpeg_dst
-                print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
-        except Exception as dl_err:
-            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
-
-    if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
-        ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
-        ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
-        shutil.copy2(ffmpeg_src, ffmpeg_dst)
-        print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
-    elif not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+    if FFMPEG_EXE:
+        shutil.copy2(FFMPEG_EXE, os.path.join(lib_dir, "ffmpeg.exe"))
+        print(f"  -> lib/ffmpeg.exe")
+    else:
         print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
 
     print(f"  -> lib/  ({dll_count} DLLs total)")
-
 
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
     shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))
@@ -548,16 +867,15 @@ def assemble_staging():
     shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
     print(f"  -> data/settings_default.json")
 
-    client_env = os.path.join(CLIENT_DIR, ".env")
-    if os.path.isfile(client_env):
-        shutil.copy2(client_env, os.path.join(STAGING_DIR, ".env"))
-        print(f"  -> .env")
-    else:
-        print(f"  [WARN] client/.env not found — skipping")
+    # wpp_minimum_version.txt (plain text, just the version string) feeds
+    # MainWindow.ensure_wpp_version() — see its own docstring for why this
+    # is a dedicated file rather than a bundled .env: only build-windows.yml
+    # writes it, so it's absent (silently skipped) on any local/dev build.
+    wpp_min_version_file = os.path.join(CLIENT_DIR, "wpp_minimum_version.txt")
+    if os.path.isfile(wpp_min_version_file):
+        shutil.copy2(wpp_min_version_file, os.path.join(STAGING_DIR, "wpp_minimum_version.txt"))
+        print(f"  -> wpp_minimum_version.txt")
 
-    # changelog_<lang>.txt files — read directly from the exe's own folder
-    # (see updater.py's resolve_changelog()), so a new/updated changelog can
-    # be dropped in without a WinZapp rebuild, same as languages/.
     changelog_files = glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt"))
     for src in changelog_files:
         shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
@@ -576,11 +894,9 @@ def assemble_staging():
         git_count = sum(1 for _, _, fs in os.walk(git_dst) for _ in fs)
         print(f"  -> git/   ({git_count} files)")
 
-
     api_dst = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0
-    custom_src_count = 0
     for abs_path, rel_path in walk_dir(API_DIR,
                                        exclude_top_dirs=API_EXCLUDE_DIRS,
                                        exclude_top_files=API_EXCLUDE_FILES,
@@ -595,11 +911,7 @@ def assemble_staging():
         shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
         print("  -> api/.commit_sha copied to staging")
 
-    cache_src = os.path.join(API_DIR, ".cache")
-    if os.path.isdir(cache_src):
-        cache_dst = os.path.join(api_dst, ".cache")
-        shutil.copytree(cache_src, cache_dst, dirs_exist_ok=True)
-        print("  -> api/.cache (Chrome Headless) copied to staging")
+    custom_src_count = 0
     for rel_path in API_CUSTOM_SRC_FILES:
         src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
         if not os.path.isfile(src_path):
@@ -612,27 +924,8 @@ def assemble_staging():
         custom_src_count += 1
     print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
 
-    # Second, untouched copy of the same patch files under api_patches/ — a
-    # pristine reference ApiSetupDialog restores from after every WPPConnect
-    # (re)install/update. api/ itself gets wiped and re-extracted from a
-    # fresh upstream ZIP on every one of those runs, so restoring from
-    # whatever happened to already be sitting in api/ before the wipe just
-    # perpetuates whatever patch snapshot the user's install last happened to
-    # have — including a stale/broken one from an older WinZapp version, with
-    # no way for a newer WinZapp release's improved patches to ever reach an
-    # existing install. api_patches/ is never modified after staging, so it
-    # always reflects exactly what *this* WinZapp build shipped with.
-    #
-    # Copied directly from client/api_patches/ — a permanent, always-git-
-    # tracked copy of these same files (never inside client/api/, so it
-    # survives even a full `rm -rf client/api/`) — rather than pulled from
-    # client/api/src/ at build time. A user deleting client/api/ before
-    # reinstalling used to leave setup_api.py / ApiSetupDialog nothing
-    # reliable to restore from (both only ever stashed whatever happened to
-    # still be on disk right before the wipe); client/api_patches/ is the
-    # single source of truth for what "correctly patched" looks like,
-    # independent of whatever state client/api/ itself is in.
     patches_dst = os.path.join(STAGING_DIR, "api_patches")
+    API_PATCHES_DIR = os.path.join(CLIENT_DIR, "api_patches")
     if os.path.isdir(API_PATCHES_DIR):
         shutil.copytree(API_PATCHES_DIR, patches_dst)
         patches_count = sum(len(fs) for _, _, fs in os.walk(patches_dst))
@@ -683,7 +976,6 @@ def create_payload_zip():
 
 def compile_installer_stub():
     step("6/8  Compiling installer stub")
-    version = read_client_version()
     run([
         WINDRES_CMD, "--codepage", "65001",
         os.path.join(INSTALLER_DIR, "installer.rc"),
@@ -692,13 +984,12 @@ def compile_installer_stub():
     ])
     run([
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
-        f'-DWINZAPP_VERSION=L"{version}"',
         os.path.join(INSTALLER_DIR, "installer.c"),
         INSTALLER_RES, "-o", INSTALLER_STUB, "-mwindows",
         "-I", INSTALLER_DIR,
         "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32", "-luuid",
     ])
-    print(f"  -> {INSTALLER_STUB}  (DisplayVersion={version})")
+    print(f"  -> {INSTALLER_STUB}")
 
 def append_zip_to_stub():
     step("7/8  Appending payload to installer stub")
@@ -741,6 +1032,8 @@ if __name__ == "__main__":
     mode_str = "onefile" if ONEFILE else "onedir"
     print(f"\nWinZapp Build Script — PyInstaller ({mode_str})")
     print("=" * 60)
+
+    ensure_build_assets()
 
     if ONEFILE:
         check_tools()

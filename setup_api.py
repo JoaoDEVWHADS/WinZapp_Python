@@ -7,19 +7,24 @@ out a specific tag. After cloning, follow the build instructions printed at
 the end to compile the API before running build.py.
 
 Configuration (via .env at the project root):
-  WPPCONNECT_TAG_VERSION  — git tag to check out after cloning.
-                            Leave unset or empty to keep the default branch (main).
+  WPPCONNECT_TAG_VERSION  — git tag to pin to. Leave unset or empty to
+                            auto-track the latest stable (non-prerelease)
+                            release tag instead — this script fetches tags
+                            and updates client/api/ to it on every run, even
+                            when client/api/ already exists from a previous
+                            run.
 
 Usage:
+  uv run setup-api
   venv\\Scripts\\python.exe setup_api.py
 """
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tempfile
 
 # ---------------------------------------------------------------------------
 
@@ -48,8 +53,34 @@ if _CLIENT_DIR not in sys.path:
 # reported live as every patch silently regressing to whatever old snapshot
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
+#
+# These are FULL-FILE restores, so any upstream change to one of them is
+# silently discarded on the next setup run. That is the intended trade — our
+# copies are the patches — but it means a server bump has to be read as "what
+# did upstream change in these files", not only "does it still build".
+# .github/scripts/audit_wpp_upgrade.py reads the two lists below and answers
+# exactly that question against a candidate tag.
+#
+# Audited at wppconnect-server 2.10.18 (2026-09-07). 2.10.17 added the Manager
+# dashboard and wired it into four of them (jest.config.js, src/index.ts,
+# src/util/createSessionUtil.ts, src/types/express/index.d.ts); every one of
+# those hooks is an emitManager()/installManager*() call feeding a web UI
+# WinZapp does not use, so dropping them costs nothing. The one substantive
+# change, `io: Socket` -> `io: Server` in the express typings, our copy already
+# carried as `Server as Socket`. 2.10.18 itself touched no source file at all —
+# it is a dependency bump moving @wppconnect-team/wppconnect from ^2.2.7 to
+# ^2.3.3, which is why the homologated pin had to reach 2.3.3 first.
+#
+# package.json is NOT in this list — see _merge_package_json_dependencies().
+# It used to be a full-file overwrite like the others, which meant its
+# "version" field (WPPConnect Server's own self-reported version — what
+# WppUpdateChecker compares against the latest GitHub release) came from
+# whatever was checked into api_patches/package.json at the time, not from
+# whatever tag was actually cloned/checked out here. Reported live: WinZapp
+# insisting its installed version was still 2.10.0 on a build that had
+# genuinely cloned/built 2.10.1, because api_patches/package.json's own
+# "version" field had gone stale.
 CUSTOM_ROOT_FILES = [
-    ".babelrc",
     "start.js",
     "config.json",
     ".eslintrc.json",
@@ -58,16 +89,14 @@ CUSTOM_ROOT_FILES = [
     "jest.config.js",
 ]
 CUSTOM_SRC_FILES = [
-    "decrypt.js",
     "src/config.ts",
     "src/index.ts",
     "src/util/createSessionUtil.ts",
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
-    "src/util/callMediaBridge.ts",
+    "src/util/tokenStore/fileTokenStory.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
-    "src/middleware/socketAuth.ts",
     "src/dto/sync.ts",
     "src/middleware/instrumentation.ts",
     "src/errors/domain.ts",
@@ -77,13 +106,14 @@ CUSTOM_SRC_FILES = [
     "src/tests/middleware/instrumentation.test.ts",
     "src/tests/dto/sync.test.ts",
     "src/tests/middleware/errorHandler.test.ts",
-    "src/controller/callController.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
     "src/controller/statusController.ts",
     "src/routes/index.ts",
+    "decrypt.js",
 ]
+
 
 def _load_env() -> dict:
     """Parse the root .env file and return a key→value dict."""
@@ -97,12 +127,11 @@ def _load_env() -> dict:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            if key.strip() and value.strip():
-                result[key.strip()] = value.strip()
+            result[key.strip()] = value.strip()
     return result
 
 
-def _run(cmd: list, cwd: str = None, check: bool = True, env: dict = None):
+def _run(cmd: list, cwd: str = None):
     # subprocess.run() with a bare command name (no shell=True, no
     # explicit .cmd/.exe suffix) can fail on Windows with
     # "[WinError 2] The system cannot find the file specified" for
@@ -113,94 +142,190 @@ def _run(cmd: list, cwd: str = None, check: bool = True, env: dict = None):
     # shutil.which() first finds the real .cmd/.exe path PATH would give
     # you, sidestepping the issue without needing shell=True (which has
     # its own quoting/injection concerns).
-    print(f"  $ {' '.join(str(c) for c in cmd)}")
-    executable = cmd[0]
-    if isinstance(executable, str) and not os.path.isabs(executable):
-        resolved = shutil.which(executable)
+    if cmd and isinstance(cmd[0], str) and not os.path.isabs(cmd[0]):
+        resolved = shutil.which(cmd[0])
         if resolved:
             cmd = [resolved] + cmd[1:]
-    creation_flags = 0
-    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-        creation_flags = subprocess.CREATE_NO_WINDOW
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        shell=False,
-        env=env,
-        creationflags=creation_flags,
-    )
-    if check and result.returncode != 0:
+    print(f"  $ {' '.join(str(c) for c in cmd)}")
+    result = subprocess.run(cmd, cwd=cwd)
+    if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
-    return result
 
 
-def ensure_portable_git():
-    import urllib.request
-    import zipfile
+def _latest_stable_tag(cwd: str) -> str:
+    """Return the highest vX.Y.Z release tag reachable from origin, or "" if
+    none is found (e.g. offline, or no tags match the vX.Y.Z pattern —
+    pre-release tags like v2.10.4-rc.1 are deliberately excluded so this
+    never auto-updates a dev/CI setup onto an unstable release).
+    """
+    result = subprocess.run(
+        ["git", "fetch", "--tags", "--force"], cwd=cwd,
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"[WARNING] git fetch --tags failed — skipping auto-update check.\n{result.stderr}")
+        return ""
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*"], cwd=cwd, capture_output=True, text=True
+    )
+    candidates = []
+    for line in result.stdout.splitlines():
+        tag = line.strip()
+        m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+        if m:
+            candidates.append((tuple(int(x) for x in m.groups()), tag))
+    if not candidates:
+        return ""
+    candidates.sort()
+    return candidates[-1][1]
 
-    if sys.platform != "win32":
+
+def _current_tag(cwd: str) -> str:
+    """Return the tag the working tree is currently checked out at exactly,
+    or "" if HEAD isn't exactly on a tag (detached at an arbitrary commit,
+    or on a branch)."""
+    result = subprocess.run(
+        ["git", "describe", "--tags", "--exact-match"], cwd=cwd,
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+# The only dependency entries WinZapp actually overrides on top of whatever
+# upstream wppconnect-server ships for a given tag. Deliberately a narrow,
+# explicit list rather than merging api_patches/package.json's entire
+# "dependencies" block wholesale — the latter would also silently roll back
+# every OTHER dependency to whatever version happened to be frozen in
+# api_patches/ at some earlier point, undoing legitimate upstream bumps on
+# every future tag this script prepares.
+_PATCHED_DEPENDENCY_KEYS = [
+    "@wppconnect-team/wppconnect",  # Exact runtime pair homologated by WinZapp.
+    "@wppconnect/wa-js",            # Prevent npm from changing browser APIs
+                                     # during a reinstall of the same server.
+    "prom-client",  # imported by src/middleware/instrumentation.ts, which is
+                    # WinZapp's own patch. Upstream happens to declare it too,
+                    # but under devDependencies — so our production import is
+                    # satisfied today only because both installers run a plain
+                    # `npm install`. Listing it here means the merge writes it
+                    # into dependencies regardless of what upstream does with
+                    # its own copy. npm accepts the entry appearing in both
+                    # blocks (verified with `npm install --dry-run`).
+    "zod",  # runtime schema for the sync endpoints' response contracts
+            # (src/dto/sync.ts). Declared here because the controllers import
+            # it at runtime — it is not a build-only tool.
+    "qrcode",  # required at runtime by WinZapp's own getQrCode patch to
+               # host.layer.js (client/core/wppconnect_host_layer_patch.py),
+               # which renders the QR PNG from the payload wa-js returns
+               # instead of scraping it out of the DOM. Same shape as
+               # prom-client above: upstream wppconnect-server declares it
+               # today, but the wppconnect library whose node_modules our
+               # patched file lives in does not, so the require() only
+               # resolves via npm hoisting. (The library is deliberately not
+               # named in full here — test_wppconnect_itself_is_no_longer_pinned
+               # greps this block for it to prove nobody re-pinned it.) If
+               # upstream drops it the patch degrades silently: base64Image comes back
+               # empty, websocket_client.py discards the event as carrying
+               # nothing usable, and the user watches an empty QR box with
+               # only a log line to show for it.
+    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary via npm — WinZapp's
+                                  # own Python side shells out to it directly
+                                  # (main.py: _find_api_ffmpeg/_convert_wav_to_ogg)
+                                  # to encode voice messages to OGG/Opus; upstream
+                                  # wppconnect-server does not declare it at all.
+]
+
+# Executable WPPConnect/WA-JS code is pinned to the exact pair validated with
+# this WinZapp patch set. Upstream uses caret ranges, so a plain npm install of
+# the same WPPConnect Server tag previously changed these APIs underneath an
+# unchanged WinZapp build. @wppconnect/wa-version remains transitively updated:
+# it is the expiring WhatsApp HTML catalogue, not the executable adapter API.
+
+
+def _recover_upstream_package_json():
+    """Bring client/api/package.json back when it went missing from a clone
+    that already exists.
+
+    _merge_package_json_dependencies() patches the file in place and bails out
+    silently when it isn't there, which is right for a fresh clone (npm install
+    would run against upstream's own file a moment later) but leaves nothing to
+    run at all when the file was deleted from an existing client/api/ — npm
+    then dies with `ENOENT: no such file or directory, open '.../package.json'`
+    and the whole setup aborts. That is not hypothetical: `git rm`-ing the
+    client/api/ copies out of WinZapp's own repo deletes them from every
+    developer's working tree on the next pull, package.json included.
+
+    client/api/ is itself a clone of wppconnect-server, so its own git checkout
+    is the correct source — that restores the real upstream file for the tag on
+    disk, which is exactly what the merge below expects to patch. api_patches/
+    is only a last resort here: its "version" field is a frozen snapshot, and
+    handing that to WppUpdateChecker is the stale-version bug described above.
+    """
+    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
+    if os.path.isfile(pkg_path):
         return
+    if os.path.isdir(os.path.join(CLIENT_API_DIR, ".git")):
+        print("[WARNING] client/api/package.json is missing — restoring it from the clone.")
+        result = subprocess.run(
+            ["git", "checkout", "--", "package.json"], cwd=CLIENT_API_DIR
+        )
+        if result.returncode == 0 and os.path.isfile(pkg_path):
+            print("[OK] Restored client/api/package.json from upstream.")
+            return
+        print(f"[WARNING] git checkout of package.json failed (exit {result.returncode}).")
+    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
+    if os.path.isfile(patch_path):
+        import shutil as _shutil
+        _shutil.copy2(patch_path, pkg_path)
+        print(
+            "[WARNING] Copied client/api_patches/package.json as a fallback — its "
+            "'version' field is a frozen snapshot and may not match the tag on disk."
+        )
 
-    client_git_dir = os.path.join(ROOT_DIR, "client", "git")
-    git_cmd_dir = os.path.join(client_git_dir, "cmd")
-    git_bin_dir = os.path.join(client_git_dir, "bin")
-    git_exe = os.path.join(git_cmd_dir, "git.exe")
 
-    # Add to PATH immediately if present
-    if os.path.isfile(git_exe):
-        if git_cmd_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = f"{git_cmd_dir};{git_bin_dir};" + os.environ.get("PATH", "")
-        return
+def _restore_custom_files(custom_contents: dict):
+    """Write every patched file back into client/api/.
 
-    if shutil.which("git") is not None:
-        return
-
-    print("[INFO] Portable Git not found — downloading MinGit for Windows...")
-    git_url = "https://github.com/git-for-windows/git/releases/download/v2.48.1.windows.1/MinGit-2.48.1-64-bit.zip"
-    zip_path = os.path.join(ROOT_DIR, "mingit.zip")
-    try:
-        os.makedirs(client_git_dir, exist_ok=True)
-        print(f"  Downloading {git_url} ...")
-        urllib.request.urlretrieve(git_url, zip_path)
-        print("  Extracting MinGit archive...")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(client_git_dir)
-        print("[OK] MinGit downloaded and extracted to client/git successfully.")
-    except Exception as e:
-        print(f"[WARNING] Could not download MinGit: {e}")
-    finally:
-        if os.path.isfile(zip_path):
-            try: os.remove(zip_path)
-            except: pass
-
-    if os.path.isfile(git_exe):
-        os.environ["PATH"] = f"{git_cmd_dir};{git_bin_dir};" + os.environ.get("PATH", "")
+    Runs on EVERY path through main(), not just after a clone or a tag
+    checkout. It used to be called only inside those two branches, so the most
+    common invocation of all — `python setup_api.py` against a client/api/ that
+    already exists, with no WPPCONNECT_TAG_VERSION set — skipped it entirely
+    and rebuilt the API from whatever happened to be on disk. Two ways that
+    bites: a patched file edited/deleted directly in client/api/ was never put
+    back (npm run build then compiled vanilla upstream, silently), and a
+    client/api/ missing its patches could not be repaired by re-running this
+    script at all, which is the one thing it exists to do.
+    """
+    for rel_path, content in custom_contents.items():
+        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        print(f"[INFO] Restored custom file: {rel_path}")
 
 
 from core.wppconnect_host_layer_patch import (
-    ORIGINAL_CHECK_QR_CODE as _HOST_LAYER_ORIGINAL_CHECK_QR_CODE,
-    V1_CHECK_QR_CODE as _HOST_LAYER_V1_CHECK_QR_CODE,
-    PATCHED_CHECK_QR_CODE as _HOST_LAYER_PATCHED_CHECK_QR_CODE,
+    patch_host_layer_source as _patch_host_layer_source,
 )
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
-from core.wppconnect_sender_layer_patch import patch_sender_layer_source
+from core.wppconnect_sender_layer_patch import ALL_PATCHES as _SENDER_LAYER_PATCHES
+from core.wppconnect_sender_layer_patch import patch_sender_layer_source as _patch_sender_layer_source
 from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
-from core.wpp_dependency_setup import (
-    PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
-    check_github_dependencies_updates as _check_github_dependencies_updates,
-    merge_dependency_patches,
-    reset_dependency_state,
+from core.wppconnect_welcome_layer_patch import (
+    latest_version_dependency_is_gone as _welcome_latest_version_dependency_is_gone,
 )
+from core.wpp_runtime import homologated_wpp_tag
 
 
 def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
-    """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
-    phone-number pairing code stops regenerating on every QR-code rotation,
-    WITHOUT freezing forever if it should ever need a refresh — see
+    """Patch @wppconnect-team/wppconnect's compiled host.layer.js: the
+    phone-number pairing code must stop regenerating on every QR-code
+    rotation WITHOUT freezing forever if it should ever need a refresh
+    (WinZapp issue #8), and a failed pairing-code request must report the
+    real browser-side error rather than the minified "t: t" that crossing
+    the CDP exception boundary raw produces. See
     client/core/wppconnect_host_layer_patch.py's module docstring for the
-    full v0 (upstream bug)/v1 (WinZapp's first, unsafe attempt)/v2 (current)
-    history. WinZapp issue #8.
+    full v0 (upstream bug)/v1 (unsafe)/v2/v3 history.
 
     This lives in node_modules (a vendored dependency of WPPConnect Server,
     not WPPConnect Server itself), so it can't go through the
@@ -208,11 +333,11 @@ def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
     node_modules from scratch every time, so this must run AFTER npm
     install, same as the existing decrypt.js patch right above this call.
 
-    Idempotent (a no-op if v2 is already applied — including automatically
-    upgrading a machine that still has v1 installed) and best-effort: if
-    the installed wppconnect version doesn't match either known source text
-    (e.g. a future upstream release), it logs a warning and leaves the file
-    untouched rather than corrupting it or crashing setup_api.py.
+    The actual search-and-replace lives in patch_host_layer_source() so
+    this and ApiSetupDialog's copy can't drift apart. Idempotent, and
+    best-effort: if the installed wppconnect version no longer matches a
+    known source text (e.g. a future upstream release), it warns and leaves
+    that part of the file untouched rather than corrupting it or crashing.
     """
     if client_api_dir is None:
         client_api_dir = CLIENT_API_DIR
@@ -223,47 +348,39 @@ def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
     if not os.path.isfile(host_layer_path):
         print("[WARNING] host.layer.js not found — skipping pairing-code patch.")
         return False
-    try:
-        with open(host_layer_path, "r", encoding="utf-8") as f:
-            src = f.read()
-    except Exception as e:
-        print(f"[WARNING] Could not read host.layer.js: {e}")
-        return False
-    if _HOST_LAYER_PATCHED_CHECK_QR_CODE in src:
-        return True  # already v2 — idempotent no-op
-    if _HOST_LAYER_ORIGINAL_CHECK_QR_CODE in src:
-        patched = src.replace(
-            _HOST_LAYER_ORIGINAL_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE
-        )
-    elif _HOST_LAYER_V1_CHECK_QR_CODE in src:
-        patched = src.replace(
-            _HOST_LAYER_V1_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE
-        )
-    else:
-        print(
-            "[WARNING] host.layer.js does not match any known source text — "
-            "skipping pairing-code patch (unsupported wppconnect version?)."
-        )
-        return False
-    try:
+
+    with open(host_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    patched, notes, ok = _patch_host_layer_source(content)
+    if patched != content:
         with open(host_layer_path, "w", encoding="utf-8") as f:
             f.write(patched)
-        print("[OK] Patched host.layer.js (pairing-code rotation).")
-        return True
-    except Exception as e:
-        print(f"[WARNING] Could not write host.layer.js: {e}")
-        return False
+
+    for note in notes:
+        if "DID NOT MATCH" in note:
+            print(
+                f"[WARNING] host.layer.js — {note} The installed "
+                "@wppconnect-team/wppconnect version may have changed this "
+                "file; please report this to the WinZapp maintainers."
+            )
+        else:
+            print(f"[OK] host.layer.js — {note}")
+    return ok
 
 
 def _patch_wppconnect_status_layer(client_api_dir: str = None) -> bool:
     """Patch @wppconnect-team/wppconnect's compiled status.layer.js so
-    status (stories) posting actually reports success/failure instead of
-    always succeeding — see
-    client/core/wppconnect_status_layer_patch.py's module docstring.
+    posting a status (text/image/video) actually reports whether it
+    succeeded, instead of always reporting success — see
+    client/core/wppconnect_status_layer_patch.py's module docstring for the
+    root cause (a missing async/await/return in three methods there,
+    inconsistent with every other evaluateAndReturn() call in this same
+    package).
 
-    Same node_modules constraint + idempotence as the host-layer patch
-    above: must run AFTER npm install, no-ops if already applied, and never
-    crashes the setup if the installed version doesn't match.
+    Idempotent (each of the three patches is independently a no-op once
+    applied) and best-effort — a mismatched method is logged and skipped
+    rather than corrupting the file.
     """
     if client_api_dir is None:
         client_api_dir = CLIENT_API_DIR
@@ -272,35 +389,50 @@ def _patch_wppconnect_status_layer(client_api_dir: str = None) -> bool:
         "dist", "api", "layers", "status.layer.js",
     )
     if not os.path.isfile(status_layer_path):
-        print("[WARNING] status.layer.js not found — skipping status patch.")
+        print("[WARNING] status.layer.js not found — skipping status-posting-result patch.")
         return False
-    try:
-        with open(status_layer_path, "r", encoding="utf-8") as f:
-            src = f.read()
-    except Exception as e:
-        print(f"[WARNING] Could not read status.layer.js: {e}")
-        return False
-    changed = False
+
+    with open(status_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    applied = 0
+    already = 0
+    missing = 0
     for original, patched in _STATUS_LAYER_PATCHES:
-        if original in src:
-            src = src.replace(original, patched)
-            changed = True
-    if not changed:
-        return True  # already patched, or version doesn't match — no-op
-    try:
+        if patched in content:
+            already += 1
+        elif original in content:
+            content = content.replace(original, patched, 1)
+            applied += 1
+        else:
+            missing += 1
+
+    if applied:
         with open(status_layer_path, "w", encoding="utf-8") as f:
-            f.write(src)
-        print("[OK] Patched status.layer.js (status posting result).")
-        return True
-    except Exception as e:
-        print(f"[WARNING] Could not write status.layer.js: {e}")
-        return False
+            f.write(content)
+        print(f"[OK] Patched status.layer.js — {applied} status-posting method(s) now correctly report success/failure.")
+    elif already == len(_STATUS_LAYER_PATCHES):
+        print("[INFO] status.layer.js status-posting-result patch already applied.")
+    if missing:
+        print(
+            f"[WARNING] status.layer.js: {missing} status-posting method(s) did not match "
+            "the expected upstream source — skipping those (the installed "
+            "@wppconnect-team/wppconnect version may have changed this file)."
+        )
+    return missing == 0
 
 
 def _patch_wppconnect_sender_layer(client_api_dir: str = None) -> bool:
     """Patch @wppconnect-team/wppconnect's compiled sender.layer.js so a
-    failed video send surfaces the REAL error instead of opaque minified
-    junk — see client/core/wppconnect_sender_layer_patch.py's docstring."""
+    failed sendFile() (e.g. every video-message send, currently) reports
+    the real browser-side error instead of the opaque, minified
+    {"name":"t","message":"t"} that crossing the CDP exception boundary
+    raw currently produces — see
+    client/core/wppconnect_sender_layer_patch.py's module docstring.
+
+    Idempotent and best-effort, same pattern as the host/status layer
+    patches right above.
+    """
     if client_api_dir is None:
         client_api_dir = CLIENT_API_DIR
     sender_layer_path = os.path.join(
@@ -308,157 +440,286 @@ def _patch_wppconnect_sender_layer(client_api_dir: str = None) -> bool:
         "dist", "api", "layers", "sender.layer.js",
     )
     if not os.path.isfile(sender_layer_path):
-        print("[WARNING] sender.layer.js not found — skipping send-error patch.")
+        print("[WARNING] sender.layer.js not found — skipping sendFile error-detail patch.")
         return False
-    try:
-        with open(sender_layer_path, "r", encoding="utf-8") as f:
-            src = f.read()
-    except Exception as e:
-        print(f"[WARNING] Could not read sender.layer.js: {e}")
-        return False
-    patched_src = patch_sender_layer_source(src)
-    changed = patched_src != src
-    src = patched_src
-    if not changed:
-        return True
-    try:
+
+    with open(sender_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    applied = 0
+    already = 0
+    missing = 0
+    for original, patched in _SENDER_LAYER_PATCHES:
+        if patched in content:
+            already += 1
+        elif original in content:
+            content = content.replace(original, patched, 1)
+            applied += 1
+        else:
+            missing += 1
+
+    # patch_sender_layer_source() additionally migrates a couple of
+    # transitional intermediate states from this patch's own iterative
+    # development (a chunked-upload variant missing the MediaGatingUtils
+    # 1 GB override, and an even earlier chunking-threshold marker) that
+    # the literal ALL_PATCHES pairs above don't cover on their own — see
+    # that function's own docstring. Idempotent no-op on content the loop
+    # above already brought fully up to date.
+    migrated = _patch_sender_layer_source(content)
+    if migrated != content:
+        content = migrated
+        applied += 1
+
+    if applied:
         with open(sender_layer_path, "w", encoding="utf-8") as f:
-            f.write(src)
-        print("[OK] Patched sender.layer.js (video send error detail).")
-        return True
-    except Exception as e:
-        print(f"[WARNING] Could not write sender.layer.js: {e}")
-        return False
+            f.write(content)
+        print(f"[OK] Patched sender.layer.js — {applied} sendFile error(s) now report real detail instead of minified junk.")
+    elif already == len(_SENDER_LAYER_PATCHES):
+        print("[INFO] sender.layer.js sendFile error-detail patch already applied.")
+    if missing:
+        print(
+            f"[WARNING] sender.layer.js: {missing} method(s) did not match "
+            "the expected upstream source — skipping those (the installed "
+            "@wppconnect-team/wppconnect version may have changed this file)."
+        )
+    return missing == 0
 
 
 def _patch_wppconnect_welcome_layer(client_api_dir: str = None) -> bool:
     """Patch @wppconnect-team/wppconnect's compiled controllers/welcome.js
-    so a CommonJS require() of the ESM-only `latest-version` package stops
-    crashing the whole server at startup on Node 20+ — see
-    client/core/wppconnect_welcome_layer_patch.py's module docstring."""
+    so a plain CommonJS require() of the ESM-only `latest-version` package
+    doesn't crash the whole server on startup (Node 20+) — see
+    client/core/wppconnect_welcome_layer_patch.py's module docstring for
+    why the replacement must be a bare function, not `{ default: fn }`.
+
+    Idempotent and best-effort, same pattern as the other layer patches
+    above.
+    """
     if client_api_dir is None:
         client_api_dir = CLIENT_API_DIR
-    welcome_path = os.path.join(
+    welcome_layer_path = os.path.join(
         client_api_dir, "node_modules", "@wppconnect-team", "wppconnect",
         "dist", "controllers", "welcome.js",
     )
-    if not os.path.isfile(welcome_path):
-        print("[WARNING] welcome.js not found — skipping ESM-require patch.")
+    if not os.path.isfile(welcome_layer_path):
+        print("[WARNING] welcome.js not found — skipping latest-version ESM patch.")
         return False
-    try:
-        with open(welcome_path, "r", encoding="utf-8") as f:
-            src = f.read()
-    except Exception as e:
-        print(f"[WARNING] Could not read welcome.js: {e}")
-        return False
-    changed = False
+
+    with open(welcome_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    if _welcome_latest_version_dependency_is_gone(content):
+        print(
+            "[INFO] welcome.js does not import latest-version at all "
+            "(wppconnect >= 2.3.2 asks the registry over fetch) — nothing to patch."
+        )
+        return True
+
+    applied = 0
+    already = 0
+    missing = 0
     for original, patched in _WELCOME_LAYER_PATCHES:
-        if original in src:
-            src = src.replace(original, patched)
-            changed = True
-    if not changed:
-        return True
-    try:
-        with open(welcome_path, "w", encoding="utf-8") as f:
-            f.write(src)
-        print("[OK] Patched welcome.js (Node 20+ ESM require).")
-        return True
-    except Exception as e:
-        print(f"[WARNING] Could not write welcome.js: {e}")
-        return False
+        if patched in content:
+            already += 1
+        elif original in content:
+            content = content.replace(original, patched, 1)
+            applied += 1
+        else:
+            missing += 1
 
-
-def _recover_upstream_package_json():
-    """Restore package.json from the checked-out WPPConnect revision."""
-    git_dir = os.path.join(CLIENT_API_DIR, ".git")
-    package_path = os.path.join(CLIENT_API_DIR, "package.json")
-    if not os.path.isdir(git_dir):
-        return
-    result = subprocess.run(
-        ["git", "show", "HEAD:package.json"],
-        cwd=CLIENT_API_DIR,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout:
-        raise RuntimeError("Could not read package.json from WPPConnect HEAD")
-
-    descriptor, temporary_path = tempfile.mkstemp(
-        prefix=".package.",
-        suffix=".tmp",
-        dir=CLIENT_API_DIR,
-    )
-    os.close(descriptor)
-    try:
-        with open(temporary_path, "wb") as stream:
-            stream.write(result.stdout)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, package_path)
-    finally:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
-    print("[INFO] Restored upstream package.json from WPPConnect HEAD")
+    if applied:
+        with open(welcome_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("[OK] Patched welcome.js — latest-version ESM require no longer crashes startup on Node 20+.")
+    elif already == len(_WELCOME_LAYER_PATCHES):
+        print("[INFO] welcome.js latest-version ESM patch already applied.")
+    if missing:
+        print(
+            f"[WARNING] welcome.js: {missing} pattern(s) did not match "
+            "the expected upstream source — skipping those (the installed "
+            "@wppconnect-team/wppconnect version may have changed this file)."
+        )
+    return missing == 0
 
 
 def _merge_package_json_dependencies():
-    """Merge only WinZapp-owned dependencies into upstream's manifest."""
-    try:
-        applied = merge_dependency_patches(CLIENT_API_DIR, API_PATCHES_DIR)
-    except Exception as exc:
-        print(f"[WARNING] Failed to merge package.json dependency patches: {exc}")
+    """Apply WinZapp's specific dependency patches onto whatever
+    package.json the clone/checkout actually left on disk, instead of
+    overwriting the whole file. Only the keys in _PATCHED_DEPENDENCY_KEYS are
+    copied in from client/api_patches/package.json — "version", "name",
+    scripts, and every other dependency all come from the real checked-out
+    file, so WinZapp's own version-check (WppUpdateChecker /
+    _get_installed_wpp_version()) keeps reflecting whatever was genuinely
+    cloned/built rather than a value frozen in api_patches/ at some earlier
+    point in time.
+    """
+    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
+    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
+    if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
         return
-    print(f"[INFO] Applied {applied} WinZapp dependency patches to package.json")
-
-
-def _reset_dependency_state():
-    """Discard generated locks and modules before resolving Git dependencies."""
     try:
-        removed = reset_dependency_state(CLIENT_API_DIR)
-    except Exception as exc:
-        print(f"[WARNING] Failed to reset dependency state: {exc}")
-        raise
-    if removed:
-        print(f"[INFO] Removed stale dependency state: {', '.join(removed)}")
+        with open(pkg_path, encoding="utf-8") as f:
+            pkg = json.load(f)
+        with open(patch_path, encoding="utf-8") as f:
+            patch = json.load(f)
+    except Exception as e:
+        print(f"[WARNING] Failed to merge package.json dependency patches: {e}")
+        return
+    patch_deps = patch.get("dependencies", {})
+    deps = pkg.setdefault("dependencies", {})
+    applied = 0
+    for key in _PATCHED_DEPENDENCY_KEYS:
+        if key in patch_deps:
+            deps[key] = patch_deps[key]
+            applied += 1
+    with open(pkg_path, "w", encoding="utf-8") as f:
+        json.dump(pkg, f, indent=2)
+        f.write("\n")
+    print(f"[INFO] Applied {applied} patched dependencies into package.json (version kept at {pkg.get('version', '?')})")
+
+
+def directory_has_entries(path):
+    """Is `path` a directory with anything in it?
+
+    Answers True for a directory we cannot read, which is the conservative half:
+    an unreadable client/api/ counts as an install, so the caller verifies it
+    instead of cloning on top of files it could not see. A bare os.listdir()
+    here raised PermissionError with a traceback ahead of every handled message
+    below it — a locked folder, or one left by another Windows user, is exactly
+    the case that deserves the friendlier path rather than the ugliest one.
+    """
+    if not os.path.isdir(path):
+        return False
+    try:
+        return bool(os.listdir(path))
+    except OSError:
+        return True
+
+
+# Directory entries that can appear inside client/api/ without anyone having
+# installed WPPConnect Server there. Exactly one so far, and it is not a corner
+# case — it is what every CI build does:
+#
+#   - name: Cache node_modules
+#     uses: actions/cache@v4
+#     with:
+#       path: client/api/node_modules
+#
+# runs BEFORE setup_api.py, and restoring that cache creates client/api/ with
+# node_modules and nothing else in it. directory_has_entries() then answers
+# "an install is already here", the plan drops to "verify-snapshot", and the
+# version can only be read off a package.json that does not exist yet — so
+# every build after the first one to populate that cache died on
+#
+#   RuntimeError: Unmanaged client/api contains WPPConnect unknown, but
+#   WinZapp requires 2.10.16.
+#
+# with no alpha published. (_recover_upstream_package_json() would have put
+# that file back, but it runs after the check that raises.)
+#
+# Skipping the cached folder is the whole fix, and it costs nothing: the clone
+# branch below already moves node_modules aside and restores it afterwards,
+# which is precisely why the workflow caches that path in the first place.
+_CACHE_ONLY_API_ENTRIES = {"node_modules"}
+
+
+def api_dir_holds_an_install(path):
+    """Does `path` contain a WPPConnect Server install, as opposed to a cache?
+
+    Deliberately a separate question from directory_has_entries(): that one
+    answers "is anything here at all", which is the right test for the folder
+    itself and the wrong one for deciding whether to clone into it.
+    """
+    if not os.path.isdir(path):
+        return False
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        # Same conservative half as directory_has_entries(): a folder we cannot
+        # read is verified, never cloned over.
+        return True
+    return any(entry not in _CACHE_ONLY_API_ENTRIES for entry in entries)
+
+
+def plan_api_checkout(api_dir_exists, api_dir_nonempty,
+                      git_has_head_and_config, tag):
+    """Decide what has to happen to client/api/ before npm install runs.
+
+    Split out of main() because the decision was otherwise only reachable by
+    running the whole script — network clone and npm install included — so the
+    branch a fresh checkout takes (every CI build: client/api/ is git-ignored
+    and simply absent there) could only ever be "tested" by grepping the
+    source, and a wrong answer survived two rounds of review that way.
+
+    Returns {"clone": bool, "action": str}, where action is one of:
+      "checkout"        — check the pinned tag out of a git clone we manage;
+      "latest"          — nothing pinned: track the newest stable release tag;
+      "verify-snapshot" — an extracted/recovered client/api/ that is not a
+                          clone we manage: either no .git at all (the common
+                          case — a zip unpacked over the folder) or one too
+                          partial to trust. Running git from it walks upward
+                          into WinZapp's own repository and checks the
+                          WPPConnect tag out *there*, so the version can only
+                          be read off package.json;
+      "none"            — unmanaged and nothing pinned: nothing safe to do.
+    """
+    # An *empty* client/api/ is not an install: a cancelled extraction, or a
+    # folder someone created by hand, used to skip the clone and then fall into
+    # "verify-snapshot", which raises "Unmanaged client/api contains WPPConnect
+    # unknown". Treating it as absent restores the old behaviour of simply
+    # cloning into it.
+    already_cloned = bool(api_dir_exists and api_dir_nonempty)
+    # Cloning creates a real .git, so every path that clones is one we manage,
+    # by construction. Answering this from the directory as it looked *before*
+    # the clone is what put every fresh install in "verify-snapshot" and left
+    # the homologated tag permanently unchecked-out.
+    managed = bool(git_has_head_and_config) or not already_cloned
+    if managed:
+        action = "checkout" if tag else "latest"
+    elif tag:
+        action = "verify-snapshot"
+    else:
+        action = "none"
+    return {"clone": not already_cloned, "action": action}
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="WinZapp WPPConnect Server setup and update script.")
-    parser.add_argument("--clean", "--force", "--reinstall", action="store_true", dest="clean",
-                        help="Force full clean reinstallation (removes node_modules and reinstalls from scratch).")
-    parser.add_argument("--update", action="store_true", dest="update",
-                        help="Perform fast incremental update (git fetch, SHA compare, git pull, npm update and build).")
-    args, _ = parser.parse_known_args()
-
-    ensure_portable_git()
     env = _load_env()
     tag = env.get("WPPCONNECT_TAG_VERSION", "").strip()
+    if not tag:
+        contract_path = os.path.join(ROOT_DIR, "client", "wpp_minimum_version.txt")
+        tag = homologated_wpp_tag(contract_path)
+        if tag:
+            print(f"[INFO] Using WinZapp homologated WPPConnect tag {tag}.")
 
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
-    already_cloned = os.path.isdir(git_dir)
-    has_node_modules = os.path.isdir(os.path.join(CLIENT_API_DIR, "node_modules"))
+    api_dir_exists = os.path.isdir(CLIENT_API_DIR)
+    plan = plan_api_checkout(
+        api_dir_exists=api_dir_exists,
+        api_dir_nonempty=api_dir_holds_an_install(CLIENT_API_DIR),
+        git_has_head_and_config=(
+            os.path.isfile(os.path.join(git_dir, "HEAD"))
+            and os.path.isfile(os.path.join(git_dir, "config"))
+        ),
+        tag=tag,
+    )
+    already_cloned = not plan["clone"]
 
-    # Determine execution mode
-    is_incremental_update = already_cloned and has_node_modules and not args.clean
-
-    # Platform-specific configurations
-    is_windows = sys.platform == "win32"
-    node_bin = "node"
-    npm_bin = "npm"
-    if is_windows:
-        win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
-        if os.path.isfile(win_node):
-            node_bin = win_node
-            win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
-            if os.path.isfile(win_npm):
-                npm_bin = win_npm
-
-        win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
-        win_node_dir = os.path.join(ROOT_DIR, "client", "node")
-        os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
-
-    # Gather custom patches
+    # Gather the content to restore for every patched file, preferring
+    # client/api_patches/ (permanent, always-tracked) over whatever
+    # happens to still be sitting in client/api/ right now — the latter
+    # is worthless as a source the moment client/api/ has already been
+    # deleted, which is exactly when this restore matters most.
+    #
+    # Loaded up front, before the clone branch, because the single
+    # _restore_custom_files() call at the end of main() consumes it on every
+    # path — including the one that wipes and re-clones client/api/, which is
+    # why it has to be read into memory *before* that happens. It used to be
+    # populated only on the clone path, so checking out a tag against an
+    # existing client/api/ raised NameError — and had that line been reached
+    # with an empty dict instead, it would have been worse: `git checkout -f`
+    # overwrites the patched files with upstream's, and nothing would have put
+    # ours back.
     custom_contents = {}
     for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
         patches_path = os.path.join(API_PATCHES_DIR, rel_path)
@@ -472,209 +733,241 @@ def main():
                 custom_contents[rel_path] = f.read()
             print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
 
-    has_git = shutil.which("git") is not None
-
-    if is_incremental_update:
-        print("[INFO] Existing installation detected — performing fast incremental update...")
-        if has_git and already_cloned:
-            try:
-                # 1. Obter SHA atual
-                res_old = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
-                old_sha = res_old.stdout.strip() if res_old.returncode == 0 else "unknown"
-
-                # 2. Executar git fetch --all
-                print(f"[INFO] Running git fetch --all in client/api (current SHA: {old_sha})...")
-                _run(["git", "fetch", "--all", "--prune"], cwd=CLIENT_API_DIR)
-
-                # 3. Obter SHA remoto da branch upstream
-                res_remote = subprocess.run(["git", "rev-parse", "--short", "@{u}"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
-                if res_remote.returncode != 0:
-                    res_remote = subprocess.run(["git", "rev-parse", "--short", "origin/main"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
-                remote_sha = res_remote.stdout.strip() if res_remote.returncode == 0 else old_sha
-
-                # 4. Comparar SHAs e fazer pull se houver novidades
-                if old_sha != remote_sha and remote_sha:
-                    print(f"[INFO] New commit available on upstream wppconnect-server: {old_sha} -> {remote_sha}")
-                    print("[INFO] Resetting local patched state and pulling updates from upstream...")
-                    _run(["git", "reset", "--hard", "HEAD"], cwd=CLIENT_API_DIR)
-                    _run(["git", "pull", "--ff-only"], cwd=CLIENT_API_DIR)
-                else:
-                    print(f"[INFO] Upstream wppconnect-server is already up to date ({old_sha}).")
-            except Exception as e:
-                print(f"[WARNING] Could not update wppconnect-server via git: {e}")
-
-        # Sincronizar patches
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Synced custom patch: {rel_path}")
-
-        _recover_upstream_package_json()
-        _merge_package_json_dependencies()
-
-        # Comparar e atualizar dependências do GitHub
-        packages_to_update = _check_github_dependencies_updates(CLIENT_API_DIR)
-        if packages_to_update:
-            print(f"[INFO] Updating packages: {', '.join(packages_to_update)}...")
-            npm_cmd = [node_bin, npm_bin] if npm_bin.endswith("npm-cli.js") else [npm_bin]
-            try:
-                _run(npm_cmd + ["update"] + packages_to_update + ["--no-audit", "--no-fund"], cwd=CLIENT_API_DIR)
-            except Exception as e:
-                print(f"[WARNING] npm update failed ({e}) — falling back to npm install...")
-                _run(npm_cmd + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
-        else:
-            print("[INFO] All 3 GitHub dependencies are already up to date!")
-
+    if already_cloned:
+        print(f"[INFO] client/api/ already exists — skipping clone (checking for updates below).")
     else:
-        # Modo de instalação limpa (primeira vez ou --clean/--force)
-        if already_cloned:
-            print(f"[INFO] Full clean install requested — reconfiguring client/api/...")
+        print(f"[INFO] Cloning WPPConnect Server …")
+        temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
+        node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
+        has_node_modules = os.path.isdir(node_modules_path)
+        if has_node_modules:
+            try:
+                if os.path.exists(temp_node_modules):
+                    shutil.rmtree(temp_node_modules)
+                shutil.move(node_modules_path, temp_node_modules)
+                print("[INFO] Temporarily moved node_modules to preserve cache.")
+            except Exception as e:
+                print(f"[WARNING] Failed to move node_modules: {e}")
+                has_node_modules = False
+
+        if os.path.isdir(CLIENT_API_DIR):
+            try:
+                shutil.rmtree(CLIENT_API_DIR)
+            except Exception as e:
+                print(f"[WARNING] Failed to remove client/api: {e}")
+        os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
+        _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+
+        if has_node_modules:
+            try:
+                shutil.move(temp_node_modules, os.path.join(CLIENT_API_DIR, "node_modules"))
+                print("[INFO] Restored node_modules cache successfully.")
+            except Exception as e:
+                print(f"[WARNING] Failed to restore node_modules: {e}")
+
+    if plan["action"] == "checkout":
+        current = _current_tag(CLIENT_API_DIR)
+        if current == tag:
+            print(f"[INFO] Already pinned to {tag}.")
         else:
-            print(f"[INFO] Cloning WPPConnect Server …")
-            temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
-            node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
-            has_nm = os.path.isdir(node_modules_path)
-            if has_nm and not args.clean:
-                try:
-                    if os.path.exists(temp_node_modules):
-                        shutil.rmtree(temp_node_modules)
-                    shutil.move(node_modules_path, temp_node_modules)
-                    print("[INFO] Temporarily moved node_modules to preserve cache.")
-                except Exception as e:
-                    print(f"[WARNING] Failed to move node_modules: {e}")
-                    has_nm = False
-
-            if os.path.isdir(CLIENT_API_DIR):
-                try:
-                    shutil.rmtree(CLIENT_API_DIR)
-                except Exception as e:
-                    print(f"[WARNING] Failed to remove client/api: {e}")
-            os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
-
-            if has_git:
-                _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+            print(f"[INFO] WPPCONNECT_TAG_VERSION pinned — checking out {tag}.")
+            _run(["git", "fetch", "--tags", "--force"], cwd=CLIENT_API_DIR)
+            _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+    elif plan["action"] == "latest":
+        latest = _latest_stable_tag(CLIENT_API_DIR)
+        if not latest:
+            print("[INFO] No stable release tag found (offline or no tags) — using default branch (main).")
+        else:
+            current = _current_tag(CLIENT_API_DIR)
+            if current == latest:
+                print(f"[INFO] Already at the latest stable release ({latest}).")
             else:
-                print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
-                import urllib.request
-                import zipfile
-                zip_url = "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
-                zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
-                extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
-                try:
-                    print(f"  Downloading {zip_url} ...")
-                    urllib.request.urlretrieve(zip_url, zip_tmp)
-                    print("  Extracting ZIP archive...")
-                    with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
-                        zip_ref.extractall(extract_tmp)
-                    
-                    extracted_subdirs = [os.path.join(extract_tmp, d) for d in os.listdir(extract_tmp) if os.path.isdir(os.path.join(extract_tmp, d))]
-                    source_folder = extracted_subdirs[0] if extracted_subdirs else extract_tmp
-                    shutil.move(source_folder, CLIENT_API_DIR)
-                    print("[INFO] WPPConnect Server ZIP extracted to client/api successfully.")
-                except Exception as zip_err:
-                    print(f"[ERROR] Failed to download or extract WPPConnect Server ZIP: {zip_err}")
-                    sys.exit(1)
-                finally:
-                    if os.path.exists(zip_tmp):
-                        try: os.remove(zip_tmp)
-                        except: pass
-                    if os.path.exists(extract_tmp):
-                        try: shutil.rmtree(extract_tmp)
-                        except: pass
+                if current:
+                    print(f"[INFO] Newer WPPConnect Server release found: {current} -> {latest}. Updating...")
+                else:
+                    print(f"[INFO] No WPPCONNECT_TAG_VERSION pinned — using latest stable release {latest}.")
+                _run(["git", "checkout", "-f", latest], cwd=CLIENT_API_DIR)
+    elif plan["action"] == "verify-snapshot":
+        # An extracted/recovered API carries no `.git` of its own, or only a
+        # partial one. Running git from it walks upward into WinZapp's own
+        # repository and tries to check out the WPPConnect tag there. Never
+        # cross that boundary.
+        pkg_version = ""
+        try:
+            with open(os.path.join(CLIENT_API_DIR, "package.json"), encoding="utf-8") as fh:
+                pkg_version = str(json.load(fh).get("version", ""))
+        except Exception:
+            pass
+        expected = tag.lstrip("vV")
+        if not pkg_version:
+            # No package.json at all is not "the wrong version is installed",
+            # it is "nothing is installed" — and saying so is what points at
+            # the cause (something created client/api/ without cloning into
+            # it, e.g. a restored cache; see _CACHE_ONLY_API_ENTRIES).
+            raise RuntimeError(
+                "client/api/ exists but has no readable package.json, so it is "
+                "not a WPPConnect Server install. Something created the folder "
+                "without cloning into it. Delete client/api/ (keeping "
+                "node_modules if you want the cache) and run setup_api.py again."
+            )
+        if pkg_version != expected:
+            # This script only ever runs from a dev checkout or CI (build.py
+            # re-runs it on detected drift), never from the app — so the advice
+            # has to be what works there. "Reinstall through WinZapp" belongs in
+            # ApiSetupDialog, which is the other caller of the same patches.
+            raise RuntimeError(
+                f"Unmanaged client/api contains WPPConnect {pkg_version or 'unknown'}, "
+                f"but WinZapp requires {expected}. Delete client/api/ and run "
+                f"setup_api.py again to get a managed clone at the pinned tag."
+            )
+        print(
+            f"[INFO] Unmanaged API snapshot already reports homologated version "
+            f"{pkg_version}; skipping git checkout safely."
+        )
 
-            if has_nm and not args.clean:
-                try:
-                    shutil.move(temp_node_modules, os.path.join(CLIENT_API_DIR, "node_modules"))
-                    print("[INFO] Restored node_modules cache successfully.")
-                except Exception as e:
-                    print(f"[WARNING] Failed to restore node_modules: {e}")
+    # Single restore point, deliberately outside every branch above: the clone,
+    # the tag checkout (`git checkout -f` overwrites the patched files with
+    # upstream's) and the plain "client/api/ is already here" path all need the
+    # exact same thing done afterwards, and only the first two used to get it.
+    _recover_upstream_package_json()
+    _restore_custom_files(custom_contents)
+    _merge_package_json_dependencies()
 
-        # Always restore every patched file from client/api_patches/ on every run
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Synced custom patch: {rel_path}")
+    print()
+    print("[OK] WPPConnect Server ready at client/api/")
+    print()
 
-        _recover_upstream_package_json()
-        _merge_package_json_dependencies()
+    # Platform-specific installations
+    is_windows = sys.platform == "win32"
 
-        print("[INFO] Automating Node.js dependency installation from scratch...")
-        _reset_dependency_state()
+    # 1. Automating Node dependency installation and build
+    print("[INFO] Automating Node.js dependency installation and compilation...")
+    try:
+        # Determine node/npm command
+        # On Windows, check if portable node exists in client/node/node.exe
+        node_bin = "node"
+        npm_bin = "npm"
+        if is_windows:
+            win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
+            if os.path.isfile(win_node):
+                node_bin = win_node
+                # Try to locate npm CLI
+                win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
+                if os.path.isfile(win_npm):
+                    npm_bin = win_npm
+                    # A HEALTH PROBE MUST NEVER BE MORE FATAL THAN THE THING IT
+                    # STANDS IN FOR. This one asks "can the portable npm run at
+                    # all"; the real `npm install` two blocks below has no
+                    # timeout and fails loudly and informatively if npm is
+                    # genuinely broken. So a probe that does not answer in time
+                    # is "unknown", not "unhealthy" — and certainly not a reason
+                    # to abort the build.
+                    #
+                    # It was neither. At 10s, and with TimeoutExpired escaping
+                    # into the outer handler, a cold `npm install --help` on a
+                    # GitHub runner turned into
+                    #
+                    #   [ERROR] Node.js dependencies installation/build failed:
+                    #   Command '[... npm-cli.js, install, --help]' timed out
+                    #   after 10 seconds
+                    #
+                    # and no alpha was published (2026-09-07, run 34162896892),
+                    # on a commit whose two predecessors had built fine — the
+                    # signature of a threshold too close to the normal cost of
+                    # the operation, not of a broken runtime.
+                    #
+                    # 120s because this prints a help page: anything that slow
+                    # says something real about the machine, while ten seconds
+                    # says only that npm was cold.
+                    try:
+                        npm_probe = subprocess.run(
+                            [node_bin, npm_bin, "install", "--help"],
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                    except subprocess.TimeoutExpired:
+                        print(
+                            "[WARNING] The portable npm health probe timed out. "
+                            "Continuing with it anyway — the npm install below "
+                            "will report the real problem if there is one."
+                        )
+                        npm_probe = None
+                    if npm_probe is not None and npm_probe.returncode != 0:
+                        system_node = shutil.which("node")
+                        system_npm = shutil.which("npm.cmd") or shutil.which("npm")
+                        if not system_node or not system_npm:
+                            raise RuntimeError(
+                                "Portable npm is unhealthy; reinstall the homologated "
+                                "Node.js runtime before building WPPConnect"
+                            )
+                        print(
+                            "[WARNING] Portable npm is unhealthy; using the system "
+                            "Node.js runtime for this build."
+                        )
+                        node_bin = system_node
+                        npm_bin = system_npm
+
+        # Run npm install
         print("[INFO] Running npm install...")
         if npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
 
-    # Save current commit SHA to client/api/.commit_sha for version checking
-    try:
-        sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
-        if shutil.which("git"):
-            res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
-            if res.returncode == 0 and res.stdout.strip():
-                with open(sha_file, "w", encoding="utf-8") as f:
-                    f.write(res.stdout.strip())
-                print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
-        else:
-            with open(sha_file, "w", encoding="utf-8") as f:
-                f.write("997164f")
-            print("[INFO] Saved default commit SHA (997164f) to client/api/.commit_sha")
-    except Exception as e:
-        print(f"[WARNING] Could not save .commit_sha: {e}")
-
-    print()
-    print("[OK] WPPConnect Server ready at client/api/")
-    print()
-
-    # Aplicação de Patches das camadas e Compilação
-    try:
-        # Apply the RangeError/memory-leak patch to decrypt.js
+        # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
+            import shutil as _shutil
             custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
             decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
             if os.path.isfile(custom_decrypt):
                 print("[INFO] Copying custom decrypt.js patch to node_modules...")
+                # Ensure the destination directory exists (should exist due to npm install)
                 os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
-                shutil.copy2(custom_decrypt, decrypt_js_path)
+                _shutil.copy2(custom_decrypt, decrypt_js_path)
                 print("[OK] Copied decrypt.js patch successfully.")
             else:
                 print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
-        # Patch layers
+        # Slow down phone-number pairing-code rotation (WinZapp issue #8) —
+        # see _patch_wppconnect_host_layer()'s docstring for the upstream bug.
         try:
             _patch_wppconnect_host_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch host.layer.js pairing-code rotation: {e}")
 
+        # Status posting always reported success regardless of whether it
+        # actually worked — see _patch_wppconnect_status_layer()'s docstring.
         try:
             _patch_wppconnect_status_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch status.layer.js posting-result reporting: {e}")
 
+        # Failed video sends only ever logged opaque minified junk — see
+        # _patch_wppconnect_sender_layer()'s docstring.
         try:
             _patch_wppconnect_sender_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch sender.layer.js sendFile error detail: {e}")
 
+        # A CommonJS require() of the ESM-only `latest-version` package
+        # crashes the whole server at startup on Node 20+ — see
+        # _patch_wppconnect_welcome_layer()'s docstring.
         try:
             _patch_wppconnect_welcome_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch welcome.js latest-version ESM require: {e}")
 
-        # Download Chromium if not installed
-        if not is_incremental_update:
-            print("[INFO] Checking Chromium (Puppeteer)...")
-            install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
-            if os.path.isfile(install_js):
-                _run([node_bin, install_js], cwd=CLIENT_API_DIR)
-            else:
-                _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+        # Download Chromium (Puppeteer postinstall)
+        print("[INFO] Downloading Chromium (Puppeteer)...")
+        install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
+        if os.path.isfile(install_js):
+            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+        else:
+            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
+            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
@@ -682,7 +975,8 @@ def main():
             _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
-        print("[OK] WPPConnect Server built successfully.")
+
+        print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
     except Exception as e:
         print(f"[ERROR] Node.js dependencies installation/build failed: {e}")
@@ -690,6 +984,13 @@ def main():
         print(f"  cd {CLIENT_API_DIR}")
         print("  npm install")
         print("  npm run build")
+        # This used to only print the error and fall through: setup_api.py
+        # exited 0 either way, so a failed/partial `npm run build` silently
+        # left whatever dist/server.js already happened to be on disk (stale,
+        # or from a much older checkout) in place. build.py only checks that
+        # dist/server.js *exists*, not that it matches the current src/patches
+        # — so that stale build got shipped in a release without any warning.
+        # Failing loudly here is what actually surfaces the problem.
         sys.exit(1)
 
     # 2. Linux OS dependencies installation (Debian/Ubuntu)
@@ -712,8 +1013,7 @@ def main():
                 "libnss3", "libpango-1.0-0", "libpangocairo-1.0-0", "libstdc++6", "libx11-6",
                 "libx11-xcb1", "libxcb1", "libxcomposite1", "libxcursor1", "libxdamage1",
                 "libxext6", "libxfixes3", "libxi6", "libxkbcommon0", "libxrandr2", "libxrender1", "libxshmfence1", "libxss1",
-                "libxtst6", "lsb-release", "xdg-utils", "wget",
-                "pulseaudio", "pulseaudio-utils"
+                "libxtst6", "lsb-release", "xdg-utils", "wget"
             ]
             if not is_root:
                 if shutil.which("sudo"):
@@ -734,37 +1034,6 @@ def main():
                     print("[INFO] Installing system libraries for Chrome/Puppeteer...")
                     subprocess.run(install_cmd, check=True)
                     print("[OK] Linux system dependencies for Chromium installed successfully!")
-                    if is_root and shutil.which("systemctl"):
-                        pulse_config = "/etc/winzapp-pulse.pa"
-                        pulse_service = "/etc/systemd/system/winzapp-pulseaudio.service"
-                        pulse_runtime = "/run/pulse"
-                        pulse_socket = f"{pulse_runtime}/winzapp-native"
-                        config_text = (
-                            "load-module module-native-protocol-unix "
-                            f"socket={pulse_socket} auth-anonymous=1\n"
-                            "load-module module-always-sink\n"
-                        )
-                        service_text = (
-                            "[Unit]\nDescription=WinZapp virtual audio server\n"
-                            "After=dbus.service\n\n[Service]\nType=simple\nUser=root\n"
-                            "RuntimeDirectory=pulse\nRuntimeDirectoryMode=0755\n"
-                            "ExecStartPre=-/usr/bin/pulseaudio --kill\n"
-                            "ExecStartPre=/bin/chown pulse:pulse /run/pulse\n"
-                            f"ExecStart=/usr/bin/pulseaudio --system --daemonize=no "
-                            f"--disallow-exit --exit-idle-time=-1 -nF {pulse_config}\n"
-                            "Restart=on-failure\nRestartSec=2\n\n"
-                            "[Install]\nWantedBy=multi-user.target\n"
-                        )
-                        with open(pulse_config, "w", encoding="utf-8") as fh:
-                            fh.write(config_text)
-                        with open(pulse_service, "w", encoding="utf-8") as fh:
-                            fh.write(service_text)
-                        subprocess.run(["systemctl", "daemon-reload"], check=True)
-                        subprocess.run(
-                            ["systemctl", "enable", "--now", "winzapp-pulseaudio.service"],
-                            check=True,
-                        )
-                        print("[OK] WinZapp virtual audio service configured and started.")
                 except Exception as e:
                     print(f"[WARNING] Failed to automatically install system packages: {e}")
                     print("Please install them manually using:")
