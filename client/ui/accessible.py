@@ -126,10 +126,11 @@ class AccessibleEmojiButton(wx.Accessible):
 class _VoiceButtonAccessible(wx.Accessible):
     """Base for voice-recording buttons with custom keyboard shortcuts.
 
-    The same accessible object also implements the transient focus cloak used
-    when WinZapp moves focus programmatically. Keeping both behaviours in one
-    object avoids replacing the button's accessible object and losing its
-    keyboard shortcut metadata after the first recording.
+    It can also host the reusable MSAA focus-cloak state for callers that
+    genuinely must move focus. Voice-recording start no longer relies on that
+    cloak: silent recording mode avoids the Send/Discard focus move entirely.
+    Keeping the state here preserves keyboard-shortcut metadata if another
+    caller arms the generic cloak helper.
     """
 
     def __init__(self, main_window, window=None):

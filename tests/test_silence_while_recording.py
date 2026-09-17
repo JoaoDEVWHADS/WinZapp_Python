@@ -215,11 +215,10 @@ class TestSilenceSendVoiceFocusIfEnabled:
         )
         return stub
 
-    # The cancel burst is the FALLBACK, not the mechanism — core.focus_cloak
-    # stops the announcement from being produced at all (see
-    # tests/test_focus_cloak.py). The spacing here is front-loaded so that if
-    # the cloak ever fails, what leaks out is a syllable rather than the whole
-    # "enviar mensagem de voz, botão, Ctrl+R".
+    # This burst remains for recording-state changes that do not move focus
+    # (for example Pause/Resume). Recording start itself no longer manufactures
+    # a Send/Discard focus event when suppression is requested, because trying
+    # to cancel that event after the fact leaked the observed "env..." fragment.
     EXPECTED_DELAYS = [0, 40, 90, 160, 260, 400]
 
     @staticmethod

@@ -144,6 +144,37 @@ def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
     assert "!preexistingIds.has(modelId)" in controller
 
 
+
+
+def test_active_call_poll_tolerates_transient_active_call_gaps():
+    source = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    assert "const ACTIVE_CALL_MISSING_GRACE_MS = 5000" in source
+    assert "let activeCallMissingSince = 0" in source
+    assert "if (previousId) activeCall = findCall(previousId)" in source
+    assert "now - activeCallMissingSince < ACTIVE_CALL_MISSING_GRACE_MS" in source
+    assert "emitCallState('ended', lastActiveCall, 'ENDED')" in source
+    # The regression was a one-poll null immediately becoming ENDED.
+    assert "if (!activeCall) {\n                if (lastActiveCall) {" not in source
+
+def test_handled_incoming_call_cannot_fire_stale_120_second_timeout():
+    create_session = _source("client/api_patches/src/util/createSessionUtil.ts")
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    # Valmir's log showed offer -> accept -> NOT_ANSWERED exactly 120 seconds
+    # after the original offer. Newer WA keeps accepted calls in activeCall,
+    # so the incoming tracker must see that slot instead of its stale ring model.
+    assert "const active = store?.activeCall || store?.get?.('activeCall')" in create_session
+    assert "if (active && callIdOf(active) === id) return active" in create_session
+
+    # Successful WinZapp actions also retire the incoming watchdog explicitly,
+    # covering builds where activeCall changes identity during the transition.
+    assert "__winzappForgetIncomingCall" in create_session
+    assert "trackedCalls.delete(id)" in create_session
+    assert "forgetIncomingCall(callId || callIdOf(call))" in controller
+    assert "forgetIncomingCall(callId)" in controller
+    assert "forgetIncomingCall(handledCallId)" in controller
+
 def test_session_prewarms_lazy_whatsapp_voip_runtime():
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
     create_session = _source("client/api_patches/src/util/createSessionUtil.ts")

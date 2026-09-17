@@ -18,7 +18,6 @@ from core.api_client import api_get, api_post, redact_api_url
 from core.save_location import resolve_save_dialog_folder
 from core.utils import format_number, normalize_line_separators, is_voice_message
 from core.video_player import VideoPlayer
-from core.focus_cloak import cloak_focus_announcement
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
@@ -2585,18 +2584,19 @@ class StatusPanel(wx.Panel):
         return bool(silence_recording or not extended_enabled)
 
     def _focus_recording_button_silently(self, button):
-        """Move focus to a recording button without the screen reader
-        announcing it. See ConversationsPanel._focus_recording_button_silently
-        for why the cloak, and not the silence() burst, is the mechanism."""
+        """Apply recording focus without creating a suppressed focus event.
+
+        See ConversationsPanel._focus_recording_button_silently: when silence
+        is requested, the reliable cross-API solution is not to move focus to
+        Send at all.  The status recording shortcuts remain available.
+        """
         if self._voice_recording_focus_suppression_enabled():
-            # Armed BEFORE SetFocus(), or the screen reader reads the real
-            # (focused) state and speaks.
-            cloak_focus_announcement(button)
+            return False
         button.SetFocus()
-        self._silence_send_voice_focus_if_enabled()
+        return True
 
     def _silence_send_voice_focus_if_enabled(self):
-        """Fallback for an announcement the cloak did not stop."""
+        """Cancel delayed speech from non-focus recording state changes."""
         if not self._voice_recording_focus_suppression_enabled():
             return
         speak_output = getattr(self.main_window, "speak_output", None)
