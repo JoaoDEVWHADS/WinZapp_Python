@@ -103,6 +103,7 @@ from core.profile_backup import (
 )
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
+from core.call_logic import incoming_call_can_answer, active_call_label_key
 from core import browser_payload
 from core.database_bridge import DatabaseBridge
 from core import token_vault
@@ -5949,7 +5950,7 @@ class MainWindow(wx.Frame):
             self.restore_window()
         self._close_incoming_call_dialog(identity)
         details = getattr(self, "_incoming_call_details", {}).get(identity, {})
-        can_answer = not details.get("is_video") and not details.get("is_group")
+        can_answer = incoming_call_can_answer(details)
         dialog = IncomingCallDialog(
             self,
             message,
@@ -6004,7 +6005,7 @@ class MainWindow(wx.Frame):
                 label.SetLabel(message)
             answer = getattr(self, "incoming_call_answer_button", None)
             if answer is not None:
-                answer.Enable(not details.get("is_video") and not details.get("is_group"))
+                answer.Enable(incoming_call_can_answer(details))
             bar.Show()
         else:
             bar.Hide()
@@ -6199,9 +6200,6 @@ class MainWindow(wx.Frame):
         if details.get("is_video"):
             self.output(self.i18n.t("incoming_call_video_not_supported"), interrupt=True)
             return
-        if details.get("is_group"):
-            self.output(self.i18n.t("incoming_call_group_not_supported"), interrupt=True)
-            return
         payload = self._call_control_payload(identity)
         self.stop_incoming_call_alert(identity)
         self._active_voice_call = {
@@ -6210,6 +6208,8 @@ class MainWindow(wx.Frame):
             "peer_jid": details.get("peer_jid") or "",
             "name": details.get("name") or "",
             "outgoing": False,
+            "is_group": bool(details.get("is_group")),
+            "group_jid": details.get("group_jid") or "",
         }
         wx.CallAfter(self._sync_voice_call_bar)
 
@@ -6409,12 +6409,14 @@ class MainWindow(wx.Frame):
             if button is not None:
                 button.SetLabel(mute_label)
         name = active.get("name") or active.get("peer_jid") or self.i18n.t("unknown_contact")
-        label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
+        label_key = active_call_label_key(active)
+        active_text = self.i18n.t(label_key).format(name=name)
+        label.SetLabel(active_text)
         window = getattr(self, "voice_call_window", None)
         if window is not None:
             window_label = getattr(self, "voice_call_window_label", None)
             if window_label is not None:
-                window_label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
+                window_label.SetLabel(active_text)
             if not window.IsShown():
                 window.Show()
                 window.Raise()
