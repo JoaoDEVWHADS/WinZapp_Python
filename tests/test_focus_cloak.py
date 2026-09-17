@@ -1,18 +1,13 @@
-"""Tests for core.focus_cloak — suppressing the screen reader's focus
-announcement when a voice recording starts.
+"""Tests for the reusable MSAA focus cloak and recording focus policy.
 
-The point of the module is a very specific claim about the platform: that a
-wx.Accessible attached to a native wx.Button really does answer MSAA's
-WM_GETOBJECT, and that returning a state without STATE_SYSTEM_FOCUSED is
-therefore visible to a screen reader. NVDA drops a focus event whose object
-(and none of its ancestors) reports FOCUSED — IAccessibleHandler
-.processFocusNVDAEvent -> IAccessible._get_shouldAllowIAccessibleFocusEvent —
-so that is the whole mechanism, and it is worth verifying against the real
-oleacc rather than only against our own Python.
+The cloak verifies a specific platform claim: a wx.Accessible attached to a
+native wx.Button can hide STATE_SYSTEM_FOCUSED from the IAccessible path.
+Voice-recording start no longer depends on that MSAA-only mechanism, because
+NVDA may consume the focus through UIA; silent recording mode instead avoids
+the synthetic Send/Discard focus move entirely.
 
-None of this opens a window on the desktop: the frames come from
-tests.conftest.hidden_frame() and are never shown. MSAA answers for an unshown
-window just fine.
+None of the platform tests opens a window on the desktop: the frames come from
+tests.conftest.hidden_frame() and are never shown.
 """
 
 import ctypes
@@ -260,16 +255,16 @@ class _FakeButton:
 
 @pytest.mark.parametrize("panel_module", ["ui.conversations", "status_panel"])
 @pytest.mark.parametrize(
-    ("silence_enabled", "extended_enabled", "should_arm"),
+    ("silence_enabled", "extended_enabled", "should_focus"),
     [
-        (False, True, False),
-        (True, True, True),
-        (False, False, True),
-        (True, False, True),
+        (False, True, True),
+        (True, True, False),
+        (False, False, False),
+        (True, False, False),
     ],
 )
-def test_focus_helper_arms_cloak_for_silence_or_extended_compat_off(
-    panel_module, silence_enabled, extended_enabled, should_arm, monkeypatch
+def test_recording_focus_is_not_synthesized_when_suppression_is_requested(
+    panel_module, silence_enabled, extended_enabled, should_focus
 ):
     import importlib
 
@@ -280,9 +275,6 @@ def test_focus_helper_arms_cloak_for_silence_or_extended_compat_off(
         else module.StatusPanel
     )
 
-    armed = []
-    monkeypatch.setattr(module, "cloak_focus_announcement", lambda w: armed.append(w))
-
     stub = _PanelStub(silence_enabled, extended_enabled)
     stub._voice_recording_silence_enabled = (
         panel_cls._voice_recording_silence_enabled.__get__(stub)
@@ -290,10 +282,9 @@ def test_focus_helper_arms_cloak_for_silence_or_extended_compat_off(
     stub._voice_recording_focus_suppression_enabled = (
         panel_cls._voice_recording_focus_suppression_enabled.__get__(stub)
     )
-    stub._silence_send_voice_focus_if_enabled = lambda: None
 
     btn = _FakeButton()
-    panel_cls._focus_recording_button_silently(stub, btn)
+    moved = panel_cls._focus_recording_button_silently(stub, btn)
 
-    assert btn.focused, "focus must move regardless of the settings"
-    assert armed == ([btn] if should_arm else [])
+    assert btn.focused is should_focus
+    assert moved is should_focus

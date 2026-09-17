@@ -1860,6 +1860,14 @@ export default class CreateSessionUtil {
           // firing the expected Backbone event, so retain and poll by call id.
           const trackedCalls = new Map<string, any>();
           const ignoredHistoricalCallIds = new Set<string>();
+          // Call-control actions run in separate page.evaluate() calls. Expose
+          // one tiny bridge so a successful accept/reject/end can retire the
+          // incoming-ring watchdog immediately instead of letting its 120 s
+          // timeout fire against an already handled call.
+          (window as any).__winzappForgetIncomingCall = (callId = '') => {
+            const id = String(callId || '');
+            if (id) trackedCalls.delete(id);
+          };
           const CALL_START_GRACE_MS = 5000;
           const stores = [
             WPP?.whatsapp?.CallStore,
@@ -2003,6 +2011,13 @@ export default class CreateSessionUtil {
           const findCall = (id: string) => {
             for (const store of stores) {
               try {
+                // Newer WhatsApp Web builds keep an accepted native call only
+                // in CallStore.activeCall instead of the legacy collection.
+                // Without this lookup, the incoming-ring tracker kept polling
+                // its stale INCOMING_RING snapshot and fired NOT_ANSWERED at
+                // exactly 120 seconds even after WinZapp had accepted it.
+                const active = store?.activeCall || store?.get?.('activeCall');
+                if (active && callIdOf(active) === id) return active;
                 const direct = store?.get?.(id);
                 if (direct) return direct;
                 const models =
@@ -2166,6 +2181,12 @@ export default class CreateSessionUtil {
           // incoming and outgoing calls expose their complete lifecycle to Python.
           let lastActiveSignature = '';
           let lastActiveCall: any = null;
+          let activeCallMissingSince = 0;
+          const ACTIVE_CALL_MISSING_GRACE_MS = 5000;
+          const TERMINAL_CALL_STATES = new Set([
+            'ENDED', 'REJECTED', 'FAILED', 'NOT_ANSWERED',
+            'HANDLED_REMOTELY', 'REMOTE_CALL_IN_PROGRESS',
+          ]);
           (window as any).__winzappCallStatePoll = window.setInterval(() => {
             try {
               let activeCall: any = null;
@@ -2180,18 +2201,43 @@ export default class CreateSessionUtil {
                   null;
               }
 
+              // WhatsApp replaces CallStore.activeCall during some internal
+              // state transitions/rejoins.  A single null poll used to become
+              // a synthetic ENDED immediately, which could tear down a healthy
+              // WinZapp call after it had been running for a while.  Recover
+              // the same call from the collection first, then require a short
+              // sustained absence before synthesizing an end event.
+              if (!activeCall && lastActiveCall) {
+                const previousId = callIdOf(lastActiveCall);
+                if (previousId) activeCall = findCall(previousId);
+              }
+
               if (!activeCall) {
-                if (lastActiveCall) {
-                  const previousState = callStateOf(lastActiveCall);
-                  if (!['ENDED', 'REJECTED', 'FAILED', 'NOT_ANSWERED'].includes(previousState)) {
-                    emitCallState('ended', lastActiveCall, 'ENDED');
-                  }
+                if (!lastActiveCall) {
+                  activeCallMissingSince = 0;
+                  return;
                 }
+                const previousState = callStateOf(lastActiveCall);
+                if (TERMINAL_CALL_STATES.has(previousState)) {
+                  emitCallState('state', lastActiveCall, previousState);
+                  lastActiveCall = null;
+                  lastActiveSignature = '';
+                  activeCallMissingSince = 0;
+                  return;
+                }
+                const now = Date.now();
+                activeCallMissingSince = activeCallMissingSince || now;
+                if (now - activeCallMissingSince < ACTIVE_CALL_MISSING_GRACE_MS) {
+                  return;
+                }
+                emitCallState('ended', lastActiveCall, 'ENDED');
                 lastActiveCall = null;
                 lastActiveSignature = '';
+                activeCallMissingSince = 0;
                 return;
               }
 
+              activeCallMissingSince = 0;
               const state = callStateOf(activeCall);
               const signature = [
                 callIdOf(activeCall),

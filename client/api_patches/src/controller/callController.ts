@@ -144,6 +144,13 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         outgoing: !!call?.outgoing,
       });
 
+      const forgetIncomingCall = (callId: string) => {
+        if (!callId) return;
+        try {
+          win.__winzappForgetIncomingCall?.(callId);
+        } catch (_) {}
+      };
+
       const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
       const getNativeVoipStack = async (): Promise<any> => {
@@ -240,22 +247,26 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         const callId = String(payload.callId || '');
         const call = findCall(callId);
         if (call) {
-          return runNativeVoipAction(async (voipStack: any) => {
+          const result = await runNativeVoipAction(async (voipStack: any) => {
             if (typeof voipStack?.acceptCall !== 'function') {
               throw new Error('Native VoIP acceptCall is not available');
             }
             await voipStack.acceptCall(true, call?.isVideo === true);
             return { handled: true, via: 'native-voip', call: summarizeCall(call) };
           });
+          forgetIncomingCall(callId || callIdOf(call));
+          return result;
         }
-        return win.WPP.call.accept(callId || undefined);
+        const result = await win.WPP.call.accept(callId || undefined);
+        forgetIncomingCall(callId);
+        return result;
       }
 
       if (action === 'reject') {
         const callId = String(payload.callId || '');
         const call = findCall(callId);
         if (call) {
-          return runNativeVoipAction(async (voipStack: any) => {
+          const result = await runNativeVoipAction(async (voipStack: any) => {
             if (typeof voipStack?.rejectCall !== 'function') {
               throw new Error('Native VoIP rejectCall is not available');
             }
@@ -263,15 +274,21 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             await voipStack.rejectCall();
             return { handled: true, via: 'native-voip', call: summarizeCall(call) };
           });
+          forgetIncomingCall(callId || callIdOf(call));
+          return result;
         }
         const reject = win.WPP.call.rejectCall || win.WPP.call.reject;
         if (typeof reject !== 'function') throw new Error('WPP.call.reject is not available');
-        return reject(callId || undefined);
+        const result = await reject(callId || undefined);
+        forgetIncomingCall(callId);
+        return result;
       }
 
       if (action === 'end') {
-        const call = findCall(String(payload.callId || ''));
-        return runNativeVoipAction(async (voipStack: any) => {
+        const requestedCallId = String(payload.callId || '');
+        const call = findCall(requestedCallId);
+        const handledCallId = requestedCallId || callIdOf(call);
+        const result = await runNativeVoipAction(async (voipStack: any) => {
           if (typeof voipStack?.endCall === 'function') {
             if (call) call.userEndedCall = true;
             await voipStack.endCall(2, true);
@@ -279,6 +296,8 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           }
           return win.WPP.call.end();
         });
+        forgetIncomingCall(handledCallId);
+        return result;
       }
 
       if (action === 'offer') {

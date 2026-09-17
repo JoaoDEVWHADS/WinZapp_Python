@@ -65,7 +65,6 @@ from core.utils import history_window, reaction_targets_status, format_number, d
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
-from core.focus_cloak import cloak_focus_announcement
 from core.spell_checker import (
     WindowsSpellChecker, spell_check_active, windows_spellcheck_enabled,
 )
@@ -3338,41 +3337,30 @@ class ConversationsPanel(wx.Panel):
         return bool(silence_recording or not extended_enabled)
 
     def _focus_recording_button_silently(self, button):
-        """Move focus to one of the voice-recording buttons without the screen
-        reader announcing it.
+        """Apply the configured recording focus without leaking speech.
 
-        This is the primary mechanism, and it works by stopping the
-        announcement from ever being produced: core.focus_cloak briefly makes
-        the control report its MSAA state without STATE_SYSTEM_FOCUSED, which
-        NVDA checks (shouldAllowIAccessibleFocusEvent) *before* deciding to
-        speak, so the event is discarded rather than spoken and cancelled.
+        When recording-focus suppression is enabled, deliberately do not move
+        Windows focus to Send/Discard.  NVDA can receive a wx control focus
+        through MSAA or UIA; hiding only the MSAA focused state is therefore
+        not sufficient on every machine.  Cancelling speech afterwards is
+        also too late and is what produced the audible "env..." fragment.
 
-        Cancelling after the fact — what this used to do alone — is a race the
-        app loses: the focus WinEvent is delivered synchronously but spoken
-        asynchronously on the screen reader's own thread, so the cancel either
-        arrives before anything is queued or after speech has already started.
-        Users heard the whole "enviar mensagem de voz, botão, Ctrl+R" clipped
-        part-way, which for someone recording on air is the exact failure the
-        setting exists to prevent. The silence() burst below stays as a
-        fallback for anything the cloak cannot reach (a control read over UIA
-        rather than MSAA, a platform that does not route WM_GETOBJECT through
-        wx), not as the mechanism.
-
-        Whether the button is Enviar or Descartar is the user's own choice in
-        Configurações > Interface do usuário; both go through here.
+        The recording shortcuts remain frame accelerators (Ctrl+R sends,
+        Ctrl+Shift+P pauses, Ctrl+Shift+D discards), so the silent mode does not
+        require a synthetic focus event at all.  With suppression disabled we
+        preserve the user's normal Send/Discard focus preference.
         """
         if self._voice_recording_focus_suppression_enabled():
-            # Must be armed BEFORE SetFocus(): the state has to already be
-            # hiding FOCUSED by the time the screen reader reads it back.
-            cloak_focus_announcement(button)
+            return False
         button.SetFocus()
-        self._silence_send_voice_focus_if_enabled()
+        return True
 
     def _silence_send_voice_focus_if_enabled(self):
         """Fallback: cancel a focus announcement that was produced anyway.
 
-        Secondary to the cloak in :meth:`_focus_recording_button_silently` —
-        see there for why cancelling alone is not enough. The button keeps its
+        Recording start avoids the focus event entirely when suppression is
+        requested. This cancellation burst remains only for other recording
+        state changes that can trigger speech. The button keeps its
         native accessible name and shortcut at all times; blanking the name out
         was tried and removed, because it stripped the control's identity from
         the accessibility tree for every consumer, not just from the one
@@ -3381,8 +3369,8 @@ class ConversationsPanel(wx.Panel):
         The repeats exist because there is no single right moment: a screen
         reader that speaks synchronously is caught by the immediate call, and
         one that queues on its own thread by a later one. The spacing is
-        front-loaded so that if the cloak did fail, what leaks out is a
-        syllable rather than a sentence. Each call is idempotent, so the
+        front-loaded so that delayed screen-reader output is caught as early
+        as possible. Each call is idempotent, so the
         repeats are harmless.
         """
         if not self._voice_recording_focus_suppression_enabled():
