@@ -21,13 +21,14 @@ def start_api():
         
     # Porta padrão da API
     port = 6300
+    if is_port_in_use(port):
+        print(f"Error: Port {port} is already in use. The API might already be running.")
+        sys.exit(1)
+
     # Remove devices left by a crashed API before new sessions are created.
     # The API recreates the devices it actually needs for each live account.
     if sys.platform != "win32":
         cleanup_winzapp_pulse_modules()
-    if is_port_in_use(port):
-        print(f"Error: Port {port} is already in use. The API might already be running.")
-        sys.exit(1)
         
     os.makedirs(log_dir, exist_ok=True)
     stdout_log = os.path.join(log_dir, "node_stdout.log")
