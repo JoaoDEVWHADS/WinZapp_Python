@@ -44,6 +44,13 @@ def test_group_call_participants_skip_unresolved_lids():
     ]
 
 
+def test_main_window_imports_group_participant_normalizer():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "client/main.py").read_text(encoding="utf-8")
+    assert "normalize_group_call_participants," in source
+
+
 def test_main_window_posts_group_voice_call_to_group_offer_endpoint():
     from pathlib import Path
 

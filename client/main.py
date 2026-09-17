@@ -103,7 +103,11 @@ from core.profile_backup import (
 )
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.quiet_hours import is_quiet_hours_active
-from core.call_logic import incoming_call_can_answer, active_call_label_key
+from core.call_logic import (
+    active_call_label_key,
+    incoming_call_can_answer,
+    normalize_group_call_participants,
+)
 from core import browser_payload
 from core.database_bridge import DatabaseBridge
 from core import token_vault
