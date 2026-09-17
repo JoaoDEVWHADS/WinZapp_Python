@@ -93,6 +93,20 @@ function ensureLinuxCallAudio(
   );
   const processes = { playback, capture };
   linuxAudioProcesses.set(session, processes);
+  const discardProcessError = (name: string) => (error: Error) => {
+    logger?.debug?.(`[${session}] ${name} stream closed: ${error.message}`);
+  };
+  playback.on('error', discardProcessError('pacat'));
+  playback.stdin.on('error', discardProcessError('pacat stdin'));
+  capture.on('error', discardProcessError('parec'));
+  capture.stdout.on('error', discardProcessError('parec stdout'));
+  const removeExitedRelay = () => {
+    if (linuxAudioProcesses.get(session) === processes) {
+      stopLinuxCallAudio(session);
+    }
+  };
+  playback.once('exit', removeExitedRelay);
+  capture.once('exit', removeExitedRelay);
   let remoteFrames = 0;
   capture.stdout.on('data', (chunk: Buffer) => {
     for (let offset = 0; offset < chunk.length; offset += MAX_AUDIO_FRAME_BYTES) {
@@ -772,8 +786,16 @@ export function registerCallAudioSocket(
     if (!(clientsArray as any)[session]) return;
     const linuxAudio = ensureLinuxCallAudio(session, socket, logger);
     if (linuxAudio) {
-      if (!linuxAudio.playback.stdin.write(pcm)) {
-        linuxAudio.playback.stdin.once('drain', () => undefined);
+      // Live audio must never queue without bounds. If PulseAudio is applying
+      // backpressure, drop this 20 ms frame; adding one `drain` listener per
+      // frame leaks listeners and eventually writes to a process that has
+      // already exited, crashing Node with an unhandled EPIPE.
+      if (
+        linuxAudio.playback.exitCode === null &&
+        !linuxAudio.playback.stdin.destroyed &&
+        linuxAudio.playback.stdin.writable
+      ) {
+        try { linuxAudio.playback.stdin.write(pcm); } catch (_) {}
       }
       const received = (micReceived.get(session) || 0) + 1;
       micReceived.set(session, received);
