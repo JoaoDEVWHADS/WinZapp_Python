@@ -745,7 +745,7 @@ def main():
                         )
                         service_text = (
                             "[Unit]\nDescription=WinZapp virtual audio server\n"
-                            "After=dbus.service\n\n[Service]\nType=simple\nUser=pulse\n"
+                            "After=dbus.service\n\n[Service]\nType=simple\nUser=root\n"
                             "RuntimeDirectory=winzapp-pulse\nRuntimeDirectoryMode=0755\n"
                             f"ExecStart=/usr/bin/pulseaudio --system --daemonize=no "
                             f"--disallow-exit --exit-idle-time=-1 -nF {pulse_config}\n"
