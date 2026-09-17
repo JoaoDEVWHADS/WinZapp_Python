@@ -24,6 +24,7 @@ function installCallMediaBridgeInPage(): boolean {
     micQueue: [] as Float32Array[],
     micOffset: 0,
     remotePipelines: new Map<string, any>(),
+    remoteTrackIds: new Set<string>(),
     micFramesPushed: 0,
     micBytesPushed: 0,
     micSamplesConsumed: 0,
@@ -151,12 +152,17 @@ function installCallMediaBridgeInPage(): boolean {
       try { pipeline.sink.disconnect(); } catch (_) {}
     }
     state.remotePipelines.clear();
+    state.remoteTrackIds.clear();
   };
 
   const attachRemoteTrack = (track: MediaStreamTrack) => {
     if (!track || track.kind !== 'audio') return;
     const id = track.id || String(Math.random());
-    if (state.remotePipelines.has(id)) return;
+    // Creating our own MediaStreamSource below goes through the global audio
+    // graph hook too. Reserve this id before doing so, otherwise that hook
+    // re-enters here and recursively builds an unbounded number of pipelines.
+    if (state.remoteTrackIds.has(id)) return;
+    state.remoteTrackIds.add(id);
 
     const context = ensureContext();
     const stream = new MediaStream([track]);
@@ -190,6 +196,7 @@ function installCallMediaBridgeInPage(): boolean {
       try { pipeline.processor.disconnect(); } catch (_) {}
       try { pipeline.sink.disconnect(); } catch (_) {}
       state.remotePipelines.delete(id);
+      state.remoteTrackIds.delete(id);
     }, { once: true });
   };
 

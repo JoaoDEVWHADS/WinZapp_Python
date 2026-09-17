@@ -40,3 +40,10 @@ def test_remote_audio_observes_the_web_audio_playback_graph():
     assert "createMediaStreamSource" in source
     assert "createMediaStreamTrackSource" in source
     assert "__winzappCallMediaSourceWrapped" in source
+
+
+def test_audio_graph_hook_cannot_recursively_attach_the_same_remote_track():
+    source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
+    assert "remoteTrackIds: new Set<string>()" in source
+    assert "if (state.remoteTrackIds.has(id)) return;" in source
+    assert "state.remoteTrackIds.add(id);" in source
