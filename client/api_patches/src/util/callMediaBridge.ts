@@ -534,7 +534,13 @@ function installCallMediaBridgeInPage(): boolean {
         writable: true,
         value: async (descriptor: PermissionDescriptor) => {
           const name = String((descriptor as any)?.name || '');
-          if (name === 'microphone' || name === 'camera') {
+          // Microphone only. WhatsApp's VoIP bootstrap gates on this, and the
+          // physical device is never opened anyway — getUserMedia below hands
+          // back a synthetic track. The camera is deliberately NOT claimed:
+          // video calls are out of scope, and answering 'granted' here would
+          // undo removing videoCapture from the CDP grant for any page that
+          // checks before asking.
+          if (name === 'microphone') {
             return permissionResult(name, 'granted');
           }
           return nativePermissionQuery(descriptor);
@@ -544,7 +550,18 @@ function installCallMediaBridgeInPage(): boolean {
   } catch (_) {}
 
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
-    if (!constraints?.audio) return nativeGetUserMedia(constraints);
+    // Anything asking for a CAMERA OR A MICROPHONE is served synthetically,
+    // and the check covers video on its own. An earlier version returned to
+    // the native call whenever `audio` was falsy, which let a page-side
+    // getUserMedia({ video: true }) past the refusal further down: with
+    // --use-fake-ui-for-media-stream the browser auto-accepts the request, so
+    // the real webcam opened with no prompt and no indicator, in a page the
+    // user never sees. Removing videoCapture from the CDP grant does not close
+    // that — the grant governs the Permissions API, the flag governs the
+    // prompt.
+    if (!constraints?.audio && !constraints?.video) {
+      return nativeGetUserMedia(constraints);
+    }
 
     // Never let WhatsApp Web open the physical microphone. Even while the
     // Python call engine is not active, expose a live silent synthetic track so
@@ -552,11 +569,10 @@ function installCallMediaBridgeInPage(): boolean {
     // Once state.enabled becomes true, Python PCM is written into this track.
     const micTrack = ensureMicTrack().clone();
     if (micTrack.id) state.localTrackIds.add(micTrack.id);
-    // Audio only, whatever was asked for. Video calls are deliberately out of
-    // scope, and --use-fake-ui-for-media-stream plus the CDP videoCapture
-    // grant mean a nativeGetUserMedia({ video }) here would open the real
-    // camera with no prompt and no indicator, from a page the user never sees.
-    // Returning the microphone alone makes any video path fail closed.
+    // Audio only, whatever was asked for: the returned stream has no video
+    // track, so every video path fails closed instead of reaching hardware.
+    // Deliberately not a rejection — WhatsApp's VoIP bootstrap probes this and
+    // a throw here would take voice calls down with video.
     if (constraints.video) {
       report('video-request-refused', 'video calls are not supported');
     }

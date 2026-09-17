@@ -281,9 +281,17 @@ opens a physical device. `callController.ts` exposes
 `/api/:session/call/{accept,reject,end,offer,audio/enable,diagnostics}`, and
 `createSessionUtil.ts` re-emits both `incomingcall` and the full `callstate`
 lifecycle. Video calls are deliberately out of scope: the camera path fails
-closed (no `videoCapture` in the CDP grant, and `bridgedGetUserMedia` returns
-the microphone alone), because `--use-fake-ui-for-media-stream` means a real
-`getUserMedia({video})` would open the webcam with no prompt and no indicator.
+closed, and it takes THREE things rather than one: no `videoCapture` in the CDP
+grant, the patched `navigator.permissions.query` claiming the microphone only,
+and `bridgedGetUserMedia` serving a synthetic stream for any request naming
+audio **or video**. The grant governs the Permissions API; the prompt is
+governed by `--use-fake-ui-for-media-stream`, which accepts the request itself
+— so dropping the grant closes nothing on its own. The first attempt at this
+put the video refusal *below* an early return that fell through to the real
+device whenever `audio` was falsy, which left `getUserMedia({video: true})`
+opening the webcam with no prompt and no indicator, in a page the user never
+sees, while a test asserting on the removed expression passed. Assert on the
+shape of the guard, not on the absence of a string.
 
 **A call event names the peer in whichever address form its source happened to
 hold, and the two sources disagree.** The offer arrives through
@@ -311,7 +319,8 @@ that FAILED, and `sync_chat_messages()` reports failure only by returning
 nothing read. An account can be marked fully synced having fetched nothing, and
 only F5 repairs that (see the sync-completion trap above — this is the same
 trap from the other side). The gate therefore lives in the 60-second poll, the
-backfill loop and the media sweep, all of which simply skip a cycle, and it is
+backfill loop, the deep-history walk and the media sweep, all four of which
+simply skip a cycle or do fewer chats in this one, and it is
 `_voice_call_in_progress()` — **bounded**, because `_active_voice_call` is
 cleared only by a terminal `callstate` event or by hanging up in WinZapp, and a
 call torn down on the phone producing neither would otherwise pause every
@@ -351,8 +360,11 @@ Windows, where the page bridge above is the whole mechanism. But with local API
 mode off the user points WinZapp at a WPPConnect Server on their own Linux host,
 and there the Chrome holding the session has no audio device at all — the page
 bridge has nothing to hand PCM to. So `prepareLinuxCallAudioEnvironment()` gives
-each session a virtual sink/source pair (`winzapp_<kind>_<session>`, scoped by
-name so nothing can touch another application's), binds that Chrome to them
+each session its own devices (`winzapp_<kind>_<session>`, scoped by name so
+nothing can touch another application's) — at module level two null sinks plus
+a `module-remap-source`, because Chromium leaves raw monitor sources out of
+`enumerateDevices()`, and the module count is what the sweep has to clean —
+binds that Chrome to them
 through `PULSE_SOURCE`/`PULSE_SINK`, and `pacat`/`parec` move the bytes to and
 from the Socket.IO stream the Windows client is on. Every function in that block
 refuses to run unless `process.platform` is `linux` **and** `PULSE_SERVER` is
@@ -371,7 +383,16 @@ the start script as well as the stop ones.
 every connection because it only ever listened on localhost; that stops being
 true the moment custom-API mode points at a remote host, which is exactly the
 deployment the Pulse path above exists for. Note the ordinary message/ACK
-traffic is deliberately left as a broadcast — this change is call-only.
+traffic is deliberately left as a broadcast — this change is call-only — and
+that is the reason **one shared remote server serving more than one account is
+not supported yet**: every authenticated socket still receives every session's
+`received-message`, `chats-update`, `onack` and even `qrCode`/`phoneCode`
+(around twenty emit sites). `_belongs_to_this_session()` discards them on the
+client, but the plaintext crosses first. Harmless on the default, where each
+account has its own Node on its own port. Related, and also not solved: with a
+user-supplied `http://`/`ws://` server the live microphone PCM crosses that
+network in the clear, which `settings_import_api_confirm` does not warn about
+— it covers the token.
 
 ### Status tab (`client/status_panel.py`, Alt+5)
 `StatusPanel` shows other contacts' WhatsApp statuses (stories) grouped by sender in `_status_list`, plus a `MyStatusDialog` for the user's own posted statuses. WPPConnect exposes no REST endpoint to query other users' statuses — the list is built entirely from `MainWindow._status_updates` (populated live by `_store_status_update()` as `status@broadcast` messages arrive over Socket.IO), not fetched on demand. Text/image/video/audio/document/sticker/contact status types all funnel through the module-level `_status_content_label()` helper for a translated content preview — every one of the panel's own near-duplicate copies of that switch used to fall through to the raw `messageType` string (e.g. literal `"audioMessage"`) for anything past text/image/video, so any future status type added here should go through that shared helper rather than a new inline copy. Video/audio playback reuses `core/video_player.py` (see above); Enter/Space on an already-open video or audio status list item toggles play/pause instead of re-selecting (which would otherwise `stop()` and restart the player — see `_is_current_status_playable()`). Reacting to (liking) someone else's status needs the poster's own `StatusV3Model` resolved via `WPP.status.get(posterJid).getAllMsgs()` in the Node layer (`deviceController.ts`'s `reactMessage`) — the general `Store.Msg.models` collection that `WPP.chat.sendReactionToMessage()` searches by default never contains another person's status at all.

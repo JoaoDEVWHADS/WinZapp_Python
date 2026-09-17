@@ -6324,11 +6324,17 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def open_call_audio_settings(self, _event=None):
-        """Choose the call microphone and speaker without changing global audio settings."""
+    def open_call_audio_settings(self, _event=None, parent=None):
+        """Choose the call microphone and speaker without changing global audio settings.
+
+        ``parent`` is passed by whoever opened this. It matters: parented to the
+        main window while the Settings dialog is what opened it, the chooser has
+        an enabled sibling that can sit on top of it.
+        """
         import sounddevice as sd
-        call_window = getattr(self, "voice_call_window", None)
-        parent = call_window if (call_window is not None and call_window.IsShown()) else self
+        if parent is None:
+            call_window = getattr(self, "voice_call_window", None)
+            parent = call_window if (call_window is not None and call_window.IsShown()) else self
         dialog = wx.Dialog(parent,
                            title=self.i18n.t("voice_call_settings_title"), size=(560, 390))
         root = wx.BoxSizer(wx.VERTICAL)

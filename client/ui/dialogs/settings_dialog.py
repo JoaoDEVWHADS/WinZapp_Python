@@ -1931,7 +1931,8 @@ class SettingsDialog(wx.Dialog):
         opener = getattr(self.main_window, "open_call_audio_settings", None)
         if opener is None:
             return
-        opener(event)
+        # Parented to this dialog, so the chooser cannot end up underneath it.
+        opener(event, parent=self)
 
     def _on_call_alerts_toggle(self, event):
         self._update_call_fields_state()

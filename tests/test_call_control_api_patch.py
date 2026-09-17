@@ -46,9 +46,8 @@ def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
     assert "call:audio:remote" in bridge
     assert "RTCPeerConnection" in bridge
     assert "__winzappOnCallRemoteAudio" in bridge
-    assert "if (!constraints?.audio) return nativeGetUserMedia(constraints)" in bridge
+    assert "if (!constraints?.audio && !constraints?.video) {" in bridge
     assert "microphone" in bridge
-    assert "camera" in bridge
     assert "webkitGetUserMedia" in bridge
     assert "if (!state.enabled || !constraints?.audio)" not in bridge
 
@@ -134,10 +133,32 @@ def test_cdp_permission_grant_includes_the_microphone_but_not_the_camera():
 
     assert "'audioCapture'" in granted[0]
     assert "videoCapture" not in granted[0]
-    # And the page keeps the camera shut even if something asks for it.
+    # And the page keeps the camera shut even if something asks for it. This
+    # asserts on the SHAPE of the guard, not on a removed expression: the first
+    # attempt at this fix left the refusal below an early return that sent
+    # `{video: true}` with no audio key straight to the real device, and a
+    # `"nativeGetUserMedia({ video:" not in bridge` check passed happily over
+    # it. With --use-fake-ui-for-media-stream the browser accepts that request
+    # itself, so the CDP grant above cannot close it on its own.
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
-    assert "nativeGetUserMedia({ video:" not in bridge
-    assert "video-request-refused" in bridge
+    body = bridge[bridge.index("const bridgedGetUserMedia"):]
+    body = body[: body.index("\n  };")]
+    # The only way back to the native device is when NEITHER kind was asked
+    # for; a video-only request must not reach it.
+    natives = [line.strip() for line in body.splitlines() if "nativeGetUserMedia" in line]
+    assert natives == ["return nativeGetUserMedia(constraints);"], natives
+    assert "if (!constraints?.audio && !constraints?.video) {" in body
+    assert "video-request-refused" in body
+    # The stream handed back carries the synthetic microphone and nothing else.
+    assert "return new MediaStream([micTrack]);" in body
+
+    # The page must not claim the camera either: answering 'granted' from the
+    # patched permissions.query would undo dropping videoCapture for any page
+    # that checks before asking.
+    query = bridge[bridge.index("value: async (descriptor: PermissionDescriptor)"):]
+    query = query[: query.index("nativePermissionQuery(descriptor)")]
+    assert "name === 'microphone'" in query
+    assert "'camera'" not in query
 
 
 def test_setup_api_copies_call_patch_files_into_runtime_api():
