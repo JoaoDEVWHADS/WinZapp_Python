@@ -134,7 +134,7 @@ WhatsApp's own limit is **2 GB for documents** and **1 GB for photos, videos and
 Raising the page-side ceiling is the delicate half, because that patch is applied by idempotent search-and-replace to `node_modules`: an installation already patched with the previous text will not match the pristine source any more, so a **new block version plus a migration from the old one** is required, exactly as `_BROWSER_ATTACHMENT_LIMIT_PATCH_V3` derives from `_BROWSER_ATTACHMENT_LIMIT_PATCH_V2` and `patch_sender_layer_source()` rewrites V2 into V3 at both nesting depths. Never edit a shipped `_V<n>` constant in place — it is the left-hand side of a migration, and changing it strands every install that carries it. Order matters too: the V2→V3 ceiling rewrite must run *after* the WAV-bypass removal, whose match has V2 as its prefix.
 
 ### `client/main.py` — the god object
-Almost everything (WebSocket/HTTP calls to WPPConnect, JID normalization, chat/contact state, sync, sound/notification dispatch, menu wiring, update checks) lives on the single `MainWindow(wx.Frame)` class in `client/main.py` (~26,900 lines). When making a change, `grep` this file first — the method you need very likely already exists here rather than in a smaller module. `client/ui/conversations.py` (`ConversationsPanel`, ~16,000 lines) is the other large file, holding essentially all message-list/composer UI and behavior.
+Almost everything (WebSocket/HTTP calls to WPPConnect, JID normalization, chat/contact state, sync, sound/notification dispatch, menu wiring, update checks) lives on the single `MainWindow(wx.Frame)` class in `client/main.py` (~32,600 lines). When making a change, `grep` this file first — the method you need very likely already exists here rather than in a smaller module. `client/ui/conversations.py` (`ConversationsPanel`, ~17,400 lines) is the other large file, holding essentially all message-list/composer UI and behavior.
 
 ### Message/data pipeline
 1. **`client/core/websocket_client.py`** (`WebSocketClient`) connects to WPPConnect's Socket.IO and normalizes raw WPPConnect/Baileys event payloads into WinZapp's canonical message dict shape: `{"key": {"remoteJid", "fromMe", "id", "participant"?}, "message": {...}, "messageType": "...", "messageTimestamp": ..., "pushName": "..."}`. All downstream code (`main.py`, `core/database.py`, `ui/conversations.py`) assumes this shape.
@@ -268,6 +268,131 @@ WhatsApp JIDs come in several forms and normalizing them wrong is the single mos
 **A code stream nobody is watching is a ban, not a nuisance — and `connection_mode` cannot tell you whether anyone is watching.** `WebSocketClient.on_qrcode_update()`'s two dialog-refresh branches used to key on `connect.connection_mode` alone. That attribute is written once, when the user picks a pairing method, and never reset: on an install that paired by QR it stays `"qrcode"` for the rest of the process's life. So when WhatsApp later dropped the session and WPPConnect went back to minting a fresh code every ~20-30s, every one of those events took the first branch — the sound, the spoken "O QR-CODE foi atualizado" over the conversation list, and a redraw of widgets destroyed hours earlier — and, being the first branch of an `if/elif` chain, permanently shadowed the proactive re-pairing branch below it, which was the only thing that would have told the user the session was gone. Reported live, and the account was banned for the volume of pairing attempts. Both branches now require `_is_pairing_dialog_active()`, and everything that *counts* a code as unattended goes through `_pairing_attended()`, which consults `_pairing_in_progress` as well — the dialog alone leaves the window between `on_pairing_complete()`'s `EndModal` and `messages.set`, where a just-paired install would have had its first sync closed under it (same two-signal rule, and the same reason, as `check_wa_connection_http()`'s own early return).
 
 Surfacing it is only half of it: nothing bounded the stream itself. `autoClose`/`deviceSyncTimeout` are pinned to 0 (`client/api_patches/src/config.ts`) precisely so WPPConnect never closes a code-producing session on its own — the right answer while somebody is looking at the dialog, since a blind user needs unbounded time to pair, and the wrong one when nobody is. So a code arriving with no dialog on screen now goes to `_handle_unattended_qr()`: it opens the re-pairing dialog on the first event (paired installs), and after `_UNATTENDED_QR_LIMIT` events with still no dialog it calls `MainWindow._halt_unattended_qr_session()`, which closes the session and latches `_qr_flood_halted`. **The latch is the load-bearing half** — `check_wa_connection_http()`'s CLOSED branch fires `/start-session` on the very next poll otherwise, reviving the browser and restarting the same stream ~30s later, so the close alone buys one poll cycle rather than a fix. It is deliberately *not* folded into `_self_inflicted_teardown_expected()`: that makes `_set_wa_connected()` show "connecting" and swallow the offline announcement, and here the session is genuinely gone and the user needs to hear so — which the halt says itself (error sound + `unattended_qr_session_closed`), because by construction the flood only happens while already offline, so the next poll's `_set_wa_connected(False, …)` hits its no-change early return and says nothing. An install that never paired, which the re-pairing dialog above skips, gets that dialog opened after the halt: it is the only thing that clears the latch, so without it the app is offline for good with no route back. Nothing is wiped — token and `paired` are untouched — and the latch clears on a real reconnect and when the pairing dialog opens.
+
+### Voice calls — Python owns the audio, the page owns everything else
+
+WhatsApp signaling, encryption and WebRTC stay inside WhatsApp Web. What
+WinZapp replaces is only the two ends of the audio: `client/core/call_audio.py`
+(`CallAudioSession`) captures PCM from the local microphone and plays the PCM
+extracted from the remote track, and `client/api_patches/src/util/callMediaBridge.ts`
+injects a page script that hands those frames to and from WhatsApp's own
+`RTCPeerConnection` through a synthetic `getUserMedia` track. The page never
+opens a physical device. `callController.ts` exposes
+`/api/:session/call/{accept,reject,end,offer,audio/enable,diagnostics}`, and
+`createSessionUtil.ts` re-emits both `incomingcall` and the full `callstate`
+lifecycle. Video calls are deliberately out of scope: the camera path fails
+closed, and it takes THREE things rather than one: no `videoCapture` in the CDP
+grant, the patched `navigator.permissions.query` claiming the microphone only,
+and `bridgedGetUserMedia` serving a synthetic stream for any request naming
+audio **or video**. The grant governs the Permissions API; the prompt is
+governed by `--use-fake-ui-for-media-stream`, which accepts the request itself
+— so dropping the grant closes nothing on its own. The first attempt at this
+put the video refusal *below* an early return that fell through to the real
+device whenever `audio` was falsy, which left `getUserMedia({video: true})`
+opening the webcam with no prompt and no indicator, in a page the user never
+sees, while a test asserting on the removed expression passed. Assert on the
+shape of the guard, not on the absence of a string.
+
+**A call event names the peer in whichever address form its source happened to
+hold, and the two sources disagree.** The offer arrives through
+`call.incoming_call` carrying whatever WhatsApp signalled with; the page's own
+`CallStore.activeCall` poll (every 250 ms) reports the form the store holds. On
+a LID-addressed account those are `<digits>@lid` and `<phone>@s.whatsapp.net`.
+Compared raw, one call's `ACTIVE` and its terminal `ENDED` looked like two
+different calls and both were discarded: nothing was announced, the call window
+stayed up, and `CallAudioSession` went on reading the microphone for the rest of
+the session. `core/call_matching.py` owns that decision — extracted from
+`main.py` precisely so it is reachable from a test — with the peer comparison
+injected (`_chat_jids_equivalent`) because the `@lid` caches live on
+`MainWindow`. Once the held call has a *real* WhatsApp id, only that id matches,
+so a delayed terminal event from an earlier call with the same person cannot
+tear down the current one. Outgoing calls go through `_resolve_jid_for_send()`
+like every send, for the same reason: an `@lid` is an identifier, not a number
+to dial.
+
+**Standing the background sync down during a call must happen where a round is
+*decided*, never inside one.** `sync_remote_chats()` returns the set of chats
+that FAILED, and `sync_chat_messages()` reports failure only by returning
+`False` — so an early return from either reads as *every chat succeeded*:
+`message_sync_ok` stays true, `_persist_successful_sync_state()` clears the
+`force_full_pending` latch and the list-chats snapshot is committed for chats
+nothing read. An account can be marked fully synced having fetched nothing, and
+only F5 repairs that (see the sync-completion trap above — this is the same
+trap from the other side). The gate therefore lives in the 60-second poll, the
+backfill loop, the deep-history walk and the media sweep, all four of which
+simply skip a cycle or do fewer chats in this one, and it is
+`_voice_call_in_progress()` — **bounded**, because `_active_voice_call` is
+cleared only by a terminal `callstate` event or by hanging up in WinZapp, and a
+call torn down on the phone producing neither would otherwise pause every
+background pass for the rest of the session. A paused sync is invisible: the
+user just stops receiving messages. Losing the connection also ends the call,
+since no terminal event can arrive over a dead socket.
+
+That predicate is reached from four background paths, so **every test stub that
+runs one of them binds it from the real class**. A stub whose `__getattr__`
+invents a truthy answer makes the pause permanent, and the backfill loop then
+sleeps a second per iteration until its whole deadline elapses — one guard left
+to a default turned `tests/test_deep_history_backfill.py` into a 2h20m CI run
+reporting 184 failures, most of them unrelated collateral from hours in one
+process (dialog creation failing, `TextCtrl` returning `''`: the signature of
+USER-object exhaustion).
+
+**The call controls live in exactly one place**, the modeless
+`voice_call_window`. An in-frame bar was tried alongside it and removed: two
+copies of the same three buttons have to be kept in step by hand, and the
+frame-level copy was never shown anyway, so `refresh_labels` was relabelling
+the dead set. Focus is put on that window's mute button **once, when the window
+appears** — `_sync_voice_call_bar()` runs again on every call-state change, so
+focusing unconditionally yanked focus back while the user was reading the
+conversation or had Tabbed to Desligar, and NVDA read the button over the call
+audio. Same class of defect as the played-row repaint above. Failures are
+spoken, so they go through `_raise_for_call_response()`/`_call_error_text()`:
+the status code is what a user can act on, while the API's body — up to 500
+characters of JSON wrapping a minified browser stack trace, which used to be
+read aloud in full — stays in `log.log`.
+
+Call devices are their own pair (`settings["call_audio_devices"]`), separate
+from Settings > Dispositivos de áudio on purpose: a headset chosen for calls
+must not silently become the microphone that records voice messages.
+
+**PulseAudio, and why it is not dead Linux code.** WinZapp itself always runs on
+Windows, where the page bridge above is the whole mechanism. But with local API
+mode off the user points WinZapp at a WPPConnect Server on their own Linux host,
+and there the Chrome holding the session has no audio device at all — the page
+bridge has nothing to hand PCM to. So `prepareLinuxCallAudioEnvironment()` gives
+each session its own devices (`winzapp_<kind>_<session>`, scoped by name so
+nothing can touch another application's) — at module level two null sinks plus
+a `module-remap-source`, because Chromium leaves raw monitor sources out of
+`enumerateDevices()`, and the module count is what the sweep has to clean —
+binds that Chrome to them
+through `PULSE_SOURCE`/`PULSE_SINK`, and `pacat`/`parec` move the bytes to and
+from the Socket.IO stream the Windows client is on. Every function in that block
+refuses to run unless `process.platform` is `linux` **and** `PULSE_SERVER` is
+the WinZapp socket, which is what makes it read like dead code on a Windows
+checkout. Deleting it would remove calls from remote-API installs while they go
+on *appearing* to work, since signaling, ringing and the call window all come
+from the page. `pulse_audio_lifecycle.py` is the other half: a `load-module`
+outlives the process that asked for it, so a crashed Node leaves its devices
+behind and the next session stacks another pair on top — hence the sweep, from
+the start script as well as the stop ones.
+
+**Socket.IO is authenticated now, and that is part of the same feature.**
+`socketAuth.ts` binds every socket to the session encoded in the same
+`<session>:<bcrypt>` token the REST API uses, and call events are emitted to
+`session:<name>` rooms rather than broadcast. The server historically trusted
+every connection because it only ever listened on localhost; that stops being
+true the moment custom-API mode points at a remote host, which is exactly the
+deployment the Pulse path above exists for. Note the ordinary message/ACK
+traffic is deliberately left as a broadcast — this change is call-only — and
+that is the reason **one shared remote server serving more than one account is
+not supported yet**: every authenticated socket still receives every session's
+`received-message`, `chats-update`, `onack` and even `qrCode`/`phoneCode`
+(around twenty emit sites). `_belongs_to_this_session()` discards them on the
+client, but the plaintext crosses first. Harmless on the default, where each
+account has its own Node on its own port. Related, and also not solved: with a
+user-supplied `http://`/`ws://` server the live microphone PCM crosses that
+network in the clear, which `settings_import_api_confirm` does not warn about
+— it covers the token.
 
 ### Status tab (`client/status_panel.py`, Alt+5)
 `StatusPanel` shows other contacts' WhatsApp statuses (stories) grouped by sender in `_status_list`, plus a `MyStatusDialog` for the user's own posted statuses. WPPConnect exposes no REST endpoint to query other users' statuses — the list is built entirely from `MainWindow._status_updates` (populated live by `_store_status_update()` as `status@broadcast` messages arrive over Socket.IO), not fetched on demand. Text/image/video/audio/document/sticker/contact status types all funnel through the module-level `_status_content_label()` helper for a translated content preview — every one of the panel's own near-duplicate copies of that switch used to fall through to the raw `messageType` string (e.g. literal `"audioMessage"`) for anything past text/image/video, so any future status type added here should go through that shared helper rather than a new inline copy. Video/audio playback reuses `core/video_player.py` (see above); Enter/Space on an already-open video or audio status list item toggles play/pause instead of re-selecting (which would otherwise `stop()` and restart the player — see `_is_current_status_playable()`). Reacting to (liking) someone else's status needs the poster's own `StatusV3Model` resolved via `WPP.status.get(posterJid).getAllMsgs()` in the Node layer (`deviceController.ts`'s `reactMessage`) — the general `Store.Msg.models` collection that `WPP.chat.sendReactionToMessage()` searches by default never contains another person's status at all.

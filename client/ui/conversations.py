@@ -765,6 +765,13 @@ class ConversationsPanel(wx.Panel):
         self._conv_data_btn.Bind(wx.EVT_BUTTON, self._show_conversation_data)
         conv_sizer.Add(self._conv_data_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
+        self._voice_call_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("voice_call_button")
+        )
+        self._voice_call_btn.Bind(wx.EVT_BUTTON, self._on_voice_call)
+        conv_sizer.Add(self._voice_call_btn, 0, wx.LEFT | wx.TOP, 5)
+        self._voice_call_btn.Hide()
+
         # ── Search in conversation button ───────────────────────────────────
         self._search_open_btn = wx.Button(
             self.conversation_panel, label=i18n.t("search_in_conv")
@@ -1702,6 +1709,10 @@ class ConversationsPanel(wx.Panel):
         conversation = self.main_window.chats.get(jid) or self.conversation
         was_editable = self.message_field.IsEditable()
         self._apply_composer_permissions(jid, conversation)
+        # Deliberately not re-syncing the call button here: whether a chat can
+        # be called depends only on its JID kind, which cannot change while the
+        # conversation stays open. The two places that DO open a conversation
+        # sync it; a live permission refresh only has to touch the composer.
         self.message_label.SetLabel(
             self._message_label_text(jid, conversation, self.conversation_name)
         )
@@ -1733,6 +1744,9 @@ class ConversationsPanel(wx.Panel):
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
+            self._sync_voice_call_button(conversation.get("remoteJid", ""))
+            self.conversation_panel.Layout()
+            self.Layout()
             # Conversation already open — just focus the message input field.
             wx.CallAfter(self.message_field.SetFocus)
             return
@@ -1854,6 +1868,7 @@ class ConversationsPanel(wx.Panel):
         )
 
         self._apply_composer_permissions(jid, conversation)
+        self._sync_voice_call_button(jid)
         self.message_label.SetLabel(
             self._message_label_text(jid, conversation, self.conversation_name)
         )
@@ -2232,6 +2247,7 @@ class ConversationsPanel(wx.Panel):
 
         self._new_conv_btn.SetLabel(i18n.t("new_conversation"))
         self._search_open_btn.SetLabel(i18n.t("search_in_conv"))
+        self._voice_call_btn.SetLabel(i18n.t("voice_call_button"))
         self._search_close_btn.SetLabel(i18n.t("search_close"))
         self._search_field_label.SetLabel(i18n.t("search_in_conv"))
         self._search_prev_btn.SetLabel(i18n.t("search_prev_result"))
@@ -2299,6 +2315,20 @@ class ConversationsPanel(wx.Panel):
             self._send_voice_message(event)
         elif not self._recording_starting:
             self._start_voice_recording()
+
+    def _sync_voice_call_button(self, jid: str):
+        jid = str(jid or "")
+        unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast"))
+        self._voice_call_btn.Show(bool(jid) and not unavailable)
+        self.conversation_panel.Layout()
+        self.Layout()
+
+    def _on_voice_call(self, _event=None):
+        if not self.conversation:
+            return
+        jid = str(self.conversation.get("remoteJid") or "")
+        name = self.conversation_name or self.conversation.get("name") or ""
+        self.main_window.start_voice_call(jid, name)
 
     # ── Text message sending ─────────────────────────────────────────────────
 
@@ -4060,6 +4090,7 @@ class ConversationsPanel(wx.Panel):
         self._reset_expanded_window()
         closed_jid = self._last_open_jid
         self.conversation = None
+        self._voice_call_btn.Hide()
         self.conversation_panel.Hide()
         self.Layout()
         return True, closed_jid
