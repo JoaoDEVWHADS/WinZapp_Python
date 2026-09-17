@@ -1,10 +1,14 @@
-/build.py merge=ours
-/client/updater.py merge=ours
-/client/config.py merge=ours
-/client/version.py merge=ours
-/setup_api.py merge=ours
-/client/api_patches/package.json merge=ours
-/client/ui/dialogs/api_setup.py merge=ours
-/README.md merge=ours
-/CHANGELOG.md merge=ours
-/.github/workflows/release.yml merge=ours
+# Temporary integration-only merge policy. Removed before the squash commit.
+**/updater.py merge=protected
+**/config.py merge=protected
+**/config.json merge=protected
+**/release.py merge=protected
+**/CHANGELOG* merge=protected
+**/README* merge=protected
+**/version.py merge=protected
+**/build.py merge=protected
+**/setup_api.py merge=protected
+**/api_setup.py merge=protected
+**/package.json merge=protected
+**/builder.py merge=protected
+**/setup.py merge=protected
