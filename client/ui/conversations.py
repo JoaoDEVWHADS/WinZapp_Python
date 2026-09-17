@@ -60,6 +60,7 @@ from ui.accessible import (
 )
 from ui.dialogs.emoji_picker import choose_and_insert_emoji
 from ui.dialogs.clear_chat_confirm import confirm_clear_chat
+from ui.dialogs.group_voice_call import GroupVoiceCallDialog
 from core.save_location import resolve_save_dialog_folder
 from core.utils import history_window, reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, db_fetch_limit, looks_like_binary_blob, normalize_for_search, normalize_line_separators, to_editor_line_endings, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, is_voice_message, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
@@ -2319,7 +2320,7 @@ class ConversationsPanel(wx.Panel):
 
     def _sync_voice_call_button(self, jid: str):
         jid = str(jid or "")
-        unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast"))
+        unavailable = jid.endswith(("@newsletter", "@broadcast"))
         self._voice_call_btn.Show(bool(jid) and not unavailable)
         self.conversation_panel.Layout()
         self.Layout()
@@ -2329,7 +2330,76 @@ class ConversationsPanel(wx.Panel):
             return
         jid = str(self.conversation.get("remoteJid") or "")
         name = self.conversation_name or self.conversation.get("name") or ""
+        if jid.endswith("@g.us"):
+            self._open_group_voice_call_picker(jid, name)
+            return
         self.main_window.start_voice_call(jid, name)
+
+    def _open_group_voice_call_picker(self, group_jid: str, group_name: str):
+        if getattr(self, "_group_voice_call_picker_loading", False):
+            return
+        self._group_voice_call_picker_loading = True
+        self.main_window.output(
+            self.main_window.i18n.t("group_voice_call_loading"), interrupt=True
+        )
+
+        def _worker():
+            candidates = []
+            try:
+                info = self.main_window.get_group_info(group_jid)
+                participants = info.get("participants") or []
+                seen = set()
+                for participant in participants:
+                    if not isinstance(participant, dict):
+                        continue
+                    raw_jid = participant.get("id") or participant.get("jid") or ""
+                    if isinstance(raw_jid, dict):
+                        raw_jid = raw_jid.get("_serialized") or raw_jid.get("id") or ""
+                    jid = str(raw_jid or "").strip()
+                    if not jid or jid in seen or self.main_window._is_self_jid(jid):
+                        continue
+                    seen.add(jid)
+                    display = self._get_participant_name(
+                        jid, participant, resolve_missing=False
+                    )
+                    candidates.append((display, jid))
+                candidates.sort(key=lambda item: str(item[0]).casefold())
+            except Exception:
+                logging.exception("[group_call] failed to load participants")
+            finally:
+                wx.CallAfter(
+                    self._show_group_voice_call_picker,
+                    group_jid,
+                    group_name,
+                    candidates,
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_group_voice_call_picker(
+        self, group_jid: str, group_name: str, candidates: list[tuple[str, str]]
+    ):
+        self._group_voice_call_picker_loading = False
+        if not self.conversation or self.conversation.get("remoteJid") != group_jid:
+            return
+        if len(candidates) < 2:
+            self.main_window.output(
+                self.main_window.i18n.t("group_voice_call_not_enough_participants"),
+                interrupt=True,
+            )
+            return
+        dialog = GroupVoiceCallDialog(
+            self.main_window, self.main_window.i18n, group_name, candidates
+        )
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            selected = dialog.selected_jids()
+        finally:
+            dialog.Destroy()
+        if len(selected) < 2:
+            return
+        self.main_window.start_group_voice_call(group_jid, selected, group_name)
 
     # ── Text message sending ─────────────────────────────────────────────────
 
