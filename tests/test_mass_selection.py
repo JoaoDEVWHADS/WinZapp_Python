@@ -106,8 +106,9 @@ class _FakeMainWindow:
     def output(self, text, interrupt=False):
         self.announced.append(text)
 
-    def clear_chat(self, jid):
+    def clear_chat(self, jid, keep_starred=True):
         self.cleared.append(jid)
+        self.clear_keep_starred = keep_starred
 
     def delete_chat(self, jid):
         self.deleted.append(jid)
@@ -176,6 +177,7 @@ class _Panel:
     _on_messages_list_key_down = ConversationsPanel._on_messages_list_key_down
     _on_conv_list_key_down = ConversationsPanel._on_conv_list_key_down
     _on_mass_clear_chats = ConversationsPanel._on_mass_clear_chats
+    _reset_view_after_chat_cleared = ConversationsPanel._reset_view_after_chat_cleared
     _on_mass_delete_chats = ConversationsPanel._on_mass_delete_chats
     _on_mass_archive_chats = ConversationsPanel._on_mass_archive_chats
     _on_mass_mark_read_chats = ConversationsPanel._on_mass_mark_read_chats
@@ -200,9 +202,18 @@ class _Panel:
 
     _select_message_at = ConversationsPanel._select_message_at
     _toggle_message_selection = ConversationsPanel._toggle_message_selection
+    _toggle_chat_selection = ConversationsPanel._toggle_chat_selection
+    # Selection mode (issue #99): every announcement here now carries the
+    # "modo de seleção ativado/desativado" tail when the selection goes from
+    # empty to non-empty or back, and plain Space keeps selecting while one
+    # exists.
+    _selection_mode_enabled = ConversationsPanel._selection_mode_enabled
+    _selection_mode_announcement = ConversationsPanel._selection_mode_announcement
+    _space_toggles_playback = ConversationsPanel._space_toggles_playback
     _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
     _select_chat_at = ConversationsPanel._select_chat_at
     _all_chat_jids = ConversationsPanel._all_chat_jids
+    _chat_selection_visible = ConversationsPanel._chat_selection_visible
     _refresh_message_rows_by_ids = ConversationsPanel._refresh_message_rows_by_ids
     _set_message_row_texts = ConversationsPanel._set_message_row_texts
     _render_message_line = lambda self, msg, index=None, total=None: msg.get("key", {}).get("id", "")
@@ -239,9 +250,21 @@ class _Panel:
         # The repaint is per-row (_repaint_or_repopulate); populate_calls
         # stays here to assert the full rebuild is NOT what happens.
         self.populate_calls = 0
+        self.played = []
         self.repainted = []
         self.repaint_ok = True
         self.persisted = []
+
+    # Plain Space only reaches these for an audio/video row; every message
+    # this file builds is a text one, so they just record.
+    def _use_conversation_video_media_viewer_dialog(self):
+        return False
+
+    def _toggle_audio_message_playback(self, msg):
+        self.played.append(msg.get("key", {}).get("id", ""))
+
+    def _play_toggle_video_message(self, msg):
+        self.played.append(msg.get("key", {}).get("id", ""))
 
     def populate_messages(self, preserve_focus=False):
         self.populate_calls += 1
@@ -353,12 +376,13 @@ class TestCtrlSpaceInTheConversationsList:
         panel = _Panel(chats=[_chat("a@s.whatsapp.net"), _chat("b@s.whatsapp.net")], focused=1)
         panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == {"b@s.whatsapp.net"}
-        assert panel.main_window.announced == ["selected"]
+        assert panel.main_window.announced == ["selected. selection_mode_on"]
         assert panel.selection_sound.plays == 1
 
     def test_plain_space_does_not_select(self):
-        """Plain Space is left alone in the conversations list too, for
-        consistency with the messages list."""
+        """Plain Space only selects once a selection already exists (issue
+        #99) — with nothing selected it is left alone in the conversations
+        list, exactly as before."""
         panel = _Panel(chats=[_chat("a@s.whatsapp.net")], focused=0)
         event = _space()
         panel._on_conv_list_key_down(event)
@@ -370,7 +394,8 @@ class TestCtrlSpaceInTheConversationsList:
         panel._on_conv_list_key_down(_ctrl_space())
         panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == set()
-        assert panel.main_window.announced == ["selected", "unselected"]
+        assert panel.main_window.announced == [
+            "selected. selection_mode_on", "unselected. selection_mode_off"]
 
     def test_deselecting_is_silent(self):
         """The tone marks "now selected"; replaying it on removal would make
@@ -431,7 +456,7 @@ class TestCtrlSpaceInTheConversationsList:
         assert panel.selected_chats == {"b@s.whatsapp.net"}
         assert panel.conversations_list._focused == 1
         assert panel.selection_sound.plays == 1
-        assert panel.main_window.announced == ["selected"]
+        assert panel.main_window.announced == ["selected. selection_mode_on"]
 
     def test_shift_end_selects_everything_below_and_jumps_to_the_last_row(self):
         chats = [_chat(f"{i}@s.whatsapp.net") for i in range(4)]
@@ -455,10 +480,11 @@ class TestCtrlSpaceInTheConversationsList:
         panel = _Panel(chats=chats, focused=0)
         panel._on_conv_list_key_down(_ctrl_shift_space())
         assert panel.selected_chats == {"0@s.whatsapp.net", "1@s.whatsapp.net", "2@s.whatsapp.net"}
-        assert panel.main_window.announced == ["all_selected"]
+        assert panel.main_window.announced == ["all_selected. selection_mode_on"]
         panel._on_conv_list_key_down(_ctrl_shift_space())
         assert panel.selected_chats == set()
-        assert panel.main_window.announced == ["all_selected", "all_unselected"]
+        assert panel.main_window.announced == [
+            "all_selected. selection_mode_on", "all_unselected. selection_mode_off"]
 
 
 class TestCtrlSpaceInTheMessagesList:
@@ -466,12 +492,13 @@ class TestCtrlSpaceInTheMessagesList:
         panel = _Panel(messages=[_msg("m1"), _msg("m2")], focused=1)
         panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == {"m2"}
-        assert panel.main_window.announced == ["selected"]
+        assert panel.main_window.announced == ["selected. selection_mode_on"]
         assert panel.selection_sound.plays == 1
 
     def test_plain_space_does_not_select(self):
-        """Plain Space is reserved for playing/pausing the focused audio or
-        video message — it must fall through here (Skip), not toggle."""
+        """Plain Space plays/pauses the focused audio or video, and only
+        selects once a selection already exists (issue #99) — on a text
+        message with nothing selected it still falls through (Skip)."""
         panel = _Panel(messages=[_msg("m1")], focused=0)
         event = _space()
         panel._on_messages_list_key_down(event)
@@ -483,7 +510,8 @@ class TestCtrlSpaceInTheMessagesList:
         panel._on_messages_list_key_down(_ctrl_space())
         panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == set()
-        assert panel.main_window.announced == ["selected", "unselected"]
+        assert panel.main_window.announced == [
+            "selected. selection_mode_on", "unselected. selection_mode_off"]
 
     @pytest.mark.parametrize("row", [SEPARATOR, PLACEHOLDER])
     def test_a_sentinel_row_cannot_be_selected(self, row):
@@ -561,10 +589,11 @@ class TestCtrlSpaceInTheMessagesList:
         panel = _Panel(messages=[_msg("m1"), _msg("m2")], focused=0)
         panel._on_messages_list_key_down(_ctrl_shift_space())
         assert panel.selected_messages == {"m1", "m2"}
-        assert panel.main_window.announced == ["all_selected"]
+        assert panel.main_window.announced == ["all_selected. selection_mode_on"]
         panel._on_messages_list_key_down(_ctrl_shift_space())
         assert panel.selected_messages == set()
-        assert panel.main_window.announced == ["all_selected", "all_unselected"]
+        assert panel.main_window.announced == [
+            "all_selected. selection_mode_on", "all_unselected. selection_mode_off"]
 
 
 class TestToggleMessageSelection:
@@ -576,7 +605,7 @@ class TestToggleMessageSelection:
         panel = _Panel(messages=[_msg("m1")])
         panel._toggle_message_selection(panel._sorted_messages[0])
         assert panel.selected_messages == {"m1"}
-        assert panel.main_window.announced == ["selected"]
+        assert panel.main_window.announced == ["selected. selection_mode_on"]
         assert panel.selection_sound.plays == 1
 
     def test_unselects_an_already_selected_message(self):
@@ -584,7 +613,7 @@ class TestToggleMessageSelection:
         panel.selected_messages = {"m1"}
         panel._toggle_message_selection(panel._sorted_messages[0])
         assert panel.selected_messages == set()
-        assert panel.main_window.announced == ["unselected"]
+        assert panel.main_window.announced == ["unselected. selection_mode_off"]
         assert panel.selection_sound.plays == 0
 
     def test_a_sentinel_row_is_a_no_op(self):
@@ -598,6 +627,9 @@ class TestToggleMessageSelection:
 def confirm_yes(monkeypatch):
     """Every destructive mass action asks first; answer yes."""
     monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: wx.YES)
+    # Clearing asks through its own dialog (it carries the "keep starred
+    # messages" checkbox); answer yes with the checkbox at its default.
+    monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: (True, True))
 
 
 @pytest.fixture
@@ -612,12 +644,19 @@ def confirm_yes_capture(monkeypatch):
         return wx.YES
 
     monkeypatch.setattr(wx, "MessageBox", _fake_message_box)
+
+    def _fake_clear_confirm(parent, message, title, keep_starred_label, **kw):
+        calls.append((message, title))
+        return True, True
+
+    monkeypatch.setattr("ui.conversations.confirm_clear_chat", _fake_clear_confirm)
     return calls
 
 
 @pytest.fixture
 def confirm_no(monkeypatch):
     monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: wx.NO)
+    monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: (False, True))
 
 
 @pytest.fixture
@@ -790,6 +829,14 @@ class TestMassChatActions:
         assert panel.selected_chats == set()
         assert panel.main_window.announced == ["success_clear"]
 
+    def test_unticking_keep_starred_applies_to_every_selected_chat(self, monkeypatch):
+        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: (True, False))
+        panel = _Panel()
+        panel.selected_chats = {"a@s.whatsapp.net", "b@s.whatsapp.net"}
+        panel._on_mass_clear_chats(None)
+        assert sorted(panel.main_window.cleared) == ["a@s.whatsapp.net", "b@s.whatsapp.net"]
+        assert panel.main_window.clear_keep_starred is False
+
     def test_declining_the_confirmation_clears_nothing(self, confirm_no):
         """And leaves the selection intact, so the user does not have to
         rebuild it after an accidental cancel."""
@@ -867,6 +914,7 @@ class TestMassChatActions:
         """Not even a confirmation dialog — the submenu is only built while a
         selection exists, but the handlers are reachable after it is cleared."""
         monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: pytest.fail("asked"))
+        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: pytest.fail("asked"))
         panel = _Panel()
         getattr(panel, handler)(None)
         assert panel.main_window.cleared == []

@@ -61,6 +61,9 @@ class _Panel:
     """Only what activate_message() touches on the branches under test."""
 
     activate_message = ConversationsPanel.activate_message
+    # The audio branch itself now lives in its own method, shared with plain
+    # Space (issue #99) — the clean_msg_id derivation asserted below is in it.
+    _toggle_audio_message_playback = ConversationsPanel._toggle_audio_message_playback
     _do_activate_message = ConversationsPanel._do_activate_message
     _extract_links = ConversationsPanel._extract_links
     _message_own_links = ConversationsPanel._message_own_links

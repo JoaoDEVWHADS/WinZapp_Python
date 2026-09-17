@@ -92,6 +92,9 @@ class _Panel:
         self._all_sorted_messages = list(records)
         self._messages_offset = 0
         self._unread_sep_idx = -1
+        # A removed id also leaves the selection — see
+        # tests/test_selection_mode.py for why that matters.
+        self.selected_messages = set()
         self.messages_list = _FakeList(len(rendered))
         self.main_window = _Main()
         self.stopped_playback = []
