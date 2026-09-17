@@ -6082,6 +6082,8 @@ class MainWindow(wx.Frame):
             "peer_jid": details.get("peer_jid") or "",
             "name": details.get("name") or "",
             "outgoing": bool(details.get("outgoing", False)),
+            "is_group": bool(details.get("is_group")),
+            "group_jid": details.get("group_jid") or "",
         }
         self._voice_call_last_announced_state = ""
         wx.CallAfter(self._sync_voice_call_bar)
@@ -6389,6 +6391,89 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def start_group_voice_call(
+        self, group_jid: str, participant_jids: list[str], name: str = ""
+    ):
+        """Start a WhatsApp group voice call with selected group participants."""
+        group_jid = self._normalize_jid(str(group_jid or ""))
+        if not group_jid.endswith("@g.us"):
+            self.output(self.i18n.t("voice_call_start_failed").format(
+                error="grupo inválido"
+            ), interrupt=True)
+            return
+        if (
+            getattr(self, "_active_voice_call", None) is not None
+            or bool(getattr(self, "_active_incoming_calls", {}))
+        ):
+            self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
+            return
+
+        requested = [str(jid or "").strip() for jid in participant_jids or [] if jid]
+        unresolved_lids = [
+            jid for jid in requested
+            if jid.endswith("@lid")
+            and jid not in getattr(self, "_lid_to_phone", {})
+        ]
+        identity = f"outgoing-group:{group_jid}"
+        details = {
+            "identity": identity,
+            "call_id": identity,
+            "peer_jid": group_jid,
+            "group_jid": group_jid,
+            "name": name or getattr(self, "_group_name_cache", {}).get(group_jid, "") or group_jid,
+            "outgoing": True,
+            "is_group": True,
+        }
+        self.output(
+            self.i18n.t("voice_call_starting").format(name=details["name"]),
+            interrupt=True,
+        )
+        self._active_voice_call = dict(details)
+        self._voice_call_last_announced_state = ""
+        wx.CallAfter(self._sync_voice_call_bar)
+
+        def _worker():
+            with self._call_action_lock:
+                try:
+                    if unresolved_lids:
+                        self.resolve_lid_jids_via_api(unresolved_lids)
+                    participants = normalize_group_call_participants(
+                        requested, getattr(self, "_lid_to_phone", {})
+                    )
+                    participants = [
+                        jid for jid in participants if not self._is_self_jid(jid)
+                    ]
+                    if len(participants) < 2:
+                        raise RuntimeError(
+                            "não foi possível resolver pelo menos dois participantes do grupo"
+                        )
+                    self._start_voice_call_audio(identity, details)
+                    response = self._post_call_control(
+                        "group/offer",
+                        {"participants": participants, "isVideo": False},
+                        timeout=75,
+                    )
+                    if response.status_code >= 400:
+                        raise RuntimeError(response.text[:500])
+                    try:
+                        body = response.json().get("response") or {}
+                    except Exception:
+                        body = {}
+                    call_id = str(body.get("id") or "") if isinstance(body, dict) else ""
+                    active = getattr(self, "_active_voice_call", None)
+                    if active is not None and call_id:
+                        active["call_id"] = call_id
+                except Exception as exc:
+                    self._stop_voice_call_audio()
+                    logging.exception("[call] outgoing group voice call failed")
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("voice_call_start_failed").format(error=exc),
+                        True,
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _sync_voice_call_bar(self):
         bar = getattr(self, "voice_call_bar", None)
         label = getattr(self, "voice_call_label", None)
@@ -6446,11 +6531,19 @@ class MainWindow(wx.Frame):
             # having created the Python audio session.
             if state != "ACTIVE" or not call_id:
                 return
+            group_jid = self._normalize_jid(str(event.get("groupJid") or ""))
+            is_group = bool(event.get("isGroup", False) or group_jid.endswith("@g.us"))
             active = {
                 "identity": call_id,
                 "call_id": call_id,
-                "peer_jid": peer_jid,
-                "name": self._preview_sender_from_jid(peer_jid) or peer_jid,
+                "peer_jid": group_jid if is_group and group_jid else peer_jid,
+                "group_jid": group_jid,
+                "is_group": is_group,
+                "name": (
+                    getattr(self, "_group_name_cache", {}).get(group_jid, "")
+                    if is_group and group_jid
+                    else self._preview_sender_from_jid(peer_jid) or peer_jid
+                ),
                 "outgoing": bool(event.get("outgoing", False)),
             }
             self._active_voice_call = active
@@ -6472,7 +6565,14 @@ class MainWindow(wx.Frame):
             return
         if call_id:
             active["call_id"] = call_id
-        if peer_jid:
+        group_jid = self._normalize_jid(str(event.get("groupJid") or ""))
+        if event.get("isGroup") or group_jid.endswith("@g.us"):
+            active["is_group"] = True
+            if group_jid:
+                active["group_jid"] = group_jid
+                active["peer_jid"] = group_jid
+                active["name"] = getattr(self, "_group_name_cache", {}).get(group_jid, "") or active.get("name")
+        elif peer_jid:
             active["peer_jid"] = peer_jid
         if not active.get("name") and peer_jid:
             active["name"] = self._preview_sender_from_jid(peer_jid) or peer_jid
