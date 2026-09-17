@@ -36,6 +36,8 @@ FIXES
 
 - After WinZapp recovers the browser profile, chats with unread messages no longer show up as read.
 
+- Copying part of the message text window (Alt+C) brought along line breaks the message did not have, wherever the window splits long lines to make them easier to read. Copying now gives you the message as it was written, with only its own line breaks.
+
 V1.1.1.0
 
 This release is about keeping your account connected. WinZapp now keeps a backup copy of the browser profile — which is where your WhatsApp connection actually lives — and restores it on its own when it stops being accepted, telling you what happened. Alongside it come fixes for the situations that broke the session and left the app asking you to pair again: shutting the computer down, suspending and resuming, and the app restarting the connection by itself. Spell checking in the message field and link actions arrived too.

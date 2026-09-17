@@ -36,6 +36,8 @@ POPRAWKI
 
 - Po odzyskaniu profilu przeglądarki przez WinZapp czaty z nieprzeczytanymi wiadomościami nie są już pokazywane jako przeczytane.
 
+- Kopiowanie fragmentu okienka z tekstem wiadomości (Alt+C) dodawało podziały wierszy, których wiadomość nie miała, w miejscach, gdzie okienko dzieli długie wiersze dla łatwiejszego czytania. Teraz kopia zawiera wiadomość dokładnie tak, jak została napisana, tylko z jej własnymi podziałami wierszy.
+
 V1.1.1.0
 
 Ta wersja dotyczy utrzymania połączenia z Twoim kontem. WinZapp zapisuje teraz kopię zapasową profilu przeglądarki — to w nim faktycznie przechowywane jest Twoje połączenie z WhatsApp — i sam ją przywraca, gdy przestaje być akceptowana, informując o tym, co się stało. Razem z nią pojawiają się poprawki sytuacji, które przerywały sesję i zmuszały do ponownego parowania: wyłączenie komputera, wstrzymanie i wznowienie oraz samo ponowne uruchamianie połączenia przez program. Doszły również sprawdzanie pisowni w polu wiadomości i akcje na odnośnikach.

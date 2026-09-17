@@ -64,6 +64,7 @@ from core.save_location import resolve_save_dialog_folder
 from core.utils import history_window, reaction_targets_status, format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, db_fetch_limit, looks_like_binary_blob, normalize_for_search, normalize_line_separators, to_editor_line_endings, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded, is_voice_message, video_seconds, MEASURED_SECONDS_KEY, link_preview_text
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
+from core.wrapped_text import original_range, selection_offsets, word_wrap
 from core.video_player import VideoPlayer
 from core.focus_cloak import cloak_focus_announcement
 from core.spell_checker import (
@@ -14010,26 +14011,6 @@ class ConversationsPanel(wx.Panel):
 
         i18n = self.main_window.i18n
 
-        def _word_wrap(raw: str, width: int = 100) -> str:
-            """Wrap at word boundaries around *width* chars; never breaks mid-word."""
-            out = []
-            for para in raw.split("\n"):
-                if not para:
-                    out.append("")
-                    continue
-                line = ""
-                for word in para.split(" "):
-                    if not line:
-                        line = word
-                    elif len(line) + 1 + len(word) <= width:
-                        line += " " + word
-                    else:
-                        out.append(line)
-                        line = word
-                if line:
-                    out.append(line)
-            return "\n".join(out)
-
         # Use wx.Frame with parent=None so the window is completely independent:
         # it appears in the taskbar, stays visible when Alt+Tab switches away from
         # WinZapp, and never blocks the main window's input focus.
@@ -14042,10 +14023,42 @@ class ConversationsPanel(wx.Panel):
         panel = wx.Panel(dlg)
         sizer = wx.BoxSizer(wx.VERTICAL)
         text_ctrl = wx.TextCtrl(
-            panel, value=_word_wrap(text),
+            panel, value=word_wrap(text),
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+        # The wrap above is only for line-by-line reading. Copying hands out
+        # the message as written: the same range of the original, with its
+        # spaces where the wrap put breaks. Ctrl+C / Ctrl+Insert are consumed
+        # here; the native context menu's Copy arrives as EVT_TEXT_COPY.
+        # Neither handler calls Skip(), and that is what keeps the native
+        # control from copying the wrapped text on top of ours.
+        def _copy_original(event=None):
+            offsets = selection_offsets(
+                text_ctrl.GetRange, text_ctrl.GetStringSelection,
+                *text_ctrl.GetSelection(),
+            )
+            if not offsets:
+                return
+            copied = original_range(text, *offsets)
+            if not copied:
+                return
+            # pyperclip, like the other text copies: wx.TheClipboard without
+            # Flush() loses the text when WinZapp exits.
+            try:
+                pyperclip.copy(copied)
+            except Exception:
+                self.main_window.output(i18n.t("msg_copy_error"))
+
+        def _on_text_key(event):
+            key = event.GetKeyCode()
+            if event.GetModifiers() == wx.MOD_CONTROL and key in (ord("C"), wx.WXK_INSERT):
+                _copy_original()
+                return
+            event.Skip()
+
+        text_ctrl.Bind(wx.EVT_KEY_DOWN, _on_text_key)
+        text_ctrl.Bind(wx.EVT_TEXT_COPY, _copy_original)
         close_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("close"))
         sizer.Add(close_btn, 0, wx.ALIGN_RIGHT | wx.RIGHT | wx.BOTTOM, 8)
         panel.SetSizer(sizer)
