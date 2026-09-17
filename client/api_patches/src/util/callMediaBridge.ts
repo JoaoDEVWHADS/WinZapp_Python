@@ -12,7 +12,7 @@ const linuxAudioProcesses = new Map<
   string,
   { playback: ChildProcessWithoutNullStreams; capture: ChildProcessWithoutNullStreams }
 >();
-const LINUX_PULSE_SERVER = 'unix:/run/winzapp-pulse/native';
+const LINUX_PULSE_SERVER = 'unix:/run/pulse/winzapp-native';
 
 function linuxDeviceName(kind: 'mic' | 'speaker', session: string): string {
   return `winzapp_${kind}_${session.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48)}`;

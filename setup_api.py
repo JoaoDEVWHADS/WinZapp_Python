@@ -737,18 +737,19 @@ def main():
                     if is_root and shutil.which("systemctl"):
                         pulse_config = "/etc/winzapp-pulse.pa"
                         pulse_service = "/etc/systemd/system/winzapp-pulseaudio.service"
-                        pulse_runtime = "/run/winzapp-pulse"
+                        pulse_runtime = "/run/pulse"
+                        pulse_socket = f"{pulse_runtime}/winzapp-native"
                         config_text = (
                             "load-module module-native-protocol-unix "
-                            f"socket={pulse_runtime}/native auth-anonymous=1\n"
+                            f"socket={pulse_socket} auth-anonymous=1\n"
                             "load-module module-always-sink\n"
                         )
                         service_text = (
                             "[Unit]\nDescription=WinZapp virtual audio server\n"
                             "After=dbus.service\n\n[Service]\nType=simple\nUser=root\n"
-                            "RuntimeDirectory=winzapp-pulse\nRuntimeDirectoryMode=0755\n"
+                            "RuntimeDirectory=pulse\nRuntimeDirectoryMode=0755\n"
                             "ExecStartPre=-/usr/bin/pulseaudio --kill\n"
-                            "ExecStartPre=/bin/chown pulse:pulse /run/winzapp-pulse\n"
+                            "ExecStartPre=/bin/chown pulse:pulse /run/pulse\n"
                             f"ExecStart=/usr/bin/pulseaudio --system --daemonize=no "
                             f"--disallow-exit --exit-idle-time=-1 -nF {pulse_config}\n"
                             "Restart=on-failure\nRestartSec=2\n\n"
