@@ -164,6 +164,7 @@ class _Stub:
     # Real implementations under test.
     _merge_history_into_records = ConversationsPanel._merge_history_into_records
     _remember_expanded_window = ConversationsPanel._remember_expanded_window
+    _refresh_expanded_window_before_rebuild = ConversationsPanel._refresh_expanded_window_before_rebuild
     _reset_expanded_window = ConversationsPanel._reset_expanded_window
     _history_window_for_rebuild = ConversationsPanel._history_window_for_rebuild
     _load_older_messages = ConversationsPanel._load_older_messages
@@ -626,3 +627,47 @@ class TestTheRenderedWindowIsTheFloor:
         assert expanded_min_visible(displayable, "m-100", 450) == 450
         # E com a âncora mais antiga que o piso, é ela que manda.
         assert expanded_min_visible(displayable, "m-100", 10) == 400
+
+
+class TestTheWindowIsReadFromTheScreenBeforeEachRebuild:
+    """Terceira porta para o mesmo sintoma, medida em 2026-09-16: a lista abre
+    com 200 linhas, uma mensagem chega por append (201, sem registrar nada), e
+    a mensagem mais antiga da tela é removida — era o espelhamento de apagadas
+    tirando uma mensagem que o telefone nunca apagou (ver
+    tests/test_remote_deletion_window.py). A âncora some, a janela cai para o
+    piso por contagem, e o piso é o da abertura: o rebuild seguinte volta a 200
+    com o offset andando uma casa. populate_messages() agora relê a tela antes
+    de reconstruir, então o piso é o que o leitor de tela está lendo agora."""
+
+    def test_a_removed_anchor_after_a_live_append_does_not_shrink_the_list(self):
+        stub = _Stub(sorted_messages=[_msg(f"m-{i}", i) for i in range(50, 250)])
+        stub._remember_expanded_window()                       # abertura: 200, âncora m-50
+        stub._sorted_messages.append(_msg("m-250", 250))       # append ao vivo: 201
+        stub._sorted_messages.pop(0)                           # m-50 removida: 200 na tela
+        stub._sorted_messages.append(_msg("m-251", 251))       # outra chegada: 201 na tela
+        stub._refresh_expanded_window_before_rebuild()
+        displayable = [_msg(f"m-{i}", i) for i in range(0, 252) if i != 50]
+        offset, _ = stub._history_window_for_rebuild(displayable, 200)
+        assert len(displayable[offset:]) == 201, "o rebuild cortou linhas que estavam na tela"
+
+    def test_without_the_reread_the_same_sequence_shrinks(self):
+        """Prende que o teste acima reproduz o defeito."""
+        stub = _Stub(sorted_messages=[_msg(f"m-{i}", i) for i in range(50, 250)])
+        stub._remember_expanded_window()
+        displayable = [_msg(f"m-{i}", i) for i in range(0, 252) if i != 50]
+        offset, _ = stub._history_window_for_rebuild(displayable, 200)
+        assert len(displayable[offset:]) == 200
+
+    def test_a_conversation_not_yet_painted_is_left_to_the_page_size(self):
+        """Depois de _reset_expanded_window(), _sorted_messages ainda pode ser
+        da conversa anterior e não pode virar o piso da que está abrindo."""
+        stub = _Stub(sorted_messages=[_msg(f"old-{i}", i) for i in range(1000)])
+        stub._refresh_expanded_window_before_rebuild()
+        assert stub._expanded_visible_count == 0
+        assert stub._expanded_oldest_msg_id == ""
+
+    def test_populate_messages_rereads_before_it_clears_the_list(self):
+        src = inspect.getsource(ConversationsPanel.populate_messages)
+        assert src.index("self._refresh_expanded_window_before_rebuild()") < src.index(
+            "self.messages_list.DeleteAllItems()"
+        )

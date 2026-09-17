@@ -1,0 +1,62 @@
+name: Bug report
+description: Report behavior that is not working as expected.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve WinZapp. Do not include phone numbers, messages, tokens, or other personal data.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and the expected behavior.
+      placeholder: I expected... But instead...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the steps that cause the problem.
+      placeholder: |
+        1. Open...
+        2. Click...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: WinZapp version
+      description: Find it under Help > About.
+      placeholder: E.g. 1.2.3.0
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: E.g. Windows 11 24H2
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Attach relevant excerpts from log.log or shutdown_audit.log after removing personal data.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched for existing issues before opening this one.
+          required: true
+        - label: I removed personal data and credentials from attachments and logs.
+          required: true

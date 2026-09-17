@@ -95,6 +95,9 @@ class _RemovalStub:
         self._all_sorted_messages = list(sorted_messages)
         self._messages_offset = 0
         self._unread_sep_idx = -1
+        # A removed id also leaves the selection — see
+        # tests/test_selection_mode.py for why that matters.
+        self.selected_messages = set()
         # Not under test here (see tests/test_stop_playback_on_delete.py) —
         # just need _stop_playback_for_removed_messages() to find nothing
         # playing and no-op.
@@ -231,6 +234,7 @@ class TestRemoveMessagesById:
 class _FakeConversationsPanel:
     def __init__(self, remote_jid=None):
         self.conversation = {"remoteJid": remote_jid} if remote_jid else None
+        self.selected_messages = {"A", "B", "C"}
         self.removed = None
         self.populate_called = False
 
@@ -253,7 +257,12 @@ class _ReconcileStub:
     methods as plain functions (no HTTP, no wx event loop)."""
 
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _deletions_before_remote_window = MainWindow._deletions_before_remote_window
+    _REMOTE_BEFORE_PAGES = MainWindow._REMOTE_BEFORE_PAGES
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
+    _rollback_gaps = MainWindow._rollback_gaps
+    _legacy_restore_gap = MainWindow._legacy_restore_gap
+    _ROLLBACK_GAPS_METADATA_KEY = MainWindow._ROLLBACK_GAPS_METADATA_KEY
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions
     _REMOTE_CLEAR_CONFIRM_STRIKES = MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES
@@ -267,9 +276,22 @@ class _ReconcileStub:
         self._schedule_set_chats_calls = 0
         self.settings = {}
 
-    # Stubbed instead of hitting the network.
-    def _fetch_remote_message_ids(self, remote_jid):
-        return self._remote_ids
+    # Stubbed instead of hitting the network. The oldest remote timestamp
+    # defaults to "older than every local record" (the fixtures all sit at
+    # 1000), so tests that do not care about the window bound see none.
+    _remote_oldest_ts = 1
+
+    def _fetch_remote_message_window(self, remote_jid):
+        if self._remote_ids is None:
+            return None
+        if not self._remote_ids:
+            return set(), None, ""
+        return set(self._remote_ids), self._remote_oldest_ts, "anchor"
+
+    # The look further back. Fails by default: a failed page must never turn
+    # into a deletion (see _deletions_before_remote_window).
+    def _fetch_remote_messages_before(self, remote_jid, anchor_id):
+        return None
 
     def clear_chat_messages_local(self, jid, record_cutoff=True):
         self.clear_calls.append((jid, record_cutoff))
@@ -331,6 +353,7 @@ class TestReconcileActiveConversation:
             stub._reconcile_active_conversation_with_remote()
         assert stub.clear_calls == [(jid, False)]  # record_cutoff=False: mirroring, not a new cutoff
         assert stub.conversations_panel.populate_called is True
+        assert stub.conversations_panel.selected_messages == set()
         assert stub._schedule_set_chats_calls == 1
 
     def test_a_single_empty_read_does_not_immediately_clear(self):
@@ -390,7 +413,7 @@ class TestReconcileActiveConversation:
         assert stub.conversations_panel.removed is None
 
     def test_messages_older_than_the_remote_fetch_window_are_never_diffed(self):
-        """Regression: _fetch_remote_message_ids() only asks WhatsApp Web for
+        """Regression: _fetch_remote_message_window() only asks WhatsApp Web for
         its last `messages_page_size` messages. Comparing the FULL local
         history against that limited window used to flag (and delete) older
         local messages just because a busy chat had pushed them past the

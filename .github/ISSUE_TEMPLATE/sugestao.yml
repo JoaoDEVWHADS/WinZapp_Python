@@ -1,0 +1,46 @@
+name: Suggestion
+description: Share an idea to improve the WinZapp experience.
+title: "[Suggestion]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Well-contextualized suggestions help assess impact, priority, and accessibility. Do not include personal data or credentials.
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What is your suggestion?
+      description: Explain the improvement you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: benefit
+    attributes:
+      label: What benefit would it provide?
+      description: Describe the problem or opportunity the suggestion addresses.
+    validations:
+      required: true
+
+  - type: textarea
+    id: accessibility
+    attributes:
+      label: Accessibility considerations
+      description: Describe impacts on screen readers, keyboard use, or low vision, if applicable.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include examples, references, or images that help explain the idea.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched for existing issues before opening this one.
+          required: true
+        - label: I did not include personal data, messages, or credentials.
+          required: true
