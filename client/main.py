@@ -6063,6 +6063,33 @@ class MainWindow(wx.Frame):
         if hasattr(self, "voice_call_bar"):
             wx.CallAfter(self._sync_voice_call_bar)
 
+    def _restart_active_voice_call_audio(self):
+        """Apply changed call devices without ending the WhatsApp call."""
+        active = dict(getattr(self, "_active_voice_call", {}) or {})
+        if not active or getattr(self, "_call_audio_session", None) is None:
+            return
+
+        def _worker():
+            with self._call_action_lock:
+                try:
+                    self._stop_voice_call_audio()
+                    self._start_voice_call_audio(
+                        str(active.get("identity") or active.get("call_id") or "call"),
+                        active,
+                    )
+                    logging.info("[call_audio] active call devices switched")
+                except Exception:
+                    logging.exception("[call_audio] failed to switch active call devices")
+                    wx.CallAfter(
+                        self.output,
+                        self.i18n.t("voice_call_start_failed").format(
+                            error="não foi possível abrir o novo dispositivo de áudio"
+                        ),
+                        True,
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _stop_active_voice_call_if_matches(self, identity: str, peer_jid: str):
         active = getattr(self, "_active_voice_call", None)
         if not active:
@@ -6205,6 +6232,8 @@ class MainWindow(wx.Frame):
             cfg["output_device_name"] = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
             self.effective_input_device_name = cfg["input_device_name"]
             self.save_settings()
+            if getattr(self, "_call_audio_session", None) is not None:
+                self._restart_active_voice_call_audio()
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
         cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
