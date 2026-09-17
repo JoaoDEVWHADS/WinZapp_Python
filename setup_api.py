@@ -712,7 +712,8 @@ def main():
                 "libnss3", "libpango-1.0-0", "libpangocairo-1.0-0", "libstdc++6", "libx11-6",
                 "libx11-xcb1", "libxcb1", "libxcomposite1", "libxcursor1", "libxdamage1",
                 "libxext6", "libxfixes3", "libxi6", "libxkbcommon0", "libxrandr2", "libxrender1", "libxshmfence1", "libxss1",
-                "libxtst6", "lsb-release", "xdg-utils", "wget"
+                "libxtst6", "lsb-release", "xdg-utils", "wget",
+                "pulseaudio", "pulseaudio-utils"
             ]
             if not is_root:
                 if shutil.which("sudo"):
@@ -733,6 +734,34 @@ def main():
                     print("[INFO] Installing system libraries for Chrome/Puppeteer...")
                     subprocess.run(install_cmd, check=True)
                     print("[OK] Linux system dependencies for Chromium installed successfully!")
+                    if is_root and shutil.which("systemctl"):
+                        pulse_config = "/etc/winzapp-pulse.pa"
+                        pulse_service = "/etc/systemd/system/winzapp-pulseaudio.service"
+                        pulse_runtime = "/run/winzapp-pulse"
+                        config_text = (
+                            "load-module module-native-protocol-unix "
+                            f"socket={pulse_runtime}/native auth-anonymous=1\n"
+                            "load-module module-always-sink\n"
+                        )
+                        service_text = (
+                            "[Unit]\nDescription=WinZapp virtual audio server\n"
+                            "After=dbus.service\n\n[Service]\nType=simple\nUser=pulse\n"
+                            "RuntimeDirectory=winzapp-pulse\nRuntimeDirectoryMode=0755\n"
+                            f"ExecStart=/usr/bin/pulseaudio --system --daemonize=no "
+                            f"--disallow-exit --exit-idle-time=-1 -nF {pulse_config}\n"
+                            "Restart=on-failure\nRestartSec=2\n\n"
+                            "[Install]\nWantedBy=multi-user.target\n"
+                        )
+                        with open(pulse_config, "w", encoding="utf-8") as fh:
+                            fh.write(config_text)
+                        with open(pulse_service, "w", encoding="utf-8") as fh:
+                            fh.write(service_text)
+                        subprocess.run(["systemctl", "daemon-reload"], check=True)
+                        subprocess.run(
+                            ["systemctl", "enable", "--now", "winzapp-pulseaudio.service"],
+                            check=True,
+                        )
+                        print("[OK] WinZapp virtual audio service configured and started.")
                 except Exception as e:
                     print(f"[WARNING] Failed to automatically install system packages: {e}")
                     print("Please install them manually using:")
