@@ -4,6 +4,8 @@ import subprocess
 import time
 import socket
 
+from pulse_audio_lifecycle import cleanup_winzapp_pulse_modules
+
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('127.0.0.1', port)) == 0
@@ -19,6 +21,10 @@ def start_api():
         
     # Porta padrão da API
     port = 6300
+    # Remove devices left by a crashed API before new sessions are created.
+    # The API recreates the devices it actually needs for each live account.
+    if sys.platform != "win32":
+        cleanup_winzapp_pulse_modules()
     if is_port_in_use(port):
         print(f"Error: Port {port} is already in use. The API might already be running.")
         sys.exit(1)
