@@ -825,6 +825,7 @@
     "voice_call_starting": "Calling {name}.",
     "voice_call_start_failed": "Could not start the call: {error}",
     "voice_call_connected": "Call connected.",
+    "voice_call_reconnecting": "The call is reconnecting.",
     "voice_call_ended": "Call ended.",
     "incoming_call_close_button": "&Close window",
     "emoji_button": "Emoji",

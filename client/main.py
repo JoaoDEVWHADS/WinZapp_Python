@@ -6422,6 +6422,11 @@ class MainWindow(wx.Frame):
             self._stop_voice_call_audio(grace_seconds=1.25)
             self.output(self.i18n.t("voice_call_ended"), interrupt=True)
             return
+        if state == "REJOINING":
+            if self._voice_call_last_announced_state != "REJOINING":
+                self._voice_call_last_announced_state = "REJOINING"
+                self.output(self.i18n.t("voice_call_reconnecting"), interrupt=True)
+            return
         if state == "ACTIVE" and self._voice_call_last_announced_state != "ACTIVE":
             self._voice_call_last_announced_state = "ACTIVE"
             if getattr(self, "_call_audio_session", None) is None:
