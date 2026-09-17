@@ -1,0 +1,14 @@
+# Temporary integration-only merge policy. Removed before the squash commit.
+**/updater.py merge=protected
+**/config.py merge=protected
+**/config.json merge=protected
+**/release.py merge=protected
+**/CHANGELOG* merge=protected
+**/README* merge=protected
+**/version.py merge=protected
+**/build.py merge=protected
+**/setup_api.py merge=protected
+**/api_setup.py merge=protected
+**/package.json merge=protected
+**/builder.py merge=protected
+**/setup.py merge=protected
