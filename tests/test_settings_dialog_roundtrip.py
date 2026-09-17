@@ -253,8 +253,10 @@ def make_dialog(wx_app):
         return dlg
 
     yield _make
-    for dlg in created:
-        dlg.Destroy()
+    # The dialog AND its hidden parent frame, deleted now rather than queued
+    # for an idle cycle that never comes (see conftest.destroy_now).
+    from tests.conftest import destroy_now
+    destroy_now(*created)
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
