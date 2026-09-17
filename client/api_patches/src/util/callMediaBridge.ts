@@ -447,6 +447,19 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
     if (!(client as any).__winzappCallMediaNewDocumentInstalled) {
       await page.evaluateOnNewDocument(installCallMediaBridgeInPage);
       (client as any).__winzappCallMediaNewDocumentInstalled = true;
+
+      // WPPConnect hands the page to us only after WhatsApp Web has loaded.
+      // Installing the bridge in that already-running document is too late:
+      // WhatsApp's VoIP bundle may already have cached getUserMedia and
+      // RTCPeerConnection. Reload exactly once after registering the
+      // new-document script, so the media hooks exist before any WhatsApp
+      // module evaluates. The authenticated profile lives in userDataDir, so
+      // this is a normal WhatsApp Web reload and does not re-pair the account.
+      if (!(client as any).__winzappCallMediaPrimed) {
+        (client as any).__winzappCallMediaPrimed = true;
+        logger?.info?.(`[${client.session}] priming call media bridge before WhatsApp load`);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 120000 });
+      }
     }
     const installed = await page.evaluate(installCallMediaBridgeInPage);
     if (installed) logger?.info?.(`[${client.session}] WinZapp call media bridge ready`);
