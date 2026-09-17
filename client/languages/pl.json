@@ -848,7 +848,7 @@
     "incoming_call_answer_failed": "Nie udało się odebrać połączenia: {error}",
     "incoming_call_reject_failed": "Nie udało się odrzucić połączenia: {error}",
     "incoming_call_end_failed": "Nie udało się zakończyć połączenia: {error}",
-    "voice_call_button": "&Zadzwoń",
+    "voice_call_button": "&Połączenie głosowe",
     "voice_call_end_button": "&Rozłącz",
     "voice_call_settings_button": "&Ustawienia",
     "voice_call_mute_button": "&Wycisz mikrofon",

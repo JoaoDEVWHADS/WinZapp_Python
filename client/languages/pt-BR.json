@@ -848,7 +848,7 @@
     "incoming_call_answer_failed": "Não foi possível atender a ligação: {error}",
     "incoming_call_reject_failed": "Não foi possível recusar a ligação: {error}",
     "incoming_call_end_failed": "Não foi possível desligar a ligação: {error}",
-    "voice_call_button": "&Ligar",
+    "voice_call_button": "&Ligação de voz",
     "voice_call_end_button": "&Desligar",
     "voice_call_settings_button": "&Configurações",
     "voice_call_mute_button": "&Silenciar microfone",
