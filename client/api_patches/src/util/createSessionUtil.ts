@@ -1759,7 +1759,7 @@ export default class CreateSessionUtil {
           callTimestamp: number,
           observedAt: number
         ) => {
-          req.io.emit('incomingcall', {
+          req.io.to(`session:${client.session}`).emit('incomingcall', {
             session: client.session,
             data: {
               event: event,
@@ -1796,7 +1796,7 @@ export default class CreateSessionUtil {
           callTimestamp: number,
           observedAt: number
         ) => {
-          req.io.emit('callstate', {
+          req.io.to(`session:${client.session}`).emit('callstate', {
             session: client.session,
             data: {
               event,
@@ -2392,7 +2392,7 @@ export default class CreateSessionUtil {
         return;
       }
 
-      req.io.emit('incomingcall', {
+      req.io.to(`session:${client.session}`).emit('incomingcall', {
         ...call,
         session: client.session,
         timestamp: offerTimeMs ? Math.floor(offerTimeMs / 1000) : 0,

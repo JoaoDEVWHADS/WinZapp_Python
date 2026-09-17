@@ -308,7 +308,7 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
         if (typeof base64 !== 'string' || base64.length > MAX_AUDIO_FRAME_BYTES * 2) return;
         const pcmBytes = Math.floor((base64.length * 3) / 4);
         if (!pcmBytes || pcmBytes > MAX_AUDIO_FRAME_BYTES) return;
-        io.emit('call:audio:remote', {
+        io.to(`session:${client.session}`).emit('call:audio:remote', {
           session: client.session,
           sampleRate: Number(sampleRate) || 48000,
           encoding: 'base64',
