@@ -87,6 +87,7 @@ def _stub(mw, events):
         _mw=mw,
         _closed=threading.Event(),
         _LID_RESOLVE_CHUNK=ConversationDataDialog._LID_RESOLVE_CHUNK,
+        _LID_RESOLVE_BATCH=ConversationDataDialog._LID_RESOLVE_BATCH,
         _load_media_history=lambda: events.append(("media",)),
         _populate_group=lambda data: None,
         _refresh_participant_rows=_named(lambda: None, "_refresh_participant_rows"),
@@ -124,20 +125,28 @@ class TestFetchPostsTheDataFirst:
         populate = next(e for e in events if e[0] == "CallAfter" and e[1] == "_populate_group")
         assert populate[2][0]["participants"] == participants
 
-    def test_one_lookup_per_call_repainting_every_chunk_and_at_the_end(self, events):
+    def test_small_batches_repainting_every_chunk_and_at_the_end(self, events):
         chunk = ConversationDataDialog._LID_RESOLVE_CHUNK
+        batch = ConversationDataDialog._LID_RESOLVE_BATCH
         participants = [{"id": _lid(i)} for i in range(chunk * 2 + 1)]
         stub = _stub(_Mw(participants, events), events)
         stub._resolve_participant_lids({"participants": participants})
 
         resolves = [e[1] for e in events if e[0] == "resolve"]
-        assert resolves == [[_lid(i)] for i in range(chunk * 2 + 1)]
+        assert [len(r) for r in resolves] == [batch] * (2 * chunk // batch) + [1]
+        assert [j for r in resolves for j in r] == [_lid(i) for i in range(chunk * 2 + 1)]
         repaint = "_refresh_participant_rows"
-        assert _names(events) == (
-            ["resolve"] * chunk + [repaint]
-            + ["resolve"] * chunk + [repaint]
-            + ["resolve", repaint]
-        )
+        per_chunk = ["resolve"] * (chunk // batch) + [repaint]
+        assert _names(events) == per_chunk * 2 + ["resolve", repaint]
+
+    def test_batch_is_small_and_divides_the_repaint_chunk(self):
+        """Each resolve_lid_jids_via_api() call ends with a full chat-list
+        rebuild, so one JID per call is too many calls; and closing is only
+        noticed between calls, so a whole chunk per call is too slow to stop.
+        Dividing the chunk keeps the repaint cadence exact."""
+        chunk = ConversationDataDialog._LID_RESOLVE_CHUNK
+        batch = ConversationDataDialog._LID_RESOLVE_BATCH
+        assert 1 < batch < chunk and chunk % batch == 0
 
     def test_an_exact_multiple_does_not_repaint_twice(self, events):
         chunk = ConversationDataDialog._LID_RESOLVE_CHUNK
@@ -189,6 +198,18 @@ class TestAResolutionFailureKeepsTheList:
         posted = [e for e in events if e[0] == "CallAfter"]
         assert len(posted) == 1
         assert posted[0][2][0]["participants"] == participants
+
+    def test_a_bug_before_the_lookups_does_not_wipe_the_list_either(self, events):
+        participants = [{"id": _lid(1)}]
+        stub = _stub(_Mw(participants, events), events)
+
+        def _broken(data):
+            raise AttributeError("bug outside the lookup loop")
+
+        stub._resolve_participant_lids = _broken
+        ConversationDataDialog._fetch_data(stub)
+        posted = [e for e in events if e[0] == "CallAfter"]
+        assert [p[2][0] for p in posted] == [{"subject": "Grupo", "participants": participants}]
 
 
 class _FakeList:

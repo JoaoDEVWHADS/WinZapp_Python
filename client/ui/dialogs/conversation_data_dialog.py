@@ -651,7 +651,16 @@ class ConversationDataDialog(wx.Dialog):
                 # the dialog never loading when the user moved to another tab,
                 # which is simply what anyone does while nothing appears.
                 wx.CallAfter(self._populate_group, data)
-                self._resolve_participant_lids(data)
+                # Guarded here as well as inside: the rows are already posted,
+                # and anything escaping to the handler below would post
+                # _populate_group({}) on top of them.
+                try:
+                    self._resolve_participant_lids(data)
+                except Exception:
+                    logging.exception(
+                        "[ConversationDataDialog] participant @lid resolution failed for %s",
+                        self._jid,
+                    )
             else:
                 # Same order as the group branch: the Media tab is visible from
                 # the moment the dialog opens and only touches the local
@@ -772,13 +781,20 @@ class ConversationDataDialog(wx.Dialog):
     # visibly arrive while the dialog is open, rarely enough that a screen
     # reader sitting on a changed row is not re-reading it constantly.
     _LID_RESOLVE_CHUNK = 25
+    # JIDs per resolve_lid_jids_via_api() call. Not one: every call ends by
+    # scheduling a full chat-list rebuild, the cost register_jid_mapping()'s
+    # defer_ui exists to avoid, and one JID per call would rebuild it every
+    # ~0.6 s for minutes. Not a whole chunk either: closing is only noticed
+    # between calls, and 25 JIDs is ~15 s of API calls for nobody. Five bounds
+    # both at ~3 s. Must divide _LID_RESOLVE_CHUNK.
+    _LID_RESOLVE_BATCH = 5
 
     def _resolve_participant_lids(self, data: dict) -> None:
         """Resolve unmapped @lid participants AFTER the rows are shown.
 
-        Runs on the background fetch thread, one JID per call so that closing
-        the dialog is noticed within one lookup (~0.6 s) rather than one
-        chunk, and repaints the rows every _LID_RESOLVE_CHUNK lookups plus
+        Runs on the background fetch thread, _LID_RESOLVE_BATCH JIDs per call
+        so that closing the dialog is noticed within a few seconds rather than
+        one chunk, and repaints the rows every _LID_RESOLVE_CHUNK lookups plus
         once at the end. Stops when the dialog is closed: the resolution only
         exists to improve this list, and a 300-member group would otherwise
         keep calling the API for minutes on behalf of nobody — the next
@@ -801,25 +817,27 @@ class ConversationDataDialog(wx.Dialog):
             (data or {}).get("participants"), lid_to_phone
         )
         chunk = self._LID_RESOLVE_CHUNK
+        batch = self._LID_RESOLVE_BATCH
         done = 0
-        for lid in lids:
+        for start in range(0, len(lids), batch):
             if self._closed.is_set():
                 return
             try:
-                self._mw.resolve_lid_jids_via_api([lid])
+                self._mw.resolve_lid_jids_via_api(lids[start:start + batch])
             except Exception:
                 logging.exception(
                     "[ConversationDataDialog] participant @lid resolution failed for %s",
                     self._jid,
                 )
                 break
-            done += 1
+            done += len(lids[start:start + batch])
             if done % chunk == 0 and not self._closed.is_set():
                 wx.CallAfter(self._refresh_participant_rows)
         # The last partial round — and, after a failure, whatever did resolve.
-        # Also catches a lookup another caller (a presence event, the
-        # conversation panel) finished for a JID this loop skipped as already
-        # in flight.
+        # Also picks up a lookup another caller (a presence event, the
+        # conversation panel) finished before this point for a JID this loop
+        # skipped as already in flight; one finishing later waits for the next
+        # opening.
         if done % chunk != 0 and not self._closed.is_set():
             wx.CallAfter(self._refresh_participant_rows)
 
