@@ -17,7 +17,8 @@ def _source(relative: str) -> str:
 def test_api_patch_forwards_native_call_events_to_socket_io():
     source = _source("client/api_patches/src/util/createSessionUtil.ts")
     assert "WPP.on('call.incoming_call'" in source
-    assert "req.io.emit('incomingcall'" in source
+    assert ".emit('incomingcall', {" in source
+    assert "req.io.to(`session:${client.session}`)" in source
     assert "call?.id?.toString?.()" in source
     assert "ignored historical offer" in source
 
@@ -36,3 +37,13 @@ def test_ui_has_native_alert_lifecycle_and_user_stop_controls():
     assert "stop_all_incoming_call_alerts" in main
     assert "_show_incoming_call_dialog" in main
     assert "IncomingCallDialog" in dialog
+
+
+def test_active_call_poll_promotes_ringing_calls_to_incoming_alert_pipeline():
+    source = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    assert "let lastActiveIncomingOfferId = ''" in source
+    assert "const isIncomingRingingCall =" in source
+    assert "!isHistoricalIncomingCall(activeCall, 'activeCall')" in source
+    assert "emitCall('offer', activeCall, 'INCOMING_RING')" in source
+    assert "rememberCall(activeCall)" in source

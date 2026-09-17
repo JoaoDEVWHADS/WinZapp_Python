@@ -2181,6 +2181,7 @@ export default class CreateSessionUtil {
           // incoming and outgoing calls expose their complete lifecycle to Python.
           let lastActiveSignature = '';
           let lastActiveCall: any = null;
+          let lastActiveIncomingOfferId = '';
           let activeCallMissingSince = 0;
           const ACTIVE_CALL_MISSING_GRACE_MS = 5000;
           const TERMINAL_CALL_STATES = new Set([
@@ -2233,6 +2234,7 @@ export default class CreateSessionUtil {
                 emitCallState('ended', lastActiveCall, 'ENDED');
                 lastActiveCall = null;
                 lastActiveSignature = '';
+                lastActiveIncomingOfferId = '';
                 activeCallMissingSince = 0;
                 return;
               }
@@ -2246,7 +2248,37 @@ export default class CreateSessionUtil {
                 activeCall?.outgoing ? '1' : '0',
               ].join('|');
               if (signature !== lastActiveSignature) {
-                emitCallState('state', activeCall, state);
+                const activeId = callIdOf(activeCall);
+                const incomingRingStates = new Set([
+                  'INCOMING_RING',
+                  'PREACCEPT_RECEIVED',
+                  'ReceivedCall',
+                  'ReceivedCallWithoutOffer',
+                ]);
+                const isIncomingRingingCall =
+                  incomingRingStates.has(state) &&
+                  activeCall?.outgoing !== true &&
+                  activeCall?.isOutgoing !== true &&
+                  activeCall?.direction !== 'outgoing';
+
+                // Current WhatsApp Web can expose a ringing call only through
+                // CallStore.activeCall.  The public call.incoming_call event is
+                // not reliable enough to be the sole alert source (especially
+                // for group calls). Promote that active slot into the exact same
+                // incomingcall pipeline so Python rings, opens the accessible
+                // dialog and can answer it. emitCall() also emits callstate.
+                if (
+                  isIncomingRingingCall &&
+                  activeId &&
+                  activeId !== lastActiveIncomingOfferId &&
+                  !isHistoricalIncomingCall(activeCall, 'activeCall')
+                ) {
+                  rememberCall(activeCall);
+                  emitCall('offer', activeCall, 'INCOMING_RING');
+                  lastActiveIncomingOfferId = activeId;
+                } else {
+                  emitCallState('state', activeCall, state);
+                }
                 lastActiveSignature = signature;
               }
               lastActiveCall = activeCall;
