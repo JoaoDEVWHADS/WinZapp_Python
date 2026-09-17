@@ -6066,18 +6066,37 @@ class MainWindow(wx.Frame):
     def _restart_active_voice_call_audio(self):
         """Apply changed call devices without ending the WhatsApp call."""
         active = dict(getattr(self, "_active_voice_call", {}) or {})
-        if not active or getattr(self, "_call_audio_session", None) is None:
+        if (
+            not active
+            or getattr(self, "_call_audio_session", None) is None
+            or getattr(self, "_call_audio_restart_pending", False)
+        ):
             return
+        self._call_audio_restart_pending = True
 
         def _worker():
             with self._call_action_lock:
                 try:
                     self._stop_voice_call_audio()
-                    self._start_voice_call_audio(
-                        str(active.get("identity") or active.get("call_id") or "call"),
-                        active,
-                    )
-                    logging.info("[call_audio] active call devices switched")
+                    last_error = None
+                    for attempt in range(3):
+                        try:
+                            # PortAudio may release the old device on a
+                            # background callback immediately after close.
+                            if attempt:
+                                time.sleep(0.25)
+                            self._start_voice_call_audio(
+                                str(active.get("identity") or active.get("call_id") or "call"),
+                                active,
+                            )
+                            logging.info("[call_audio] active call devices switched")
+                            last_error = None
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                            self._stop_voice_call_audio()
+                    if last_error is not None:
+                        raise last_error
                 except Exception:
                     logging.exception("[call_audio] failed to switch active call devices")
                     wx.CallAfter(
@@ -6087,6 +6106,8 @@ class MainWindow(wx.Frame):
                         ),
                         True,
                     )
+                finally:
+                    self._call_audio_restart_pending = False
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -6234,6 +6255,7 @@ class MainWindow(wx.Frame):
             self.save_settings()
             if getattr(self, "_call_audio_session", None) is not None:
                 self._restart_active_voice_call_audio()
+            wx.CallAfter(input_combo.SetFocus)
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
         cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
