@@ -252,12 +252,30 @@ function installCallMediaBridgeInPage(): boolean {
 
   const NativeRTCPeerConnection = win.RTCPeerConnection;
   try {
+    // Install at construction time as well as on setRemoteDescription. Some
+    // WhatsApp Web builds create the peer and apply the remote description in
+    // the same task; installing only the prototype hook can therefore miss
+    // the first remote receiver (and leave the call connected but silent).
+    class BridgedRTCPeerConnection extends NativeRTCPeerConnection {
+      constructor(...args: any[]) {
+        super(...args);
+        attachPeerConnection(this);
+      }
+    }
+    Object.setPrototypeOf(BridgedRTCPeerConnection, NativeRTCPeerConnection);
+    win.RTCPeerConnection = BridgedRTCPeerConnection;
     const nativeSetRemoteDescription = NativeRTCPeerConnection.prototype.setRemoteDescription;
     NativeRTCPeerConnection.prototype.setRemoteDescription = function (...args: any[]) {
       attachPeerConnection(this);
       return nativeSetRemoteDescription.apply(this, args);
     };
   } catch (_) {}
+
+  // A few Chromium/WPP builds expose the remote stream only through an
+  // audio/video element instead of a page-visible track event. Keep this scan
+  // cheap and short-lived; it is stopped with the bridge reset by navigation.
+  const mediaScan = win.setInterval(scanMediaElements, 250);
+  state.mediaScan = mediaScan;
   try {
     const WrappedRTCPeerConnection = new Proxy(NativeRTCPeerConnection, {
       construct(target, args) {
