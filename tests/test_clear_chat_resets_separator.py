@@ -14,7 +14,7 @@ running wx.App, so the method is exercised against a small stub — same
 approach as tests/test_pin_message.py.
 """
 
-from ui.conversations import ConversationsPanel
+from ui.conversations import ArchivedConversationsPanel, ConversationsPanel
 
 
 class _FakeMessagesList:
@@ -38,9 +38,17 @@ class _FakeMainWindow:
     def _schedule_set_chats(self):
         self.schedule_set_chats_calls += 1
 
+    def add_chats_to_ui(self):
+        pass
+
+    def output(self, *a, **k):
+        pass
+
 
 class _Stub:
     _on_menu_clear_chat = ConversationsPanel._on_menu_clear_chat
+    _on_mass_clear_chats = ConversationsPanel._on_mass_clear_chats
+    _reset_view_after_chat_cleared = ConversationsPanel._reset_view_after_chat_cleared
 
     def __init__(self, jid):
         self.main_window = _FakeMainWindow()
@@ -132,3 +140,50 @@ class TestKeepStarredChoiceIsForwarded:
         _Stub(JID)._on_menu_clear_chat(JID)
 
         assert seen == ["clear_chat_keep_starred"]
+
+
+def _assert_open_view_reset(stub):
+    assert stub._sorted_messages == []
+    assert stub.selected_messages == set()
+    assert stub._unread_sep_idx == -1
+    assert stub._first_unread_msg_id is None
+    assert stub.messages_list.delete_all_calls == 1
+
+
+class TestEveryClearEntryPointResetsTheOpenConversation:
+    """Clearing the open chat from the mass action or from the archived list
+    left its rows and its marked messages behind — and the selection mode is
+    on whenever anything is marked, so Space kept marking instead of playing
+    and the first Esc announced "all unmarked" instead of closing."""
+
+    def test_mass_clear_including_the_open_chat(self, monkeypatch):
+        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **kw: (True, True))
+        stub = _Stub(JID)
+        stub.selected_chats = {JID, "other@s.whatsapp.net"}
+
+        stub._on_mass_clear_chats(None)
+
+        _assert_open_view_reset(stub)
+        assert sorted(stub.main_window.clear_chat_calls) == sorted([JID, "other@s.whatsapp.net"])
+
+    def test_mass_clear_of_other_chats_leaves_the_open_one_alone(self, monkeypatch):
+        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **kw: (True, True))
+        stub = _Stub(JID)
+        stub.selected_chats = {"other@s.whatsapp.net"}
+
+        stub._on_mass_clear_chats(None)
+
+        assert stub.selected_messages == {"m1", "m2"}
+        assert stub.messages_list.delete_all_calls == 0
+
+    def test_archived_list_clear_of_the_open_chat(self, monkeypatch):
+        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **kw: (True, True))
+        panel = _Stub(JID)
+        archived = type("_Archived", (), {"_on_clear": ArchivedConversationsPanel._on_clear})()
+        archived.main_window = panel.main_window
+        panel.main_window.conversations_panel = panel
+
+        archived._on_clear(JID)
+
+        _assert_open_view_reset(panel)
+        assert panel.main_window.clear_chat_calls == [JID]

@@ -130,6 +130,7 @@ class _Panel:
         self.conversation = {"remoteJid": jid}
         self.removed = None
         self.populate_called = False
+        self.selected_messages = {"marked"}
 
     def remove_messages_by_id(self, ids, focus_previous=False):
         self.removed = set(ids)
@@ -312,6 +313,9 @@ class TestAShrunkenWindowIsNotADeletion:
         _poll(stub, STRIKES)
 
         assert stub.clear_calls == [GROUP]
+        # The marked messages went with the clear, so the selection mode must
+        # not stay on over them.
+        assert stub.conversations_panel.selected_messages == set()
 
 
 class TestOlderDeletionsStillArrive:

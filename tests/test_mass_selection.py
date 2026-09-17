@@ -177,6 +177,7 @@ class _Panel:
     _on_messages_list_key_down = ConversationsPanel._on_messages_list_key_down
     _on_conv_list_key_down = ConversationsPanel._on_conv_list_key_down
     _on_mass_clear_chats = ConversationsPanel._on_mass_clear_chats
+    _reset_view_after_chat_cleared = ConversationsPanel._reset_view_after_chat_cleared
     _on_mass_delete_chats = ConversationsPanel._on_mass_delete_chats
     _on_mass_archive_chats = ConversationsPanel._on_mass_archive_chats
     _on_mass_mark_read_chats = ConversationsPanel._on_mass_mark_read_chats
