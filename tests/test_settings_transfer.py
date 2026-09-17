@@ -185,6 +185,17 @@ class TestTheApiThisAccountTalksTo:
         assert merged["connection"] == current["connection"]
         assert "connection" in ignored
 
+    @pytest.mark.parametrize("connection", [
+        {"wpp_custom_api": "yes", "wpp_server": "https://api.exemplo.com",
+         "wpp_ws_server": "wss://api.exemplo.com", "wpp_port": 8443},
+        {"wpp_custom_api": True, "wpp_server": "https://api.exemplo.com",
+         "wpp_ws_server": "wss://api.exemplo.com", "wpp_port": "8443"},
+    ])
+    def test_the_prompt_never_describes_values_that_would_not_be_saved(self, connection):
+        """Found in review: a truthy "yes" or a string port produced a prompt
+        for a change merge_settings() then saved differently."""
+        assert transfer.api_change(_settings(), {"connection": connection}) is None
+
     def test_the_displayed_address_is_parsed_not_echoed(self):
         assert transfer.api_endpoint("HTTPS://API.Exemplo.com", 443, ("https",)) ==             "https://api.exemplo.com:443"
         assert transfer.api_endpoint("http://[::1]", 6300, ("http",)) == "http://[::1]:6300"

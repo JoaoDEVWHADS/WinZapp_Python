@@ -139,7 +139,10 @@ def connection_runtime(settings, fallback=None):
 def uses_custom_api(settings) -> bool:
     """Whether these settings describe a WPPConnect the user runs themselves."""
     section = (settings or {}).get("connection") if isinstance(settings, dict) else None
-    return bool(section.get("wpp_custom_api")) if isinstance(section, dict) else False
+    # `is True`, not truthiness: merge_settings() only ever saves a real bool
+    # here, so a file saying "yes" must not be asked about (api_change) as if
+    # it moved the API and then be saved with the flag still False.
+    return section.get("wpp_custom_api") is True if isinstance(section, dict) else False
 
 
 def is_excluded(section, key, settings=None) -> bool:
@@ -320,10 +323,14 @@ def api_endpoint(base, port, schemes):
     if not isinstance(base, str) or not base or any(
             ch.isspace() or ord(ch) < 32 for ch in base):
         return None
+    # A real int only, the one type merge_settings() saves for wpp_port: "8443"
+    # would be shown here as :8443 while the port actually kept stays the old
+    # one.
+    if isinstance(port, bool) or not isinstance(port, int):
+        return None
     try:
         parts = urlsplit(base)
         host = parts.hostname
-        port = int(port)
     except (TypeError, ValueError):
         return None
     scheme = parts.scheme.lower()

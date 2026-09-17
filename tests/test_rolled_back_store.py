@@ -147,6 +147,7 @@ class _ReconcileStub:
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
     _rollback_gaps = MainWindow._rollback_gaps
+    _legacy_restore_gap = MainWindow._legacy_restore_gap
     _ROLLBACK_GAPS_METADATA_KEY = MainWindow._ROLLBACK_GAPS_METADATA_KEY
     _deletions_before_remote_window = MainWindow._deletions_before_remote_window
     _mirror_remote_clear = MainWindow._mirror_remote_clear
@@ -669,3 +670,76 @@ class TestRollbackGapHelpers:
         from core.remote_reconcile import MAX_ROLLBACK_GAPS
         gaps = _normalize_rollback_gaps([[i * 10, i * 10 + 1] for i in range(50)])
         assert len(gaps) == MAX_ROLLBACK_GAPS and gaps[-1] == [490, 491]
+
+
+class TestARestoreFromBeforeThisBuild:
+    """A profile restored on an earlier build left its hole with nothing
+    recording it, and the walk back into older history ships in the same
+    release as the recording — so the first time that chat is opened, the hole
+    would be confirmed away (reproduced in review). The broken profile the
+    restore moved aside is the evidence left of it."""
+
+    class _Db:
+        def __init__(self, stored=None):
+            self.data = {} if stored is None else {MainWindow._ROLLBACK_GAPS_METADATA_KEY: stored}
+
+        def get_metadata_json(self, key, default=None):
+            return self.data.get(key, default)
+
+        def set_metadata_json(self, key, value):
+            self.data[key] = value
+
+    def _stub(self, tmp_path, db):
+        from core import profile_recovery
+        stub = _ReconcileStub([], (set(), None))
+        stub.db = db
+        stub.token = "sess:tok"
+        stub.global_dir = str(tmp_path)
+        broken = profile_recovery.profile_dir(str(tmp_path), "sess") + ".broken"
+        return stub, broken
+
+    def test_the_broken_profile_it_left_records_everything_before_it(self, tmp_path):
+        import os
+        db = self._Db()
+        stub, broken = self._stub(tmp_path, db)
+        os.makedirs(broken)
+        os.utime(broken, (2_000_000, 2_000_000))
+
+        gaps = stub._rollback_gaps()
+
+        assert gaps and gaps[0][0] == 0 and gaps[0][1] >= 2_000_000
+        assert db.data[MainWindow._ROLLBACK_GAPS_METADATA_KEY] == gaps
+
+    def test_no_broken_profile_records_nothing_but_is_checked_once(self, tmp_path):
+        db = self._Db()
+        stub, _broken = self._stub(tmp_path, db)
+        assert stub._rollback_gaps() == []
+        assert db.data[MainWindow._ROLLBACK_GAPS_METADATA_KEY] == []
+
+    def test_an_install_that_already_records_is_not_second_guessed(self, tmp_path):
+        """Once written, the stored list is the record — a `.broken` from a
+        restore this build already recorded must not widen it to all history."""
+        import os
+        db = self._Db(stored=[[1_000, 2_000]])
+        stub, broken = self._stub(tmp_path, db)
+        os.makedirs(broken)
+        assert stub._rollback_gaps() == [[1_000, 2_000]]
+
+    def test_the_legacy_period_keeps_the_reproduced_hole(self, tmp_path):
+        import os
+        history = _old_history(30)
+        stub = _ReconcileStub(
+            history, (_ids(history[20:]), history[20]["messageTimestamp"]),
+            before={"anchor": _page(history[:10])})
+        stub.db = self._Db()
+        stub.token = "sess:tok"
+        stub.global_dir = str(tmp_path)
+        from core import profile_recovery
+        broken = profile_recovery.profile_dir(str(tmp_path), "sess") + ".broken"
+        os.makedirs(broken)
+        restored = history[25]["messageTimestamp"]
+        os.utime(broken, (restored, restored))
+
+        _poll(stub, STRIKES + 1)
+
+        assert stub.conversations_panel.removed is None

@@ -261,6 +261,7 @@ class _ReconcileStub:
     _REMOTE_BEFORE_PAGES = MainWindow._REMOTE_BEFORE_PAGES
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
     _rollback_gaps = MainWindow._rollback_gaps
+    _legacy_restore_gap = MainWindow._legacy_restore_gap
     _ROLLBACK_GAPS_METADATA_KEY = MainWindow._ROLLBACK_GAPS_METADATA_KEY
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions

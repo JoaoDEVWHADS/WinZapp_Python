@@ -23661,27 +23661,67 @@ class MainWindow(wx.Frame):
 
     def _rollback_gaps(self) -> list:
         """The recorded rolled-back periods (see _record_rollback_gap())."""
-        cached = getattr(self, "_rollback_gaps_cache", None)
-        db = getattr(self, "db", None)
-        if cached is None and db is not None:
-            try:
-                cached = _normalize_rollback_gaps(
-                    db.get_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, []))
-            except Exception:
-                logging.exception("[reconcile] could not read rolled-back periods")
-                return []
-            self._rollback_gaps_cache = cached
-        if getattr(self, "_rollback_gaps_dirty", False) and db is not None:
-            try:
-                stored = _normalize_rollback_gaps(
-                    db.get_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, []))
-                cached = _normalize_rollback_gaps(stored + list(cached or []))
-                db.set_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, cached)
+        lock = self.__dict__.setdefault("_rollback_gaps_lock", threading.Lock())
+        with lock:
+            cached = getattr(self, "_rollback_gaps_cache", None)
+            db = getattr(self, "db", None)
+            if cached is None and db is not None:
+                try:
+                    stored = db.get_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, None)
+                except Exception:
+                    logging.exception("[reconcile] could not read rolled-back periods")
+                    return []
+                if stored is None:
+                    # Never written: this is the first launch of a build that
+                    # records restores. One done earlier left its hole too, and
+                    # nothing recorded it (see _legacy_restore_gap()).
+                    cached = self._legacy_restore_gap()
+                    self._rollback_gaps_dirty = True
+                else:
+                    cached = _normalize_rollback_gaps(stored)
                 self._rollback_gaps_cache = cached
-                self._rollback_gaps_dirty = False
-            except Exception:
-                logging.exception("[reconcile] could not store rolled-back periods")
-        return list(cached or [])
+            if getattr(self, "_rollback_gaps_dirty", False) and db is not None:
+                try:
+                    stored = _normalize_rollback_gaps(
+                        db.get_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, []) or [])
+                    cached = _normalize_rollback_gaps(stored + list(cached or []))
+                    db.set_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, cached)
+                    self._rollback_gaps_cache = cached
+                    self._rollback_gaps_dirty = False
+                except Exception:
+                    logging.exception("[reconcile] could not store rolled-back periods")
+            return list(cached or [])
+
+    def _legacy_restore_gap(self) -> list:
+        """The period a restore made BEFORE rolled-back periods were recorded
+        left behind, or [].
+
+        The walk back into older history ships in the same release as the
+        recording, so a profile restored on an earlier build has a hole nothing
+        knows about — and the first time that chat is opened it would be
+        confirmed away (reproduced in review). What survives of such a restore
+        is the broken profile it moved aside, `<profile>.broken`, whose mtime
+        is about when it happened. When the restore started from is not known,
+        so the period covers everything before it: that keeps messages, which
+        is the direction to be wrong in.
+        """
+        from core import profile_recovery
+        session_name = (getattr(self, "token", "") or "").split(":")[0]
+        global_dir = getattr(self, "global_dir", None)
+        if not session_name or not global_dir:
+            return []
+        try:
+            restored_at = os.path.getmtime(
+                profile_recovery.profile_dir(global_dir, session_name) + ".broken")
+        except OSError:
+            return []
+        except Exception:
+            logging.exception("[reconcile] could not look for an earlier restore")
+            return []
+        logging.info("[reconcile] an earlier profile restore (%s) left an unrecorded "
+                     "period — not judging anything before it.",
+                     time.strftime("%Y-%m-%d %H:%M", time.localtime(restored_at)))
+        return _add_rollback_gap([], None, restored_at)
 
     def _reconcile_active_conversation_with_remote(self):
         """Detect a phone-side clear or individual message deletions in
