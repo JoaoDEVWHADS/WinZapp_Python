@@ -24,6 +24,12 @@ FIXES
 
 - When WhatsApp refused the connection right after the app was opened, the backup copy of the browser profile was never restored: if pairing codes started arriving in the first few seconds, WinZapp closed the session and sent you to pair again even with a good copy saved. It now restores the copy as soon as the first code appears, and only asks you to pair when the restore does not help.
 
+- Adding a group member by phone number did nothing: the "Add number" button added nobody and showed no error. It now adds the number right away and tells you whether it worked, and an invalid number is reported. In the same dialog, the search field is now read as "Search contact".
+
+- With a chat open, the message list shrank back to the configured limit every minute, and older messages disappeared — including from the stored history. WinZapp mistook messages outside the range it checks on WhatsApp for messages deleted on the phone. It now only compares the range WhatsApp actually returned, and the list no longer shrinks while you read.
+
+- In groups with many participants, group info could sit on "Loading..." for minutes — Overview and the Participants list only appeared after WinZapp had looked up, one at a time, the number of every member whose number it did not know yet. It looked frozen, and only closing and reopening the dialog brought it back. The info now appears as soon as the group answers, and missing names and numbers are filled into the list afterwards, without moving you off the row you are on.
+
 - Changing the language in Settings and pressing Apply now translates every option. Some stayed in the previous language until Settings was closed and opened again, such as "When opening a chat, show up to this many messages" and "Messages to skip when pressing Page Up / Page Down".
 
 - The default audio playback speed no longer drops back to 1x on its own. When Settings opened, the field in the Audio playback tab was empty whatever speed was saved, and pressing Apply and then OK saved 1x over it. The saved speed is now shown selected and kept.

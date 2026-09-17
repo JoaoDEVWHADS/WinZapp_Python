@@ -164,15 +164,18 @@ class _ReconcileStub:
             conversation={"remoteJid": jid})
         self.chats[jid] = {
             "messages": {"messages": {"records": [
-                {"key": {"id": "a"}, "messageTimestamp": 1},
-                {"key": {"id": "b"}, "messageTimestamp": 2},
-                {"key": {"id": "c"}, "messageTimestamp": 3},
+                {"key": {"id": "a"}, "messageTimestamp": 1,
+                 "messageType": "conversation", "message": {"conversation": "x"}},
+                {"key": {"id": "b"}, "messageTimestamp": 2,
+                 "messageType": "conversation", "message": {"conversation": "x"}},
+                {"key": {"id": "c"}, "messageTimestamp": 3,
+                 "messageType": "conversation", "message": {"conversation": "x"}},
             ]}}
         }
 
     def _fetch_remote_message_window(self, remote_jid):
         self.fetched.append(remote_jid)
-        return set(), 0, ""   # the rolled-back store knows nothing
+        return set(), None, ""   # the rolled-back store knows nothing
 
 
 class TestARolledBackStoreIsNotADeletion:

@@ -24,6 +24,12 @@ CORRECCIONES
 
 - Cuando WhatsApp rechazaba la conexión justo al abrir el programa, la copia de seguridad del perfil nunca llegaba a restaurarse: si los códigos de vinculación empezaban a llegar en los primeros segundos, WinZapp cerraba la sesión y pedía vincular de nuevo aunque hubiera una copia buena guardada. Ahora restaura la copia en cuanto aparece el primer código, y solo pide vincular cuando la restauración no lo resuelve.
 
+- Agregar un miembro al grupo por número de teléfono no hacía nada: el botón "Agregar número" no agregaba a nadie y no mostraba ningún error. Ahora agrega el número al instante e indica si funcionó, y avisa si el número no es válido. En el mismo diálogo, el campo de búsqueda ahora se lee como "Buscar contacto".
+
+- Con una conversación abierta, la lista de mensajes se reducía cada minuto al límite configurado, y los mensajes antiguos desaparecían — también del historial guardado. WinZapp confundía los mensajes fuera del tramo que consulta en WhatsApp con mensajes borrados en el teléfono. Ahora solo compara el tramo que WhatsApp realmente devolvió, y la lista ya no se reduce mientras lees.
+
+- En grupos con muchos participantes, los datos del grupo podían quedarse en "Cargando..." durante minutos: el Resumen y la lista de Participantes solo aparecían después de que WinZapp buscara, uno por uno, el número de cada miembro cuyo número aún no conocía. Parecía bloqueado, y solo volvía cerrando y abriendo el diálogo. Ahora los datos aparecen en cuanto el grupo responde, y los nombres y números que faltan se completan en la lista a continuación, sin sacarte de la fila en la que estás.
+
 - Cambiar el idioma en Configuración y pulsar Aplicar ahora traduce todas las opciones. Algunas seguían en el idioma anterior hasta cerrar y volver a abrir Configuración, como "Al abrir una conversación, mostrar número de mensajes hasta" y "Mensajes a saltar al presionar Av Pág / Re Pág".
 
 - La velocidad predeterminada de reproducción de audio ya no vuelve sola a 1x. Al abrir Configuración, el campo de la pestaña Reproducción de audio aparecía vacío, fuera cual fuera la velocidad guardada, y pulsar Aplicar y después Aceptar guardaba 1x encima. Ahora la velocidad guardada aparece seleccionada y se conserva.

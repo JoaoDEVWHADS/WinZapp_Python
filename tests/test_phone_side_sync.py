@@ -273,17 +273,20 @@ class _ReconcileStub:
         self._schedule_set_chats_calls = 0
         self.settings = {}
 
-    # Stubbed instead of hitting the network. Every fixture message carries
-    # messageTimestamp=1000 (see _msg); a non-empty answer is stated to start
-    # just before that, so all of them fall inside the period it covers.
+    # Stubbed instead of hitting the network. The oldest remote timestamp
+    # defaults to "older than every local record" (the fixtures all sit at
+    # 1000), so tests that do not care about the window bound see none.
+    _remote_oldest_ts = 1
+
     def _fetch_remote_message_window(self, remote_jid):
         if self._remote_ids is None:
             return None
-        return (set(self._remote_ids), (999 if self._remote_ids else 0),
-                ("anchor" if self._remote_ids else ""))
+        if not self._remote_ids:
+            return set(), None, ""
+        return set(self._remote_ids), self._remote_oldest_ts, "anchor"
 
-    # Never reached with these fixtures: every message sits at 1000, after the
-    # window's stated start of 999, so nothing is older than the window.
+    # The look further back. Fails by default: a failed page must never turn
+    # into a deletion (see _deletions_before_remote_window).
     def _fetch_remote_messages_before(self, remote_jid, anchor_id):
         return None
 
@@ -407,7 +410,7 @@ class TestReconcileActiveConversation:
         assert stub.conversations_panel.removed is None
 
     def test_messages_older_than_the_remote_fetch_window_are_never_diffed(self):
-        """Regression: _fetch_remote_message_ids() only asks WhatsApp Web for
+        """Regression: _fetch_remote_message_window() only asks WhatsApp Web for
         its last `messages_page_size` messages. Comparing the FULL local
         history against that limited window used to flag (and delete) older
         local messages just because a busy chat had pushed them past the

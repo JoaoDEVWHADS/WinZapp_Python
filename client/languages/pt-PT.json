@@ -408,6 +408,7 @@
     "add_member_country_label": "Selecionar o país para adicionar por número",
     "add_member_phone_number_label": "Introduza um número de telefone",
     "add_member_custom_number_button": "Adicionar número",
+    "add_member_invalid_number": "Introduza um número de telefone válido.",
     "no_groups_available": "Não há grupos disponíveis.",
     "unread_sep_singular": "1 mensagem por ler",
     "unread_sep_plural": "{count} mensagens por ler",

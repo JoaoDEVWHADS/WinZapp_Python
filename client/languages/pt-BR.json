@@ -408,6 +408,7 @@
     "add_member_country_label": "Selecionar país para adicionar via número",
     "add_member_phone_number_label": "Digite um número de telefone",
     "add_member_custom_number_button": "Adicionar número",
+    "add_member_invalid_number": "Digite um número de telefone válido.",
     "no_groups_available": "Nenhum grupo disponível.",
     "unread_sep_singular": "1 mensagem não lida",
     "unread_sep_plural": "{count} mensagens não lidas",

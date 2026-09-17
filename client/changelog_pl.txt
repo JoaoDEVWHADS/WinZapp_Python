@@ -24,6 +24,12 @@ POPRAWKI
 
 - Gdy WhatsApp odrzucał połączenie tuż po uruchomieniu programu, kopia zapasowa profilu przeglądarki w ogóle nie była przywracana: jeśli kody parowania zaczynały napływać w pierwszych sekundach, WinZapp zamykał sesję i kazał sparować konto od nowa, mimo że zapisana była dobra kopia. Teraz przywraca kopię, gdy tylko pojawi się pierwszy kod, i prosi o parowanie dopiero wtedy, gdy przywrócenie nie pomoże.
 
+- Dodawanie członka grupy według numeru telefonu nic nie robiło: przycisk "Dodaj numer" nikogo nie dodawał i nie pokazywał błędu. Teraz od razu dodaje numer i informuje, czy się udało, a nieprawidłowy numer jest zgłaszany. W tym samym oknie pole wyszukiwania jest teraz odczytywane jako "Szukaj kontaktu".
+
+- Przy otwartym czacie lista wiadomości co minutę kurczyła się z powrotem do ustawionego limitu, a starsze wiadomości znikały — także z zapisanej historii. WinZapp mylił wiadomości spoza zakresu sprawdzanego w WhatsAppie z wiadomościami usuniętymi na telefonie. Teraz porównuje tylko zakres, który WhatsApp faktycznie zwrócił, i lista nie kurczy się już podczas czytania.
+
+- W grupach z wieloma uczestnikami informacje o grupie mogły przez kilka minut pokazywać "Wczytywanie..." — Przegląd i lista Uczestników pojawiały się dopiero wtedy, gdy WinZapp po kolei sprawdził numer każdego członka, którego numeru jeszcze nie znał. Wyglądało to na zawieszenie i pomagało dopiero zamknięcie i ponowne otwarcie okna. Teraz informacje pojawiają się, gdy tylko grupa odpowie, a brakujące nazwy i numery są uzupełniane na liście później, bez przenoszenia Cię z wiersza, na którym jesteś.
+
 - Zmiana języka w Ustawieniach i naciśnięcie Zastosuj tłumaczy teraz wszystkie opcje. Niektóre pozostawały w poprzednim języku aż do zamknięcia i ponownego otwarcia Ustawień, na przykład „Przy otwieraniu czatu pokaż maksymalnie tyle wiadomości" i „Liczba wiadomości pomijanych klawiszami Page Up / Page Down".
 
 - Domyślna prędkość odtwarzania dźwięku nie wraca już sama do 1x. Po otwarciu Ustawień pole na karcie Odtwarzanie audio było puste niezależnie od zapisanej prędkości, a naciśnięcie Zastosuj, a potem OK zapisywało 1x w jej miejsce. Teraz zapisana prędkość jest zaznaczona i zachowywana.

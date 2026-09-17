@@ -319,31 +319,33 @@ class TestAShrunkenWindowIsNotADeletion:
 
 
 class TestOlderDeletionsStillArrive:
-    """Everything v1.1.1.0 mirrored must still be mirrored."""
+    """A deletion a page of WhatsApp Web's database PROVES is mirrored, after
+    confirmation. What the walk cannot account for is kept: that rule came from
+    main (PR #248, core/remote_deletions.py) and won the merge, because a
+    message WhatsApp Web's store never held or has lost answers exactly like a
+    deleted one, and removing it deletes the only complete copy."""
 
-    def test_the_oldest_messages_of_a_short_chat(self):
-        """Delete-for-me of the two first messages: WhatsApp Web now holds
-        m2..m9 and nothing before them."""
+    def test_the_oldest_messages_of_a_short_chat_are_kept_at_the_end_of_history(self):
+        """WhatsApp Web holds m2..m9 and nothing before them. That is a
+        delete-for-me of the first two — or a store that never had them."""
         history = _old_history(10)
         stub = _ReconcileStub(history, (_ids(history[2:]), history[2]["messageTimestamp"]),
                               before={"anchor": _page([])})
 
-        _poll(stub, STRIKES - 1)
+        _poll(stub, STRIKES + 1)
         assert stub.conversations_panel.removed is None
 
-        _poll(stub)
-        assert stub.conversations_panel.removed == {"m0", "m1"}
-
-    def test_a_clear_on_the_phone_with_new_messages_since(self):
-        """Cleared while WinZapp was closed, then a message arrived: the window
-        holds only that one, and nothing exists before it. More than the cap."""
+    def test_a_clear_on_the_phone_with_new_messages_since_is_not_mirrored(self):
+        """Accepted cost of keeping what cannot be proven: the window holds only
+        the new message and nothing exists before it, which is also exactly
+        what a store holding little history looks like."""
         history = _old_history(30)
         stub = _ReconcileStub(history, ({"new"}, int(time.time()) - 600),
                               before={"anchor": _page([])})
 
         _poll(stub, STRIKES)
 
-        assert stub.conversations_panel.removed == _ids(history)
+        assert stub.conversations_panel.removed is None
         assert stub.clear_calls == []
 
     def test_a_deletion_found_further_back_across_pages(self):
@@ -360,17 +362,14 @@ class TestOlderDeletionsStillArrive:
         assert stub.conversations_panel.removed == {"m15"}
         assert stub.before_calls[:2] == ["anchor", "ser_m10"]
 
-    def test_a_look_further_back_that_keeps_failing_still_mirrors(self):
-        """As in v1.1.1.0, what cannot be found counts as missing — only
-        confirmed, never from one read."""
+    def test_a_look_further_back_that_keeps_failing_deletes_nothing(self):
+        """A persistently failing page (an endpoint broken by an upgrade) must
+        not turn into deleting the older history of every chat opened."""
         history = _old_history(10)
         stub = _ReconcileStub(history, (_ids(history[2:]), history[2]["messageTimestamp"]))
 
-        _poll(stub, STRIKES - 1)
+        _poll(stub, STRIKES + 1)
         assert stub.conversations_panel.removed is None
-
-        _poll(stub)
-        assert stub.conversations_panel.removed == {"m0", "m1"}
 
     def test_a_batch_pushed_out_of_the_slice_while_confirming_is_still_mirrored(self):
         """A busy chat: 11 messages deleted on the phone, and new ones keep
@@ -391,7 +390,7 @@ class TestOlderDeletionsStillArrive:
 
         assert stub.conversations_panel.removed == {f"m{i}" for i in range(1, 12)}
 
-    def test_running_out_of_pages_still_mirrors_after_confirmation(self):
+    def test_running_out_of_pages_keeps_what_was_not_reached(self):
         history = _old_history(30)
         before = {"anchor": _page([history[28]])}
         before.update({f"ser_m{k}": _page([history[k - 1]]) for k in range(28, 1, -1)})
@@ -400,9 +399,9 @@ class TestOlderDeletionsStillArrive:
         _poll(stub, STRIKES)
 
         assert len(stub.before_calls) == STRIKES * MainWindow._REMOTE_BEFORE_PAGES
-        assert stub.conversations_panel.removed == {f"m{i}" for i in range(24)}
+        assert stub.conversations_panel.removed is None
 
-    def test_a_page_that_does_not_move_back_still_mirrors_after_confirmation(self):
+    def test_a_page_that_does_not_move_back_keeps_the_older_messages(self):
         history = _old_history(10)
         stub = _ReconcileStub(
             history, (_ids(history[2:]), history[2]["messageTimestamp"]),
@@ -410,7 +409,7 @@ class TestOlderDeletionsStillArrive:
 
         _poll(stub, STRIKES)
 
-        assert stub.conversations_panel.removed == {"m0", "m1"}
+        assert stub.conversations_panel.removed is None
 
     def test_a_direct_deletion_is_not_delayed_by_an_older_one(self):
         history = _old_history(10)
@@ -442,20 +441,20 @@ def _raw_pair(mid, ts):
 
 class TestTheFetches:
     def test_the_window_names_its_oldest_message_as_the_anchor(self):
-        stub = _FetchStub(([_raw_pair("b", 200), _raw_pair("a", 100)], 2))
+        stub = _FetchStub(([_raw_pair("b", 200), _raw_pair("a", 100)], 2, 100))
         assert stub._fetch_remote_message_window(GROUP) == ({"a", "b"}, 100, f"false_{GROUP}_a")
 
     def test_the_page_before_is_asked_with_the_encoded_anchor(self):
-        stub = _FetchStub(([_raw_pair("a", 100)], 1))
+        stub = _FetchStub(([_raw_pair("a", 100)], 1, 100))
         assert stub._fetch_remote_messages_before(GROUP, "false_x@g.us_A B") == (
             {"a"}, 100, f"false_{GROUP}_a")
         assert stub.queries == ["&direction=before&id=false_x%40g.us_A%20B"]
 
     def test_an_empty_page_is_the_end_of_history(self):
-        assert _FetchStub(([], 0))._fetch_remote_messages_before(GROUP, "x") == (set(), 0, "")
+        assert _FetchStub(([], 0, None))._fetch_remote_messages_before(GROUP, "x") == (set(), None, "")
 
     def test_unreadable_items_are_a_failure_not_an_empty_page(self):
-        assert _FetchStub(([], 3))._fetch_remote_messages_before(GROUP, "x") is None
+        assert _FetchStub(([], 3, 100))._fetch_remote_messages_before(GROUP, "x") is None
 
     def test_a_failed_request_is_a_failure(self):
         assert _FetchStub(None)._fetch_remote_messages_before(GROUP, "x") is None
@@ -500,13 +499,15 @@ class TestGetRemoteMessages:
                 {"id": {"_serialized": "false_5511@c.us_A"}, "t": 100}, {"bad": True}]})
 
         monkeypatch.setattr(main_module, "api_get", fake_get)
-        pairs, raw_count = _GetStub()._get_remote_messages(
+        pairs, raw_count, oldest = _GetStub()._get_remote_messages(
             "5511@s.whatsapp.net", "&direction=before&id=x")
 
         assert calls == ["http://127.0.0.1:6300/api/tok/get-messages/5511@c.us"
                          "?count=50&direction=before&id=x"]
         assert [n["key"]["id"] for n, _raw in pairs] == ["A"]
         assert raw_count == 2
+        # Read off the raw items, the unreadable one included.
+        assert oldest == 100
 
     def test_an_error_status_is_a_failure(self, monkeypatch):
         monkeypatch.setattr(main_module, "api_get", lambda url, **kw: _Response(500, {}))
