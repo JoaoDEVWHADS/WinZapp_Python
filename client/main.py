@@ -45,7 +45,11 @@ from core.sound_system import (
     alert_tone_choice_keys, resolve_alert_tone_path,
     discover_sound_packs, resolve_sound_event_path, DEFAULT_PACK_ID,
 )
-from core.audio_devices import find_input_device_index, test_input_device, enumerate_input_devices
+from core.audio_devices import (
+    find_input_device_index,
+    test_input_device,
+    enumerate_input_devices,
+)
 from core.bulk_read_state import run_bulk_read_state
 from core.message_edit import (
     apply_caption_edit,
@@ -5990,11 +5994,11 @@ class MainWindow(wx.Frame):
             raise RuntimeError("Socket.IO client is not available for call audio")
         from core.call_audio import CallAudioConfig, CallAudioSession
 
-        audio_settings = self.settings.get("audio_devices", {})
-        input_name = (
-            getattr(self, "effective_input_device_name", "")
-            or audio_settings.get("input_device_name", "")
-        )
+        # Call routing is deliberately independent from the global Audio
+        # Devices settings used by messages and effects. The call dialog
+        # persists these choices under call_audio_devices.
+        audio_settings = self.settings.get("call_audio_devices", {})
+        input_name = audio_settings.get("input_device_name", "")
         output_name = audio_settings.get("output_device_name", "")
         session_name = str(getattr(ws, "instance_name", "") or self.token).split(":", 1)[0]
         audio = CallAudioSession(
@@ -6162,47 +6166,34 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def open_call_audio_settings(self, _event=None):
-        """Open the focused, keyboard-friendly device chooser for calls."""
+        """Choose the call microphone and speaker without changing global audio settings."""
         import sounddevice as sd
-        dialog = wx.Dialog(getattr(self, "voice_call_window", self), title=self.i18n.t("voice_call_settings_title"), size=(560, 390))
+        dialog = wx.Dialog(getattr(self, "voice_call_window", self),
+                           title=self.i18n.t("voice_call_settings_title"), size=(560, 390))
         root = wx.BoxSizer(wx.VERTICAL)
-        notebook = wx.Notebook(dialog)
-        cfg = self.settings.get("audio_devices", {})
+        cfg = self.settings.setdefault("call_audio_devices", {})
         try:
             output_names = [str(d.get("name", "")).strip() for d in sd.query_devices()
                             if d.get("max_output_channels", 0) > 0]
         except Exception:
             output_names = []
         input_names = [name for _, name in enumerate_input_devices()]
-        lists = []
-        for title, names, selected in (
-            (self.i18n.t("voice_call_playback_devices"), output_names, cfg.get("output_device_name", "")),
-            (self.i18n.t("voice_call_recording_devices"), input_names, cfg.get("input_device_name", "")),
-        ):
-            page = wx.Panel(notebook)
-            page_sizer = wx.BoxSizer(wx.VERTICAL)
-            listing = wx.ListBox(page, choices=[self.i18n.t("audio_device_default")] + names, style=wx.LB_SINGLE)
-            listing.SetSelection((names.index(selected) + 1) if selected in names else 0)
-            page_sizer.Add(listing, 1, wx.EXPAND | wx.ALL, 12)
-            page.SetSizer(page_sizer)
-            lists.append((listing, names))
-            notebook.AddPage(page, title)
-            def on_key(event, control=listing):
-                key = event.GetKeyCode()
-                if key == wx.WXK_RIGHT:
-                    notebook.ChangeSelection(min(notebook.GetSelection() + 1, notebook.GetPageCount() - 1))
-                elif key == wx.WXK_LEFT:
-                    notebook.ChangeSelection(max(notebook.GetSelection() - 1, 0))
-                elif key == wx.WXK_SPACE:
-                    # ListBox focus and selection are intentionally explicit:
-                    # Space confirms the highlighted device for keyboard users.
-                    selection = control.GetSelection()
-                    if selection >= 0:
-                        control.SetSelection(selection)
-                else:
-                    event.Skip()
-            listing.Bind(wx.EVT_KEY_DOWN, on_key)
-        root.Add(notebook, 1, wx.EXPAND | wx.ALL, 8)
+        default_name = self.i18n.t("audio_device_default")
+
+        def add_combo(label_key, names, selected):
+            root.Add(wx.StaticText(dialog, label=self.i18n.t(label_key)),
+                     0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+            combo = wx.ComboBox(dialog, style=wx.CB_READONLY,
+                                choices=[default_name] + names)
+            combo.SetSelection(1 + names.index(selected) if selected in names else 0)
+            root.Add(combo, 0, wx.EXPAND | wx.ALL, 8)
+            return combo
+
+        input_combo = add_combo("voice_call_recording_devices",
+                                input_names, cfg.get("input_device_name", ""))
+        output_combo = add_combo("voice_call_playback_devices",
+                                 output_names, cfg.get("output_device_name", ""))
+
         buttons = wx.StdDialogButtonSizer()
         cancel_button = wx.Button(dialog, wx.ID_CANCEL, self.i18n.t("cancel"))
         apply_button = wx.Button(dialog, wx.ID_APPLY, self.i18n.t("apply"))
@@ -6210,18 +6201,15 @@ class MainWindow(wx.Frame):
         buttons.AddButton(cancel_button); buttons.AddButton(apply_button); buttons.AddButton(ok_button); buttons.Realize()
         root.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         def apply(_evt=None):
-            out = lists[0][0].GetStringSelection()
-            inp = lists[1][0].GetStringSelection()
-            default_name = self.i18n.t("audio_device_default")
-            self.settings.setdefault("audio_devices", {})["output_device_name"] = "" if out == default_name else out
-            self.settings.setdefault("audio_devices", {})["input_device_name"] = "" if inp == default_name else inp
-            self.effective_input_device_name = self.settings["audio_devices"]["input_device_name"]
+            cfg["input_device_name"] = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
+            cfg["output_device_name"] = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
+            self.effective_input_device_name = cfg["input_device_name"]
             self.save_settings()
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
         cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
         dialog.SetSizer(root)
-        lists[0][0].SetFocus()
+        input_combo.SetFocus()
         dialog.ShowModal()
         dialog.Destroy()
 
