@@ -20,6 +20,8 @@ CORRECCIONES
 
 - Con una conversación abierta, la lista de mensajes se reducía cada minuto al límite configurado, y los mensajes antiguos desaparecían — también del historial guardado. WinZapp confundía los mensajes fuera del tramo que consulta en WhatsApp con mensajes borrados en el teléfono. Ahora solo compara el tramo que WhatsApp realmente devolvió, y la lista ya no se reduce mientras lees.
 
+- En grupos con muchos participantes, los datos del grupo podían quedarse en "Cargando..." durante minutos: el Resumen y la lista de Participantes solo aparecían después de que WinZapp buscara, uno por uno, el número de cada miembro cuyo número aún no conocía. Parecía bloqueado, y solo volvía cerrando y abriendo el diálogo. Ahora los datos aparecen en cuanto el grupo responde, y los nombres y números que faltan se completan en la lista a continuación, sin sacarte de la fila en la que estás.
+
 V1.1.1.0
 
 Esta versión trata de mantener tu cuenta conectada. WinZapp ahora guarda una copia de seguridad del perfil del navegador — que es donde vive realmente tu conexión con WhatsApp — y la restaura por su cuenta cuando deja de ser aceptada, avisando de lo ocurrido. Junto a ella llegan las correcciones de las situaciones que rompían la sesión y hacían que el programa pidiera vincular de nuevo: apagar el ordenador, suspender y reanudar, y el propio programa reiniciando la conexión. También llegan la corrección ortográfica en el campo de mensaje y las acciones sobre enlaces.
