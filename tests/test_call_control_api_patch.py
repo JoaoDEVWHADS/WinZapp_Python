@@ -62,8 +62,9 @@ def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     assert "--disable-voice-input" not in config
     assert "--disable-voice-input" not in session_util
     assert "--mute-audio" not in config
-    assert "--mute-audio" not in start_js
+    assert "\n  '--mute-audio'," not in start_js
     assert "--mute-audio" not in session_util
+    assert "ignoreDefaultArgs: ['--mute-audio']" in start_js
 
 
 def test_headless_chromium_auto_grants_webrtc_media_permission():

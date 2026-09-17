@@ -1114,6 +1114,10 @@ const finalConfig = {
     puppeteerOptions: {
       ...(configDefault.createOptions?.puppeteerOptions || {}),
       ...(customConfig.createOptions?.puppeteerOptions || {}),
+      // Puppeteer adds --mute-audio to its headless defaults independently of
+      // browserArgs.  Leaving it there discards the remote call audio in the
+      // Chromium audio service before WinZapp can play it.
+      ignoreDefaultArgs: ['--mute-audio'],
       protocolTimeout: 300000,
       executablePath: chromeExecutable || undefined,
     },
