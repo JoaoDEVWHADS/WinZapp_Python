@@ -25,6 +25,7 @@ function pulseEnv(): NodeJS.ProcessEnv {
 export function prepareLinuxCallAudioEnvironment(session: string, logger: any): boolean {
   if (process.platform !== 'linux') return false;
   const mic = linuxDeviceName('mic', session);
+  const micInput = `${mic}_input`;
   const speaker = linuxDeviceName('speaker', session);
   try {
     const sinks = execFileSync('pactl', ['list', 'short', 'sinks'], {
@@ -47,13 +48,39 @@ export function prepareLinuxCallAudioEnvironment(session: string, logger: any): 
         );
       }
     }
+    const sources = execFileSync('pactl', ['list', 'short', 'sources'], {
+      env: pulseEnv(),
+      encoding: 'utf8',
+    });
+    if (!sources.split(/\r?\n/).some((line) => line.split(/\s+/)[1] === micInput)) {
+      execFileSync(
+        'pactl',
+        [
+          'load-module',
+          'module-remap-source',
+          `source_name=${micInput}`,
+          `master=${mic}.monitor`,
+          'channels=1',
+          'channel_map=mono',
+          'master_channel_map=mono',
+          'remix=no',
+        ],
+        { env: pulseEnv(), stdio: 'ignore' }
+      );
+    }
+    execFileSync('pactl', ['set-default-source', micInput], {
+      env: pulseEnv(),
+      stdio: 'ignore',
+    });
     // Chromium inherits these variables from this account's dedicated Node
-    // process. Its microphone is the monitor of the sink Python writes to;
+    // process. Its microphone is a real remapped Pulse source backed by the
+    // monitor of the sink Python writes to. Chromium deliberately omits raw
+    // monitor sources from enumerateDevices(), so the remap is required.
     // its speaker is another sink whose monitor Node streams back to Python.
     process.env.PULSE_SERVER = LINUX_PULSE_SERVER;
-    process.env.PULSE_SOURCE = `${mic}.monitor`;
+    process.env.PULSE_SOURCE = micInput;
     process.env.PULSE_SINK = speaker;
-    logger?.info?.(`[${session}] Linux call audio devices ready mic=${mic}.monitor speaker=${speaker}`);
+    logger?.info?.(`[${session}] Linux call audio devices ready mic=${micInput} speaker=${speaker}`);
     return true;
   } catch (error: any) {
     logger?.warn?.(`[${session}] Linux call audio unavailable: ${error?.message || error}`);
