@@ -9,14 +9,14 @@ const micDraining = new Set<string>();
 
 function installCallMediaBridgeInPage(): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 3) return true;
+  if (win.__winzappCallMediaBridge?.version === 4) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
   if (!AudioContextCtor) return false;
 
   const state: any = {
-    version: 3,
+    version: 4,
     enabled: false,
     context: null,
     micDestination: null,
@@ -242,22 +242,10 @@ function installCallMediaBridgeInPage(): boolean {
         return result;
       }) as typeof pc.setRemoteDescription;
     } catch (_) {}
-    // WhatsApp can obtain a stream before the bridge wrapper is installed and
-    // then add that stream later. Replace only outgoing audio at the final
-    // WebRTC boundary so Python PCM is always the media source.
-    try {
-      const nativeAddTrack = pc.addTrack.bind(pc);
-      tagged.__winzappNativeAddTrack = nativeAddTrack;
-      pc.addTrack = ((track: MediaStreamTrack, ...streams: MediaStream[]) => {
-        if (state.enabled && track?.kind === 'audio') {
-          const micTrack = ensureMicTrack().clone();
-          if (micTrack.id) state.localTrackIds.add(micTrack.id);
-          const micStream = new MediaStream([micTrack]);
-          return nativeAddTrack(micTrack, micStream);
-        }
-        return nativeAddTrack(track, ...streams);
-      }) as typeof pc.addTrack;
-    } catch (_) {}
+    // Do not replace pc.addTrack here. WhatsApp receives the synthetic
+    // microphone directly from bridgedGetUserMedia. Replacing a track after
+    // its call graph has been created forces a renegotiation in current Web
+    // builds, which makes the phone show "reconnecting" and ends the call.
     return pc;
   };
 
