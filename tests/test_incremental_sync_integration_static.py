@@ -38,7 +38,7 @@ def test_pending_history_repair_survives_restart():
 
 def test_incremental_message_window_is_bounded_and_adaptive():
     block = SOURCE[SOURCE.index("def sync_chat_messages"):SOURCE.index(
-        "def _fetch_remote_message_ids")]
+        "def _get_remote_messages")]
     assert 'sync_mode="full"' in block
     assert "_INCREMENTAL_MESSAGE_WINDOW" in block
     assert "_next_incremental_limit(" in block
@@ -71,8 +71,13 @@ def test_periodic_poll_does_not_commit_failed_delta_marker():
 
 def test_chat_marker_is_committed_only_after_selected_message_fetch_succeeds():
     block = SOURCE[SOURCE.index("def sync_chat_messages"):SOURCE.index(
-        "def _fetch_remote_message_ids")]
-    assert "message_fetch_satisfied = bool(api_ok and incremental_satisfied)" in block
+        "def _get_remote_messages")]
+    # Matched loosely on purpose: the verdict grew a second arm (chat_absent /
+    # absent_satisfied, for an @lid an e2e_notification minted with no chat
+    # behind it) and pinning the exact expression would have failed on a change
+    # that was correct.
+    assert "message_fetch_satisfied = bool(" in block
+    assert "api_ok and incremental_satisfied" in block
     assert "if message_fetch_satisfied:\n                self.db.upsert_chat" in block
     assert "if api_ok and all_messages:\n                self.db.insert_messages_batch" in block
     assert block.index("self.db.insert_messages_batch(remote_jid, all_messages)") < block.index(
@@ -82,7 +87,7 @@ def test_chat_marker_is_committed_only_after_selected_message_fetch_succeeds():
 
 def test_history_repair_state_is_persisted_before_chat_marker_commit():
     block = SOURCE[SOURCE.index("def sync_chat_messages"):SOURCE.index(
-        "def _fetch_remote_message_ids")]
+        "def _get_remote_messages")]
     gap_persist = block.index("self._persist_history_gap_jids()")
     pending_persist = block.index("self._persist_backfill_pending_state()")
     chat_commit = block.index("self.db.upsert_chat(remote_jid, chat)")

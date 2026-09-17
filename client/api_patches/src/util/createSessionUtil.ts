@@ -702,9 +702,9 @@ async function restoreStatusSender(page: any, logger: any, session: string) {
  *     granted set for the origin, so asking for ['notifications'] flips
  *     durableStorage from 'prompt' to 'denied' — measurably worse than doing
  *     nothing. The CDP grant below covers notifications anyway. The same single
- *     grant also covers audioCapture/videoCapture so WhatsApp's VoIP bootstrap
- *     sees microphone/camera permission as granted while WinZapp's page patch
- *     still replaces the physical microphone with the Python PCM bridge.
+ *     grant also covers audioCapture so WhatsApp's VoIP bootstrap sees
+ *     microphone permission as granted while WinZapp's page patch still
+ *     replaces the physical microphone with the Python PCM bridge.
  *
  * Best-effort throughout: never throw from here.
  */
@@ -720,7 +720,12 @@ async function grantPersistentStorage(page: any, logger: any, session: string) {
     }
     await page.__wzPermissionSession.send('Browser.grantPermissions', {
       origin,
-      permissions: ['durableStorage', 'notifications', 'audioCapture', 'videoCapture'],
+      // audioCapture only: WhatsApp's VoIP bootstrap needs to see microphone
+      // permission granted, and the page patch replaces the physical
+      // microphone with the Python PCM bridge anyway. videoCapture is
+      // deliberately absent while video calls are out of scope — granted, it
+      // would let the page open the real camera with no prompt.
+      permissions: ['durableStorage', 'notifications', 'audioCapture'],
     });
   } catch (e: any) {
     page.__wzPermissionSession = null;
@@ -2360,6 +2365,8 @@ export default class CreateSessionUtil {
     // that was already built for exactly this — it just never received a
     // live edit event to actually detect until now.
     await client.onMessageEdit(async (eventOrChat: any, _id?: string, legacyMessage?: any) => {
+      // Current WPPConnect emits one { chat, id, msg } object even though its
+      // public type still declares the legacy three-argument callback.
       //
       // The last fallback is a SHAPE check, not a bare `?? eventOrChat`. The
       // guard below exists precisely for the case where a wrapper arrives

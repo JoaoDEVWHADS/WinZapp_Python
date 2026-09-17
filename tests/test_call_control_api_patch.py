@@ -113,11 +113,31 @@ def test_chromium_keeps_rendering_backend_available_for_voip_runtime():
     assert "--disable-webgl" not in session_util
 
 
-def test_cdp_permission_grant_includes_voip_capture_permissions():
-    create_session = _source("client/api_patches/src/util/createSessionUtil.ts")
+def test_cdp_permission_grant_includes_the_microphone_but_not_the_camera():
+    """WhatsApp's VoIP bootstrap needs microphone permission to look granted.
 
-    assert "audioCapture" in create_session
-    assert "videoCapture" in create_session
+    It must not get the camera with it. --use-fake-ui-for-media-stream removes
+    the permission prompt that headless Chromium cannot answer anyway, so a
+    videoCapture grant means any page-side getUserMedia({video}) opens the real
+    camera silently, with no indicator, while video calls are out of scope.
+
+    Asserted on the grant list itself rather than on the words appearing
+    anywhere in the file — the word survives in the comment explaining why it
+    is absent, which would make a substring check pass vacuously.
+    """
+    create_session = _source("client/api_patches/src/util/createSessionUtil.ts")
+    granted = [
+        line for line in create_session.splitlines()
+        if "permissions: [" in line and not line.lstrip().startswith("//")
+    ]
+    assert len(granted) == 1, granted
+
+    assert "'audioCapture'" in granted[0]
+    assert "videoCapture" not in granted[0]
+    # And the page keeps the camera shut even if something asks for it.
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+    assert "nativeGetUserMedia({ video:" not in bridge
+    assert "video-request-refused" in bridge
 
 
 def test_setup_api_copies_call_patch_files_into_runtime_api():
@@ -130,7 +150,13 @@ def test_setup_api_copies_call_patch_files_into_runtime_api():
 def test_outgoing_call_allows_native_voip_more_than_generic_http_timeout():
     main_py = _source("client/main.py")
 
-    assert '"offer",\n                        {"to": peer_jid, "isVideo": False},\n                        timeout=75,' in main_py
+    # Matched on the pieces rather than on one exact block of source, so
+    # reformatting the call cannot read as a lost timeout.
+    offer = main_py[main_py.index("def start_voice_call"):]
+    offer = offer[: offer.index("threading.Thread(target=_worker")]
+    assert '"offer",' in offer
+    assert "timeout=75," in offer
+    assert '{"to": dial_jid, "isVideo": False}' in offer
 
 
 def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
@@ -164,12 +190,22 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
     assert "retryWAWebVoipInitAfterFailure" in controller
 
 
-def test_wa_js_voip_initialization_can_retry_after_lazy_backend_failure():
-    source = _source("rm download/wa-js/src/call/functions/enableCallInterface.ts")
+def test_voip_initialization_can_retry_after_lazy_backend_failure():
+    """A failed VoIP init has to be retried, and the retry has to be OURS.
 
-    assert "initializationPromise" in source
-    assert "isEnabled = false" in source
-    assert "throw err" in source
+    This used to read wa-js's own `enableCallInterface.ts` out of a checkout
+    that only ever existed on one machine, so it failed for everybody else and
+    in CI. Nothing in WinZapp patches wa-js here — the recovery lives in the
+    page script the bridge injects, which is the file to hold to it.
+    """
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "WPP?.call?.enableCallInterface" in bridge
+    assert "getDidVoipInitError" in bridge
+    assert "retryWAWebVoipInitAfterFailure" in bridge
+    # A failure must be retried rather than returned: the backend is lazy and
+    # the first attempt losing the race is the normal case.
+    assert "attempt < 10" in bridge
 
 
 def test_voip_runtime_warmup_is_deduplicated_per_session():

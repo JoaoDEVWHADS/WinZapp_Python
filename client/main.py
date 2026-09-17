@@ -52,6 +52,7 @@ from core.audio_devices import (
     enumerate_input_devices,
 )
 from core.bulk_read_state import run_bulk_read_state
+from core.call_matching import call_event_matches_active
 from core.message_edit import (
     apply_caption_edit,
     carry_over_edited_marker,
@@ -2678,35 +2679,10 @@ class MainWindow(wx.Frame):
         self.incoming_call_bar.SetSizer(incoming_call_sizer)
         self.incoming_call_bar.Hide()
 
-        self.voice_call_bar = wx.Panel(self)
-        voice_call_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.voice_call_label = wx.StaticText(self.voice_call_bar, label="")
-        self.voice_call_end_button = wx.Button(
-            self.voice_call_bar, label=self.i18n.t("voice_call_end_button")
-        )
-        self.voice_call_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
-        self.voice_call_settings_button = wx.Button(
-            self.voice_call_bar, label=self.i18n.t("voice_call_settings_button")
-        )
-        self.voice_call_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
-        self.voice_call_mute_button = wx.Button(self.voice_call_bar, label=self.i18n.t("voice_call_mute_button"))
-        self.voice_call_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
-        voice_call_sizer.Add(
-            self.voice_call_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
-        )
-        voice_call_sizer.Add(
-            self.voice_call_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
-        )
-        voice_call_sizer.Add(
-            self.voice_call_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
-        )
-        voice_call_sizer.Add(
-            self.voice_call_mute_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8
-        )
-        self.voice_call_bar.SetSizer(voice_call_sizer)
-        self.voice_call_bar.Hide()
         # Calls live in their own modeless window so changing focus back to
         # the conversation never leaves call controls stranded in the main UI.
+        # There is deliberately only this one set of call controls — see
+        # _sync_voice_call_bar() for why the in-frame copy was removed.
         self.voice_call_window = wx.Frame(
             self, title=self.i18n.t("voice_call_window_title"), size=(560, 150),
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
@@ -2756,7 +2732,6 @@ class MainWindow(wx.Frame):
         # Frame sizer
         frame_sizer = wx.BoxSizer(wx.VERTICAL)
         frame_sizer.Add(self.incoming_call_bar, 0, wx.EXPAND)
-        frame_sizer.Add(self.voice_call_bar, 0, wx.EXPAND)
         frame_sizer.Add(self.main_panel, 1, wx.EXPAND)
         self.SetSizer(frame_sizer)
 
@@ -4820,6 +4795,16 @@ class MainWindow(wx.Frame):
         connected = bool(connected)
         was = bool(getattr(self, "_wa_connected", False))
         self._wa_connected = connected
+        if not connected and getattr(self, "_active_voice_call", None):
+            # A call cannot outlive its signaling. No terminal `callstate` can
+            # reach us over a dead socket, so without this the call window
+            # stayed up and CallAudioSession went on reading the microphone
+            # until the app was restarted.
+            logging.info("[call] ending the active call: WhatsApp went offline")
+            try:
+                self._stop_voice_call_audio()
+            except Exception:
+                logging.exception("[call] could not stop call audio while going offline")
         # Nothing to do only when the flag *and* the derived offline state are
         # both already consistent with `connected`. _shutting_down already
         # returned above, so the check below can only mean still-updating or
@@ -5439,9 +5424,12 @@ class MainWindow(wx.Frame):
             if answer_button is not None and call_bar is not None and call_bar.IsShown():
                 wx.CallAfter(answer_button.SetFocus)
             else:
-                end_button = getattr(self, "voice_call_end_button", None)
-                voice_bar = getattr(self, "voice_call_bar", None)
-                if end_button is not None and voice_bar is not None and voice_bar.IsShown():
+                # Same reasoning for a call already up: the controls are in
+                # their own window, so hand focus to that window's Desligar.
+                end_button = getattr(self, "voice_call_window_end_button", None)
+                call_window = getattr(self, "voice_call_window", None)
+                if (end_button is not None and call_window is not None
+                        and call_window.IsShown()):
                     wx.CallAfter(end_button.SetFocus)
         if self.background_mode:
             event.Skip()
@@ -5962,6 +5950,34 @@ class MainWindow(wx.Frame):
         self._incoming_call_dialogs[identity] = dialog
         dialog.show_accessibly()
 
+    # A voice call is the one thing in WinZapp that wants the network and the
+    # CPU to itself, so the *recurring* background work stands down while one
+    # is up. Bounded on purpose, for the reason in _voice_call_in_progress().
+    _VOICE_CALL_PAUSE_MAX_SECONDS = 2 * 60 * 60
+
+    def _voice_call_in_progress(self) -> bool:
+        """Is a voice call up, for the purpose of standing background work down?
+
+        Bounded deliberately. ``_active_voice_call`` is cleared by a terminal
+        ``callstate`` event or by hanging up inside WinZapp; a call torn down on
+        the phone in a way that produces neither would otherwise pause the
+        periodic poll and the history backfill for the rest of the session —
+        and a paused sync is invisible, the user simply stops receiving
+        messages. The clock starts the first time this is asked rather than
+        where the call is registered, because that flag is assigned from four
+        separate places and one of them forgetting to stamp it is exactly the
+        silent failure this bound exists to prevent.
+        """
+        if not getattr(self, "_active_voice_call", None):
+            self._voice_call_pause_since = 0.0
+            return False
+        since = getattr(self, "_voice_call_pause_since", 0.0) or 0.0
+        now = time.monotonic()
+        if not since:
+            self._voice_call_pause_since = now
+            return True
+        return (now - since) <= self._VOICE_CALL_PAUSE_MAX_SECONDS
+
     def _first_incoming_call_identity(self) -> str:
         calls = getattr(self, "_active_incoming_calls", {})
         return next(iter(calls), "")
@@ -6046,6 +6062,35 @@ class MainWindow(wx.Frame):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/call/{endpoint}"
         return api_post(url, token=self.token, json=payload, timeout=timeout)
 
+    # Every failure in this section is spoken, so it has to be short enough to
+    # be worth listening to.
+    _CALL_ERROR_MAX_SPOKEN = 120
+
+    def _raise_for_call_response(self, response, action: str):
+        """Turn a failed call-control response into a speakable error.
+
+        The body is up to 500 characters of JSON wrapping a minified browser
+        stack trace, and it used to go straight into the spoken message: a
+        failed answer read the whole thing aloud. The status code is what the
+        user can act on; the body belongs in log.log, which is the file we ask
+        for anyway.
+        """
+        if response.status_code < 400:
+            return response
+        logging.warning("[call] %s failed: HTTP %s %s", action,
+                        response.status_code, response.text[:500])
+        raise RuntimeError(f"HTTP {response.status_code}")
+
+    def _call_error_text(self, error) -> str:
+        """Collapse any call failure into one short line fit for speech."""
+        logging.info("[call] failure detail: %r", error)
+        text = " ".join(str(error or "").split())
+        if not text:
+            return self.i18n.t("voice_call_error_unknown")
+        if len(text) > self._CALL_ERROR_MAX_SPOKEN:
+            text = text[: self._CALL_ERROR_MAX_SPOKEN].rstrip() + "..."
+        return text
+
     def _start_voice_call_audio(self, identity: str, details: dict | None = None):
         logging.info("[call_audio] starting session identity=%s", identity)
         if getattr(self, "_call_audio_session", None) is not None:
@@ -6053,7 +6098,7 @@ class MainWindow(wx.Frame):
         ws = getattr(self, "ws", None)
         sio = getattr(ws, "sio", None)
         if sio is None:
-            raise RuntimeError("Socket.IO client is not available for call audio")
+            raise RuntimeError(self.i18n.t("voice_call_error_no_connection"))
         from core.call_audio import CallAudioConfig, CallAudioSession
 
         # Call routing is deliberately independent from the global Audio
@@ -6122,7 +6167,7 @@ class MainWindow(wx.Frame):
         stop = getattr(ws, "stop_call_audio_stream", None)
         if stop is not None:
             stop()
-        if hasattr(self, "voice_call_bar"):
+        if hasattr(self, "voice_call_window"):
             wx.CallAfter(self._sync_voice_call_bar)
 
     def _restart_active_voice_call_audio(self):
@@ -6163,9 +6208,7 @@ class MainWindow(wx.Frame):
                     logging.exception("[call_audio] failed to switch active call devices")
                     wx.CallAfter(
                         self.output,
-                        self.i18n.t("voice_call_start_failed").format(
-                            error="não foi possível abrir o novo dispositivo de áudio"
-                        ),
+                        self.i18n.t("voice_call_device_switch_failed"),
                         True,
                     )
                 finally:
@@ -6217,9 +6260,9 @@ class MainWindow(wx.Frame):
             with self._call_action_lock:
                 try:
                     self._start_voice_call_audio(identity, details)
-                    response = self._post_call_control("accept", payload)
-                    if response.status_code >= 400:
-                        raise RuntimeError(response.text[:500])
+                    self._raise_for_call_response(
+                        self._post_call_control("accept", payload), "accept"
+                    )
                     wx.CallAfter(
                         self.output,
                         self.i18n.t("incoming_call_answered"),
@@ -6230,7 +6273,9 @@ class MainWindow(wx.Frame):
                     logging.exception("[call] accept failed")
                     wx.CallAfter(
                         self.output,
-                        self.i18n.t("incoming_call_answer_failed").format(error=exc),
+                        self.i18n.t("incoming_call_answer_failed").format(
+                            error=self._call_error_text(exc)
+                        ),
                         True,
                     )
 
@@ -6243,14 +6288,16 @@ class MainWindow(wx.Frame):
         def _worker():
             with self._call_action_lock:
                 try:
-                    response = self._post_call_control("reject", payload)
-                    if response.status_code >= 400:
-                        raise RuntimeError(response.text[:500])
+                    self._raise_for_call_response(
+                        self._post_call_control("reject", payload), "reject"
+                    )
                 except Exception as exc:
                     logging.exception("[call] reject failed")
                     wx.CallAfter(
                         self.output,
-                        self.i18n.t("incoming_call_reject_failed").format(error=exc),
+                        self.i18n.t("incoming_call_reject_failed").format(
+                            error=self._call_error_text(exc)
+                        ),
                         True,
                     )
 
@@ -6260,14 +6307,16 @@ class MainWindow(wx.Frame):
         def _worker():
             with self._call_action_lock:
                 try:
-                    response = self._post_call_control("end", {})
-                    if response.status_code >= 400:
-                        raise RuntimeError(response.text[:500])
+                    self._raise_for_call_response(
+                        self._post_call_control("end", {}), "end"
+                    )
                 except Exception as exc:
                     logging.exception("[call] end failed")
                     wx.CallAfter(
                         self.output,
-                        self.i18n.t("incoming_call_end_failed").format(error=exc),
+                        self.i18n.t("incoming_call_end_failed").format(
+                            error=self._call_error_text(exc)
+                        ),
                         True,
                     )
                 finally:
@@ -6278,7 +6327,9 @@ class MainWindow(wx.Frame):
     def open_call_audio_settings(self, _event=None):
         """Choose the call microphone and speaker without changing global audio settings."""
         import sounddevice as sd
-        dialog = wx.Dialog(getattr(self, "voice_call_window", self),
+        call_window = getattr(self, "voice_call_window", None)
+        parent = call_window if (call_window is not None and call_window.IsShown()) else self
+        dialog = wx.Dialog(parent,
                            title=self.i18n.t("voice_call_settings_title"), size=(560, 390))
         root = wx.BoxSizer(wx.VERTICAL)
         cfg = self.settings.setdefault("call_audio_devices", {})
@@ -6313,7 +6364,6 @@ class MainWindow(wx.Frame):
         def apply(_evt=None):
             cfg["input_device_name"] = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
             cfg["output_device_name"] = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
-            self.effective_input_device_name = cfg["input_device_name"]
             self.save_settings()
             if getattr(self, "_call_audio_session", None) is not None:
                 self._restart_active_voice_call_audio()
@@ -6363,13 +6413,21 @@ class MainWindow(wx.Frame):
             with self._call_action_lock:
                 try:
                     self._start_voice_call_audio(identity, details)
-                    response = self._post_call_control(
+                    # Same resolver every send endpoint goes through: on a
+                    # LID-addressed account the conversation's own JID is an
+                    # @lid, which is an identifier and not a phone number, and
+                    # handing it to WPP.call.offer() unresolved is how a call
+                    # either throws in the page or dials the digits as if they
+                    # were a number.
+                    dial_jid = self._resolve_jid_for_send(peer_jid) or peer_jid
+                    response = self._raise_for_call_response(
+                        self._post_call_control(
+                            "offer",
+                            {"to": dial_jid, "isVideo": False},
+                            timeout=75,
+                        ),
                         "offer",
-                        {"to": peer_jid, "isVideo": False},
-                        timeout=75,
                     )
-                    if response.status_code >= 400:
-                        raise RuntimeError(response.text[:500])
                     try:
                         body = response.json().get("response") or {}
                     except Exception:
@@ -6383,44 +6441,50 @@ class MainWindow(wx.Frame):
                     logging.exception("[call] outgoing call failed")
                     wx.CallAfter(
                         self.output,
-                        self.i18n.t("voice_call_start_failed").format(error=exc),
+                        self.i18n.t("voice_call_start_failed").format(
+                            error=self._call_error_text(exc)
+                        ),
                         True,
                     )
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _sync_voice_call_bar(self):
-        bar = getattr(self, "voice_call_bar", None)
-        label = getattr(self, "voice_call_label", None)
-        if bar is None or label is None:
+        """Keep the modeless call window in step with the active call.
+
+        The call controls live in one place only — `voice_call_window`. An
+        in-frame bar was tried alongside it and removed: two copies of the same
+        three buttons is the shape that has to be kept in step by hand, and the
+        frame-level copy was never shown anyway (the method ended on an
+        unconditional Hide()), so `refresh_labels` was relabelling the dead set
+        and not the live one.
+        """
+        window = getattr(self, "voice_call_window", None)
+        if window is None:
             return
         active = getattr(self, "_active_voice_call", None)
         if not active:
-            bar.Hide()
-            window = getattr(self, "voice_call_window", None)
-            if window is not None:
-                window.Hide()
-            self.Layout()
+            window.Hide()
             return
         muted = bool(getattr(getattr(self, "_call_audio_session", None), "microphone_muted", False))
         mute_label = self.i18n.t("voice_call_unmute_button" if muted else "voice_call_mute_button")
-        for button_name in ("voice_call_mute_button", "voice_call_window_mute_button"):
-            button = getattr(self, button_name, None)
-            if button is not None:
-                button.SetLabel(mute_label)
+        button = getattr(self, "voice_call_window_mute_button", None)
+        if button is not None:
+            button.SetLabel(mute_label)
         name = active.get("name") or active.get("peer_jid") or self.i18n.t("unknown_contact")
-        label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
-        window = getattr(self, "voice_call_window", None)
-        if window is not None:
-            window_label = getattr(self, "voice_call_window_label", None)
-            if window_label is not None:
-                window_label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
-            if not window.IsShown():
-                window.Show()
-                window.Raise()
-            self.voice_call_window_mute_button.SetFocus()
-        bar.Hide()
-        self.Layout()
+        window_label = getattr(self, "voice_call_window_label", None)
+        if window_label is not None:
+            window_label.SetLabel(self.i18n.t("voice_call_active_label").format(name=name))
+        if not window.IsShown():
+            window.Show()
+            window.Raise()
+            # Focused exactly once, when the window appears. This method runs
+            # again on every call-state change (the page polls CallStore four
+            # times a second), so focusing unconditionally yanked focus back
+            # here while the user was reading the conversation or had Tabbed to
+            # Desligar, and NVDA read the button over the call audio.
+            if button is not None:
+                button.SetFocus()
 
     def toggle_call_microphone(self, _event=None):
         session = getattr(self, "_call_audio_session", None)
@@ -6428,7 +6492,6 @@ class MainWindow(wx.Frame):
             return
         session.set_microphone_muted(not session.microphone_muted)
         self._sync_voice_call_bar()
-        wx.CallAfter(self.voice_call_window_mute_button.SetFocus)
 
     def on_voice_call_state_event(self, event: dict):
         """Apply the complete call lifecycle emitted by the page CallStore."""
@@ -6454,19 +6517,12 @@ class MainWindow(wx.Frame):
             self._active_voice_call = active
             self._voice_call_last_announced_state = ""
             wx.CallAfter(self._sync_voice_call_bar)
-        active_call_id = str(active.get("call_id") or "")
-        active_identity = str(active.get("identity") or "")
-        has_bound_call_id = bool(active_call_id) and not active_call_id.startswith("outgoing:")
-        if call_id and has_bound_call_id:
-            # A delayed terminal event from an older call with the same person
-            # must never tear down the current call.
-            matches = call_id in {active_call_id, active_identity}
-        else:
-            matches = (
-                (call_id and call_id == active_identity)
-                or (peer_jid and peer_jid == active.get("peer_jid"))
-            )
-        if not matches:
+        # Bridged through @lid <-> phone, because the offer and the page's
+        # CallStore poll do not agree on which form to use — see
+        # core/call_matching.py for what comparing them raw cost.
+        if not call_event_matches_active(
+            active, call_id, peer_jid, self._chat_jids_equivalent
+        ):
             return
         if call_id:
             active["call_id"] = call_id
@@ -6505,9 +6561,10 @@ class MainWindow(wx.Frame):
             if self._call_audio_session is not None:
                 return
             try:
-                response = self._post_call_control("audio/enable", {}, timeout=20)
-                if response.status_code >= 400:
-                    raise RuntimeError(response.text[:500])
+                self._raise_for_call_response(
+                    self._post_call_control("audio/enable", {}, timeout=20),
+                    "audio/enable",
+                )
                 self._start_voice_call_audio(
                     str(details.get("identity") or details.get("call_id") or "call"),
                     details,
@@ -11360,8 +11417,15 @@ class MainWindow(wx.Frame):
             self.incoming_call_stop_button.SetLabel(
                 self.i18n.t("incoming_call_silence_button")
             )
-        if hasattr(self, "voice_call_end_button"):
-            self.voice_call_end_button.SetLabel(self.i18n.t("voice_call_end_button"))
+        if hasattr(self, "voice_call_window_end_button"):
+            self.voice_call_window_end_button.SetLabel(
+                self.i18n.t("voice_call_end_button")
+            )
+            self.voice_call_window_settings_button.SetLabel(
+                self.i18n.t("voice_call_settings_button")
+            )
+            self.voice_call_window.SetTitle(self.i18n.t("voice_call_window_title"))
+            # Relabels the mute button too, in whichever state it is in.
             self._sync_voice_call_bar()
         # Update frame title (unread indicator + any status suffix)
         self._update_title()
@@ -19555,6 +19619,15 @@ class MainWindow(wx.Frame):
                     if getattr(self, "_initial_sync_running", False):
                         # Don't fight the initial sync for the same dict.
                         continue
+                    if self._voice_call_in_progress():
+                        # The only safe place to stand the message sync down
+                        # during a call: nothing has been attempted yet, so
+                        # skipping this cycle cannot be mistaken for a round
+                        # that succeeded. See sync_chat_messages()' own note.
+                        logging.info(
+                            "[periodic_contacts_sync] skipped during active voice call"
+                        )
+                        continue
                     if elapsed >= _CONTACT_POLL_SECONDS:
                         elapsed = 0
                         self.get_remote_contacts()
@@ -21410,9 +21483,10 @@ class MainWindow(wx.Frame):
 
     def sync_remote_chats(self, target_chats=None, incremental: bool = False,
                           expected_run_id=None):
-        if getattr(self, "_active_voice_call", None):
-            logging.info("[sync_remote_chats] paused during active voice call")
-            return set()
+        # Also deliberately NOT gated on an active voice call: this returns the
+        # set of chats that FAILED, so an early empty set is read by the caller
+        # as "every chat succeeded" — see the comment at the top of
+        # sync_chat_messages() for what that costs.
         # expected_run_id is passed only by _run_sync() (issue #198); the
         # periodic poll leaves it None and behaves exactly as before.
         def _superseded():
@@ -22389,10 +22463,16 @@ class MainWindow(wx.Frame):
                         return
                     time.sleep(1)
 
-                if getattr(self, "_active_voice_call", None):
-                    logging.info("[backfill] paused during active voice call")
+                if self._voice_call_in_progress():
+                    # Logged once per call, not once per second: this loop
+                    # re-checks every second and the line was filling the log
+                    # file users are asked to send.
+                    if not getattr(self, "_backfill_call_pause_logged", False):
+                        self._backfill_call_pause_logged = True
+                        logging.info("[backfill] paused during active voice call")
                     delay = 1
                     continue
+                self._backfill_call_pause_logged = False
 
                 if not getattr(self, "_wa_connected", False):
                     # Not a wasted pass: nothing was attempted, so just wait
@@ -22483,7 +22563,7 @@ class MainWindow(wx.Frame):
                         "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
                         attempt, len(window), len(deep_pending))
                     for jid in window:
-                        if getattr(self, "_active_voice_call", None):
+                        if self._voice_call_in_progress():
                             break
                         if getattr(self, "_sync_run_id", 0) != my_run:
                             return
@@ -23044,7 +23124,7 @@ class MainWindow(wx.Frame):
         for a round that has been superseded fills media/ with files nothing on
         disk refers to. Downloads already running finish.
         """
-        if getattr(self, "_active_voice_call", None):
+        if self._voice_call_in_progress():
             logging.info("[sync_media_for_all_chats] paused during active voice call")
             return 0
 
@@ -23065,7 +23145,7 @@ class MainWindow(wx.Frame):
         downloaded = 0
         timeout = self._MEDIA_SYNC_TIMEOUT
         def _download(msg):
-            if getattr(self, "_active_voice_call", None):
+            if self._voice_call_in_progress():
                 return False
             if should_stop is not None and should_stop():
                 return False
@@ -23283,8 +23363,14 @@ class MainWindow(wx.Frame):
         return payload if isinstance(payload, dict) else None
 
     def sync_chat_messages(self, chat, expected_run_id=None, sync_mode="full"):
-        if getattr(self, "_active_voice_call", None):
-            return None
+        # Deliberately NOT gated on an active voice call. sync_remote_chats()
+        # counts only a False return as a failure, so bailing out here reported
+        # every skipped chat as a *successful* fetch: message_sync_ok stayed
+        # true, _persist_successful_sync_state() cleared the force_full latch
+        # and committed the list-chats snapshot for chats nothing had read.
+        # An account could be marked fully synced having fetched nothing, which
+        # only F5 repairs. The call stands background work down where a *new*
+        # round is decided instead — see _voice_call_in_progress().
         if (expected_run_id is not None
                 and getattr(self, "_sync_run_id", 0) != expected_run_id):
             logging.info(

@@ -1708,7 +1708,10 @@ class ConversationsPanel(wx.Panel):
         conversation = self.main_window.chats.get(jid) or self.conversation
         was_editable = self.message_field.IsEditable()
         self._apply_composer_permissions(jid, conversation)
-        self._sync_voice_call_button(jid)
+        # Deliberately not re-syncing the call button here: whether a chat can
+        # be called depends only on its JID kind, which cannot change while the
+        # conversation stays open. The two places that DO open a conversation
+        # sync it; a live permission refresh only has to touch the composer.
         self.message_label.SetLabel(
             self._message_label_text(jid, conversation, self.conversation_name)
         )

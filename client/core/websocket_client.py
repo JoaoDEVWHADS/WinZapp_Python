@@ -2450,9 +2450,13 @@ class WebSocketClient:
                 return
             normalized = dict(payload)
             normalized["id"] = str(normalized.get("id") or "")
+            # One canonical key, not two: leaving `peer_jid` beside `peerJid`
+            # gives every consumer downstream a second place to read the peer
+            # from, and they will not stay in step.
             normalized["peerJid"] = str(
-                normalized.get("peerJid") or normalized.get("peer_jid") or ""
+                normalized.get("peerJid") or normalized.pop("peer_jid", "") or ""
             )
+            normalized.pop("peer_jid", None)
             normalized["state"] = str(normalized.get("state") or "").upper()
             normalized["event"] = str(normalized.get("event") or "state").lower()
             normalized["outgoing"] = bool(normalized.get("outgoing", False))

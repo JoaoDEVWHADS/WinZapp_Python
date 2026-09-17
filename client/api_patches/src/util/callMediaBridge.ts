@@ -525,10 +525,15 @@ function installCallMediaBridgeInPage(): boolean {
     // Once state.enabled becomes true, Python PCM is written into this track.
     const micTrack = ensureMicTrack().clone();
     if (micTrack.id) state.localTrackIds.add(micTrack.id);
-    if (!constraints.video) return new MediaStream([micTrack]);
-    const videoOnly = await nativeGetUserMedia({ video: constraints.video, audio: false });
-    videoOnly.addTrack(micTrack);
-    return videoOnly;
+    // Audio only, whatever was asked for. Video calls are deliberately out of
+    // scope, and --use-fake-ui-for-media-stream plus the CDP videoCapture
+    // grant mean a nativeGetUserMedia({ video }) here would open the real
+    // camera with no prompt and no indicator, from a page the user never sees.
+    // Returning the microphone alone makes any video path fail closed.
+    if (constraints.video) {
+      report('video-request-refused', 'video calls are not supported');
+    }
+    return new MediaStream([micTrack]);
   };
   try {
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
