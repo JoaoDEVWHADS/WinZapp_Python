@@ -19,3 +19,24 @@ def test_unrelated_socket_events_keep_existing_behavior():
     source = (ROOT / "client/api_patches/src/util/createSessionUtil.ts").read_text(encoding="utf-8")
     # This change is deliberately call-only: normal message ACK traffic remains untouched.
     assert "req.io.emit('onack', { ...ack, session: client.session });" in source
+
+
+def test_remote_audio_recovers_tracks_that_arrive_without_a_track_event():
+    source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
+    assert "pc.getReceivers?.()" in source
+    assert "Promise.resolve(result).then(attachRemoteReceivers)" in source
+    assert "call media ${event}: ${details}" in source
+
+
+def test_remote_audio_also_observes_media_streams_assigned_to_audio_elements():
+    source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
+    assert "const attachRemoteStream" in source
+    assert "Object.getOwnPropertyDescriptor(mediaProto, 'srcObject')" in source
+    assert "new MutationObserver(scanMediaElements)" in source
+
+
+def test_remote_audio_observes_the_web_audio_playback_graph():
+    source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
+    assert "createMediaStreamSource" in source
+    assert "createMediaStreamTrackSource" in source
+    assert "__winzappCallMediaSourceWrapped" in source

@@ -9,14 +9,14 @@ const micDraining = new Set<string>();
 
 function installCallMediaBridgeInPage(): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 1) return true;
+  if (win.__winzappCallMediaBridge?.version === 2) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
   if (!AudioContextCtor) return false;
 
   const state: any = {
-    version: 1,
+    version: 2,
     enabled: false,
     context: null,
     micDestination: null,
@@ -27,6 +27,12 @@ function installCallMediaBridgeInPage(): boolean {
     micFramesPushed: 0,
     micBytesPushed: 0,
     micSamplesConsumed: 0,
+    remoteFramesCaptured: 0,
+    remoteTracksAttached: 0,
+  };
+
+  const report = (event: string, details = '') => {
+    try { win.__winzappOnCallBridgeEvent?.(event, details); } catch (_) {}
   };
 
   const ensureContext = () => {
@@ -163,6 +169,10 @@ function installCallMediaBridgeInPage(): boolean {
       const input = event.inputBuffer.getChannelData(0);
       const callback = win.__winzappOnCallRemoteAudio;
       if (typeof callback === 'function' && input.length) {
+        state.remoteFramesCaptured += 1;
+        if (state.remoteFramesCaptured === 1 || state.remoteFramesCaptured % 250 === 0) {
+          report('remote-frame', `track=${id} frames=${state.remoteFramesCaptured}`);
+        }
         callback(encodePcm16(input), context.sampleRate).catch?.(() => undefined);
       }
       event.outputBuffer.getChannelData(0).fill(0);
@@ -171,6 +181,8 @@ function installCallMediaBridgeInPage(): boolean {
     processor.connect(sink);
     sink.connect(context.destination);
     state.remotePipelines.set(id, { source, processor, sink, track });
+    state.remoteTracksAttached += 1;
+    report('remote-track', `track=${id} tracks=${state.remoteTracksAttached}`);
     track.addEventListener('ended', () => {
       const pipeline = state.remotePipelines.get(id);
       if (!pipeline) return;
@@ -181,11 +193,41 @@ function installCallMediaBridgeInPage(): boolean {
     }, { once: true });
   };
 
+  const attachRemoteStream = (stream: MediaStream | null | undefined) => {
+    try {
+      for (const track of stream?.getAudioTracks?.() || []) attachRemoteTrack(track);
+    } catch (_) {}
+  };
+
+  const scanMediaElements = () => {
+    try {
+      for (const element of Array.from(document.querySelectorAll('audio, video')) as HTMLMediaElement[]) {
+        attachRemoteStream(element.srcObject instanceof MediaStream ? element.srcObject : null);
+      }
+    } catch (_) {}
+  };
+
   const attachPeerConnection = (pc: RTCPeerConnection) => {
     const tagged = pc as any;
     if (tagged.__winzappCallMediaAttached) return pc;
     tagged.__winzappCallMediaAttached = true;
+    const attachRemoteReceivers = () => {
+      try {
+        for (const receiver of pc.getReceivers?.() || []) attachRemoteTrack(receiver?.track);
+      } catch (_) {}
+    };
     pc.addEventListener('track', (event) => attachRemoteTrack(event.track));
+    // Some WhatsApp Web builds populate receivers while applying the remote
+    // description without dispatching a page-visible `track` event. Inspecting
+    // receivers after the native promise settles covers that path too.
+    try {
+      const nativeSetRemoteDescription = pc.setRemoteDescription.bind(pc);
+      pc.setRemoteDescription = ((description: RTCSessionDescriptionInit) => {
+        const result = nativeSetRemoteDescription(description);
+        Promise.resolve(result).then(attachRemoteReceivers).catch(() => undefined);
+        return result;
+      }) as typeof pc.setRemoteDescription;
+    } catch (_) {}
     // WhatsApp can obtain a stream before the bridge wrapper is installed and
     // then add that stream later. Replace only outgoing audio at the final
     // WebRTC boundary so Python PCM is always the media source.
@@ -221,6 +263,56 @@ function installCallMediaBridgeInPage(): boolean {
     WrappedRTCPeerConnection.prototype = NativeRTCPeerConnection.prototype;
     win.RTCPeerConnection = WrappedRTCPeerConnection;
     if (win.webkitRTCPeerConnection) win.webkitRTCPeerConnection = WrappedRTCPeerConnection;
+  } catch (_) {}
+
+  // Newer WhatsApp Web builds can own the PeerConnection in an internal
+  // context and only surface the remote MediaStream by assigning it to an
+  // HTMLMediaElement. Capture that equally valid media path, including a
+  // stream that was assigned before this bridge was injected.
+  try {
+    const mediaProto = win.HTMLMediaElement?.prototype;
+    const descriptor = mediaProto && Object.getOwnPropertyDescriptor(mediaProto, 'srcObject');
+    if (descriptor?.get && descriptor?.set && !mediaProto.__winzappCallMediaSrcObjectWrapped) {
+      Object.defineProperty(mediaProto, 'srcObject', {
+        configurable: true,
+        enumerable: descriptor.enumerable,
+        get: descriptor.get,
+        set(value: any) {
+          descriptor.set!.call(this, value);
+          attachRemoteStream(value instanceof MediaStream ? value : null);
+        },
+      });
+      mediaProto.__winzappCallMediaSrcObjectWrapped = true;
+    }
+    scanMediaElements();
+    new MutationObserver(scanMediaElements).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  } catch (_) {}
+
+  // WhatsApp can keep the WebRTC connection in an internal context but still
+  // build its playback graph in this document. Hook the graph boundary so a
+  // remote stream/track reaches the Python speaker bridge in that layout too.
+  try {
+    const contextProto = AudioContextCtor.prototype as any;
+    if (!contextProto.__winzappCallMediaSourceWrapped) {
+      const nativeCreateMediaStreamSource = contextProto.createMediaStreamSource;
+      if (typeof nativeCreateMediaStreamSource === 'function') {
+        contextProto.createMediaStreamSource = function (stream: MediaStream) {
+          attachRemoteStream(stream);
+          return nativeCreateMediaStreamSource.call(this, stream);
+        };
+      }
+      const nativeCreateMediaStreamTrackSource = contextProto.createMediaStreamTrackSource;
+      if (typeof nativeCreateMediaStreamTrackSource === 'function') {
+        contextProto.createMediaStreamTrackSource = function (track: MediaStreamTrack) {
+          attachRemoteTrack(track);
+          return nativeCreateMediaStreamTrackSource.call(this, track);
+        };
+      }
+      contextProto.__winzappCallMediaSourceWrapped = true;
+    }
   } catch (_) {}
 
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -316,6 +408,14 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
         });
       }
     );
+  } catch (_) {
+    // Puppeteer bindings survive navigation; duplicate registration is expected.
+  }
+
+  try {
+    await page.exposeFunction('__winzappOnCallBridgeEvent', (event: string, details: string) => {
+      logger?.info?.(`[${client.session}] call media ${event}: ${details}`);
+    });
   } catch (_) {
     // Puppeteer bindings survive navigation; duplicate registration is expected.
   }
