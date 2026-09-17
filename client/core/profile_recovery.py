@@ -339,6 +339,18 @@ def snapshot_age_seconds(global_dir, session_name, now=None):
     return max(0.0, (time.time() if now is None else now) - mtime)
 
 
+def snapshot_taken_at(global_dir, session_name, prefer_previous=False):
+    """When the generation restore_snapshot() would restore was completed
+    (epoch seconds), or None. Read before restoring: the restore moves that
+    directory into place, so afterwards the question has no answer."""
+    path = (previous_snapshot_dir(global_dir, session_name) if prefer_previous
+            else snapshot_dir(global_dir, session_name))
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
 def snapshot_is_fresh(global_dir, session_name, max_age=SNAPSHOT_MAX_AGE_SECONDS,
                       now=None):
     age = snapshot_age_seconds(global_dir, session_name, now=now)

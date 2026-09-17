@@ -68,6 +68,9 @@ from core.remote_reconcile import (
     older_than_window as _older_than_window,
     oldest_anchor as _oldest_anchor,
     split_deletions as _split_deletions,
+    add_rollback_gap as _add_rollback_gap,
+    normalize_rollback_gaps as _normalize_rollback_gaps,
+    outside_rollback_gaps as _outside_rollback_gaps,
 )
 from core.incremental_sync import (
     chat_activity_floor as _chat_activity_floor,
@@ -86,7 +89,7 @@ from core.wpp_runtime import (
     read_homologated_wpp_version, wppconnect_library_drift, WPPCONNECT_PACKAGE,
 )
 from core.utils import reaction_targets_status, encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, group_setting_notif_value, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded, plan_row_updates, display_page_fetch_limit, carry_over_video_durations, video_seconds, MEASURED_SECONDS_KEY, is_voice_message, backfill_missing_defaults, auto_download_allows, migrate_voice_messages_media_types, migrate_voice_message_mode_default, migrate_spell_check_mode
-from core.utils import clear_chat_keep_starred_echo
+from core.utils import clear_chat_applied, clear_chat_keep_starred_echo
 from ui.dialogs.checkbox_confirm import confirm_with_checkbox
 from core.settings_transfer import connection_runtime as _connection_runtime
 from core.profile_backup import (
@@ -9830,9 +9833,20 @@ class MainWindow(wx.Frame):
                     # recorded — WhatsApp really did refuse that profile.)
                     self._set_profile_recovery_generation(generation)
                     return
+                taken_at = profile_recovery.snapshot_taken_at(
+                    global_dir, session_name, prefer_previous=prefer_previous)
                 if profile_recovery.restore_snapshot(
                         global_dir, session_name, prefer_previous=prefer_previous):
                     self._shutdown_audit("profile restored from snapshot")
+                    # The suspension below lasts one launch; the gap the restore
+                    # leaves in WhatsApp Web's own database does not. Recorded
+                    # for good (core/remote_reconcile.py, "Periods a profile
+                    # restore rolled back").
+                    try:
+                        self._record_rollback_gap(taken_at, time.time())
+                    except Exception:
+                        logging.exception("[profile-recovery] could not record "
+                                          "the rolled-back period")
                     # The restore rolled WhatsApp Web's OWN store back to
                     # whenever the snapshot was taken — up to
                     # SNAPSHOT_MAX_AGE_SECONDS. Measured 2026-09-10: the
@@ -11452,14 +11466,18 @@ class MainWindow(wx.Frame):
             return
         self._announce_settings_transfer("settings_import_done", count=applied)
 
-    def _confirm_imported_api(self, server: str) -> bool:
-        """Ask, naming the server, before an import moves this install to
-        another API. Every request carries the session token to that server, so
-        this is not one more preference among the rest. No is the default, and
-        No still imports everything else (import_settings_from_file())."""
+    def _confirm_imported_api(self, change: dict) -> bool:
+        """Ask, naming both addresses, before an import moves this install to
+        another API. The session token goes to both of them, and the change
+        reaches every account on this computer (app_settings'
+        _CONNECTION_GLOBAL), so this is not one more preference among the rest.
+        No is the default, and No still imports everything else
+        (import_settings_from_file())."""
         t = self.i18n.t
         dlg = wx.MessageDialog(
-            self, t("settings_import_api_confirm").format(server=server or "?"),
+            self, t("settings_import_api_confirm").format(
+                server=change.get("server") or "?",
+                ws_server=change.get("ws_server") or "?"),
             t("settings_import_confirm_title"),
             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
         )
@@ -11515,10 +11533,11 @@ class MainWindow(wx.Frame):
         file that is not an export, or holds nothing this build knows, leaves
         the install exactly as it was.
 
-        `confirm_api_change(server) -> bool` is asked when the file would move
-        this install to another API (core/settings_transfer.api_change). With
-        no callback, or a No, the connection is left exactly as it is and the
-        rest is still imported — never the other way round.
+        `confirm_api_change(change) -> bool` is asked when the file would move
+        this install to another API (core/settings_transfer.api_change, a dict
+        naming both addresses). With no callback, or a No, the connection is
+        left exactly as it is and the rest is still imported — never the other
+        way round.
         """
         from core.settings_transfer import api_change, merge_settings, read_export
         try:
@@ -11551,9 +11570,12 @@ class MainWindow(wx.Frame):
                          len(ignored), ", ".join(sorted(ignored)[:20]))
         if not applied:
             return "settings_import_nothing", 0
-        # In place: panels and helpers hold a reference to this very dict.
-        self.settings.clear()
-        self.settings.update(merged)
+        # In place: panels and helpers hold a reference to this very dict. No
+        # clear() first — `merged` already holds every key this install had —
+        # and under the save lock: a save on another thread in between would
+        # otherwise iterate a dict changing size, or write settings.json empty.
+        with self._save_lock:
+            self.settings.update(merged)
         self.save_settings()
         self.apply_settings_live()
         logging.info("[settings-transfer] %d setting(s) imported from %s", applied, path)
@@ -11597,11 +11619,24 @@ class MainWindow(wx.Frame):
             "wpp_port": getattr(self, "wpp_port", None),
             "wpp_api_key": getattr(self, "wpp_api_key", None),
         })
+        socket_moved = (runtime["wpp_ws_server"] != getattr(self, "wpp_ws_server", None)
+                        or runtime["wpp_port"] != getattr(self, "wpp_port", None))
         self.wpp_custom_api = runtime["wpp_custom_api"]
         self.wpp_server = runtime["wpp_server"]
         self.wpp_ws_server = runtime["wpp_ws_server"]
         self.wpp_port = runtime["wpp_port"]
         self.wpp_api_key = runtime["wpp_api_key"]
+
+        def _reconnect_socket():
+            # REST calls read the attributes above on every request; the
+            # Socket.IO connection was opened against the old address and would
+            # keep delivering (or failing to deliver) live events from there
+            # until a restart. connect_websocket() disconnects first and blocks
+            # on the handshake, hence the thread.
+            if socket_moved and getattr(self, "ws", None) is not None:
+                threading.Thread(target=self.connect_websocket, daemon=True).start()
+
+        _step("live connection", _reconnect_socket)
 
         _step("audio devices", self._apply_configured_audio_devices)
         _step("sounds", self.load_sounds)
@@ -23610,6 +23645,44 @@ class MainWindow(wx.Frame):
     # mirrored locally — a single valid-but-empty read is not enough.
     _REMOTE_CLEAR_CONFIRM_STRIKES = 3
 
+    _ROLLBACK_GAPS_METADATA_KEY = "remote_rollback_gaps"
+
+    def _record_rollback_gap(self, taken_at, restored_at) -> None:
+        """Remember, persistently, the period a profile restore rolled
+        WhatsApp Web's database back. Kept in memory first: a restore can run
+        before prepare_sync() has created self.db, and losing the record to that
+        would bring back exactly the deletions it exists to prevent — it is
+        written to the database the next time _rollback_gaps() finds one."""
+        gaps = _add_rollback_gap(self._rollback_gaps(), taken_at, restored_at)
+        self._rollback_gaps_cache = gaps
+        self._rollback_gaps_dirty = True
+        logging.info("[profile-recovery] rolled-back period recorded: %s", gaps[-1:])
+        self._rollback_gaps()
+
+    def _rollback_gaps(self) -> list:
+        """The recorded rolled-back periods (see _record_rollback_gap())."""
+        cached = getattr(self, "_rollback_gaps_cache", None)
+        db = getattr(self, "db", None)
+        if cached is None and db is not None:
+            try:
+                cached = _normalize_rollback_gaps(
+                    db.get_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, []))
+            except Exception:
+                logging.exception("[reconcile] could not read rolled-back periods")
+                return []
+            self._rollback_gaps_cache = cached
+        if getattr(self, "_rollback_gaps_dirty", False) and db is not None:
+            try:
+                stored = _normalize_rollback_gaps(
+                    db.get_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, []))
+                cached = _normalize_rollback_gaps(stored + list(cached or []))
+                db.set_metadata_json(self._ROLLBACK_GAPS_METADATA_KEY, cached)
+                self._rollback_gaps_cache = cached
+                self._rollback_gaps_dirty = False
+            except Exception:
+                logging.exception("[reconcile] could not store rolled-back periods")
+        return list(cached or [])
+
     def _reconcile_active_conversation_with_remote(self):
         """Detect a phone-side clear or individual message deletions in
         whichever conversation is currently open, and mirror them locally.
@@ -23686,6 +23759,9 @@ class MainWindow(wx.Frame):
             records, limit, _stable_cutoff, None, is_countable_message,
             extra_ids=pending_run[0] if pending_run else (),
         )
+        # Nothing a profile restore rolled back is ever judged: WhatsApp Web's
+        # database has a hole there that answers exactly like a deletion.
+        candidates = _outside_rollback_gaps(candidates, self._rollback_gaps())
         if remote_ids:
             # The answer is cut by count, so it only proves deletions inside the
             # period it covers. Older local messages are asked about again,
@@ -28873,8 +28949,17 @@ class MainWindow(wx.Frame):
                         body = r.json()
                     except Exception:
                         body = None
-                    if clear_chat_keep_starred_echo(body) is False:
+                    echo = clear_chat_keep_starred_echo(body)
+                    if echo is False and clear_chat_applied(body, phone):
                         wx.CallAfter(self._record_starred_clear_cutoff, jid, cutoff)
+                    elif echo is False:
+                        # The server understood keepStarred=false, but WhatsApp
+                        # Web did not confirm the clear: nothing proves the
+                        # starred messages are gone from the phone.
+                        logging.warning(
+                            "[clear_chat] %s: the clear was not confirmed by "
+                            "WhatsApp Web — starred messages not treated as cleared.", jid,
+                        )
                     else:
                         logging.warning(
                             "[clear_chat] %s: server did not confirm keepStarred=false "

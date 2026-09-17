@@ -149,9 +149,46 @@ class TestTheApiThisAccountTalksTo:
         assert "wpp_server" not in exported["connection"]
         assert "wpp_ws_server" not in exported["connection"]
 
-    def test_api_change_names_the_server_a_custom_file_moves_to(self):
+    def test_api_change_names_both_addresses_the_token_goes_to(self):
+        """REST calls carry the token to wpp_server; Socket.IO sends it as
+        `apikey` to wpp_ws_server — naming only one was bypassable in review."""
         incoming, _ = transfer.read_export(transfer.build_export(self._custom()))
-        assert transfer.api_change(_settings(), incoming) == "https://api.exemplo.com"
+        assert transfer.api_change(_settings(), incoming) == {
+            "server": "https://api.exemplo.com:8443",
+            "ws_server": "wss://api.exemplo.com:8443",
+        }
+
+    def test_a_changed_websocket_address_alone_is_still_asked_about(self):
+        current = self._custom()
+        incoming = {"connection": dict(current["connection"], wpp_ws_server="wss://outro.exemplo")}
+        assert transfer.api_change(current, incoming) == {
+            "server": "https://api.exemplo.com:8443",
+            "ws_server": "wss://outro.exemplo:8443",
+        }
+
+    @pytest.mark.parametrize("server, ws_server", [
+        ("http://127.0.0.1@evil.example", "ws://127.0.0.1"),    # userinfo
+        ("http://127.0.0.1", "wss://127.0.0.1@evil.example"),   # userinfo on the socket
+        ("http://evil.example:80", "ws://evil.example"),        # port hidden in the base
+        ("http://evil.example/x", "ws://evil.example"),         # path
+        ("http://evil.example ", "ws://evil.example"),          # whitespace
+        ("file://evil.example", "ws://evil.example"),           # not http
+        ("", "ws://evil.example"),
+    ])
+    def test_an_address_that_does_not_mean_what_it_looks_like_is_refused(self, server, ws_server):
+        incoming = {"connection": {"wpp_custom_api": True, "wpp_server": server,
+                                   "wpp_ws_server": ws_server, "wpp_port": 8443,
+                                   "wpp_api_key": "k"}}
+        current = _settings()
+        assert transfer.api_change(current, incoming) is None
+        merged, _applied, ignored = transfer.merge_settings(current, incoming)
+        assert merged["connection"] == current["connection"]
+        assert "connection" in ignored
+
+    def test_the_displayed_address_is_parsed_not_echoed(self):
+        assert transfer.api_endpoint("HTTPS://API.Exemplo.com", 443, ("https",)) ==             "https://api.exemplo.com:443"
+        assert transfer.api_endpoint("http://[::1]", 6300, ("http",)) == "http://[::1]:6300"
+        assert transfer.api_endpoint("http://h", 70000, ("http",)) is None
 
     def test_api_change_is_none_when_nothing_about_the_api_changes(self):
         custom = self._custom()
@@ -271,21 +308,82 @@ class TestImporting:
         assert merged["storage"]["auto_download_media_types"] == ["images"]
         assert applied == 1
 
-    def test_a_free_form_section_travels_whole(self):
-        """sound_events is keyed by event name, not by a fixed set."""
-        events = {"message_received": {"enabled": False, "path": ""}}
+    def test_sound_event_switches_travel_per_pack(self):
+        """sound_events is {pack: {event: {...}}} — the nesting load_sounds()
+        reads, calling .get() at every level."""
+        events = {"default": {"message_received": {"enabled": False}}}
         merged, applied, ignored = self._merge({"sound_events": events})
         assert merged["sound_events"] == events and applied == 1 and ignored == []
 
-    def test_a_free_form_entry_of_the_wrong_shape_is_dropped(self):
-        """Free-form in its keys, never in its values: load_sounds() calls
-        .get() on each one, and it runs in __init__ — so a number here would
-        stop the app opening at all on the next launch, with hand-editing
-        settings.json the only way back."""
-        merged, applied, ignored = self._merge(
-            {"sound_events": {"default": 5, "classic": {"enabled": True}}})
-        assert merged["sound_events"] == {"classic": {"enabled": True}}
-        assert ignored == ["sound_events.default"] and applied == 1
+    def test_a_sound_event_of_the_wrong_shape_is_dropped_at_any_depth(self):
+        """Free-form in its keys, never in its values: load_sounds() runs in
+        __init__, so a string one level too deep would stop the app opening at
+        all on the next launch — caught in review one level below where the
+        check used to look."""
+        merged, applied, ignored = self._merge({"sound_events": {
+            "default": {"message": "x", "sent": {"enabled": True}},
+            "classic": 5,
+        }})
+        assert merged["sound_events"] == {"default": {"sent": {"enabled": True}}}
+        assert sorted(ignored) == ["sound_events.classic", "sound_events.default.message"]
+        assert applied == 1
+
+    def test_a_sound_file_path_never_travels(self):
+        """A path names a file on the machine that wrote it — and one from a
+        file someone sent may be a network path Windows signs in to."""
+        merged, _applied, ignored = self._merge({"sound_events": {
+            "default": {"message_received": {"enabled": True,
+                                             "path": r"\\evil.example\share\x.ogg"}}}})
+        assert merged["sound_events"]["default"]["message_received"] == {"enabled": True}
+        assert "sound_events.default.message_received.path" in ignored
+
+    def test_an_existing_local_sound_path_survives_the_import(self):
+        current = _settings()
+        current["sound_events"] = {"default": {"message_received": {
+            "enabled": True, "path": r"C:\Sons\meu.ogg"}}}
+        merged, _applied, _ignored = transfer.merge_settings(
+            current, {"sound_events": {"default": {"message_received": {"enabled": False}}}})
+        assert merged["sound_events"]["default"]["message_received"] == {
+            "enabled": False, "path": r"C:\Sons\meu.ogg"}
+
+    def test_the_export_carries_no_sound_path(self):
+        settings = _settings()
+        settings["sound_events"] = {"default": {"message_received": {
+            "enabled": True, "path": r"C:\Sons\meu.ogg"}}}
+        exported = transfer.exportable_settings(settings)
+        assert exported["sound_events"] == {"default": {"message_received": {"enabled": True}}}
+
+    @pytest.mark.parametrize("section, key", [
+        ("files", "save_dialog_custom_folder"),
+        ("alert_tones", "private_custom_path"),
+        ("alert_tones", "group_custom_path"),
+    ])
+    def test_machine_paths_never_travel(self, section, key):
+        merged, _applied, ignored = self._merge({section: {key: r"\\evil.example\share"}})
+        assert merged[section][key] == _settings()[section][key]
+        assert f"{section}.{key}" in ignored
+
+    @pytest.mark.parametrize("hotkey, kept", [
+        (None, True),
+        ({"vk": 87, "mod": 0x0002}, True),           # Ctrl+W
+        ({"vk": 87, "mod": 0x0001 | 0x0004}, True),  # Alt+Shift+W
+        ({"vk": 87, "mod": 0}, False),               # bare W, system-wide
+        ({"vk": 87, "mod": 0x0004}, False),          # Shift only
+        ({"vk": 87, "mod": 0x0008 | 0x0002}, False), # Win bit, never captured
+        ({"vk": 0, "mod": 0x0002}, False),
+        ({"vk": True, "mod": 0x0002}, False),
+        ({"vk": 87}, False),
+    ])
+    def test_a_global_hotkey_obeys_the_capture_rule(self, hotkey, kept):
+        current = _settings()
+        current["general"]["global_hotkey"] = {"vk": 65, "mod": 0x0002}
+        merged, _applied, ignored = transfer.merge_settings(
+            current, {"general": {"global_hotkey": hotkey}})
+        if kept:
+            assert merged["general"]["global_hotkey"] == hotkey
+        else:
+            assert merged["general"]["global_hotkey"] == {"vk": 65, "mod": 0x0002}
+            assert "general.global_hotkey" in ignored
 
     @pytest.mark.parametrize("language, kept", [
         ("pl", True), ("en-US", True), ("xx-YY", False), ("", False),

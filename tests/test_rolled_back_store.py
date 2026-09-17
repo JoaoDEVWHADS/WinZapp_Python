@@ -23,6 +23,10 @@ import wx
 import main as main_module
 from core.incremental_sync import chat_activity_floor
 from core.remote_reconcile import deletions_within_remote_window, remote_window_oldest
+from core.remote_reconcile import (
+    add_rollback_gap as _add_rollback_gap,
+    normalize_rollback_gaps as _normalize_rollback_gaps,
+)
 from main import MainWindow
 from tests.test_get_remote_chats_persistence import _chat, _make, post  # noqa: F401 (fixture)
 
@@ -142,6 +146,8 @@ class _Panel:
 class _ReconcileStub:
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
+    _rollback_gaps = MainWindow._rollback_gaps
+    _ROLLBACK_GAPS_METADATA_KEY = MainWindow._ROLLBACK_GAPS_METADATA_KEY
     _deletions_before_remote_window = MainWindow._deletions_before_remote_window
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions
@@ -569,3 +575,97 @@ class TestARolledBackSnapshotCannotRewindTheList:
         result = _make(cached).get_remote_chats(dict(cached), persist_full=False, notify_errors=False)
 
         assert result[JID]["t"] == 1_700_000_000
+
+
+class TestARestoredStoreHasAHoleNotDeletions:
+    """A profile restore rolls WhatsApp Web's database back to the snapshot,
+    and what arrived in between is never put back there: a hole in the middle
+    of the chat. A page before the anchor is contiguous from the database's
+    point of view, so every local message in the hole "is inside the page's
+    period and absent" on every poll — found in review, m10..m19 mirrored as
+    phone-side deletions after three polls. Restores now record that period
+    for good, and nothing stamped inside it is judged."""
+
+    def _stub_with_hole(self):
+        history = _old_history(30)
+        stub = _ReconcileStub(
+            history, (_ids(history[20:]), history[20]["messageTimestamp"]),
+            before={"anchor": _page(history[:10])})  # m10..m19 lost by the store
+        return history, stub
+
+    def test_without_a_recorded_restore_the_hole_would_be_mirrored(self):
+        """Pins that the fixture reproduces the defect."""
+        _history, stub = self._stub_with_hole()
+        _poll(stub, STRIKES)
+        assert stub.conversations_panel.removed == {f"m{i}" for i in range(10, 20)}
+
+    def test_a_recorded_restore_keeps_the_hole(self):
+        history, stub = self._stub_with_hole()
+        stub._rollback_gaps_cache = _add_rollback_gap(
+            [], history[10]["messageTimestamp"], history[19]["messageTimestamp"])
+        _poll(stub, STRIKES + 1)
+        assert stub.conversations_panel.removed is None
+
+    def test_a_real_deletion_outside_the_period_still_arrives(self):
+        base = int(time.time()) - 400_000
+        history = [_msg(f"m{i}", base + i * 10_000) for i in range(30)]
+        window = [r for r in history[20:] if r["key"]["id"] != "m25"]
+        stub = _ReconcileStub(history, (_ids(window), history[20]["messageTimestamp"]),
+                              before={"anchor": _page(history[:20])})
+        stub._rollback_gaps_cache = _add_rollback_gap([], base, base + 5)
+        _poll(stub)
+        assert stub.conversations_panel.removed == {"m25"}
+
+    def test_the_period_survives_a_restart(self):
+        class _Db:
+            def __init__(self):
+                self.data = {}
+
+            def get_metadata_json(self, key, default=None):
+                return self.data.get(key, default)
+
+            def set_metadata_json(self, key, value):
+                self.data[key] = value
+
+        db = _Db()
+        first = _ReconcileStub([], (set(), None))
+        first.db = db
+        first._record_rollback_gap = types.MethodType(MainWindow._record_rollback_gap, first)
+        first._record_rollback_gap(1_000_000, 1_050_000)
+
+        later = _ReconcileStub([], (set(), None))
+        later.db = db
+        assert later._rollback_gaps() == db.data[MainWindow._ROLLBACK_GAPS_METADATA_KEY]
+        assert later._rollback_gaps()[0][0] <= 1_000_000
+
+    def test_a_restore_before_the_database_exists_is_kept_until_it_does(self):
+        stub = _ReconcileStub([], (set(), None))
+        stub._record_rollback_gap = types.MethodType(MainWindow._record_rollback_gap, stub)
+        stub._record_rollback_gap(1_000_000, 1_050_000)
+        assert stub._rollback_gaps()
+
+        stored = {}
+        stub.db = types.SimpleNamespace(
+            get_metadata_json=lambda key, default=None: stored.get(key, default),
+            set_metadata_json=lambda key, value: stored.__setitem__(key, value))
+        stub._rollback_gaps()
+        assert stored[MainWindow._ROLLBACK_GAPS_METADATA_KEY]
+
+
+class TestRollbackGapHelpers:
+    def test_margins_widen_the_period(self):
+        (start, end), = _add_rollback_gap([], 10_000, 20_000)
+        assert start < 10_000 and end > 20_000
+
+    def test_unknown_snapshot_age_covers_everything_before_the_restore(self):
+        (start, end), = _add_rollback_gap([], None, 20_000)
+        assert start == 0 and end > 20_000
+
+    def test_overlapping_periods_merge_and_garbage_is_dropped(self):
+        gaps = _normalize_rollback_gaps([[100, 200], "x", [150, 300], [5, 1], [400, 500]])
+        assert gaps == [[100, 300], [400, 500]]
+
+    def test_the_list_is_bounded_to_the_newest(self):
+        from core.remote_reconcile import MAX_ROLLBACK_GAPS
+        gaps = _normalize_rollback_gaps([[i * 10, i * 10 + 1] for i in range(50)])
+        assert len(gaps) == MAX_ROLLBACK_GAPS and gaps[-1] == [490, 491]

@@ -29,6 +29,7 @@ making the imported settings take effect.
 """
 
 import copy
+from urllib.parse import urlsplit
 
 from core.utils import DEFAULT_SETTINGS
 
@@ -60,7 +61,18 @@ EXCLUDED_KEYS = frozenset({
     ("general", "terms_alert_displayed"),
     ("general", "quick_tip_shown"),
     ("files", "save_dialog_last_folder"),      # the last folder used HERE
+    # Paths on THIS machine. Useless anywhere else, and worse than useless from
+    # a file someone sent: a sound or folder path is opened as it stands, so a
+    # network path (\\host\share\x.ogg) would make Windows sign in to that
+    # host on every launch. The per-event sound paths in `sound_events` are
+    # stripped for the same reason (_sound_events_without_paths()).
+    ("files", "save_dialog_custom_folder"),
+    ("alert_tones", "private_custom_path"),
+    ("alert_tones", "group_custom_path"),
 })
+
+#: RegisterHotKey modifier bits, as settings_dialog._HotkeyCapture records them.
+_MOD_ALT, _MOD_CONTROL, _MOD_SHIFT = 0x0001, 0x0002, 0x0004
 
 #: The API this account talks to, which travels only for a custom one.
 #:
@@ -146,6 +158,58 @@ def is_excluded(section, key, settings=None) -> bool:
     return str(key).endswith(_MIGRATION_FLAG_SUFFIX)
 
 
+def _sound_events_without_paths(value):
+    """(clean sound_events, ignored names) — {pack: {event: {...}}} with every
+    per-event `path` removed, and anything not of that shape dropped.
+
+    load_sounds() reads it as exactly that nesting and calls .get() at every
+    level, so a string one level too deep saved here crashes every launch before
+    the window exists. The path is removed because it names a file on the
+    machine that wrote it (see EXCLUDED_KEYS).
+    """
+    clean, ignored = {}, []
+    if not isinstance(value, dict):
+        return clean, ["sound_events"]
+    for pack, events in value.items():
+        if not isinstance(events, dict):
+            ignored.append(f"sound_events.{pack}")
+            continue
+        kept = {}
+        for event, cfg in events.items():
+            if not isinstance(cfg, dict):
+                ignored.append(f"sound_events.{pack}.{event}")
+                continue
+            entry = {k: copy.deepcopy(v) for k, v in cfg.items() if k != "path"}
+            if "enabled" in entry and not isinstance(entry["enabled"], bool):
+                entry.pop("enabled")
+                ignored.append(f"sound_events.{pack}.{event}.enabled")
+            if "path" in cfg:
+                ignored.append(f"sound_events.{pack}.{event}.path")
+            kept[event] = entry
+        clean[pack] = kept
+    return clean, ignored
+
+
+def global_hotkey_is_valid(value) -> bool:
+    """The same rule the Settings dialog's capture enforces: no hotkey at all,
+    or a key with Ctrl or Alt (plus optionally Shift). A system-wide hotkey on a
+    bare key would swallow that key in every other program."""
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    vk, mod = value.get("vk"), value.get("mod")
+    if isinstance(vk, bool) or isinstance(mod, bool):
+        return False
+    if not isinstance(vk, int) or not isinstance(mod, int):
+        return False
+    if not 0 < vk < 256:
+        return False
+    if mod & ~(_MOD_ALT | _MOD_CONTROL | _MOD_SHIFT):
+        return False
+    return bool(mod & (_MOD_CONTROL | _MOD_ALT))
+
+
 def _default_for(section, key=None):
     """The shipped default of a setting, or None when this build has no such
     setting. `sound_events` and friends ship as an empty dict, which means
@@ -199,7 +263,9 @@ def exportable_settings(settings) -> dict:
         # in a file the user mails to themselves with no test failing.
         if section not in DEFAULT_SETTINGS or is_excluded(section, None):
             continue
-        if isinstance(value, dict):
+        if section == "sound_events":
+            out[section], _ignored = _sound_events_without_paths(value)
+        elif isinstance(value, dict):
             kept = {k: copy.deepcopy(v) for k, v in value.items()
                     if not is_excluded(section, k, settings)}
             if kept or not value:
@@ -240,26 +306,83 @@ def read_export(payload):
     return settings, ""
 
 
-def api_change(current, incoming):
-    """The server an import would move this install to, or None.
+def api_endpoint(base, port, schemes):
+    """`base` and `port` as the single address the app will really connect
+    to — `scheme://host:port` — or None when that is not what they say.
 
-    Not None only when the file describes a custom API and applying it would
-    change anything about the API this install talks to. That is the one import
-    that decides where the session token is sent from now on, so it is asked
-    about on its own, with the address in front of the person, instead of
-    riding along with the language and the sounds. Moving back to the bundled
-    API is not asked about: that sends nothing anywhere new.
+    The app builds every URL as f"{base}:{port}/..." (REST from wpp_server,
+    Socket.IO from wpp_ws_server). So the only form that means what it looks
+    like is exactly `scheme://host`: userinfo turns `http://127.0.0.1@evil`
+    into a request to `evil`, a path or port inside `base` puts the real port
+    somewhere else, and whitespace or control characters can hide either. None
+    of those is a working configuration anyway, so refusing them loses nothing.
     """
-    if not uses_custom_api(incoming):
+    if not isinstance(base, str) or not base or any(
+            ch.isspace() or ord(ch) < 32 for ch in base):
         return None
+    try:
+        parts = urlsplit(base)
+        host = parts.hostname
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in schemes or not host or not 0 < port < 65536:
+        return None
+    netloc = parts.netloc.lower()
+    if netloc not in (host, f"[{host}]") or parts.path or parts.query or parts.fragment:
+        return None
+    return f"{scheme}://{netloc}:{port}"
+
+
+_REST_SCHEMES = ("http", "https")
+_WS_SCHEMES = ("ws", "wss", "http", "https")
+
+
+def _connection_after_import(current, incoming):
+    """The connection block as it would be if the file's were applied."""
     section = incoming.get("connection") if isinstance(incoming, dict) else None
     here = (current or {}).get("connection") if isinstance(current, dict) else None
     section = section if isinstance(section, dict) else {}
     here = here if isinstance(here, dict) else {}
-    if all(section.get(key, here.get(key)) == here.get(key) for key in _CONNECTION_KEYS):
+    return {key: section.get(key, here.get(key)) for key in _CONNECTION_KEYS}, here
+
+
+def custom_api_is_valid(current, incoming) -> bool:
+    """Whether a file describing a custom API names addresses that mean what
+    they look like (api_endpoint). A file on the bundled API is always valid:
+    its addresses never travel (CUSTOM_API_KEYS)."""
+    if not uses_custom_api(incoming):
+        return True
+    after, _here = _connection_after_import(current, incoming)
+    return (api_endpoint(after["wpp_server"], after["wpp_port"], _REST_SCHEMES) is not None
+            and api_endpoint(after["wpp_ws_server"], after["wpp_port"], _WS_SCHEMES) is not None)
+
+
+def api_change(current, incoming):
+    """Where an import would move this install's API, or None.
+
+    Not None only when the file describes a valid custom API and applying it
+    would change anything about the API this install talks to. That is the one
+    import that decides where the session token is sent from now on — to BOTH
+    addresses: every REST call carries it to wpp_server, and the Socket.IO
+    connection sends it as `apikey` to wpp_ws_server — so both are named, as
+    the host and port the app will really connect to, never as the raw string
+    the file typed. Moving back to the bundled API is not asked about: that
+    sends nothing anywhere new. An invalid custom API is not asked about
+    either: merge_settings() refuses it outright.
+
+    Returns {"server": ..., "ws_server": ...}.
+    """
+    if not uses_custom_api(incoming) or not custom_api_is_valid(current, incoming):
         return None
-    server = section.get("wpp_server", here.get("wpp_server"))
-    return str(server) if server else ""
+    after, here = _connection_after_import(current, incoming)
+    if all(after[key] == here.get(key) for key in _CONNECTION_KEYS):
+        return None
+    return {
+        "server": api_endpoint(after["wpp_server"], after["wpp_port"], _REST_SCHEMES),
+        "ws_server": api_endpoint(after["wpp_ws_server"], after["wpp_port"], _WS_SCHEMES),
+    }
 
 
 def merge_settings(current, incoming, include_connection=True):
@@ -277,8 +400,29 @@ def merge_settings(current, incoming, include_connection=True):
         if is_excluded(section, None) or section not in DEFAULT_SETTINGS:
             ignored.append(str(section))
             continue
-        if section == "connection" and not include_connection:
+        if section == "connection" and (
+                not include_connection or not custom_api_is_valid(current, incoming)):
             ignored.append(str(section))
+            continue
+        if section == "sound_events":
+            if isinstance(value, dict):
+                clean, dropped = _sound_events_without_paths(value)
+                # Merged per pack and event, so a path this install already has
+                # for an event survives the import of that event's switch.
+                target = merged.setdefault("sound_events", {})
+                for pack, events in clean.items():
+                    pack_target = target.setdefault(pack, {})
+                    if not isinstance(pack_target, dict):
+                        pack_target = target[pack] = {}
+                    for event, entry in events.items():
+                        existing = pack_target.get(event)
+                        base = dict(existing) if isinstance(existing, dict) else {}
+                        base.update(entry)
+                        pack_target[event] = base
+                applied += 1
+                ignored.extend(dropped)
+            else:
+                ignored.append(str(section))
             continue
         if _is_free_form(section):
             # Free-form in its KEYS (a sound event name, a JID), never in its
@@ -317,6 +461,9 @@ def merge_settings(current, incoming, include_connection=True):
                 ignored.append(f"{section}.{key}")
                 continue
             if not _same_kind(item, _default_for(section, key)):
+                ignored.append(f"{section}.{key}")
+                continue
+            if section == "general" and key == "global_hotkey" and not global_hotkey_is_valid(item):
                 ignored.append(f"{section}.{key}")
                 continue
             if section == "general" and key == "language" and not _language_is_usable(

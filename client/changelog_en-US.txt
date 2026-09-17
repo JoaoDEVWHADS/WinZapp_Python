@@ -26,7 +26,7 @@ FIXES
 
 - Adding a group member by phone number did nothing: the "Add number" button added nobody and showed no error. It now adds the number right away and tells you whether it worked, and an invalid number is reported. In the same dialog, the search field is now read as "Search contact".
 
-- With a chat open, the message list shrank back to the configured limit every minute, and older messages disappeared — including from the stored history. WinZapp mistook messages outside the range it checks on WhatsApp for messages deleted on the phone. It now only compares the range WhatsApp actually returned, and the list no longer shrinks while you read.
+- With a chat open, the message list shrank back to the configured limit every minute, and older messages disappeared — including from the stored history. WinZapp mistook messages outside the range it checks on WhatsApp for messages deleted on the phone. A message is now only removed when WhatsApp shows it really no longer exists — never just because it could not be found, and never within the period a profile recovery rolled back — and the list no longer shrinks while you read.
 
 - In groups with many participants, group info could sit on "Loading..." for minutes — Overview and the Participants list only appeared after WinZapp had looked up, one at a time, the number of every member whose number it did not know yet. It looked frozen, and only closing and reopening the dialog brought it back. The info now appears as soon as the group answers, and missing names and numbers are filled into the list afterwards, without moving you off the row you are on.
 

@@ -181,3 +181,95 @@ def observe_deletions(state: dict, key, missing, threshold: int):
         return set(run[0])
     state[key] = run
     return set()
+
+
+# ── Periods a profile restore rolled back ───────────────────────────────────────
+#
+# restore_snapshot() puts WhatsApp Web's own database back to when the snapshot
+# was taken. Everything between that moment and the restore is in WinZapp's
+# database and NOT in WhatsApp Web's — and it stays missing there after the
+# session reconnects: a gap in the middle of that chat's history, forever.
+#
+# A gap is indistinguishable from a deletion. A get-messages page is one
+# contiguous run of what the database holds, so a local message inside the gap
+# is "strictly newer than the page's oldest message and absent from it" on every
+# poll, and a confirmation run confirms it. Measured in review with the merged
+# reconciliation: m10..m19 of a 30-message chat mirrored as phone-side
+# deletions after three polls. `_remote_deletions_untrusted` only covered the
+# launch that did the restore; the gap outlives it.
+#
+# So every successful restore records the period it rolled back, persisted,
+# and no message stamped inside one is ever judged again. Missing a deletion
+# made on the phone in that period is cosmetic; the alternative deletes history
+# from the only complete copy.
+
+#: Recorded periods kept at most. Each restore adds one and restores are rare;
+#: the bound only stops a pathological loop from growing the list forever.
+MAX_ROLLBACK_GAPS = 20
+
+#: Widened on both sides. Before: WhatsApp Web may not have flushed the last
+#: minutes before the snapshot was taken. After: messages keep arriving while
+#: the restored session reconnects and catches up.
+ROLLBACK_GAP_MARGIN_BEFORE = 3600
+ROLLBACK_GAP_MARGIN_AFTER = 1800
+
+
+def add_rollback_gap(gaps, taken_at, restored_at):
+    """The gap list with the period (taken_at, restored_at] added, as
+    [[start, end], ...] in seconds, merged and bounded.
+
+    *taken_at* None — the snapshot's age could not be read — records
+    everything up to the restore: a restore of unknown age proves nothing
+    about any earlier message.
+    """
+    try:
+        end = int(restored_at) + ROLLBACK_GAP_MARGIN_AFTER
+    except (TypeError, ValueError):
+        return normalize_rollback_gaps(gaps)
+    try:
+        start = max(0, int(taken_at) - ROLLBACK_GAP_MARGIN_BEFORE)
+    except (TypeError, ValueError):
+        start = 0
+    return normalize_rollback_gaps(list(gaps or []) + [[start, end]])
+
+
+def normalize_rollback_gaps(gaps):
+    """Well-formed, sorted, merged and bounded [[start, end], ...]. Anything
+    unreadable in a stored list is dropped rather than trusted."""
+    clean = []
+    for gap in gaps or []:
+        try:
+            start, end = int(gap[0]), int(gap[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if end >= start >= 0:
+            clean.append([start, end])
+    clean.sort()
+    merged = []
+    for start, end in clean:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    # Keep the newest when bounding: an old gap is the one least likely to
+    # still hold messages anyone opens.
+    return merged[-MAX_ROLLBACK_GAPS:]
+
+
+def outside_rollback_gaps(records, gaps):
+    """*records* minus every message stamped inside a rolled-back period.
+
+    A record with no usable timestamp is left in: the comparison already
+    refuses to judge one (deletions_within_remote_window, older_than_window).
+    """
+    gaps = normalize_rollback_gaps(gaps)
+    if not gaps:
+        return list(records or [])
+    out = []
+    for record in records or []:
+        ts = _message_seconds(record)
+        if ts and any(start <= ts <= end for start, end in gaps):
+            continue
+        out.append(record)
+    return out
+

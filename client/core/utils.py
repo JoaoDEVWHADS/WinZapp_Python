@@ -973,6 +973,24 @@ def clear_chat_keep_starred_echo(body):
     return value if isinstance(value, bool) else None
 
 
+def clear_chat_applied(body, phone) -> bool:
+    """Whether a /clear-chat response says the clear itself succeeded for
+    *phone* — `response.data[phone]`, which wppconnect's clearChat() sets to
+    `WPP.chat.clear(...).status === 200`.
+
+    The keepStarred echo alone is not that: the controller echoes what it was
+    asked to apply even when WhatsApp Web answered the clear with a failure
+    and nothing threw, and recording the starred cutoff on that would hide,
+    in WinZapp only and for good, starred messages still on the phone. Only
+    an explicit True counts.
+    """
+    if not isinstance(body, dict):
+        return False
+    response = body.get("response")
+    data = response.get("data") if isinstance(response, dict) else None
+    return isinstance(data, dict) and data.get(phone) is True
+
+
 def generate_and_save_key(filepath):
     key = Fernet.generate_key()
     with open(filepath, 'wb') as key_file:

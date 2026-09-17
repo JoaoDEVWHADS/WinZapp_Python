@@ -12,7 +12,7 @@ the rest of this test suite.
 
 import time
 
-from core.utils import clear_chat_keep_starred_echo
+from core.utils import clear_chat_applied, clear_chat_keep_starred_echo
 from main import MainWindow
 
 
@@ -335,7 +335,8 @@ class TestClearChatForwardsTheChoiceToTheServer:
 
     def test_confirmed_by_the_server_records_the_starred_cutoff(self, monkeypatch):
         stub, posted = self._run(
-            monkeypatch, {"response": {"keepStarred": False}}, keep_starred=False,
+            monkeypatch, {"response": {"keepStarred": False, "data": {"jid1": True}}},
+            keep_starred=False,
         )
 
         (url, body), = posted
@@ -354,6 +355,21 @@ class TestClearChatForwardsTheChoiceToTheServer:
         # So the next sync brings them back, matching the phone.
         assert stub._is_cleared_message("jid1", _msg("b", 200, starred=True)) is False
         assert stub.announced == ["clear_chat_starred_kept_on_phone"]
+
+    def test_an_unconfirmed_clear_records_no_starred_cutoff(self, monkeypatch):
+        """The controller echoes keepStarred=false even when WhatsApp Web
+        answered the clear itself with a failure (data[phone] False, nothing
+        thrown, still HTTP 201). Found in review: the echo alone recorded the
+        cutoff and hid starred messages still on the phone for good."""
+        stub, _ = self._run(
+            monkeypatch, {"response": {"keepStarred": False, "data": {"jid1": False}}},
+            keep_starred=False,
+        )
+
+        assert "cleared_starred_chats" not in stub.settings
+        assert stub._is_cleared_message("jid1", _msg("b", 200, starred=True)) is False
+        # Not the "outdated server" sentence: the server is fine, the clear failed.
+        assert stub.announced == []
 
     def test_a_failed_request_records_no_starred_cutoff(self, monkeypatch):
         stub, _ = self._run(monkeypatch, None, ok=False, keep_starred=False)
@@ -390,6 +406,16 @@ class TestClearChatForwardsTheChoiceToTheServer:
         stub._announce_starred_clear_unsupported()
 
         assert stub.announced == ["use Ajuda > Forçar reinstalação da WPPConnect"]
+
+
+class TestClearChatApplied:
+    def test_only_an_explicit_true_for_that_phone_counts(self):
+        assert clear_chat_applied({"response": {"data": {"5511@c.us": True}}}, "5511@c.us") is True
+        for body in (None, {}, {"response": {}}, {"response": {"data": None}},
+                     {"response": {"data": {"5511@c.us": False}}},
+                     {"response": {"data": {"5511@c.us": "true"}}},
+                     {"response": {"data": {"other@c.us": True}}}):
+            assert clear_chat_applied(body, "5511@c.us") is False
 
 
 class TestClearChatKeepStarredEcho:

@@ -10,6 +10,7 @@ restart.
 
 import copy
 import json
+import threading
 import types
 
 import pytest
@@ -63,6 +64,8 @@ class _Stub:
         self.wpp_ws_server = "ws://127.0.0.1"
         self.wpp_port = 6412
         self.wpp_api_key = "install-key"
+        self._save_lock = threading.Lock()
+        self.ws = None
         self.app_name = "WinZapp"
         self.conversations_panel = _Panel()
         self.tray_icon = None
@@ -181,7 +184,8 @@ class TestACustomApiTravels:
             self._custom_file(tmp_path),
             confirm_api_change=lambda server: asked.append(server) or True)
 
-        assert asked == ["https://api.exemplo.com"]
+        assert asked == [{"server": "https://api.exemplo.com:8443",
+                          "ws_server": "wss://api.exemplo.com:8443"}]
 
         assert stub.wpp_server == "https://api.exemplo.com"
         assert stub.wpp_port == 8443
@@ -229,6 +233,36 @@ class TestMovingToAnotherApiIsAskedSeparately:
             self._custom_file(tmp_path), confirm_api_change=_boom)
         assert error == ""
         assert stub.settings["connection"] == before
+
+    def test_accepting_it_reconnects_the_live_socket_to_the_new_address(self, tmp_path, monkeypatch):
+        """REST reads the new address on the next request; the Socket.IO
+        connection would otherwise stay on the old one until a restart."""
+        started = []
+
+        class _InlineThread:
+            def __init__(self, target=None, daemon=None, **kw):
+                self._target = target
+
+            def start(self):
+                started.append(self._target)
+
+        monkeypatch.setattr("main.threading.Thread", _InlineThread)
+        stub = _Stub()
+        stub.ws = object()
+        stub.connect_websocket = lambda: None
+        stub.import_settings_from_file(self._custom_file(tmp_path),
+                                       confirm_api_change=lambda change: True)
+        assert started == [stub.connect_websocket]
+
+    def test_declining_leaves_the_socket_alone(self, tmp_path, monkeypatch):
+        started = []
+        monkeypatch.setattr("main.threading.Thread",
+                            lambda *a, **kw: types.SimpleNamespace(start=lambda: started.append(1)))
+        stub = _Stub()
+        stub.ws = object()
+        stub.import_settings_from_file(self._custom_file(tmp_path),
+                                       confirm_api_change=lambda change: False)
+        assert started == []
 
     def test_a_file_that_changes_nothing_about_the_api_asks_nothing(self, tmp_path):
         stub = _Stub()

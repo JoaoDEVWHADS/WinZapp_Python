@@ -26,7 +26,7 @@ CORRECCIONES
 
 - Agregar un miembro al grupo por número de teléfono no hacía nada: el botón "Agregar número" no agregaba a nadie y no mostraba ningún error. Ahora agrega el número al instante e indica si funcionó, y avisa si el número no es válido. En el mismo diálogo, el campo de búsqueda ahora se lee como "Buscar contacto".
 
-- Con una conversación abierta, la lista de mensajes se reducía cada minuto al límite configurado, y los mensajes antiguos desaparecían — también del historial guardado. WinZapp confundía los mensajes fuera del tramo que consulta en WhatsApp con mensajes borrados en el teléfono. Ahora solo compara el tramo que WhatsApp realmente devolvió, y la lista ya no se reduce mientras lees.
+- Con una conversación abierta, la lista de mensajes se reducía cada minuto al límite configurado, y los mensajes antiguos desaparecían — también del historial guardado. WinZapp confundía los mensajes fuera del tramo que consulta en WhatsApp con mensajes borrados en el teléfono. Ahora un mensaje solo se borra cuando WhatsApp muestra que realmente ya no existe — nunca solo porque no se encontró, ni dentro del período que una recuperación del perfil dejó atrás — y la lista ya no se reduce mientras lees.
 
 - En grupos con muchos participantes, los datos del grupo podían quedarse en "Cargando..." durante minutos: el Resumen y la lista de Participantes solo aparecían después de que WinZapp buscara, uno por uno, el número de cada miembro cuyo número aún no conocía. Parecía bloqueado, y solo volvía cerrando y abriendo el diálogo. Ahora los datos aparecen en cuanto el grupo responde, y los nombres y números que faltan se completan en la lista a continuación, sin sacarte de la fila en la que estás.
 

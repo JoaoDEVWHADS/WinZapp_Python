@@ -260,6 +260,8 @@ class _ReconcileStub:
     _deletions_before_remote_window = MainWindow._deletions_before_remote_window
     _REMOTE_BEFORE_PAGES = MainWindow._REMOTE_BEFORE_PAGES
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
+    _rollback_gaps = MainWindow._rollback_gaps
+    _ROLLBACK_GAPS_METADATA_KEY = MainWindow._ROLLBACK_GAPS_METADATA_KEY
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions
     _REMOTE_CLEAR_CONFIRM_STRIKES = MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES
