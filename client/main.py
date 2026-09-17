@@ -6020,8 +6020,30 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self._sync_voice_call_bar)
         return True
 
-    def _stop_voice_call_audio(self):
+    def _stop_voice_call_audio(self, grace_seconds: float = 0.0):
         session = getattr(self, "_call_audio_session", None)
+        if session is not None and grace_seconds > 0:
+            pending = getattr(self, "_call_audio_stop_timer", None)
+            if pending is not None and pending.is_alive():
+                return
+
+            # WhatsApp renders its disconnect tone immediately after the
+            # terminal call state. Keep both the remote Pulse monitor and the
+            # local output stream alive long enough to deliver that tail.
+            def _finish_after_tail():
+                if getattr(self, "_call_audio_session", None) is session:
+                    self._stop_voice_call_audio()
+
+            timer = threading.Timer(grace_seconds, _finish_after_tail)
+            timer.daemon = True
+            self._call_audio_stop_timer = timer
+            timer.start()
+            return
+
+        pending = getattr(self, "_call_audio_stop_timer", None)
+        if pending is not None:
+            pending.cancel()
+            self._call_audio_stop_timer = None
         self._call_audio_session = None
         self._active_voice_call = None
         self._voice_call_last_announced_state = ""
@@ -6121,8 +6143,6 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def end_active_call(self, _event=None):
-        self._stop_voice_call_audio()
-
         def _worker():
             with self._call_action_lock:
                 try:
@@ -6136,6 +6156,8 @@ class MainWindow(wx.Frame):
                         self.i18n.t("incoming_call_end_failed").format(error=exc),
                         True,
                     )
+                finally:
+                    self._stop_voice_call_audio(grace_seconds=1.25)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -6358,7 +6380,7 @@ class MainWindow(wx.Frame):
             "HANDLED_REMOTELY", "REMOTE_CALL_IN_PROGRESS",
         }
         if state in terminal_states or event.get("event") in {"ended", "timeout"}:
-            self._stop_voice_call_audio()
+            self._stop_voice_call_audio(grace_seconds=1.25)
             self.output(self.i18n.t("voice_call_ended"), interrupt=True)
             return
         if state == "ACTIVE" and self._voice_call_last_announced_state != "ACTIVE":
