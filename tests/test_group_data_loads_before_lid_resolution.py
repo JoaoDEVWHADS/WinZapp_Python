@@ -75,6 +75,11 @@ class _Mw:
             raise RuntimeError("boom")
 
 
+def _named(fn, name):
+    fn.__name__ = name
+    return fn
+
+
 def _stub(mw, events):
     stub = types.SimpleNamespace(
         _is_group=True,
@@ -84,7 +89,7 @@ def _stub(mw, events):
         _LID_RESOLVE_CHUNK=ConversationDataDialog._LID_RESOLVE_CHUNK,
         _load_media_history=lambda: events.append(("media",)),
         _populate_group=lambda data: None,
-        _refresh_participant_rows=lambda: None,
+        _refresh_participant_rows=_named(lambda: None, "_refresh_participant_rows"),
     )
     stub._resolve_participant_lids = types.MethodType(
         ConversationDataDialog._resolve_participant_lids, stub
@@ -111,8 +116,7 @@ class TestFetchPostsTheDataFirst:
     def test_populate_is_posted_before_any_resolution_call(self, events):
         participants = [{"id": _lid(i)} for i in range(3)]
         stub = _stub(_Mw(participants, events), events)
-        stub._populate_group = lambda data: None
-        stub._populate_group.__name__ = "_populate_group"
+        stub._populate_group = _named(lambda data: None, "_populate_group")
         ConversationDataDialog._fetch_data(stub)
 
         names = _names(events)
@@ -120,15 +124,27 @@ class TestFetchPostsTheDataFirst:
         populate = next(e for e in events if e[0] == "CallAfter" and e[1] == "_populate_group")
         assert populate[2][0]["participants"] == participants
 
-    def test_resolves_in_chunks_and_repaints_after_each(self, events):
+    def test_one_lookup_per_call_repainting_every_chunk_and_at_the_end(self, events):
         chunk = ConversationDataDialog._LID_RESOLVE_CHUNK
         participants = [{"id": _lid(i)} for i in range(chunk * 2 + 1)]
         stub = _stub(_Mw(participants, events), events)
         stub._resolve_participant_lids({"participants": participants})
 
         resolves = [e[1] for e in events if e[0] == "resolve"]
-        assert [len(r) for r in resolves] == [chunk, chunk, 1]
-        assert _names(events) == ["resolve", "<lambda>"] * 3
+        assert resolves == [[_lid(i)] for i in range(chunk * 2 + 1)]
+        repaint = "_refresh_participant_rows"
+        assert _names(events) == (
+            ["resolve"] * chunk + [repaint]
+            + ["resolve"] * chunk + [repaint]
+            + ["resolve", repaint]
+        )
+
+    def test_an_exact_multiple_does_not_repaint_twice(self, events):
+        chunk = ConversationDataDialog._LID_RESOLVE_CHUNK
+        participants = [{"id": _lid(i)} for i in range(chunk)]
+        stub = _stub(_Mw(participants, events), events)
+        stub._resolve_participant_lids({"participants": participants})
+        assert _names(events).count("_refresh_participant_rows") == 1
 
     def test_nothing_to_resolve_posts_no_repaint(self, events):
         stub = _stub(_Mw([], events), events)
@@ -144,7 +160,9 @@ class TestClosingStopsTheResolution:
         stub._resolve_participant_lids({"participants": participants})
         assert events == []
 
-    def test_closed_between_chunks_stops_there(self, events):
+    def test_closed_mid_round_stops_at_the_next_lookup(self, events):
+        """Not at the end of the round: that was up to ~15 s of API calls on
+        behalf of a dialog nobody has open any more."""
         chunk = ConversationDataDialog._LID_RESOLVE_CHUNK
         participants = [{"id": _lid(i)} for i in range(chunk * 3)]
         mw = _Mw(participants, events)
@@ -204,8 +222,10 @@ class _RowMw:
     def __init__(self):
         self._lid_to_phone = {}
         self.names = {}
+        self.resolve_missing_args = []
 
-    def _resolve_jid_name(self, jid):
+    def _resolve_jid_name(self, jid, chat_jid_norm="", *, resolve_missing=True):
+        self.resolve_missing_args.append(resolve_missing)
         return self.names.get(jid, "")
 
 
@@ -247,6 +267,17 @@ class TestRefreshRewritesOnlyWhatChanged:
         assert stub._participant_jids[0] == phone
         # The unresolved admin row was not touched at all.
         assert all(w[0] == 0 for w in stub._part_list.writes)
+
+    def test_building_a_row_never_starts_its_own_lookup(self):
+        """MainWindow._resolve_jid_name() starts a resolution thread per
+        unnamed @lid by default. With rows now built before resolution that
+        was one unthrottled thread per unmapped member, and the dialog's own
+        throttled loop then skipped them all as in flight — caught in review."""
+        mw = _RowMw()
+        stub = _row_stub([_lid(1), _lid(2)], [False, False], mw)
+        stub._part_list = self._first_fill(stub)
+        ConversationDataDialog._refresh_participant_rows(stub)
+        assert mw.resolve_missing_args and not any(mw.resolve_missing_args)
 
     def test_admin_suffix_survives_the_repaint(self):
         mw = _RowMw()

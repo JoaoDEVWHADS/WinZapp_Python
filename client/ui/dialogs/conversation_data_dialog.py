@@ -767,21 +767,30 @@ class ConversationDataDialog(wx.Dialog):
             # silently hanging the dialog.
             logging.exception("[ConversationDataDialog] _populate_group failed for %s", self._jid)
 
-    # Unmapped @lid participants resolved per round before the rows are
-    # repainted. At ~0.6 s each that is a repaint every ~15 s — often enough
-    # that names visibly arrive while the dialog is open, rarely enough that a
-    # screen reader sitting on a changed row is not re-reading it constantly.
+    # Unmapped @lid participants resolved between repaints of the rows. At
+    # ~0.6 s each that is a repaint every ~15 s — often enough that names
+    # visibly arrive while the dialog is open, rarely enough that a screen
+    # reader sitting on a changed row is not re-reading it constantly.
     _LID_RESOLVE_CHUNK = 25
 
     def _resolve_participant_lids(self, data: dict) -> None:
         """Resolve unmapped @lid participants AFTER the rows are shown.
 
-        Runs on the background fetch thread, in chunks, repainting the rows
-        after each one. Stops as soon as the dialog is closed: the resolution
-        only exists to improve this list, and a 300-member group would
-        otherwise keep calling the API for minutes on behalf of nobody — the
-        next opening picks up wherever this left off, since everything
-        resolved so far is already in the mapping caches.
+        Runs on the background fetch thread, one JID per call so that closing
+        the dialog is noticed within one lookup (~0.6 s) rather than one
+        chunk, and repaints the rows every _LID_RESOLVE_CHUNK lookups plus
+        once at the end. Stops when the dialog is closed: the resolution only
+        exists to improve this list, and a 300-member group would otherwise
+        keep calling the API for minutes on behalf of nobody — the next
+        opening picks up wherever this left off, since everything resolved so
+        far is already in the mapping caches.
+
+        This loop is the ONLY thing resolving on the dialog's behalf, which is
+        why _participant_row() passes resolve_missing=False. With the rows now
+        built before resolution, the default would start one unthrottled
+        thread per unmapped member — ~305 at once on the reported group — and
+        this loop would then skip every one of them as already in flight and
+        repaint before any answer came back.
 
         Owns its own failures. It runs after the rows were posted, and letting
         an exception reach _fetch_data()'s handler would post
@@ -792,19 +801,26 @@ class ConversationDataDialog(wx.Dialog):
             (data or {}).get("participants"), lid_to_phone
         )
         chunk = self._LID_RESOLVE_CHUNK
-        for start in range(0, len(lids), chunk):
+        done = 0
+        for lid in lids:
             if self._closed.is_set():
                 return
             try:
-                self._mw.resolve_lid_jids_via_api(lids[start:start + chunk])
+                self._mw.resolve_lid_jids_via_api([lid])
             except Exception:
                 logging.exception(
                     "[ConversationDataDialog] participant @lid resolution failed for %s",
                     self._jid,
                 )
-                return
-            if self._closed.is_set():
-                return
+                break
+            done += 1
+            if done % chunk == 0 and not self._closed.is_set():
+                wx.CallAfter(self._refresh_participant_rows)
+        # The last partial round — and, after a failure, whatever did resolve.
+        # Also catches a lookup another caller (a presence event, the
+        # conversation panel) finished for a JID this loop skipped as already
+        # in flight.
+        if done % chunk != 0 and not self._closed.is_set():
             wx.CallAfter(self._refresh_participant_rows)
 
     def _participant_row(self, p_jid: str, is_admin: bool):
@@ -825,7 +841,9 @@ class ConversationDataDialog(wx.Dialog):
         p_phone = format_number(display_phone_jid) if not display_phone_jid.endswith("@lid") else display_phone_jid.rsplit("@", 1)[0]
         # Resolve name: use the robust display name resolution method from MainWindow
         # which checks contacts, chats, presence pushNames, and messages.
-        p_name = self._mw._resolve_jid_name(p_jid)
+        # resolve_missing=False: _resolve_participant_lids() does the resolving,
+        # throttled — see its docstring for what the default did here.
+        p_name = self._mw._resolve_jid_name(p_jid, resolve_missing=False)
         if not p_name or p_name == p_phone or p_name.isdigit() or p_name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
             p_name = p_phone
         # Append the admin status directly onto the row's own text (not
