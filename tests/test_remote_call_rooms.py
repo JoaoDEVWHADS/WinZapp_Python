@@ -47,3 +47,10 @@ def test_audio_graph_hook_cannot_recursively_attach_the_same_remote_track():
     assert "remoteTrackIds: new Set<string>()" in source
     assert "if (state.remoteTrackIds.has(id)) return;" in source
     assert "state.remoteTrackIds.add(id);" in source
+
+
+def test_audio_graph_hook_never_routes_the_synthetic_microphone_to_speakers():
+    source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
+    assert "localTrackIds: new Set<string>()" in source
+    assert "if (state.localTrackIds.has(id)) return;" in source
+    assert source.count("state.localTrackIds.add(micTrack.id)") == 2

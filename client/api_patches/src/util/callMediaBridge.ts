@@ -9,14 +9,14 @@ const micDraining = new Set<string>();
 
 function installCallMediaBridgeInPage(): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 2) return true;
+  if (win.__winzappCallMediaBridge?.version === 3) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
   if (!AudioContextCtor) return false;
 
   const state: any = {
-    version: 2,
+    version: 3,
     enabled: false,
     context: null,
     micDestination: null,
@@ -25,6 +25,7 @@ function installCallMediaBridgeInPage(): boolean {
     micOffset: 0,
     remotePipelines: new Map<string, any>(),
     remoteTrackIds: new Set<string>(),
+    localTrackIds: new Set<string>(),
     micFramesPushed: 0,
     micBytesPushed: 0,
     micSamplesConsumed: 0,
@@ -117,7 +118,9 @@ function installCallMediaBridgeInPage(): boolean {
     schedulerSink.connect(context.destination);
     state.micProcessor = processor;
     state.micDestination = destination;
-    return destination.stream.getAudioTracks()[0];
+    const track = destination.stream.getAudioTracks()[0];
+    if (track?.id) state.localTrackIds.add(track.id);
+    return track;
   };
 
   state.enable = () => {
@@ -153,11 +156,15 @@ function installCallMediaBridgeInPage(): boolean {
     }
     state.remotePipelines.clear();
     state.remoteTrackIds.clear();
+    state.localTrackIds.clear();
   };
 
   const attachRemoteTrack = (track: MediaStreamTrack) => {
     if (!track || track.kind !== 'audio') return;
     const id = track.id || String(Math.random());
+    // The broad Web Audio hook also observes WhatsApp consuming our synthetic
+    // microphone. Never loop that local track back into the speaker pipeline.
+    if (state.localTrackIds.has(id)) return;
     // Creating our own MediaStreamSource below goes through the global audio
     // graph hook too. Reserve this id before doing so, otherwise that hook
     // re-enters here and recursively builds an unbounded number of pipelines.
@@ -244,6 +251,7 @@ function installCallMediaBridgeInPage(): boolean {
       pc.addTrack = ((track: MediaStreamTrack, ...streams: MediaStream[]) => {
         if (state.enabled && track?.kind === 'audio') {
           const micTrack = ensureMicTrack().clone();
+          if (micTrack.id) state.localTrackIds.add(micTrack.id);
           const micStream = new MediaStream([micTrack]);
           return nativeAddTrack(micTrack, micStream);
         }
@@ -360,6 +368,7 @@ function installCallMediaBridgeInPage(): boolean {
     // the native VoIP bootstrap can complete without touching audio hardware.
     // Once state.enabled becomes true, Python PCM is written into this track.
     const micTrack = ensureMicTrack().clone();
+    if (micTrack.id) state.localTrackIds.add(micTrack.id);
     if (!constraints.video) return new MediaStream([micTrack]);
     const videoOnly = await nativeGetUserMedia({ video: constraints.video, audio: false });
     videoOnly.addTrack(micTrack);
