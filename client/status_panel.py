@@ -979,10 +979,13 @@ class StatusPanel(wx.Panel):
         wx.CallAfter(self._set_list_loading)
         my_statuses, contacts = self._fetch_statuses_from_api()
         api_ok = getattr(self, "_last_status_api_ok", False)
-        # A successful WhatsApp response is authoritative for own stories.
-        # An empty list must clear stale local optimistic rows.
+        my_status_ready = getattr(self, "_last_my_status_ready", False)
+        # A non-empty legacy response is safe to reconcile. An empty list is
+        # authoritative only when the API confirms getMyStatus() was ready.
         if api_ok:
-            self._reconcile_my_status_cache(my_statuses)
+            self._reconcile_my_status_cache(
+                my_statuses, authoritative_empty=my_status_ready
+            )
         # Merge, never replace: the API's StatusV3Store may only hold the
         # pages loaded so far, while _status_updates (seeded from the DB at
         # startup) keeps the stories that arrived via status@broadcast
@@ -999,24 +1002,17 @@ class StatusPanel(wx.Panel):
             contacts = self._merge_status_contacts(contacts, fb_contacts)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 
-    def _reconcile_my_status_cache(self, remote_my_statuses: list) -> None:
+    def _reconcile_my_status_cache(
+        self, remote_my_statuses: list, *, authoritative_empty: bool = False
+    ) -> None:
         """Delete cached own stories absent from authoritative WhatsApp.
 
-        Only runs when *remote_my_statuses* is non-empty. _fetch_statuses_
-        from_api() marks the fetch "ok" as soon as it gets back HTTP 200
-        with a JSON dict body — it has no way to tell "you genuinely have
-        no live stories right now" apart from "WPPConnect's StatusV3Store
-        hasn't finished rehydrating yet" (routine right after a reconnect),
-        both of which look identical here: an empty myStatus list. Treating
-        an empty-but-"ok" response as authoritative used to permanently
-        delete every locally cached own status — from memory AND SQLite,
-        via remove_failed_status_update() — on the next reconnect after
-        posting one, even though it was still live on WhatsApp. A genuinely
-        expired own status (the one real case this deliberately no longer
-        catches) is the far cheaper failure to leave uncorrected than
-        wiping a user's own live content out from under them.
+        Empty lists are destructive only after the API confirms that
+        WPP.status.getMyStatus() actually returned a loaded status model.
+        Older/custom APIs without that readiness marker keep the safe legacy
+        behavior: a non-empty list can reconcile, an empty one cannot.
         """
-        if not remote_my_statuses:
+        if not remote_my_statuses and not authoritative_empty:
             return
         mw = self.main_window
         remote_ids = {
@@ -1108,15 +1104,18 @@ class StatusPanel(wx.Panel):
             resp = api_get(url, headers=headers, timeout=15)
             if resp.status_code not in (200, 201):
                 self._last_status_api_ok = False
+                self._last_my_status_ready = False
                 return [], []
             body = resp.json() or {}
             data = body.get("response") if isinstance(body, dict) else None
         except Exception as exc:
             logging.warning("[status_panel] statuses API failed, falling back to WebSocket cache: %s", exc)
             self._last_status_api_ok = False
+            self._last_my_status_ready = False
             return [], []
         if not isinstance(data, dict):
             self._last_status_api_ok = False
+            self._last_my_status_ready = False
             return [], []
 
         ws  = getattr(mw, "ws", None)
@@ -1139,6 +1138,11 @@ class StatusPanel(wx.Panel):
                     logging.warning("[status_panel] failed to normalize API status: %s", exc)
             records.append(wm)
         self._last_status_api_ok = True
+        # New APIs distinguish "loaded and genuinely empty" from "not ready".
+        # Non-empty responses remain authoritative for backward compatibility.
+        self._last_my_status_ready = bool(data.get("myStatusReady")) or bool(
+            data.get("myStatus")
+        )
         return self._parse_statuses(records, i18n)
 
     def _parse_statuses(self, items, i18n) -> tuple:
