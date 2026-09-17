@@ -36,6 +36,8 @@ CORREÇÕES
 
 - Depois que o WinZapp recupera o perfil do navegador, conversas com mensagens não lidas não aparecem mais como lidas.
 
+- Ao copiar um trecho da janela de texto da mensagem (Alt+C), o texto vinha com quebras de linha que a mensagem não tinha, nos pontos em que a janela divide as linhas longas para facilitar a leitura. Agora a cópia traz a mensagem como foi escrita, só com as quebras de linha dela.
+
 V1.1.1.0
 
 Esta versão é sobre manter a sua conta conectada. O WinZapp passou a guardar uma cópia de segurança do perfil do navegador — que é onde a sua conexão com o WhatsApp realmente fica guardada — e a restaurá-la sozinho quando ela deixa de ser aceita, avisando o que aconteceu. Junto vieram as correções das situações que quebravam a sessão e faziam o programa pedir para parear de novo: desligar o computador, suspender e retomar, e o próprio programa reiniciando a conexão. Também chegaram a verificação ortográfica no campo de mensagem e as ações sobre links.
