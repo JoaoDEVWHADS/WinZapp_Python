@@ -126,18 +126,26 @@ class AccessibleEmojiButton(wx.Accessible):
 class _VoiceButtonAccessible(wx.Accessible):
     """Base for voice-recording buttons with custom keyboard shortcuts.
 
-    The native wx label must always remain available to MSAA. Recording-start
-    focus announcements are suppressed separately and only at the instant the
-    application moves focus, so navigating back to the button with Tab still
-    announces its real name and role.
+    The same accessible object also implements the transient focus cloak used
+    when WinZapp moves focus programmatically. Keeping both behaviours in one
+    object avoids replacing the button's accessible object and losing its
+    keyboard shortcut metadata after the first recording.
     """
 
-    def __init__(self, main_window):
+    def __init__(self, main_window, window=None):
         super().__init__()
         self._mw = main_window
+        self.cloaked = False
+        if window is not None:
+            setattr(window, "_winzapp_focus_cloak", self)
 
     def GetName(self, childId):
         return (wx.ACC_NOT_IMPLEMENTED, "")
+
+    def GetState(self, childId):
+        if self.cloaked and childId == 0:
+            return (wx.ACC_OK, wx.ACC_STATE_SYSTEM_FOCUSABLE)
+        return (wx.ACC_NOT_IMPLEMENTED, 0)
 
 
 class AccessibleDiscardVoiceMessage(_VoiceButtonAccessible):
@@ -150,8 +158,8 @@ class AccessibleDiscardVoiceMessage(_VoiceButtonAccessible):
 class AccessiblePauseResumeRecording(_VoiceButtonAccessible):
     """Reports Ctrl+Shift+P as the keyboard shortcut for the Pause/Resume button."""
 
-    def __init__(self, main_window=None):
-        super().__init__(main_window)
+    def __init__(self, main_window=None, window=None):
+        super().__init__(main_window, window)
 
     def GetKeyboardShortcut(self, childId):
         return (wx.ACC_OK, "Ctrl+Shift+P")

@@ -226,11 +226,9 @@ def test_no_timer_means_the_cloak_is_undone_rather_than_left_armed(button, monke
 
 
 class _PanelStub:
-    """ConversationsPanel/StatusPanel are wx classes that cannot be built
-    without a full app, so the methods under test are bound to a stub carrying
-    only what they touch — the pattern the rest of this suite uses."""
+    """Minimal panel state used to verify recording-focus suppression."""
 
-    def __init__(self, silence_while_recording):
+    def __init__(self, silence_while_recording, extended_enabled=True):
         self.main_window = type(
             "MW",
             (),
@@ -238,7 +236,10 @@ class _PanelStub:
                 "settings": {
                     "speech_content": {
                         "silence_while_recording": silence_while_recording
-                    }
+                    },
+                    "accessibility": {
+                        "extended_sr_compat_enabled": extended_enabled
+                    },
                 },
                 "speak_output": None,
             },
@@ -258,32 +259,41 @@ class _FakeButton:
 
 
 @pytest.mark.parametrize("panel_module", ["ui.conversations", "status_panel"])
-@pytest.mark.parametrize("enabled", [True, False])
-def test_focus_helper_arms_the_cloak_only_when_the_setting_is_on(
-    panel_module, enabled, monkeypatch
+@pytest.mark.parametrize(
+    ("silence_enabled", "extended_enabled", "should_arm"),
+    [
+        (False, True, False),
+        (True, True, True),
+        (False, False, True),
+        (True, False, True),
+    ],
+)
+def test_focus_helper_arms_cloak_for_silence_or_extended_compat_off(
+    panel_module, silence_enabled, extended_enabled, should_arm, monkeypatch
 ):
-    """Both panels carry their own copy of this; both must key on the same
-    single toggle. StatusPanel's copy used to also fire when
-    extended_sr_compat_enabled was off — i.e. it interrupted the screen reader
-    of a user who had asked WinZapp never to speak to it."""
     import importlib
 
     module = importlib.import_module(panel_module)
     panel_cls = (
-        module.ConversationsPanel if panel_module == "ui.conversations" else module.StatusPanel
+        module.ConversationsPanel
+        if panel_module == "ui.conversations"
+        else module.StatusPanel
     )
 
     armed = []
     monkeypatch.setattr(module, "cloak_focus_announcement", lambda w: armed.append(w))
 
-    stub = _PanelStub(enabled)
+    stub = _PanelStub(silence_enabled, extended_enabled)
     stub._voice_recording_silence_enabled = (
         panel_cls._voice_recording_silence_enabled.__get__(stub)
+    )
+    stub._voice_recording_focus_suppression_enabled = (
+        panel_cls._voice_recording_focus_suppression_enabled.__get__(stub)
     )
     stub._silence_send_voice_focus_if_enabled = lambda: None
 
     btn = _FakeButton()
     panel_cls._focus_recording_button_silently(stub, btn)
 
-    assert btn.focused, "focus must move regardless of the setting"
-    assert armed == ([btn] if enabled else [])
+    assert btn.focused, "focus must move regardless of the settings"
+    assert armed == ([btn] if should_arm else [])

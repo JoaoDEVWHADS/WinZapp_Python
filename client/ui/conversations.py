@@ -1145,14 +1145,18 @@ class ConversationsPanel(wx.Panel):
         self._discard_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("discard_voice_message")
         )
-        self._discard_voice_btn.SetAccessible(AccessibleDiscardVoiceMessage(self.main_window))
+        self._discard_voice_btn.SetAccessible(
+            AccessibleDiscardVoiceMessage(self.main_window, self._discard_voice_btn)
+        )
         self._discard_voice_btn.Bind(wx.EVT_BUTTON, self._discard_voice_message)
         voice_sizer.Add(self._discard_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._pause_resume_btn = wx.Button(
             self._voice_panel, label=i18n.t("pause_recording")
         )
-        self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording(self.main_window))
+        self._pause_resume_btn.SetAccessible(
+            AccessiblePauseResumeRecording(self.main_window, self._pause_resume_btn)
+        )
         self._pause_resume_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_recording)
         voice_sizer.Add(self._pause_resume_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -1175,7 +1179,9 @@ class ConversationsPanel(wx.Panel):
         self._send_voice_btn = wx.Button(
             self._voice_panel, label=i18n.t("send_voice_message")
         )
-        self._send_voice_btn.SetAccessible(AccessibleSendVoiceMessage(self.main_window))
+        self._send_voice_btn.SetAccessible(
+            AccessibleSendVoiceMessage(self.main_window, self._send_voice_btn)
+        )
         self._send_voice_btn.Bind(wx.EVT_BUTTON, self._send_voice_message)
         voice_sizer.Add(self._send_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
@@ -3309,20 +3315,27 @@ class ConversationsPanel(wx.Panel):
     # ── Voice recording ──────────────────────────────────────────────────────
 
     def _voice_recording_silence_enabled(self):
-        """True when Settings > Conteúdo Falado asks for silence while
-        recording a voice message.
-
-        Keyed ONLY on that toggle. It used to also fire when
-        extended_sr_compat_enabled was OFF — i.e. exactly when the user had
-        told WinZapp never to talk to their screen reader, the app started
-        interrupting it instead. That switch stops WinZapp's own AO2
-        announcements; nothing about it asks for other applications' speech to
-        be cut off.
-        """
+        """Whether all WinZapp spoken content is muted during recording."""
         settings = getattr(self.main_window, "settings", None) or {}
         return bool(
             settings.get("speech_content", {}).get("silence_while_recording", False)
         )
+
+    def _voice_recording_focus_suppression_enabled(self):
+        """Whether WinZapp's automatic recording-button focus stays silent.
+
+        The dedicated silence setting always enables this. Disabling extended
+        screen-reader compatibility also suppresses only this native focus
+        announcement, without muting unrelated screen-reader speech.
+        """
+        settings = getattr(self.main_window, "settings", None) or {}
+        silence_recording = settings.get("speech_content", {}).get(
+            "silence_while_recording", False
+        )
+        extended_enabled = settings.get("accessibility", {}).get(
+            "extended_sr_compat_enabled", True
+        )
+        return bool(silence_recording or not extended_enabled)
 
     def _focus_recording_button_silently(self, button):
         """Move focus to one of the voice-recording buttons without the screen
@@ -3348,7 +3361,7 @@ class ConversationsPanel(wx.Panel):
         Whether the button is Enviar or Descartar is the user's own choice in
         Configurações > Interface do usuário; both go through here.
         """
-        if self._voice_recording_silence_enabled():
+        if self._voice_recording_focus_suppression_enabled():
             # Must be armed BEFORE SetFocus(): the state has to already be
             # hiding FOCUSED by the time the screen reader reads it back.
             cloak_focus_announcement(button)
@@ -3372,7 +3385,7 @@ class ConversationsPanel(wx.Panel):
         syllable rather than a sentence. Each call is idempotent, so the
         repeats are harmless.
         """
-        if not self._voice_recording_silence_enabled():
+        if not self._voice_recording_focus_suppression_enabled():
             return
         speak_output = getattr(self.main_window, "speak_output", None)
         silence_focus = getattr(speak_output, "silence_screen_reader_focus", None)
@@ -3381,7 +3394,11 @@ class ConversationsPanel(wx.Panel):
         # silence() (unlike silence_screen_reader_focus) also reaches the SAPI
         # voice, which is WinZapp's own output when no screen reader is running
         # — cutting it is cutting our own speech, never another app's.
-        silence_all = getattr(speak_output, "silence", None)
+        silence_all = (
+            getattr(speak_output, "silence", None)
+            if self._voice_recording_silence_enabled()
+            else None
+        )
 
         def _silence_now():
             silence_focus()

@@ -207,6 +207,9 @@ class TestSilenceSendVoiceFocusIfEnabled:
         stub._voice_recording_silence_enabled = types.MethodType(
             ConversationsPanel._voice_recording_silence_enabled, stub
         )
+        stub._voice_recording_focus_suppression_enabled = types.MethodType(
+            ConversationsPanel._voice_recording_focus_suppression_enabled, stub
+        )
         stub._silence_send_voice_focus_if_enabled = types.MethodType(
             ConversationsPanel._silence_send_voice_focus_if_enabled, stub
         )
@@ -256,17 +259,23 @@ class TestSilenceSendVoiceFocusIfEnabled:
         # silence() rides along on every one of them, for the SAPI case.
         assert stub.main_window.speak_output.silence_calls == expected
 
-    def test_does_not_fire_merely_because_extended_sr_compat_is_off(self, monkeypatch):
-        """Turning extended screen-reader compatibility OFF means "stop talking
-        to my screen reader", not "start interrupting it". Only the dedicated
-        silence-while-recording toggle may cancel the focus announcement."""
+    def test_extended_compat_off_suppresses_only_native_focus(self, monkeypatch):
+        """With extended compatibility off, the automatic Send focus must stay
+        quiet without muting unrelated WinZapp/SAPI speech."""
         deferred = self._capture_deferred_calls(monkeypatch)
         stub = self._make_stub(silence_enabled=False, extended_enabled=False)
 
         stub._silence_send_voice_focus_if_enabled()
 
-        assert stub.main_window.speak_output.focus_silence_calls == 0
-        assert deferred == []
+        assert stub.main_window.speak_output.focus_silence_calls == 1
+        assert stub.main_window.speak_output.silence_calls == 0
+        assert [delay for delay, _ in deferred] == self.EXPECTED_DELAYS
+        for _, func in deferred:
+            func()
+        assert stub.main_window.speak_output.focus_silence_calls == 1 + len(
+            self.EXPECTED_DELAYS
+        )
+        assert stub.main_window.speak_output.silence_calls == 0
 
     def test_fires_on_the_silence_toggle_even_with_extended_compat_off(self, monkeypatch):
         """The two settings are independent: the silence toggle is what arms
@@ -297,6 +306,40 @@ class TestVoiceButtonAccessibleName:
                 "speech_content": {"silence_while_recording": silence_enabled},
                 "accessibility": {"extended_sr_compat_enabled": extended_enabled},
             }
+
+    def test_send_accessible_is_the_focus_cloak_without_losing_shortcut(self):
+        import wx
+
+        button = types.SimpleNamespace()
+        main_window = self._FakeMainWindow(True, True)
+        send = AccessibleSendVoiceMessage(main_window, button)
+
+        assert button._winzapp_focus_cloak is send
+        send.cloaked = True
+        assert send.GetState(0) == (wx.ACC_OK, wx.ACC_STATE_SYSTEM_FOCUSABLE)
+        assert send.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+R")
+        send.cloaked = False
+        assert send.GetState(0) == (wx.ACC_NOT_IMPLEMENTED, 0)
+
+    def test_focus_cloak_reuses_voice_accessible_instead_of_replacing_it(self, monkeypatch):
+        from core import focus_cloak
+
+        class _Button:
+            def SetAccessible(self, _accessible):
+                raise AssertionError("existing voice accessible must not be replaced")
+
+        button = _Button()
+        send = AccessibleSendVoiceMessage(self._FakeMainWindow(True, True), button)
+        callbacks = []
+        monkeypatch.setattr(
+            focus_cloak.wx, "CallLater", lambda _delay, func: callbacks.append(func)
+        )
+
+        assert focus_cloak.cloak_focus_announcement(button) is True
+        assert send.cloaked is True
+        assert callbacks
+        callbacks[0]()
+        assert send.cloaked is False
 
     def test_name_and_shortcut_remain_available_for_every_setting_combination(self):
         import wx
