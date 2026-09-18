@@ -329,6 +329,8 @@
     "whats_new_none_message": "Nenhum changelog disponível para esta versão.",
     "update_downloading": "Baixando atualização...",
     "update_installing": "Instalando atualização...",
+    "update_closing_other_accounts": "Fechando as outras contas do WinZapp...",
+    "update_other_accounts_running": "Outra conta do WinZapp ainda está aberta e impediria a atualização de substituir os arquivos do programa. Feche as outras contas e tente novamente.",
     "update_progress_title": "WinZapp | Instalando atualização",
     "update_error_title": "Erro ao atualizar",
     "update_error_msg": "Ocorreu um erro durante a atualização:\n\n{error}\n\nDeseja tentar novamente?",

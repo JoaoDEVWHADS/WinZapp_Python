@@ -329,6 +329,8 @@
     "whats_new_none_message": "Brak dziennika zmian dla tej wersji.",
     "update_downloading": "Pobieranie aktualizacji...",
     "update_installing": "Instalowanie aktualizacji...",
+    "update_closing_other_accounts": "Zamykanie pozostałych kont WinZapp...",
+    "update_other_accounts_running": "Inne konto WinZapp jest nadal otwarte i uniemożliwiłoby aktualizacji zastąpienie plików programu. Zamknij pozostałe konta i spróbuj ponownie.",
     "update_progress_title": "WinZapp | Instalowanie aktualizacji",
     "update_error_title": "Błąd aktualizacji",
     "update_error_msg": "Wystąpił błąd podczas aktualizacji:\n\n{error}\n\nCzy chcesz spróbować ponownie?",
