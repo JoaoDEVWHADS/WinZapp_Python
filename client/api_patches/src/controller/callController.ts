@@ -50,14 +50,13 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       const callIdOf = (call: any): string => serializeId(call?.id);
       const peerJidOf = (call: any): string => serializeId(call?.peerJid || call?.sender || call?.from);
       const getCallStore = () => {
-        const publicStore = win.WPP?.whatsapp?.CallStore || win.Store?.Call;
-        if (publicStore) return publicStore;
         try {
           const module = win.require?.('WAWebCallCollection');
-          return module?.get?.() || module;
-        } catch (_) {
-          return null;
-        }
+          const nativeStore =
+            module?.activeCall !== undefined ? module : module?.get?.() || module;
+          if (nativeStore) return nativeStore;
+        } catch (_) {}
+        return win.WPP?.whatsapp?.CallStore || win.Store?.Call || null;
       };
       const sameCallId = (call: any, wanted: string): boolean => {
         if (!call || !wanted) return false;
@@ -332,13 +331,41 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           throw new Error('WhatsApp contact ID factory is not available');
         }
 
-        const participantWids = participantIds.map((participantId) => {
-          const wid = createWid.call(widFactory, participantId);
-          if (!wid || wid.isGroup?.() || (typeof wid.isUser === 'function' && !wid.isUser())) {
-            throw new Error(`Invalid group call participant: ${participantId}`);
-          }
-          return wid;
-        });
+        const queryExistsModule = win.require?.('WAWebQueryExistsJob');
+        const queryWidExists = queryExistsModule?.queryWidExists;
+        const publicQueryWidExists = win.WPP?.contact?.queryWidExists;
+        if (typeof queryWidExists !== 'function' && typeof publicQueryWidExists !== 'function') {
+          throw new Error('WhatsApp participant resolver is not available');
+        }
+
+        const participantWids = await Promise.all(
+          participantIds.map(async (participantId) => {
+            const requestedWid = createWid.call(widFactory, participantId);
+            if (
+              !requestedWid ||
+              requestedWid.isGroup?.() ||
+              (typeof requestedWid.isUser === 'function' && !requestedWid.isUser())
+            ) {
+              throw new Error(`Invalid group call participant: ${participantId}`);
+            }
+
+            const result =
+              typeof queryWidExists === 'function'
+                ? await queryWidExists.call(queryExistsModule, requestedWid)
+                : await publicQueryWidExists.call(win.WPP.contact, participantId);
+            const resolvedWid = result?.lid || result?.wid;
+            if (!resolvedWid) {
+              throw new Error(`Group call participant is not registered or reachable: ${participantId}`);
+            }
+            if (
+              resolvedWid.isGroup?.() ||
+              (typeof resolvedWid.isUser === 'function' && !resolvedWid.isUser())
+            ) {
+              throw new Error(`Resolved group call participant is not a user: ${participantId}`);
+            }
+            return resolvedWid;
+          })
+        );
 
         const callStart = win.require?.('WAWebVoipStartCall');
         if (typeof callStart?.startWAWebVoipGroupCallFromWids !== 'function') {
@@ -348,15 +375,32 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           );
         }
 
+        const callStore = getCallStore();
+        const previousActiveId = callIdOf(callStore?.activeCall);
+        const preexistingIds = new Set(
+          getModels(callStore).map((model) => callIdOf(model)).filter(Boolean)
+        );
+
         await callStart.startWAWebVoipGroupCallFromWids(participantWids, false);
 
         const startedAt = Date.now();
         while (Date.now() - startedAt < 5000) {
           const call = getCallStore()?.activeCall;
-          if (call?.outgoing && call?.isGroup) return summarizeCall(call);
+          const activeId = callIdOf(call);
+          if (
+            call?.outgoing &&
+            call?.isGroup &&
+            activeId &&
+            activeId !== previousActiveId &&
+            !preexistingIds.has(activeId)
+          ) {
+            return summarizeCall(call);
+          }
           await delay(100);
         }
-        throw new Error('Outgoing WhatsApp group call was not promoted to an active call');
+        throw new Error(
+          'Outgoing WhatsApp group call did not create a new active call after participant resolution'
+        );
       }
 
       if (action === 'offer') {

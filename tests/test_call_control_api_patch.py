@@ -223,7 +223,26 @@ def test_group_voice_call_offer_uses_whatsapp_web_native_group_controller():
     assert "WAWebVoipStartCall" in controller
     assert "startWAWebVoipGroupCallFromWids" in controller
     assert "WAWebWidFactory" in controller
-    assert "call?.outgoing && call?.isGroup" in controller
+    assert "call?.outgoing &&" in controller
+    assert "call?.isGroup &&" in controller
     assert "At least two participants are required" in controller
     assert "Video group calls are not supported" in controller
     assert "prepareAudioBridge(req)" in controller
+
+
+def test_group_voice_call_resolves_registered_participants_and_rejects_stale_active_call():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    # WhatsApp Web's current PN/LID model requires resolving each phone JID
+    # through the native exists query before starting a group VoIP call.
+    assert "WAWebQueryExistsJob" in controller
+    assert "queryWidExists" in controller
+    assert "const resolvedWid = result?.lid || result?.wid" in controller
+    assert "participant is not registered or reachable" in controller
+
+    # A stale outgoing group model must not make /group/offer return a false 200.
+    assert "const previousActiveId = callIdOf(callStore?.activeCall)" in controller
+    assert "const preexistingIds = new Set(" in controller
+    assert "activeId !== previousActiveId" in controller
+    assert "!preexistingIds.has(activeId)" in controller
+    assert "did not create a new active call after participant resolution" in controller
