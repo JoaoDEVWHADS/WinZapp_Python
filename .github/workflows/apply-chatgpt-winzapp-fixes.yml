@@ -1,0 +1,268 @@
+name: Apply ChatGPT WinZapp fixes
+
+on:
+  push:
+    branches:
+      - chatgpt/apply-winzapp-fixes-20260918
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout patch branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply fixes to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "ChatGPT"
+          git config user.email "noreply@openai.com"
+          git fetch origin main
+          git checkout -B main origin/main
+
+          python - <<'PY'
+          from pathlib import Path
+          ROOT = Path.cwd()
+          def read(p): return (ROOT / p).read_text(encoding='utf-8')
+          def write(p, s): (ROOT / p).write_text(s, encoding='utf-8')
+          def repl(s, old, new, label):
+              if old not in s:
+                  if new in s: return s
+                  raise SystemExit(f'missing expected block: {label}')
+              return s.replace(old, new, 1)
+          def insert_before(s, marker, ins, label):
+              if ins.strip() in s: return s
+              if marker not in s: raise SystemExit(f'missing marker: {label}')
+              return s.replace(marker, ins + marker, 1)
+
+          p = 'client/main.py'
+          s = read(p)
+          s = repl(s,
+              '    def start_group_voice_call(\n        self, group_jid: str, participant_jids: list[str], name: str = ""\n    ):\n',
+              '    def start_group_voice_call(\n        self, group_jid: str, participant_jids: list[str], name: str = "",\n        *, full_group_selected: bool = False\n    ):\n',
+              'start_group_voice_call signature')
+          s = repl(s,
+              '                        {"participants": participants, "isVideo": False},\n',
+              '                        {\n                            "participants": participants,\n                            "groupJid": group_jid,\n                            "useGroupChat": bool(full_group_selected),\n                            "isVideo": False,\n                        },\n',
+              'group offer payload')
+          write(p, s)
+
+          p = 'client/ui/conversations.py'
+          s = read(p)
+          s = repl(s,
+              '        self.main_window.start_group_voice_call(group_jid, selected, group_name)\n',
+              '        self.main_window.start_group_voice_call(\n            group_jid, selected, group_name, full_group_selected=len(selected) == len(candidates)\n        )\n',
+              'group call picker call site')
+          write(p, s)
+
+          p = 'client/api_patches/src/controller/callController.ts'
+          s = read(p)
+          s = repl(s, '  participants?: string[];\n};\n', '  participants?: string[];\n  groupJid?: string;\n  useGroupChat?: boolean;\n};\n', 'payload group fields')
+          helper = """      const groupJidOf = (call: any): string => serializeId(\n        call?.groupJid ||\n        call?.group?.id ||\n        call?.groupWid ||\n        call?.groupMetadata?.id ||\n        call?.get?.('groupJid') ||\n        call?.get?.('groupWid')\n      );\n\n"""
+          s = insert_before(s, '      const summarizeCall = (call: any) => ({\n', helper, 'groupJidOf')
+          s = repl(s, '        peerJid: peerJidOf(call),\n        state: callStateOf(call),\n', '        peerJid: peerJidOf(call),\n        groupJid: groupJidOf(call),\n        state: callStateOf(call),\n', 'summary groupJid')
+          s = repl(s,
+              "        if (participantIds.length < 2) {\n          throw new Error('At least two participants are required to start a group voice call');\n        }\n\n        await ensureVoipRuntimeReady();\n",
+              "        if (participantIds.length < 2) {\n          throw new Error('At least two participants are required to start a group voice call');\n        }\n        const requestedGroupJid = String(payload.groupJid || '').trim();\n        const useGroupChat = !!payload.useGroupChat && requestedGroupJid.endsWith('@g.us');\n\n        await ensureVoipRuntimeReady();\n",
+              'group payload extraction')
+          start = s.find("        const callStart = win.require?.('WAWebVoipStartCall');\n", s.find("      if (action === 'offer-group')"))
+          end = s.find("\n      }\n\n      if (action === 'offer') {", start)
+          if start == -1 or end == -1: raise SystemExit('could not locate offer-group call controller block')
+          new_block = r'''        const callStart = win.require?.('WAWebVoipStartCall');
+        if (!callStart) {
+          throw new Error(
+            'Group WhatsApp calls are not supported by this WhatsApp Web version: ' +
+            'no internal call controller was detected'
+          );
+        }
+
+        const findGroupChat = async (): Promise<any> => {
+          if (!requestedGroupJid) return null;
+          const groupWid = createWid.call(widFactory, requestedGroupJid);
+          const keys = [groupWid, requestedGroupJid, groupWid?._serialized].filter(Boolean);
+          const collections = [
+            win.WPP?.whatsapp?.ChatStore,
+            win.Store?.Chat,
+            win.require?.('WAWebChatCollection')?.ChatCollection,
+            win.require?.('WAWebChatCollection')?.default,
+            win.require?.('WAWebChatCollection'),
+          ].filter(Boolean);
+
+          for (const collection of collections) {
+            for (const key of keys) {
+              try {
+                const chat = collection?.get?.(key);
+                if (chat) return chat;
+              } catch (_) {}
+            }
+            try {
+              const models = collection?.getModelsArray?.() || collection?.models || collection?._models || [];
+              const chat = Array.isArray(models)
+                ? models.find((model: any) => serializeId(model?.id) === requestedGroupJid)
+                : null;
+              if (chat) return chat;
+            } catch (_) {}
+          }
+
+          const publicGet = win.WPP?.chat?.get;
+          if (typeof publicGet === 'function') {
+            try {
+              const chat = await publicGet.call(win.WPP.chat, requestedGroupJid);
+              if (Array.isArray(chat)) return chat[0] || null;
+              return chat || null;
+            } catch (_) {}
+          }
+          return null;
+        };
+
+        const callStore = getCallStore();
+        const previousActiveId = callIdOf(callStore?.activeCall);
+        const preexistingIds = new Set(
+          getModels(callStore).map((model) => callIdOf(model)).filter(Boolean)
+        );
+
+        const waitForFreshOutgoingCall = async (timeoutMs: number): Promise<any> => {
+          const startedAt = Date.now();
+          while (Date.now() - startedAt < timeoutMs) {
+            const call = getCallStore()?.activeCall;
+            const activeId = callIdOf(call);
+            const state = callStateOf(call);
+            if (
+              call?.outgoing &&
+              activeId &&
+              activeId !== previousActiveId &&
+              !preexistingIds.has(activeId) &&
+              state &&
+              state !== 'NONE' &&
+              state !== 'ENDED'
+            ) {
+              return call;
+            }
+            await delay(100);
+          }
+          return null;
+        };
+
+        if (useGroupChat && typeof callStart?.startWAWebVoipGroupCallFromChat === 'function') {
+          const groupChat = await findGroupChat();
+          if (!groupChat) {
+            throw new Error(`WhatsApp group chat model was not found for ${requestedGroupJid}`);
+          }
+          await callStart.startWAWebVoipGroupCallFromChat(groupChat, false);
+          const call = await waitForFreshOutgoingCall(5000);
+          if (call) {
+            return {
+              ...summarizeCall(call),
+              isGroup: true,
+              groupJid: groupJidOf(call) || requestedGroupJid,
+              via: 'native-group-chat',
+            };
+          }
+          throw new Error('Outgoing WhatsApp group chat call did not create a live active call');
+        }
+
+        if (typeof callStart?.startWAWebVoipGroupCallFromWids !== 'function') {
+          throw new Error(
+            'Group WhatsApp calls are not supported by this WhatsApp Web version: ' +
+            'no supported internal call controller was detected'
+          );
+        }
+
+        await callStart.startWAWebVoipGroupCallFromWids(participantWids, false);
+        const directCall = await waitForFreshOutgoingCall(2500);
+        if (directCall) {
+          return { ...summarizeCall(directCall), via: 'native-group-wids' };
+        }
+
+        if (typeof callStart?.startWAWebVoipCall !== 'function') {
+          throw new Error(
+            'Direct group call stalled and the 1:1 WhatsApp call fallback is unavailable'
+          );
+        }
+        if (typeof callStart?.inviteToCall !== 'function') {
+          throw new Error(
+            'Direct group call stalled and WhatsApp inviteToCall fallback is unavailable'
+          );
+        }
+
+        const callFromUiModule = win.require?.('WAWebWamEnumCallFromUi');
+        const callFromUi = callFromUiModule?.CALL_FROM_UI?.CONVERSATION;
+        await callStart.startWAWebVoipCall(participantWids[0], false, callFromUi);
+        const seedCall = await waitForFreshOutgoingCall(5000);
+        if (!seedCall) {
+          throw new Error(
+            'Direct group call stalled and the 1:1 fallback did not create a live outgoing call'
+          );
+        }
+
+        for (const participantWid of participantWids.slice(1)) {
+          await callStart.inviteToCall(participantWid);
+          await delay(150);
+        }
+
+        return {
+          ...summarizeCall(seedCall),
+          isGroup: true,
+          via: 'one-to-one-plus-invites',
+        };'''
+          s = s[:start] + new_block + s[end:]
+          write(p, s)
+
+          p = 'tests/test_group_voice_call_logic.py'
+          s = read(p)
+          s = repl(s, '    assert \'{"participants": participants, "isVideo": False}\' in source\n', '    assert \'"groupJid": group_jid\' in source\n    assert \'"useGroupChat": bool(full_group_selected)\' in source\n    assert \'"isVideo": False\' in source\n', 'payload test')
+          write(p, s)
+          p = 'tests/test_group_voice_call_ui.py'
+          s = read(p)
+          s = repl(s, '    assert "self.main_window.start_group_voice_call(group_jid, selected, group_name)" in source\n', '    assert "full_group_selected=len(selected) == len(candidates)" in source\n', 'ui test')
+          write(p, s)
+          p = 'tests/test_call_control_api_patch.py'
+          s = read(p)
+          if 'test_group_voice_call_can_start_from_real_group_chat' not in s:
+              s += '''\n\ndef test_group_voice_call_can_start_from_real_group_chat():\n    controller = _source("client/api_patches/src/controller/callController.ts")\n    assert "groupJid?: string" in controller\n    assert "useGroupChat?: boolean" in controller\n    assert "const groupJidOf =" in controller\n    assert "requestedGroupJid.endsWith('@g.us')" in controller\n    assert "startWAWebVoipGroupCallFromChat(groupChat, false)" in controller\n    assert "via: 'native-group-chat'" in controller\n    assert "via: 'native-group-wids'" in controller\n    assert "groupJid: groupJidOf(call) || requestedGroupJid" in controller\n'''
+          write(p, s)
+          PY
+
+          python -m pytest tests/test_call_control_api_patch.py tests/test_group_voice_call_logic.py tests/test_group_voice_call_ui.py
+          git add client/api_patches/src/controller/callController.ts client/main.py client/ui/conversations.py tests/test_call_control_api_patch.py tests/test_group_voice_call_logic.py tests/test_group_voice_call_ui.py
+          git commit -m "fix: use chat model for full group calls"
+
+          python - <<'PY'
+          from pathlib import Path
+          ROOT = Path.cwd()
+          def read(p): return (ROOT / p).read_text(encoding='utf-8')
+          def write(p, s): (ROOT / p).write_text(s, encoding='utf-8')
+          def repl(s, old, new, label):
+              if old not in s:
+                  if new in s: return s
+                  raise SystemExit(f'missing expected block: {label}')
+              return s.replace(old, new, 1)
+          p = 'client/main.py'
+          s = read(p)
+          s = repl(s, '        self.voice_call_window_mute_button = wx.Button(call_panel, label=self.i18n.t("voice_call_mute_button"))\n        self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)\n', '        self.voice_call_window_mute_button = wx.Button(call_panel, label=self.i18n.t("voice_call_mute_button"))\n        self.voice_call_window_mute_button.SetName(self.i18n.t("voice_call_mute_button").replace("&", ""))\n        self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)\n', 'mute accessible name')
+          s = repl(s, '        muted = bool(getattr(getattr(self, "_call_audio_session", None), "microphone_muted", False))\n        mute_label = self.i18n.t("voice_call_unmute_button" if muted else "voice_call_mute_button")\n        for button_name in ("voice_call_mute_button", "voice_call_window_mute_button"):\n            button = getattr(self, button_name, None)\n            if button is not None:\n                button.SetLabel(mute_label)\n', '        self._refresh_voice_call_mute_button_labels()\n', 'sync mute labels')
+          s = repl(s, '            if not window.IsShown():\n                window.Show()\n                window.Raise()\n            self.voice_call_window_mute_button.SetFocus()\n', '            if not window.IsShown():\n                window.Show()\n                window.Raise()\n                wx.CallAfter(self._focus_voice_call_window_mute_button)\n', 'window focus')
+          helper = '''\n    def _refresh_voice_call_mute_button_labels(self):\n        muted = bool(getattr(getattr(self, "_call_audio_session", None), "microphone_muted", False))\n        label = self.i18n.t("voice_call_unmute_button" if muted else "voice_call_mute_button")\n        clean_label = label.replace("&", "")\n        for button_name in ("voice_call_mute_button", "voice_call_window_mute_button"):\n            button = getattr(self, button_name, None)\n            if button is not None:\n                button.SetLabel(label)\n                try:\n                    button.SetName(clean_label)\n                except Exception:\n                    pass\n        return label\n\n    def _focus_voice_call_window_mute_button(self):\n        button = getattr(self, "voice_call_window_mute_button", None)\n        if button is None:\n            return\n        try:\n            if button.IsShown() and button.IsEnabled():\n                button.SetFocus()\n        except Exception:\n            logging.exception("[call] failed to focus mute button")\n\n'''
+          if 'def _refresh_voice_call_mute_button_labels' not in s:
+              s = repl(s, '    def toggle_call_microphone(self, _event=None):\n', helper + '    def toggle_call_microphone(self, event=None):\n', 'insert mute helpers')
+          old = '''    def toggle_call_microphone(self, event=None):\n        session = getattr(self, "_call_audio_session", None)\n        if session is None:\n            return\n        session.set_microphone_muted(not session.microphone_muted)\n        self._sync_voice_call_bar()\n        wx.CallAfter(self.voice_call_window_mute_button.SetFocus)\n'''
+          new = '''    def toggle_call_microphone(self, event=None):\n        session = getattr(self, "_call_audio_session", None)\n        if session is None:\n            return\n        session.set_microphone_muted(not session.microphone_muted)\n        self._refresh_voice_call_mute_button_labels()\n        button = None\n        try:\n            button = event.GetEventObject() if event is not None else None\n        except Exception:\n            button = None\n        if button is None:\n            button = getattr(self, "voice_call_window_mute_button", None)\n        if button is not None:\n            wx.CallAfter(button.SetFocus)\n'''
+          s = repl(s, old, new, 'toggle body')
+          write(p, s)
+          p = 'tests/test_group_voice_call_ui.py'
+          s = read(p)
+          if 'test_voice_call_mute_toggle_keeps_button_accessible_name_and_focus' not in s:
+              s += '''\n\ndef test_voice_call_mute_toggle_keeps_button_accessible_name_and_focus():\n    source = _source("client/main.py")\n    assert "def _refresh_voice_call_mute_button_labels" in source\n    assert "button.SetName(clean_label)" in source\n    assert "event.GetEventObject()" in source\n    assert "def _focus_voice_call_window_mute_button" in source\n    toggle_body = source.split("def toggle_call_microphone", 1)[1].split("def on_voice_call_state_event", 1)[0]\n    assert "self._sync_voice_call_bar()" not in toggle_body\n    assert "voice_call_window_mute_button.SetFocus" not in toggle_body\n'''
+          write(p, s)
+          PY
+
+          python -m pytest tests/test_group_voice_call_ui.py
+          git add client/main.py tests/test_group_voice_call_ui.py
+          git commit -m "fix: keep mute button focus accessible"
+          git push origin HEAD:main
