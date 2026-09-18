@@ -335,6 +335,7 @@
     "update_error_title": "Błąd aktualizacji",
     "update_error_msg": "Wystąpił błąd podczas aktualizacji:\n\n{error}\n\nCzy chcesz spróbować ponownie?",
     "update_uac_declined": "Odmówiono uprawnień administratora, więc aktualizacja nie mogła zostać zainstalowana.",
+    "update_failed_previous": "Ostatnia aktualizacja WinZapp nie została ukończona: nie udało się zastąpić plików programu i nadal działa poprzednia wersja. Powód znajduje się w logs/update_install.log.",
     "update_checksum_mismatch": "Pobrany plik nie przeszedł kontroli integralności i dla Twojego bezpieczeństwa nie zostanie zainstalowany. Szczegóły: {detail}",
     "update_not_available": "Brak dostępnych aktualizacji. Używasz już najnowszej wersji.",
     "update_not_available_title": "Brak aktualizacji",

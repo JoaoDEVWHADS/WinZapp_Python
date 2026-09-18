@@ -1848,6 +1848,11 @@ class MainWindow(wx.Frame):
                 with open(marker_file, "r", encoding="utf-8", errors="ignore") as _mf:
                     marker_content = _mf.read().strip()
                 logging.error("[UPDATER_STATUS] WARNING: Found update_failed.marker from previous update: %s", marker_content)
+                # The batch installer leaves this marker precisely so the
+                # user can be told; logging it and deleting it told nobody.
+                # Reported live as "it updates and nothing changes": two
+                # failed xcopy runs, both logged here, both silent.
+                self._previous_update_failed = True
                 # Clean up old marker file on successful application startup
                 try:
                     os.remove(marker_file)
@@ -2012,6 +2017,11 @@ class MainWindow(wx.Frame):
         # is initialized) so it can run even if modal dialogs block __init__.
         if not self.background_mode:
             wx.CallLater(15000, self._start_update_checker)
+            if getattr(self, "_previous_update_failed", False):
+                # Same delay as the checker: past the startup sound and the
+                # first sync announcements, before the checker offers the
+                # very same release again.
+                wx.CallLater(15000, self._announce_previous_update_failure)
             # Separate, independent check for the WPPConnect Server itself —
             # it breaks between WinZapp releases too, and until now the only
             # fix was a user manually wiping client/api/ and node_modules.
@@ -5240,6 +5250,27 @@ class MainWindow(wx.Frame):
         self._update_checker.force_reinstall()
 
     # ── Auto-updater ──────────────────────────────────────────────────────────
+
+    def _announce_previous_update_failure(self):
+        """Tell the user the last update never landed.
+
+        Spoken, shown and with the error sound, like the other startup dead
+        ends: the batch installer failed after this process had already
+        exited, so nothing else in the app ever had a chance to say so.
+        """
+        try:
+            self.error_sound.play()
+        except Exception:
+            pass
+        try:
+            self.output(self.i18n.t("update_failed_previous"), interrupt=False)
+            wx.MessageBox(
+                self.i18n.t("update_failed_previous"),
+                self.i18n.t("update_error_title"),
+                wx.OK | wx.ICON_ERROR,
+            )
+        except Exception:
+            logging.exception("[UPDATER_STATUS] announcing the failed update failed")
 
     def _start_update_checker(self, force: bool = False):
         updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
