@@ -64,7 +64,13 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       };
 
       const callStateOf = (call: any): string => {
-        const raw = String(call?.getState?.() || call?.state || call?.get?.('state') || '');
+        // getState() legitimately returns numeric 0 for the terminal/NONE
+        // state. Using || erased that value and made a dead CallModel look
+        // like it had no state at all, which in turn let /group/offer return
+        // HTTP 200 for a call WhatsApp had already abandoned.
+        const rawValue =
+          call?.getState?.() ?? call?.state ?? call?.get?.('state') ?? '';
+        const raw = String(rawValue);
         const numericStates: Record<string, string> = {
           '0': 'NONE',
           '1': 'CALLING',
@@ -388,24 +394,118 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
         await callStart.startWAWebVoipGroupCallFromWids(participantWids, false);
 
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < 5000) {
+        // Some WhatsApp Web builds create an outgoing/isGroup CallModel but
+        // immediately leave it in state 0 (NONE).  That model is not a real
+        // ringing call: no offer reaches the phones.  Give the native group
+        // controller a short window to promote the model to a live call, but
+        // never treat a NONE/blank model as success.
+        let stalledGroupCall: any = null;
+        const directStartedAt = Date.now();
+        while (Date.now() - directStartedAt < 2500) {
           const call = getCallStore()?.activeCall;
           const activeId = callIdOf(call);
-          if (
-            call?.outgoing &&
-            call?.isGroup &&
-            activeId &&
+          const state = callStateOf(call);
+          const isFreshGroupCall =
+            !!call?.outgoing &&
+            !!call?.isGroup &&
+            !!activeId &&
             activeId !== previousActiveId &&
-            !preexistingIds.has(activeId)
-          ) {
-            return summarizeCall(call);
+            !preexistingIds.has(activeId);
+          if (isFreshGroupCall) {
+            stalledGroupCall = call;
+            if (state && state !== 'NONE' && state !== 'ENDED') {
+              return { ...summarizeCall(call), via: 'native-group' };
+            }
           }
           await delay(100);
         }
-        throw new Error(
-          'Outgoing WhatsApp group call did not create a new active call after participant resolution'
-        );
+
+        // Runtime-validated fallback: start the first participant through the
+        // ordinary 1:1 controller, then use WAWebVoipStartCall.inviteToCall()
+        // for the remaining participants.  Both pieces are independently live
+        // tested by the upstream experimental calling implementation, and this
+        // avoids the broken direct-group path present in some WA Web builds.
+        if (stalledGroupCall) {
+          const stalledId = callIdOf(stalledGroupCall);
+          try {
+            await runNativeVoipAction(async (voipStack: any) => {
+              if (typeof voipStack?.endCall !== 'function') return false;
+              stalledGroupCall.userEndedCall = true;
+              await voipStack.endCall(2, true);
+              return true;
+            });
+          } catch (_) {}
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            const current = getCallStore()?.activeCall;
+            if (!current || callIdOf(current) !== stalledId) break;
+            await delay(100);
+          }
+        }
+
+        if (typeof callStart?.startWAWebVoipCall !== 'function') {
+          throw new Error(
+            'Direct group call stalled and the 1:1 WhatsApp call fallback is unavailable'
+          );
+        }
+        if (typeof callStart?.inviteToCall !== 'function') {
+          throw new Error(
+            'Direct group call stalled and WhatsApp inviteToCall fallback is unavailable'
+          );
+        }
+
+        const callFromUiModule = win.require?.('WAWebWamEnumCallFromUi');
+        const callFromUi = callFromUiModule?.CALL_FROM_UI?.CONVERSATION;
+        await callStart.startWAWebVoipCall(participantWids[0], false, callFromUi);
+
+        let seedCall: any = null;
+        const fallbackStartedAt = Date.now();
+        while (Date.now() - fallbackStartedAt < 5000) {
+          const call = getCallStore()?.activeCall;
+          const activeId = callIdOf(call);
+          const state = callStateOf(call);
+          if (
+            call?.outgoing &&
+            activeId &&
+            activeId !== previousActiveId &&
+            !preexistingIds.has(activeId) &&
+            state &&
+            state !== 'NONE' &&
+            state !== 'ENDED'
+          ) {
+            seedCall = call;
+            break;
+          }
+          await delay(100);
+        }
+        if (!seedCall) {
+          throw new Error(
+            'Direct group call stalled and the 1:1 fallback did not create a live outgoing call'
+          );
+        }
+
+        for (const participantWid of participantWids.slice(1)) {
+          await callStart.inviteToCall(participantWid);
+          await delay(150);
+        }
+
+        // Give WhatsApp time to promote the seeded 1:1 call to group metadata.
+        // If the flag lags behind the invitations, still return the known-live
+        // call and mark this response as a group call: the caller explicitly
+        // requested a group voice call and every invite above completed.
+        let promotedCall = seedCall;
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const current = getCallStore()?.activeCall;
+          if (current && callIdOf(current) === callIdOf(seedCall)) {
+            promotedCall = current;
+            if (current?.isGroup) break;
+          }
+          await delay(100);
+        }
+        return {
+          ...summarizeCall(promotedCall),
+          isGroup: true,
+          via: 'one-to-one-plus-invites',
+        };
       }
 
       if (action === 'offer') {
@@ -546,7 +646,11 @@ export async function offerGroupCall(req: Request, res: Response) {
       return;
     }
     await prepareAudioBridge(req);
-    ok(res, await evaluateWppCall(req, 'offer-group', body));
+    const result = await evaluateWppCall(req, 'offer-group', body);
+    req.logger.info(
+      `[${req.params.session}] group call offer result: ${JSON.stringify(result)}`
+    );
+    ok(res, result);
   } catch (error) {
     await stopAudioBridge(req);
     fail(req, res, 'offerGroupCall', error);

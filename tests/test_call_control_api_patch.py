@@ -247,4 +247,25 @@ def test_group_voice_call_resolves_registered_participants_and_rejects_stale_act
     assert "const preexistingIds = new Set(" in controller
     assert "activeId !== previousActiveId" in controller
     assert "!preexistingIds.has(activeId)" in controller
-    assert "did not create a new active call after participant resolution" in controller
+    assert "Direct group call stalled" in controller
+
+
+def test_group_voice_call_falls_back_to_live_tested_one_to_one_plus_invites():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    # A group CallModel in numeric state 0 is terminal/NONE.  Preserve zero
+    # instead of erasing it through boolean `||`, otherwise the route can
+    # report a false HTTP 200 for a dead call.
+    assert "const rawValue =" in controller
+    assert "call?.getState?.() ?? call?.state" in controller
+    assert "state !== 'NONE'" in controller
+
+    # Some WA Web builds stall the direct group controller.  Fall back to the
+    # independently runtime-validated path: ordinary call + inviteToCall.
+    assert "startWAWebVoipCall(participantWids[0], false, callFromUi)" in controller
+    assert "CALL_FROM_UI?.CONVERSATION" in controller
+    assert "inviteToCall(participantWid)" in controller
+    assert "participantWids.slice(1)" in controller
+    assert "one-to-one-plus-invites" in controller
+    assert "Direct group call stalled" in controller
+    assert "group call offer result" in controller
