@@ -1872,8 +1872,14 @@ export default class CreateSessionUtil {
           let nativeCallCollection: any = null;
           try {
             const module = (window as any).require?.('WAWebCallCollection');
+            // The current native call implementation emits change:activeCall
+            // on the exported WAWebCallCollection object itself.  Prefer that
+            // exact event source even when activeCall is still undefined; the
+            // first transition is precisely the event we need to catch.
             nativeCallCollection =
-              module?.activeCall !== undefined ? module : module?.get?.() || module;
+              module && typeof module.on === 'function'
+                ? module
+                : module?.get?.() || module;
           } catch (e) {
             nativeCallCollection = null;
           }
@@ -1995,13 +2001,17 @@ export default class CreateSessionUtil {
               ''
             );
           const emitCallState = (event: string, call: any, state = '') => {
-            const peerJid = peerJidOf(call);
-            if (!peerJid) return;
+            const callId = callIdOf(call);
+            const peerJid = peerJidOf(call) || groupJidOf(call);
+            // Group activeCall models can be published before peerJid/groupJid
+            // is hydrated.  The call id is enough to keep the lifecycle alive;
+            // later state/model updates enrich the peer metadata.
+            if (!callId && !peerJid) return;
             (window as any).__winzappOnCallState(
               event,
               state,
               peerJid,
-              callIdOf(call),
+              callId,
               !!call?.isVideo || !!call?.isVideoCall,
               !!call?.isGroup || !!call?.isGroupCall,
               groupJidOf(call),
@@ -2011,13 +2021,14 @@ export default class CreateSessionUtil {
             );
           };
           const emitCall = (event: string, call: any, state = '') => {
-            const peerJid = peerJidOf(call);
-            if (!peerJid) return;
+            const callId = callIdOf(call);
+            const peerJid = peerJidOf(call) || groupJidOf(call);
+            if (!callId && !peerJid) return;
             (window as any).__winzappOnIncomingCall(
               event,
               state,
               peerJid,
-              callIdOf(call),
+              callId,
               !!call?.isVideo || !!call?.isVideoCall,
               !!call?.isGroup || !!call?.isGroupCall,
               groupJidOf(call),
@@ -2110,23 +2121,52 @@ export default class CreateSessionUtil {
           // real incoming calls on current builds.
           try {
             if (nativeCallCollection && typeof nativeCallCollection.on === 'function') {
-              nativeCallCollection.on('change:activeCall', (...args: any[]) => {
+              nativeCallCollection.on('change:activeCall', (call: any) => {
                 try {
-                  const call =
-                    args.find(
-                      (arg: any) =>
-                        arg &&
-                        typeof arg === 'object' &&
-                        (callIdOf(arg) || peerJidOf(arg))
-                    ) || nativeCallCollection.activeCall;
-                  if (!call) return;
-                  const state = callStateOf(call);
-                  if (isIncomingRingingCall(call)) {
-                    if (isHistoricalIncomingCall(call, 'activeCallChange')) return;
-                    rememberCall(call);
-                    emitIncomingOffer(call, 0, 'activeCallChange');
+                  // Current WhatsApp Web passes the new active CallModel as the
+                  // handler argument.  Do not require peerJid here: group calls
+                  // can publish the model before peer/group metadata is hydrated.
+                  const activeCall = call || nativeCallCollection.activeCall;
+                  if (!activeCall) return;
+                  const callId = callIdOf(activeCall);
+                  const state = callStateOf(activeCall);
+                  const definitelyOutgoing =
+                    activeCall?.outgoing === true ||
+                    activeCall?.isOutgoing === true ||
+                    activeCall?.direction === 'outgoing' ||
+                    ['CALLING', 'PRE_CALLING', 'CALL_B_STARTING'].includes(state);
+                  const terminal = [
+                    'ENDED', 'REJECTED', 'FAILED', 'NOT_ANSWERED',
+                    'HANDLED_REMOTELY', 'REMOTE_CALL_IN_PROGRESS',
+                  ].includes(state);
+
+                  console.log(
+                    '[browser-evaluate] activeCall change ' +
+                    JSON.stringify({
+                      id: callId,
+                      state,
+                      outgoing: definitelyOutgoing,
+                      isGroup: !!activeCall?.isGroup || !!activeCall?.isGroupCall,
+                      hasPeer: !!peerJidOf(activeCall),
+                      hasGroup: !!groupJidOf(activeCall),
+                    })
+                  );
+
+                  // An incoming activeCall may arrive one tick before its state
+                  // and peer fields.  The id plus a non-outgoing active slot is
+                  // sufficient to retain it and let emitIncomingOffer wait for
+                  // group metadata rather than dropping the only notification.
+                  const incomingCandidate =
+                    !definitelyOutgoing &&
+                    !terminal &&
+                    !!callId &&
+                    (isIncomingRingingCall(activeCall) || !state || !!activeCall?.isGroup || !!activeCall?.isGroupCall);
+                  if (incomingCandidate) {
+                    if (isHistoricalIncomingCall(activeCall, 'activeCallChange')) return;
+                    rememberCall(activeCall);
+                    emitIncomingOffer(activeCall, 0, 'activeCallChange');
                   } else if (state) {
-                    emitCallState('state', call, state);
+                    emitCallState('state', activeCall, state);
                   }
                 } catch (e) {
                   // A later activeCall transition or poll can recover.

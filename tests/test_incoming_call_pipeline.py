@@ -55,10 +55,21 @@ def test_native_active_call_change_event_promotes_incoming_calls_immediately():
     # Observe the native activeCall attribute exactly where the runtime mutates it.
     assert "WAWebCallCollection" in source
     assert "nativeCallCollection" in source
-    assert "nativeCallCollection.on('change:activeCall'" in source
-    assert "args.find(" in source
-    assert "isIncomingRingingCall(call)" in source
-    assert "emitIncomingOffer(call, 0, 'activeCallChange')" in source
+    assert "nativeCallCollection.on('change:activeCall', (call: any)" in source
+    assert "args.find(" not in source
+    assert "const incomingCandidate =" in source
+    assert "!!callId" in source
+    assert "!state || !!activeCall?.isGroup" in source
+    assert "emitIncomingOffer(activeCall, 0, 'activeCallChange')" in source
+    assert "[browser-evaluate] activeCall change" in source
+
+
+def test_incoming_call_emitters_keep_peerless_group_models_by_call_id():
+    source = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    assert "const peerJid = peerJidOf(call) || groupJidOf(call)" in source
+    assert "if (!callId && !peerJid) return" in source
+    assert "if (!peerJid) return" not in source
 
 
 def test_native_call_collection_is_preferred_for_active_call_polling():
