@@ -25293,7 +25293,15 @@ class MainWindow(wx.Frame):
                     "isLid": is_lid_target,
                     "options": link_preview_options
                 }
-                logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
+                # INFO, not DEBUG: log.log runs at INFO, and a "reply sent
+                # without its quote" report is undiagnosable without the id
+                # and type that were actually quoted (Pedro's log had the
+                # 201 and the echo, and nothing about what was quoted).
+                logging.info(
+                    "[send_text_message] sending quoted reply via send-reply to %s, "
+                    "quoted id=%s type=%s", phone_net, quoted_id,
+                    (quoted.get("messageType") or "?") if isinstance(quoted, dict) else "?",
+                )
             elif quoted_is_status:
                 logging.error("[send_text_message] status reply has no serializable quote id (key.id missing?) — refusing to send as a plain message")
                 return {"ok": False, "error": "status reply missing a serializable message id", "retry": False}
