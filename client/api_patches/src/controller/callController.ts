@@ -150,12 +150,32 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         );
       };
 
+      const groupParticipantCountOf = (call: any): number => {
+        const participants =
+          call?.groupCallParticipants ??
+          call?.get?.('groupCallParticipants') ??
+          call?.participants ??
+          call?.get?.('participants');
+        if (!participants) return 0;
+        if (Array.isArray(participants)) return participants.length;
+        try {
+          const models = participants?.getModelsArray?.();
+          if (Array.isArray(models)) return models.length;
+        } catch (_) {}
+        if (Array.isArray(participants?.models)) return participants.models.length;
+        if (Array.isArray(participants?._models)) return participants._models.length;
+        if (typeof participants?.size === 'number') return participants.size;
+        if (typeof participants?.length === 'number') return participants.length;
+        return 0;
+      };
+
       const summarizeCall = (call: any) => ({
         id: callIdOf(call),
         peerJid: peerJidOf(call),
         state: callStateOf(call),
         isVideo: !!call?.isVideo,
         isGroup: !!call?.isGroup,
+        groupParticipantCount: groupParticipantCountOf(call),
         outgoing: !!call?.outgoing,
       });
 
@@ -359,12 +379,12 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
               typeof queryWidExists === 'function'
                 ? await queryWidExists.call(queryExistsModule, requestedWid)
                 : await publicQueryWidExists.call(win.WPP.contact, participantId);
-            // The native group-call controller expects the registered WID
-            // returned by WhatsApp's exists query.  Do not substitute the LID
-            // here: one-to-one calls may prefer LIDs on current WhatsApp Web,
-            // but the tested group-call path resolves participants through
-            // getNumberId(), which returns result.wid specifically.
-            const resolvedWid = result?.wid;
+            // Current WA-JS calling uses calling_lid_version=1 and its
+            // supported call.offer() path explicitly prefers result.lid over
+            // result.wid. Keep group calls on the same identity model; passing
+            // only PN WIDs can create a local isGroup/CALLING model without
+            // producing a real remote offer on current WhatsApp Web.
+            const resolvedWid = result?.lid || result?.wid;
             if (!resolvedWid) {
               throw new Error(`Group call participant is not registered or reachable: ${participantId}`);
             }
@@ -413,7 +433,13 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             !preexistingIds.has(activeId);
           if (isFreshGroupCall) {
             stalledGroupCall = call;
-            if (state && state !== 'NONE' && state !== 'ENDED') {
+            const groupParticipantCount = groupParticipantCountOf(call);
+            if (
+              state &&
+              state !== 'NONE' &&
+              state !== 'ENDED' &&
+              groupParticipantCount >= 2
+            ) {
               return { ...summarizeCall(call), via: 'native-group' };
             }
           }
@@ -442,9 +468,9 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           }
         }
 
-        if (typeof callStart?.startWAWebVoipCall !== 'function') {
+        if (typeof win.WPP?.call?.offer !== 'function') {
           throw new Error(
-            'Direct group call stalled and the 1:1 WhatsApp call fallback is unavailable'
+            'Direct group call stalled and the WA-JS 1:1 call fallback is unavailable'
           );
         }
         if (typeof callStart?.inviteToCall !== 'function') {
@@ -453,28 +479,34 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           );
         }
 
-        const callFromUiModule = win.require?.('WAWebWamEnumCallFromUi');
-        const callFromUi = callFromUiModule?.CALL_FROM_UI?.CONVERSATION;
-        await callStart.startWAWebVoipCall(participantWids[0], false, callFromUi);
+        // Seed through WA-JS's current supported call path instead of calling
+        // WAWebVoipStartCall.startWAWebVoipCall directly. WA-JS resolves the
+        // participant to LID, enables the current calling gates and invokes
+        // the current native start-call signature internally.
+        const offeredSeed = await win.WPP.call.offer(participantIds[0], {
+          isVideo: false,
+        });
 
         let seedCall: any = null;
         const fallbackStartedAt = Date.now();
         while (Date.now() - fallbackStartedAt < 5000) {
-          const call = getCallStore()?.activeCall;
-          const activeId = callIdOf(call);
-          const state = callStateOf(call);
-          if (
-            call?.outgoing &&
-            activeId &&
-            activeId !== previousActiveId &&
-            !preexistingIds.has(activeId) &&
-            state &&
-            state !== 'NONE' &&
-            state !== 'ENDED'
-          ) {
-            seedCall = call;
-            break;
-          }
+          const activeCall = getCallStore()?.activeCall;
+          const candidates = [activeCall, offeredSeed].filter(Boolean);
+          seedCall =
+            candidates.find((call: any) => {
+              const activeId = callIdOf(call);
+              const state = callStateOf(call);
+              return (
+                !!call?.outgoing &&
+                !!activeId &&
+                activeId !== previousActiveId &&
+                !preexistingIds.has(activeId) &&
+                !!state &&
+                state !== 'NONE' &&
+                state !== 'ENDED'
+              );
+            }) || null;
+          if (seedCall) break;
           await delay(100);
         }
         if (!seedCall) {
@@ -488,22 +520,33 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           await delay(150);
         }
 
-        // Give WhatsApp time to promote the seeded 1:1 call to group metadata.
-        // If the flag lags behind the invitations, still return the known-live
-        // call and mark this response as a group call: the caller explicitly
-        // requested a group voice call and every invite above completed.
+        // A resolved inviteToCall() promise only means the private controller
+        // accepted the request. Do not report success until WhatsApp promotes
+        // the live call to real group metadata. This prevents the exact false
+        // 200 seen in the field: isGroup/CALLING with no remote participants.
         let promotedCall = seedCall;
-        for (let attempt = 0; attempt < 30; attempt += 1) {
+        let promoted = false;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
           const current = getCallStore()?.activeCall;
           if (current && callIdOf(current) === callIdOf(seedCall)) {
             promotedCall = current;
-            if (current?.isGroup) break;
+            if (
+              current?.isGroup &&
+              groupParticipantCountOf(current) >= 2
+            ) {
+              promoted = true;
+              break;
+            }
           }
           await delay(100);
         }
+        if (!promoted) {
+          throw new Error(
+            'WhatsApp accepted the group invitations but did not promote the call to a live group call'
+          );
+        }
         return {
           ...summarizeCall(promotedCall),
-          isGroup: true,
           via: 'one-to-one-plus-invites',
         };
       }

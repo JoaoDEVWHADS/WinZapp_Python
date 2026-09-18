@@ -233,13 +233,12 @@ def test_group_voice_call_offer_uses_whatsapp_web_native_group_controller():
 def test_group_voice_call_resolves_registered_participants_and_rejects_stale_active_call():
     controller = _source("client/api_patches/src/controller/callController.ts")
 
-    # The validated native group-call path resolves every phone through the
-    # exists query and passes result.wid to startWAWebVoipGroupCallFromWids.
-    # LID preference belongs to the one-to-one call path and must not leak here.
+    # Current WA-JS calling enables calling_lid_version=1 and its supported
+    # offer() path prefers LID over PN. Group participants must use the same
+    # identity model or current WA can create a local ghost CALLING model.
     assert "WAWebQueryExistsJob" in controller
     assert "queryWidExists" in controller
-    assert "const resolvedWid = result?.wid" in controller
-    assert "result?.lid || result?.wid" not in controller
+    assert "const resolvedWid = result?.lid || result?.wid" in controller
     assert "participant is not registered or reachable" in controller
 
     # A stale outgoing group model must not make /group/offer return a false 200.
@@ -260,12 +259,28 @@ def test_group_voice_call_falls_back_to_live_tested_one_to_one_plus_invites():
     assert "call?.getState?.() ?? call?.state" in controller
     assert "state !== 'NONE'" in controller
 
-    # Some WA Web builds stall the direct group controller.  Fall back to the
-    # independently runtime-validated path: ordinary call + inviteToCall.
-    assert "startWAWebVoipCall(participantWids[0], false, callFromUi)" in controller
-    assert "CALL_FROM_UI?.CONVERSATION" in controller
+    # Seed through WA-JS's supported public offer() path, then use the
+    # native invite path for the remaining selected participants.
+    assert "await win.WPP.call.offer(participantIds[0]" in controller
+    assert "startWAWebVoipCall(participantWids[0], false, callFromUi)" not in controller
     assert "inviteToCall(participantWid)" in controller
     assert "participantWids.slice(1)" in controller
     assert "one-to-one-plus-invites" in controller
     assert "Direct group call stalled" in controller
     assert "group call offer result" in controller
+
+    # A fresh isGroup/CALLING model without participants is not success.
+    assert "const groupParticipantCountOf =" in controller
+    assert "groupParticipantCount >= 2" in controller
+    assert "groupParticipantCountOf(current) >= 2" in controller
+    assert "did not promote the call to a live group call" in controller
+
+
+def test_group_voice_call_rejects_ghost_calling_model_without_participants():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    assert "groupParticipantCount: groupParticipantCountOf(call)" in controller
+    assert "groupParticipantCount >= 2" in controller
+    assert "const offeredSeed = await win.WPP.call.offer(" in controller
+    assert "current?.isGroup &&" in controller
+    assert "groupParticipantCountOf(current) >= 2" in controller
