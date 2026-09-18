@@ -16,6 +16,7 @@ tests do.
 
 import os
 import types
+import zipfile
 
 import updater
 
@@ -42,6 +43,14 @@ class TestInstallerScriptWaitsForEveryAccount:
         # make cmd jump back to the first loop for every pid.
         assert s.count(":WAIT1\n") == 1 and "goto WAIT1" in s
         assert s.count(":WAIT2\n") == 1 and "goto WAIT2" in s
+
+    def test_waiting_for_another_account_has_a_bounded_failure_path(self):
+        s = _script(extra_pids=[5151])
+        assert "setlocal EnableDelayedExpansion" in s
+        assert "if !WAIT1_SECONDS! GEQ 60 goto OTHER_ACCOUNT_TIMEOUT" in s
+        assert ":OTHER_ACCOUNT_TIMEOUT" in s
+        assert "another WinZapp account did not exit" in s
+        assert s.index(":OTHER_ACCOUNT_TIMEOUT") > s.index("xcopy")
 
     def test_no_other_account_means_the_script_is_unchanged(self):
         assert _script() == _script(extra_pids=[])
@@ -147,7 +156,7 @@ class TestClaimInstallSlot:
         stub._end_install_slot(token)
         assert update_coord.is_update_in_progress(gd) is False
 
-    def test_a_coordination_error_fails_open(self, monkeypatch, tmp_path):
+    def test_a_coordination_error_blocks_installation(self, monkeypatch, tmp_path):
         import update_coord
 
         def _boom(_gd):
@@ -155,7 +164,58 @@ class TestClaimInstallSlot:
 
         monkeypatch.setattr(update_coord, "try_begin_update", _boom)
         stub = _stub(_mw(str(tmp_path), "me"))
-        assert stub._claim_install_slot() == {}
+        assert stub._claim_install_slot() is None
+
+
+class TestWorkerReleasesFailedInstallClaim:
+    def test_an_installer_launch_exception_releases_the_claim(self, monkeypatch, tmp_path):
+        archive = tmp_path / "update.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("WinZapp.exe", "replacement")
+
+        class _Response:
+            headers = {"content-length": str(archive.stat().st_size)}
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, chunk_size):
+                yield archive.read_bytes()
+
+        token = {"owner_token": "token"}
+        released = []
+        dialog = types.SimpleNamespace(
+            _zip_url="https://example.invalid/update.zip",
+            _sha256sums_url="",
+            _signature_url="",
+            _new_version="1.2.3.4",
+            _is_alpha=False,
+            _cancelled=False,
+            _install_ok=False,
+            _error_msg="",
+            _gauge=types.SimpleNamespace(SetValue=lambda value: None),
+            _status_label=_Label(),
+            _main_window=types.SimpleNamespace(
+                i18n=types.SimpleNamespace(t=lambda key: key), wpp_port=6300,
+            ),
+            _quit_other_accounts=lambda: [],
+            _claim_install_slot=lambda: token,
+            _end_install_slot=lambda value: released.append(value),
+            EndModal=lambda result: None,
+        )
+        dialog._worker = updater.UpdateProgressDialog._worker.__get__(dialog)
+
+        monkeypatch.setattr(updater, "_is_frozen", lambda: True)
+        monkeypatch.setattr(updater.requests, "get", lambda *args, **kwargs: _Response())
+        monkeypatch.setattr(updater, "_verify_sha256sums", lambda *args, **kwargs: (True, ""))
+        monkeypatch.setattr(updater, "_run_batch_installer",
+                            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("launch failed")))
+        monkeypatch.setattr(updater.wx, "CallAfter", lambda callback, *args: callback(*args))
+
+        dialog._worker()
+
+        assert released == [token]
+        assert dialog._install_ok is False
 
 
 def wx_call_after_module():

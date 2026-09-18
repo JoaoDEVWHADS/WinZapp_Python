@@ -468,9 +468,12 @@ def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
     between their ACK and the process actually being gone.
     """
     wait_blocks = "".join(
+        f"set /a WAIT{i}_SECONDS=0\n"
         f":WAIT{i}\n"
         f'tasklist /FI "PID eq {p}" 2>NUL | find "{p}" >NUL\n'
         "if not errorlevel 1 (\n"
+        f"    set /a WAIT{i}_SECONDS+=1\n"
+        f"    if !WAIT{i}_SECONDS! GEQ 60 goto OTHER_ACCOUNT_TIMEOUT\n"
         "    timeout /t 1 /nobreak >NUL\n"
         f"    goto WAIT{i}\n"
         ")\n"
@@ -478,6 +481,7 @@ def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
     )
     return (
         "@echo off\n"
+        "setlocal EnableDelayedExpansion\n"
         # Keep one previous run's log (as .old) before truncating: this file
         # is the only record of what the installer actually did, and an
         # update that goes wrong right as the app exits (issue: a Node/
@@ -547,6 +551,12 @@ def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
         f'>> "{log_path}" echo xcopy OK\n'
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
+        "goto :EOF\n"
+        ":OTHER_ACCOUNT_TIMEOUT\n"
+        f'>> "{log_path}" echo timed out waiting for another WinZapp account to exit\n'
+        f'echo update failed: another WinZapp account did not exit > "{marker_path}"\n'
+        f'if exist "{exe_path}" start "" "{exe_path}"\n'
+        "exit /b 1\n"
     )
 
 
@@ -798,6 +808,8 @@ class UpdateProgressDialog(wx.Dialog):
 
     def _worker(self):
         """Download, extract, and launch installer — all in a background thread."""
+        update_token = None
+        installer_handed_off = False
         try:
             # ── Download ──────────────────────────────────────────────────────
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="winzapp_upd_")
@@ -920,10 +932,13 @@ class UpdateProgressDialog(wx.Dialog):
                 wx.CallAfter(self.EndModal, wx.ID_ABORT)
                 return
             self._install_ok = True
+            installer_handed_off = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
 
         except Exception as exc:
             logging.exception("Auto-updater: Exception during update installation")
+            if update_token and not installer_handed_off:
+                self._end_install_slot(update_token)
             self._error_msg = str(exc)
             wx.CallAfter(self.EndModal, wx.ID_ABORT)
 
@@ -988,10 +1003,10 @@ class UpdateProgressDialog(wx.Dialog):
             import update_coord
             return update_coord.try_begin_update(coord[0])
         except Exception:
-            # Fail open, like the prompt claim: a coordination bug must not
-            # make every install refuse with nothing to show the user why.
-            logging.exception("Auto-updater: try_begin_update failed — installing anyway")
-            return {}
+            # Unlike a prompt claim, an install must never proceed unless it
+            # can prove no other account still maps the program files.
+            logging.exception("Auto-updater: try_begin_update failed — blocking installation")
+            return None
 
     def _end_install_slot(self, token) -> None:
         coord = self._coord()
