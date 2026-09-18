@@ -161,9 +161,43 @@ decisão), `triage` (máquina de estados para issues e PRs externos),
 `resolving-merge-conflicts`, `wizard`, `teach`, `ask-matt` (roteador entre as
 outras) e `writing-for-agents` (escrever skill, `AGENTS.md` ou `CLAUDE.md`).
 
-> **Atenção antes de rodar `setup-matt-pocock-skills`.** Ela configura issue
-> tracker e vocabulário de labels *no repositório*, e vários dos fluxos de SDD
-> acima publicam nesse tracker. É decisão de time, não de máquina individual.
+### O setup já rodou — e o fluxo que ele habilita
+
+`setup-matt-pocock-skills` foi executada em 17/09/2026 e o resultado está
+versionado: `docs/agents/issue-tracker.md` (GitHub Issues, via `gh`),
+`docs/agents/triage-labels.md` (as cinco labels padrão, já criadas no repo) e
+`docs/agents/domain.md` (single-context: `CONTEXT.md` + `docs/adr/` na raiz,
+criados sob demanda pelo `/domain-modeling`). O bloco `## Agent skills` no fim
+do `CLAUDE.md` resume isso e acrescenta três limites do WinZapp: "suíte
+completa" é `pytest` sem `--run-wx-gui`; `/implement` não commita sem pedido;
+os "standards" que o `/code-review` procura são `CLAUDE.md` + `docs/traps/` +
+as skills daqui. Não é preciso rodar o setup de novo — só para trocar de
+tracker.
+
+O caminho de uma feature, do jeito que o `/ask-matt` descreve, aplicado aqui:
+
+```
+/grill-with-docs   entrevista; grava termos em CONTEXT.md e decisões em docs/adr/
+      │            (precisa ver rodando? /prototype, com /handoff nos dois sentidos)
+/to-spec           congela o combinado numa issue do GitHub
+/to-tickets        quebra em tickets verticais (tela + lógica + dados + teste + 5 locales)
+/implement         um ticket por sessão, /clear entre eles; roda /tdd por dentro
+/code-review       dois eixos: smells de Fowler + aderência à spec
+```
+
+Tudo até `/to-tickets` numa sessão só, sem `/compact`. Dois pontos de entrada
+fora desse caminho: `/triage` para issue que chega crua (relato de usuário,
+sugestão) e `/diagnosing-bugs` para bug que resiste ao primeiro olhar — ele
+exige um comando que fique vermelho *neste* bug antes de teorizar.
+
+**Onde o `winzapp-reviewer` entra:** o `/code-review` do Matt cobre estrutura
+e spec; o nosso cobre o que quebra *este* repositório (JID, sync gate, echo
+matching, cinco locales, leitor de tela, mecanismo de patch). Não são
+alternativos — rode os dois antes de abrir PR, o do Matt primeiro.
+
+`/improve-codebase-architecture` acha candidatos a extração; a execução é o
+`extract-from-god-file` daqui. `/handoff` é como se passa contexto entre
+sessões e entre pessoas sem reexplicar.
 
 ---
 
