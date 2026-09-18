@@ -47,3 +47,21 @@ def test_active_call_poll_promotes_ringing_calls_to_incoming_alert_pipeline():
     assert "!isHistoricalIncomingCall(activeCall, 'activeCall')" in source
     assert "emitCall('offer', activeCall, 'INCOMING_RING')" in source
     assert "rememberCall(activeCall)" in source
+
+def test_native_active_call_change_event_promotes_incoming_calls_immediately():
+    source = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    # Current WhatsApp Web can skip the old incoming-call event entirely.
+    # Observe the native activeCall attribute exactly where the runtime mutates it.
+    assert "WAWebCallCollection" in source
+    assert "nativeCallCollection" in source
+    assert "nativeCallCollection.on('change:activeCall'" in source
+    assert "args.find(" in source
+    assert "isIncomingRingingCall(call)" in source
+    assert "emitIncomingOffer(call, 0, 'activeCallChange')" in source
+
+
+def test_native_call_collection_is_preferred_for_active_call_polling():
+    source = _source("client/api_patches/src/util/createSessionUtil.ts")
+
+    assert "const stores = [\n            nativeCallCollection," in source

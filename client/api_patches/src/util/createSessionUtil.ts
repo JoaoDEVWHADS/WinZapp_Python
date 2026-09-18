@@ -1869,7 +1869,16 @@ export default class CreateSessionUtil {
             if (id) trackedCalls.delete(id);
           };
           const CALL_START_GRACE_MS = 5000;
+          let nativeCallCollection: any = null;
+          try {
+            const module = (window as any).require?.('WAWebCallCollection');
+            nativeCallCollection =
+              module?.activeCall !== undefined ? module : module?.get?.() || module;
+          } catch (e) {
+            nativeCallCollection = null;
+          }
           const stores = [
+            nativeCallCollection,
             WPP?.whatsapp?.CallStore,
             WPP?.whatsapp?.CallCollection,
             (window as any).Store?.Call,
@@ -1912,6 +1921,26 @@ export default class CreateSessionUtil {
               '14': 'CALL_B_STARTING',
             };
             return numericStates[raw] || raw;
+          };
+          const isIncomingRingingCall = (call: any) => {
+            if (!call) return false;
+            const state = callStateOf(call);
+            const incomingRingStates = new Set([
+              'INCOMING_RING',
+              'PREACCEPT_RECEIVED',
+              'ReceivedCall',
+              'ReceivedCallWithoutOffer',
+            ]);
+            const isOutgoing =
+              call?.outgoing === true ||
+              call?.isOutgoing === true ||
+              call?.direction === 'outgoing';
+            return (
+              !isOutgoing &&
+              (incomingRingStates.has(state) ||
+                call?.isIncoming === true ||
+                call?.direction === 'incoming')
+            );
           };
           const callTimestampOf = (call: any) => {
             const raw =
@@ -2075,10 +2104,36 @@ export default class CreateSessionUtil {
           }
 
           // ── Layer 2: direct internal CallStore access ──────────────
-          // If wa-js exposes the raw WhatsApp Web Store for calls, hook
-          // its collection's 'add' event directly. This bypasses wa-js's
-          // event plumbing entirely.
+          // Current WhatsApp Web promotes native VoIP calls through
+          // WAWebCallCollection.activeCall. Observe that property directly:
+          // relying only on collection `add` or WA-JS's public event misses
+          // real incoming calls on current builds.
           try {
+            if (nativeCallCollection && typeof nativeCallCollection.on === 'function') {
+              nativeCallCollection.on('change:activeCall', (...args: any[]) => {
+                try {
+                  const call =
+                    args.find(
+                      (arg: any) =>
+                        arg &&
+                        typeof arg === 'object' &&
+                        (callIdOf(arg) || peerJidOf(arg))
+                    ) || nativeCallCollection.activeCall;
+                  if (!call) return;
+                  const state = callStateOf(call);
+                  if (isIncomingRingingCall(call)) {
+                    if (isHistoricalIncomingCall(call, 'activeCallChange')) return;
+                    rememberCall(call);
+                    emitIncomingOffer(call, 0, 'activeCallChange');
+                  } else if (state) {
+                    emitCallState('state', call, state);
+                  }
+                } catch (e) {
+                  // A later activeCall transition or poll can recover.
+                }
+              });
+            }
+
             for (const store of stores) {
               if (store && typeof store.on === 'function') {
                 store.on('add', (call: any) => {
@@ -2249,18 +2304,6 @@ export default class CreateSessionUtil {
               ].join('|');
               if (signature !== lastActiveSignature) {
                 const activeId = callIdOf(activeCall);
-                const incomingRingStates = new Set([
-                  'INCOMING_RING',
-                  'PREACCEPT_RECEIVED',
-                  'ReceivedCall',
-                  'ReceivedCallWithoutOffer',
-                ]);
-                const isIncomingRingingCall =
-                  incomingRingStates.has(state) &&
-                  activeCall?.outgoing !== true &&
-                  activeCall?.isOutgoing !== true &&
-                  activeCall?.direction !== 'outgoing';
-
                 // Current WhatsApp Web can expose a ringing call only through
                 // CallStore.activeCall.  The public call.incoming_call event is
                 // not reliable enough to be the sole alert source (especially
@@ -2268,7 +2311,7 @@ export default class CreateSessionUtil {
                 // incomingcall pipeline so Python rings, opens the accessible
                 // dialog and can answer it. emitCall() also emits callstate.
                 if (
-                  isIncomingRingingCall &&
+                  isIncomingRingingCall(activeCall) &&
                   activeId &&
                   activeId !== lastActiveIncomingOfferId &&
                   !isHistoricalIncomingCall(activeCall, 'activeCall')
