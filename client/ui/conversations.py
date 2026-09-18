@@ -66,6 +66,7 @@ from core.utils import history_window, reaction_targets_status, format_number, d
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.message_copy_format import format_copied_message
 from core.video_player import VideoPlayer
+from core.focus_cloak import cloak_panel_focus_fallback
 from core.spell_checker import (
     WindowsSpellChecker, spell_check_active, windows_spellcheck_enabled,
 )
@@ -3535,6 +3536,13 @@ class ConversationsPanel(wx.Panel):
                 _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
                 if _rec_jid and not _rec_jid.endswith("@newsletter"):
                     self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+                if self._voice_recording_focus_suppression_enabled():
+                    cloak_panel_focus_fallback(
+                        self.conversation_panel,
+                        self.send_message_btn,
+                        self.record_voice_message_btn,
+                        self._add_attachment_btn,
+                    )
                 self.send_message_btn.Hide()
                 self.record_voice_message_btn.Hide()
                 self._add_attachment_btn.Hide()
@@ -3721,6 +3729,18 @@ class ConversationsPanel(wx.Panel):
             _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
             if _rec_jid and not _rec_jid.endswith("@newsletter"):
                 self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+            if self._voice_recording_focus_suppression_enabled():
+                recording_controls_to_hide = [
+                    self.message_field,
+                    self.send_message_btn,
+                    self.record_voice_message_btn,
+                    self._add_attachment_btn,
+                ]
+                if hasattr(self, "_emoji_btn"):
+                    recording_controls_to_hide.append(self._emoji_btn)
+                cloak_panel_focus_fallback(
+                    self.conversation_panel, *recording_controls_to_hide
+                )
             self.message_field.Hide()
             if hasattr(self, "_emoji_btn"):
                 self._emoji_btn.Hide()

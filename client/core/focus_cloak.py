@@ -100,6 +100,103 @@ def cloak_focus_announcement(window, duration_ms=DEFAULT_CLOAK_MS):
     return True
 
 
+
+# Where the transient parent-panel role cloak is parked.
+_PANEL_CLOAK_ATTR = "_winzapp_panel_focus_cloak"
+
+
+class PanelFocusCloakAccessible(wx.Accessible):
+    """Make one automatic panel-focus fallback silent to NVDA.
+
+    wx.Panel normally exposes the MSAA PANEL role. NVDA deliberately does
+    not suppress that role on focus, while its PANE role is listed in
+    controlTypes.silentRolesOnFocus. When wx hides the currently focused
+    recording trigger, Windows can focus the parent panel automatically; that
+    is the source of the otherwise isolated "Panel" announcement.
+
+    While armed, expose this structural container as an unnamed PANE.
+    Focus still exists, so keyboard accelerators and subsequent Tab navigation
+    keep working. Outside the short armed interval every method falls back to
+    wx's standard accessible object.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.cloaked = False
+
+    def GetRole(self, childId):
+        if not self.cloaked or childId != 0:
+            return (wx.ACC_NOT_IMPLEMENTED, wx.ROLE_NONE)
+        return (wx.ACC_OK, wx.ROLE_SYSTEM_PANE)
+
+    def GetName(self, childId):
+        if not self.cloaked or childId != 0:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        return (wx.ACC_OK, "")
+
+    def GetDescription(self, childId):
+        if not self.cloaked or childId != 0:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        return (wx.ACC_OK, "")
+
+
+def _get_or_install_panel_cloak(window):
+    cloak = getattr(window, _PANEL_CLOAK_ATTR, None)
+    if cloak is not None:
+        return cloak
+    cloak = PanelFocusCloakAccessible(window)
+    window.SetAccessible(cloak)
+    setattr(window, _PANEL_CLOAK_ATTR, cloak)
+    return cloak
+
+
+def _focus_is_within_any(focus, windows):
+    """Return True when focus is one of windows or below one of them."""
+    current = focus
+    while current is not None:
+        if any(current is window for window in windows if window is not None):
+            return True
+        try:
+            current = current.GetParent()
+        except Exception:
+            return False
+    return False
+
+
+def cloak_panel_focus_fallback(panel, *about_to_hide, duration_ms=DEFAULT_CLOAK_MS):
+    """Silence the parent-panel focus produced by hiding a focused child.
+
+    Nothing is armed unless the current focus is actually inside one of the
+    controls that is about to be hidden. This means Ctrl+R from a control that
+    remains visible keeps its existing focus untouched; only the automatic
+    wx/Windows fallback caused by the UI swap is affected.
+    """
+    try:
+        focus = wx.Window.FindFocus()
+        if focus is None or not _focus_is_within_any(focus, about_to_hide):
+            return False
+        cloak = _get_or_install_panel_cloak(panel)
+        cloak.cloaked = True
+    except Exception:
+        logging.debug(
+            "[focus_cloak] could not arm parent-panel fallback cloak",
+            exc_info=True,
+        )
+        return False
+
+    def _uncloak():
+        try:
+            cloak.cloaked = False
+        except Exception:
+            pass
+
+    try:
+        wx.CallLater(max(0, int(duration_ms)), _uncloak)
+    except Exception:
+        _uncloak()
+        return False
+    return True
+
 def uncloak_focus_announcement(window):
     """Disarm the cloak on ``window`` immediately, if it has one."""
     try:

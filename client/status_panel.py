@@ -18,6 +18,7 @@ from core.api_client import api_get, api_post, redact_api_url
 from core.save_location import resolve_save_dialog_folder
 from core.utils import format_number, normalize_line_separators, is_voice_message
 from core.video_player import VideoPlayer
+from core.focus_cloak import cloak_panel_focus_fallback
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
@@ -2550,6 +2551,10 @@ class StatusPanel(wx.Panel):
             self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
             self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
             self._voice_close_btn.Show()
+            if self._voice_recording_focus_suppression_enabled():
+                cloak_panel_focus_fallback(
+                    self._voice_post_panel, self._voice_start_btn
+                )
             self._voice_start_btn.Hide()
             self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
             self._voice_pause_btn.Show()
