@@ -18,6 +18,7 @@ same bug as no gate.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -143,6 +144,46 @@ class TestGateSystemNode:
         with pytest.raises(SystemExit):
             gate.run()
 
+    def test_the_override_says_nothing_when_the_version_is_already_right(
+        self, monkeypatch, capsys
+    ):
+        """Checking the override before the verdict told somebody who had left
+        it set that they were using v22.22.2 "instead of the homologated
+        v22.22.2"."""
+        _Gate(monkeypatch, NODE_VERSION, allow="1").run()
+        assert capsys.readouterr().out.count("WARNING") == 0
+
+    def test_off_windows_the_refusal_does_not_send_you_after_a_windows_zip(
+        self, monkeypatch, capsys
+    ):
+        """client/node/ is a win-x64 archive (client/node_download_config.py),
+        so it can never exist on Linux — where this gate runs on EVERY run,
+        since npm is never the portable one there. `build-onefile` is not a
+        remedy available to that reader."""
+        monkeypatch.setattr(setup_api.sys, "platform", "linux")
+        gate = _Gate(monkeypatch, "26.7.0")
+        with pytest.raises(SystemExit):
+            gate.run()
+        out = capsys.readouterr().out
+        assert "build-onefile" not in out
+        assert "client/node/" not in out
+        assert "nvm" in out and setup_api.ALLOW_SYSTEM_NODE_ENV in out
+
+    def test_on_windows_the_refusal_offers_the_portable_runtime(self, monkeypatch, capsys):
+        monkeypatch.setattr(setup_api.sys, "platform", "win32")
+        gate = _Gate(monkeypatch, "26.7.0")
+        with pytest.raises(SystemExit):
+            gate.run()
+        assert "build-onefile" in capsys.readouterr().out
+
+    def test_the_refusal_names_the_line_rather_than_one_patch(self, monkeypatch, capsys):
+        """"is not the homologated major (v22.22.2)" conflated the two: 22.22.2
+        is a version, 22.x is the line the gate actually compares."""
+        gate = _Gate(monkeypatch, "26.7.0")
+        with pytest.raises(SystemExit):
+            gate.run()
+        assert f"{build_env.node_major(NODE_VERSION)}.x" in capsys.readouterr().out
+
     def test_an_absolute_node_is_not_resolved_through_path(self, monkeypatch):
         """The unhealthy-portable-npm fallback hands over an absolute path
         shutil.which() already produced; resolving it again could pick a
@@ -157,34 +198,99 @@ class TestGateSystemNode:
         assert seen == []
 
 
+class TestNpmRunsUnderPortableNode:
+    """The one predicate deciding both how npm is invoked and whether the gate
+    applies. An earlier version tracked ``client/node/node.exe`` instead, which
+    got the mixed toolchain below exactly backwards."""
+
+    def test_the_portable_npm_cli_is_recognised(self):
+        assert setup_api.npm_runs_under_portable_node(
+            r"C:\src\WinZapp\client\node\node_modules\npm\bin\npm-cli.js"
+        ) is True
+
+    def test_a_bare_npm_is_not_the_portable_one(self):
+        """`npm` reaches _run(), which resolves it through shutil.which() to
+        the system npm.cmd — and that launches the Node.js it was installed
+        beside, not client/node/node.exe. Measured on the reporting machine:
+        `which npm` -> C:\\Program Files\\nodejs\\npm.CMD, npm 11.19.0, the
+        Node 26 install."""
+        assert setup_api.npm_runs_under_portable_node("npm") is False
+
+    def test_the_system_npm_shim_is_not_the_portable_one(self):
+        assert setup_api.npm_runs_under_portable_node(r"C:\Program Files\nodejs\npm.CMD") is False
+        assert setup_api.npm_runs_under_portable_node("/usr/bin/npm") is False
+
+
 class TestGateIsWired:
-    def test_both_paths_to_a_system_node_reach_the_gate(self):
-        """There are two: client/node/ absent, and a portable npm that failed
-        its health probe. The second sets node_bin from shutil.which() deep
-        inside the first's branch, which is exactly where a later edit loses
-        it — so assert the flag is cleared there rather than that the call
-        exists somewhere."""
+    """setup_api.py's toolchain block cannot be called from a test — it is
+    inline in a 200-line function that clones a repository first. These read
+    its source, so each one has to assert something a plausible edit could
+    actually get wrong, not merely that a line is spelled a certain way."""
+
+    def _block(self):
         source = (ROOT / "setup_api.py").read_text(encoding="utf-8")
-        assert "using_portable_node = True" in source
-        assert "using_portable_node = False" in source
-        assert "if not using_portable_node:\n            _gate_system_node(node_bin)" in source
+        start = source.index('print("[INFO] Automating Node.js dependency')
+        return source, source[start:source.index('print("[INFO] Running npm install...")', start)]
+
+    def test_the_portable_node_is_adopted_only_together_with_its_npm(self):
+        """The defect this replaced: node_bin was set from node.exe alone, so
+        a client/node/ with no npm tree left npm_bin as the bare "npm" while
+        every local signal said the toolchain was portable — and the gate,
+        keyed on node.exe, waved through a run that used the system Node."""
+        _, block = self._block()
+        adopt_node = block.index("node_bin = win_node")
+        adopt_npm = block.index("npm_bin = win_npm")
+        guard = block.index("if os.path.isfile(win_npm):")
+        assert guard < adopt_node and guard < adopt_npm, (
+            "node_bin = win_node must sit inside the branch that found the "
+            "portable npm, or the two halves can come from different runtimes"
+        )
+
+    def test_the_unhealthy_npm_fallback_lands_on_the_gate(self):
+        """The second, easy-to-miss path: a portable npm that fails its health
+        probe swaps in shutil.which("node") deep inside the branch above. It
+        reaches the gate only because npm_bin stops being npm-cli.js in the
+        same breath — assert that ordered pair, since asserting either line
+        alone passes with the other deleted."""
+        _, block = self._block()
+        fallback = block.index('system_node = shutil.which("node")')
+        assert block.index("npm_bin = system_npm", fallback) > fallback
+        assert block.index("node_bin = system_node", fallback) > fallback
+
+    def test_the_gate_guards_exactly_what_the_invocation_keys_on(self):
+        """Both must ask the same question. When they disagree, the toolchain
+        that runs is not the toolchain that was checked."""
+        source, block = self._block()
+        assert "if not npm_runs_under_portable_node(npm_bin):\n            _gate_system_node(node_bin)" in block
+        assert 'if npm_runs_under_portable_node(npm_bin):\n            _run([node_bin, npm_bin, "install"' in source
 
     def test_the_gate_runs_before_npm_install(self):
         """Behind it, `npm install` alone is 300+ packages and minutes of
         network before the Chromium download the gate exists to protect."""
-        source = (ROOT / "setup_api.py").read_text(encoding="utf-8")
+        source, _ = self._block()
         assert source.index("_gate_system_node(node_bin)") < source.index(
             'print("[INFO] Running npm install...")'
         )
 
     def test_the_homologated_version_is_not_restated_here(self):
         """client/node_download_config.py is the single source of truth for
-        the Node version (tests/test_node_version_single_source.py), and a
-        gate carrying its own copy would go on refusing the right runtime the
-        day that pin moves."""
+        the Node version, and a gate carrying its own copy would go on
+        refusing the right runtime the day that pin moves.
+
+        Matched version-SHAPED, the way tests/test_node_version_single_source.py
+        does it, not against the current value: asserting `NODE_VERSION not in
+        source` fails the day somebody writes the number into an explanatory
+        comment, which is this repository's house style and nothing to do with
+        the invariant."""
         source = (ROOT / "setup_api.py").read_text(encoding="utf-8")
         assert "from node_download_config import NODE_VERSION" in source
-        assert NODE_VERSION not in source
+        offenders = [
+            f"{number}: {line.strip()}"
+            for number, line in enumerate(source.splitlines(), 1)
+            if not line.strip().startswith("#")
+            and re.search(r"""["']\d+\.\d+\.\d+["']|node-v\d+\.\d+\.\d+""", line)
+        ]
+        assert not offenders, f"read the version from node_download_config instead: {offenders}"
 
 
 class TestSetupApiStillRunsStandalone:

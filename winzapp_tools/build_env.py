@@ -1,9 +1,11 @@
-"""Decisions build.py has to make before it can import anything heavy.
+"""Decisions build.py and setup_api.py have to make before importing anything heavy.
 
 Kept out of build.py itself because that script parses argv and downloads
 ffmpeg/libopus at import time, so none of its logic can be reached from a
-test. Standard library only: a bare system interpreter may run this before
-it hands the build over to a virtual environment.
+test. setup_api.py is the second consumer, for the Node.js version rules at
+the bottom of this file. Standard library only: a bare system interpreter may
+run this before it hands the build over to a virtual environment, and
+setup_api.py runs before client-side dependencies are installed at all.
 """
 
 from __future__ import annotations
