@@ -233,11 +233,13 @@ def test_group_voice_call_offer_uses_whatsapp_web_native_group_controller():
 def test_group_voice_call_resolves_registered_participants_and_rejects_stale_active_call():
     controller = _source("client/api_patches/src/controller/callController.ts")
 
-    # WhatsApp Web's current PN/LID model requires resolving each phone JID
-    # through the native exists query before starting a group VoIP call.
+    # The validated native group-call path resolves every phone through the
+    # exists query and passes result.wid to startWAWebVoipGroupCallFromWids.
+    # LID preference belongs to the one-to-one call path and must not leak here.
     assert "WAWebQueryExistsJob" in controller
     assert "queryWidExists" in controller
-    assert "const resolvedWid = result?.lid || result?.wid" in controller
+    assert "const resolvedWid = result?.wid" in controller
+    assert "result?.lid || result?.wid" not in controller
     assert "participant is not registered or reachable" in controller
 
     # A stale outgoing group model must not make /group/offer return a false 200.

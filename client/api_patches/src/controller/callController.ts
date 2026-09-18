@@ -353,7 +353,12 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
               typeof queryWidExists === 'function'
                 ? await queryWidExists.call(queryExistsModule, requestedWid)
                 : await publicQueryWidExists.call(win.WPP.contact, participantId);
-            const resolvedWid = result?.lid || result?.wid;
+            // The native group-call controller expects the registered WID
+            // returned by WhatsApp's exists query.  Do not substitute the LID
+            // here: one-to-one calls may prefer LIDs on current WhatsApp Web,
+            // but the tested group-call path resolves participants through
+            // getNumberId(), which returns result.wid specifically.
+            const resolvedWid = result?.wid;
             if (!resolvedWid) {
               throw new Error(`Group call participant is not registered or reachable: ${participantId}`);
             }
