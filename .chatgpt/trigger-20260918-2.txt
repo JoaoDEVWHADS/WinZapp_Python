@@ -1,0 +1,1 @@
+trigger after default workflow registration
