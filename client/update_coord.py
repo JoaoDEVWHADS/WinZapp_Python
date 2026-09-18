@@ -344,18 +344,48 @@ def _is_update_in_progress_locked(global_dir: str,
     return True
 
 
+def _is_own_lease(lease: dict, pid: int, create_time: float) -> bool:
+    """True iff *lease* was written by the process identified by (pid,
+    create_time) — same tolerance as lease_alive(), including its 0.0
+    "unknown create_time" sentinel."""
+    if lease.get("_corrupt") or lease.get("pid") != pid:
+        return False
+    ct = float(lease.get("create_time") or 0.0)
+    return ct == 0.0 or create_time == 0.0 or abs(ct - create_time) < 1e-6
+
+
+def other_live_leases(global_dir: str, pid: Optional[int] = None,
+                      create_time: Optional[float] = None,
+                      is_alive: Callable[[int, float], bool] = lease_alive) -> list[dict]:
+    """Every live runtime lease except the caller's own.
+
+    The updater runs inside a live account, so "any lease at all" was never a
+    question it could ask: its own lease made the answer always yes, which is
+    why try_begin_update() sat unused while its docstring in updater.py claimed
+    it gated the install. What actually matters is whether *another* process
+    still holds the exe and its DLLs open — that is what makes xcopy fail with
+    a sharing violation and relaunch the old build, the "atualiza e não muda"
+    loop reported with two accounts open."""
+    pid, create_time = _resolve_identity(pid, create_time)
+    with updater_lock(global_dir):
+        return [l for l in _live_leases_locked(global_dir, is_alive)
+                if not _is_own_lease(l, pid, create_time)]
+
+
 def try_begin_update(global_dir: str, pid: Optional[int] = None,
                      create_time: Optional[float] = None,
                      is_alive: Callable[[int, float], bool] = lease_alive):
     """Atomically claim the update slot. Returns an owner-token dict on success,
-    or None if a live updater owns it OR any account lease is live. The token
+    or None if a live updater owns it OR any OTHER account lease is live (the
+    caller's own lease is expected — see other_live_leases()). The token
     carries a random owner_token so only THIS install run can end it
     (GPT r2 #2 / r3 #2). All check+write under one updater_lock."""
     pid, create_time = _resolve_identity(pid, create_time)
     with updater_lock(global_dir):
         if _is_update_in_progress_locked(global_dir, is_alive):
             return None
-        if _live_leases_locked(global_dir, is_alive):
+        if any(not _is_own_lease(l, pid, create_time)
+               for l in _live_leases_locked(global_dir, is_alive)):
             return None
         token = {"owner_pid": pid, "owner_create_time": create_time,
                  "owner_token": uuid.uuid4().hex}
