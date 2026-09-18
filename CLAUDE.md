@@ -200,3 +200,32 @@ also compiles the C installer stubs); `client/changelog_*.txt`
 | `updater.py`, `update_coord.py`, release workflows | `docs/traps/updater-channels.md`, `docs/traps/release-integrity.md` |
 | Settings defaults, `_migrate_settings()` | `docs/traps/settings-migrations.md` |
 | `tests/conftest.py`, anything creating a wx window in a test | `docs/traps/tests-never-open-windows.md` |
+
+## Agent skills
+
+The `mattpocock-skills` plugin (enabled in `.claude/settings.json`) provides
+the idea → ship flow: `/grill-with-docs` → `/to-spec` → `/to-tickets` →
+`/implement` → `/code-review`, plus `/triage` and `/diagnosing-bugs`. Three
+WinZapp-specific bounds on it:
+
+- "Run the full test suite" means a plain `pytest` — **never** `--run-wx-gui`
+  (rule 1 at the top of this file).
+- `/implement` says "commit your work"; here a commit happens only when the
+  user asks for one.
+- The "documented coding standards" `/code-review` looks for are this file,
+  `docs/traps/` and the project skills in `.claude/skills/`; there is no
+  `CONTRIBUTING.md`.
+
+### Issue tracker
+
+GitHub Issues on `gabrielhhaber/WinZapp_Python`, via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default roles as-is (`needs-triage`, `needs-info`, `ready-for-agent`,
+`ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root, created lazily by
+`/domain-modeling`. See `docs/agents/domain.md`.
