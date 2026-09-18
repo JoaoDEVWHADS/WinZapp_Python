@@ -399,16 +399,18 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         );
 
         const callStart = win.require?.('WAWebVoipStartCall');
-        if (typeof callStart?.inviteToCall !== 'function') {
+        if (typeof callStart?.startWAWebVoipGroupCallFromWids !== 'function') {
           throw new Error(
-            'WhatsApp inviteToCall controller is unavailable for group calling'
+            'WhatsApp native group-call controller is unavailable'
           );
         }
-        if (typeof win.WPP?.call?.offer !== 'function') {
-          throw new Error(
-            'WA-JS call.offer is unavailable for group calling'
-          );
-        }
+
+        const callFromUiModule = win.require?.('WAWebWamEnumCallFromUi');
+        const lobbyEntryModule = win.require?.('WAWebWamEnumLobbyEntryPointType');
+        const callFromUi =
+          callFromUiModule?.CALL_FROM_UI?.GROUP_CHAT_PICKER ?? 24;
+        const lobbyEntryPoint =
+          lobbyEntryModule?.LOBBY_ENTRY_POINT_TYPE?.NOT_OPENED ?? 5;
 
         const callStore = getCallStore();
         const previousActiveId = callIdOf(callStore?.activeCall);
@@ -416,92 +418,63 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           getModels(callStore).map((model) => callIdOf(model)).filter(Boolean)
         );
 
-        // Do not use startWAWebVoipGroupCallFromWids as the primary path.
-        // On WA 2.3000.1047819263 it creates a fresh isGroup CallModel with
-        // all selected participants but leaves it stuck in CALLING and no
-        // remote device rings. Seed through WA-JS's supported public offer()
-        // path instead; WA-JS handles current calling gates, LID selection and
-        // the native start-call signature. Then promote that real 1:1 call by
-        // inviting the remaining selected participants.
+        // WhatsApp's own group-call picker calls this function with FOUR
+        // arguments:
+        //   (participantWids, isVideo, callFromUi, lobbyEntryPoint)
+        // Using only the first two leaves the native stack without the
+        // telemetry/context values it expects and was observed to create a
+        // local CALLING model that never rang remote devices.
         console.log(
-          '[winzapp-group-call] seed-via-wpp-offer ' +
+          '[winzapp-group-call] native-group-start ' +
           JSON.stringify({
-            participantCount: participantIds.length,
-            inviteToCallArity: callStart.inviteToCall.length,
-            nativeGroupAvailable:
-              typeof callStart?.startWAWebVoipGroupCallFromWids === 'function',
+            participantCount: participantWids.length,
+            functionArity: callStart.startWAWebVoipGroupCallFromWids.length,
+            callFromUi,
+            lobbyEntryPoint,
           })
         );
 
-        const offeredSeed = await win.WPP.call.offer(participantIds[0], {
-          isVideo: false,
-        });
+        await callStart.startWAWebVoipGroupCallFromWids(
+          participantWids,
+          false,
+          callFromUi,
+          lobbyEntryPoint
+        );
 
-        let seedCall: any = null;
-        const fallbackStartedAt = Date.now();
-        while (Date.now() - fallbackStartedAt < 5000) {
-          const activeCall = getCallStore()?.activeCall;
-          const candidates = [activeCall, offeredSeed].filter(Boolean);
-          seedCall =
-            candidates.find((call: any) => {
-              const activeId = callIdOf(call);
-              const state = callStateOf(call);
-              return (
-                !!call?.outgoing &&
-                !!activeId &&
-                activeId !== previousActiveId &&
-                !preexistingIds.has(activeId) &&
-                !!state &&
-                state !== 'NONE' &&
-                state !== 'ENDED'
-              );
-            }) || null;
-          if (seedCall) break;
-          await delay(100);
-        }
-        if (!seedCall) {
-          throw new Error(
-            'WA-JS group-call seed did not create a live outgoing call'
-          );
-        }
-
-        for (const participantWid of participantWids.slice(1)) {
-          await callStart.inviteToCall(participantWid);
-          console.log(
-            '[winzapp-group-call] participant invited ' +
-            JSON.stringify({ participant: serializeId(participantWid) })
-          );
-          await delay(150);
-        }
-
-        // A resolved inviteToCall() promise only means the private controller
-        // accepted the request. Do not report success until WhatsApp promotes
-        // the seeded live call to real group metadata with multiple remote
-        // participants.
-        let promotedCall = seedCall;
-        let promoted = false;
-        for (let attempt = 0; attempt < 50; attempt += 1) {
+        let startedCall: any = null;
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 5000) {
           const current = getCallStore()?.activeCall;
-          if (current && callIdOf(current) === callIdOf(seedCall)) {
-            promotedCall = current;
-            if (
-              current?.isGroup &&
-              groupParticipantCountOf(current) >= 2
-            ) {
-              promoted = true;
-              break;
-            }
+          const activeId = callIdOf(current);
+          const state = callStateOf(current);
+          if (
+            current?.outgoing &&
+            current?.isGroup &&
+            activeId &&
+            activeId !== previousActiveId &&
+            !preexistingIds.has(activeId) &&
+            state &&
+            state !== 'NONE' &&
+            state !== 'ENDED' &&
+            groupParticipantCountOf(current) >= 2
+          ) {
+            startedCall = current;
+            break;
           }
           await delay(100);
         }
-        if (!promoted) {
+
+        if (!startedCall) {
           throw new Error(
-            'WhatsApp accepted the group invitations but did not promote the call to a live group call'
+            'WhatsApp group-call controller did not create a live outgoing group call'
           );
         }
+
         return {
-          ...summarizeCall(promotedCall),
-          via: 'one-to-one-plus-invites',
+          ...summarizeCall(startedCall),
+          via: 'native-group-contextual',
+          callFromUi,
+          lobbyEntryPoint,
         };
       }
 

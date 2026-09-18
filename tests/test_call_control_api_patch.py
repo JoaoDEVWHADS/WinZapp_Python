@@ -213,7 +213,7 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "getDidVoipInitError" in bridge
 
 
-def test_group_voice_call_offer_seeds_via_wajs_and_invites_participants():
+def test_group_voice_call_offer_matches_whatsapp_native_group_signature():
     routes = _source("client/api_patches/src/routes/index.ts")
     controller = _source("client/api_patches/src/controller/callController.ts")
 
@@ -221,9 +221,11 @@ def test_group_voice_call_offer_seeds_via_wajs_and_invites_participants():
     assert 'CallController.offerGroupCall' in routes
     assert "action === 'offer-group'" in controller
     assert "WAWebVoipStartCall" in controller
-    assert "await win.WPP.call.offer(participantIds[0]" in controller
-    assert "inviteToCall(participantWid)" in controller
-    assert "seed-via-wpp-offer" in controller
+    assert "startWAWebVoipGroupCallFromWids" in controller
+    assert "GROUP_CHAT_PICKER ?? 24" in controller
+    assert "NOT_OPENED ?? 5" in controller
+    assert "participantWids,\n          false,\n          callFromUi,\n          lobbyEntryPoint" in controller
+    assert "native-group-contextual" in controller
     assert "WAWebWidFactory" in controller
     assert "At least two participants are required" in controller
     assert "Video group calls are not supported" in controller
@@ -258,27 +260,30 @@ def test_group_voice_call_falls_back_to_live_tested_one_to_one_plus_invites():
     assert "call?.getState?.() ?? call?.state" in controller
     assert "state !== 'NONE'" in controller
 
-    # Seed through WA-JS's supported public offer() path, then use the
-    # native invite path for the remaining selected participants.
-    assert "await win.WPP.call.offer(participantIds[0]" in controller
-    assert "startWAWebVoipCall(participantWids[0], false, callFromUi)" not in controller
-    assert "await callStart.startWAWebVoipGroupCallFromWids" not in controller
-    assert "inviteToCall(participantWid)" in controller
-    assert "participantWids.slice(1)" in controller
-    assert "one-to-one-plus-invites" in controller
+    # The current WhatsApp UI passes call-from-UI and lobby-entry context
+    # into the native group start. Missing these two arguments previously
+    # produced a local CALLING model without a remote ring.
+    assert "const callFromUi =" in controller
+    assert "GROUP_CHAT_PICKER ?? 24" in controller
+    assert "const lobbyEntryPoint =" in controller
+    assert "NOT_OPENED ?? 5" in controller
+    assert "await callStart.startWAWebVoipGroupCallFromWids(" in controller
+    assert "inviteToCall(participantWid)" not in controller
+    assert "one-to-one-plus-invites" not in controller
     assert "group call offer result" in controller
 
-    # The call is only successful after WhatsApp exposes real group metadata.
+    # The route still verifies that WhatsApp exposed a fresh real group model.
     assert "const groupParticipantCountOf =" in controller
     assert "groupParticipantCountOf(current) >= 2" in controller
-    assert "did not promote the call to a live group call" in controller
+    assert "did not create a live outgoing group call" in controller
 
 
 def test_group_voice_call_rejects_ghost_calling_model_without_participants():
     controller = _source("client/api_patches/src/controller/callController.ts")
 
     assert "groupParticipantCount: groupParticipantCountOf(call)" in controller
-    assert "const offeredSeed = await win.WPP.call.offer(" in controller
-    assert "await callStart.startWAWebVoipGroupCallFromWids" not in controller
+    assert "await callStart.startWAWebVoipGroupCallFromWids(" in controller
     assert "current?.isGroup &&" in controller
     assert "groupParticipantCountOf(current) >= 2" in controller
+    assert "activeId !== previousActiveId" in controller
+    assert "!preexistingIds.has(activeId)" in controller
