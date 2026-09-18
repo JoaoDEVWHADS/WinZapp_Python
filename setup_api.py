@@ -43,6 +43,24 @@ WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 _CLIENT_DIR = os.path.join(ROOT_DIR, "client")
 if _CLIENT_DIR not in sys.path:
     sys.path.insert(0, _CLIENT_DIR)
+# winzapp_tools.build_env is stdlib-only for the same reason, and holds the
+# Node.js decisions build.py already makes. ROOT_DIR is sys.path[0] for
+# `python setup_api.py` whatever the working directory, and on the path
+# already under `uv run setup-api`; inserting it keeps an embedded or
+# exec'd caller working too.
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from node_download_config import NODE_VERSION  # noqa: E402
+from winzapp_tools.build_env import (  # noqa: E402
+    portable_node_version,
+    system_node_is_refused,
+)
+
+# The escape hatch for the Node this gate has no evidence about — a major it
+# refuses that a fork has nonetheless verified. Named in the refusal itself,
+# so nobody has to read this file to get unblocked.
+ALLOW_SYSTEM_NODE_ENV = "WINZAPP_ALLOW_SYSTEM_NODE"
 
 # Files WinZapp patches on top of upstream wppconnect-server. client/api_patches/
 # is the permanent, always-git-tracked source of truth for all of these —
@@ -154,6 +172,70 @@ def _run(cmd: list, cwd: str = None):
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
+
+
+def _gate_system_node(node_bin: str) -> None:
+    """Stop before spending a system Node.js this path is not verified on.
+
+    Reached only when ``client/node/`` could not supply the runtime — a fresh
+    checkout, or a portable npm that failed its own health probe. build.py and
+    CI both provision ``client/node/`` first and never arrive here.
+
+    Prints and exits rather than raising: the caller's handler reports "Node.js
+    dependencies installation/build failed", which is the wrong sentence for a
+    run that has not installed anything yet.
+    """
+    resolved = node_bin
+    if not os.path.isabs(resolved):
+        resolved = shutil.which(resolved) or ""
+    installed = portable_node_version(resolved) if resolved else ""
+
+    if os.environ.get(ALLOW_SYSTEM_NODE_ENV, "").strip():
+        print(
+            f"[WARNING] {ALLOW_SYSTEM_NODE_ENV} is set; using system Node.js "
+            f"v{installed or 'unknown'} instead of the homologated v{NODE_VERSION}."
+        )
+        return
+
+    if system_node_is_refused(installed, NODE_VERSION):
+        # Plain ASCII, deliberately. A Windows console on cp1252 renders the
+        # em dashes the rest of this script prints as mojibake, which is
+        # survivable in a progress line and not in the one message whose whole
+        # job is to be read at the moment everything stopped.
+        print(
+            f"\n[ERROR] System Node.js v{installed} is not the homologated "
+            f"major (v{NODE_VERSION}), and this setup is only verified on that "
+            "one."
+        )
+        print(
+            "        Newer majors fail in a way that never names Node: on v26 "
+            "the Chromium download stops two files in, reports no error, and "
+            "every later run then fails on the half-extracted folder it left "
+            "behind."
+        )
+        print("        Any of these gets you going:")
+        print(
+            "          * Build once. `uv run build-onefile` provisions "
+            f"client/node/ with v{NODE_VERSION}, which this script prefers."
+        )
+        print(f"          * Switch this shell to Node {NODE_VERSION} (nvm, fnm, volta).")
+        print(
+            f"          * Set {ALLOW_SYSTEM_NODE_ENV}=1 to use it anyway, if "
+            "you have verified this major yourself."
+        )
+        sys.exit(1)
+
+    if not installed:
+        # Only an answer refuses. A probe that could not speak is not a
+        # verdict, and npm install fails loudly a moment later if Node really
+        # is broken — see system_node_is_refused()'s docstring.
+        print(
+            "[WARNING] Could not read the system Node.js version; continuing. "
+            f"This setup is verified on v{NODE_VERSION}."
+        )
+        return
+
+    print(f"[INFO] Using system Node.js v{installed} (homologated: v{NODE_VERSION}).")
 
 
 def _latest_stable_tag(cwd: str) -> str:
@@ -850,10 +932,15 @@ def main():
         # On Windows, check if portable node exists in client/node/node.exe
         node_bin = "node"
         npm_bin = "npm"
+        # The homologated runtime is the only one this path is verified on, so
+        # every way of ending up on a different one has to be visible here —
+        # there are two, and the second is easy to miss below.
+        using_portable_node = False
         if is_windows:
             win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
             if os.path.isfile(win_node):
                 node_bin = win_node
+                using_portable_node = True
                 # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
@@ -910,6 +997,10 @@ def main():
                         )
                         node_bin = system_node
                         npm_bin = system_npm
+                        using_portable_node = False
+
+        if not using_portable_node:
+            _gate_system_node(node_bin)
 
         # Run npm install
         print("[INFO] Running npm install...")
