@@ -399,10 +399,14 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         );
 
         const callStart = win.require?.('WAWebVoipStartCall');
-        if (typeof callStart?.startWAWebVoipGroupCallFromWids !== 'function') {
+        if (typeof callStart?.inviteToCall !== 'function') {
           throw new Error(
-            'Group WhatsApp calls are not supported by this WhatsApp Web version: ' +
-            'no supported internal call controller was detected'
+            'WhatsApp inviteToCall controller is unavailable for group calling'
+          );
+        }
+        if (typeof win.WPP?.call?.offer !== 'function') {
+          throw new Error(
+            'WA-JS call.offer is unavailable for group calling'
           );
         }
 
@@ -412,77 +416,23 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           getModels(callStore).map((model) => callIdOf(model)).filter(Boolean)
         );
 
-        await callStart.startWAWebVoipGroupCallFromWids(participantWids, false);
+        // Do not use startWAWebVoipGroupCallFromWids as the primary path.
+        // On WA 2.3000.1047819263 it creates a fresh isGroup CallModel with
+        // all selected participants but leaves it stuck in CALLING and no
+        // remote device rings. Seed through WA-JS's supported public offer()
+        // path instead; WA-JS handles current calling gates, LID selection and
+        // the native start-call signature. Then promote that real 1:1 call by
+        // inviting the remaining selected participants.
+        console.log(
+          '[winzapp-group-call] seed-via-wpp-offer ' +
+          JSON.stringify({
+            participantCount: participantIds.length,
+            inviteToCallArity: callStart.inviteToCall.length,
+            nativeGroupAvailable:
+              typeof callStart?.startWAWebVoipGroupCallFromWids === 'function',
+          })
+        );
 
-        // Some WhatsApp Web builds create an outgoing/isGroup CallModel but
-        // immediately leave it in state 0 (NONE).  That model is not a real
-        // ringing call: no offer reaches the phones.  Give the native group
-        // controller a short window to promote the model to a live call, but
-        // never treat a NONE/blank model as success.
-        let stalledGroupCall: any = null;
-        const directStartedAt = Date.now();
-        while (Date.now() - directStartedAt < 2500) {
-          const call = getCallStore()?.activeCall;
-          const activeId = callIdOf(call);
-          const state = callStateOf(call);
-          const isFreshGroupCall =
-            !!call?.outgoing &&
-            !!call?.isGroup &&
-            !!activeId &&
-            activeId !== previousActiveId &&
-            !preexistingIds.has(activeId);
-          if (isFreshGroupCall) {
-            stalledGroupCall = call;
-            const groupParticipantCount = groupParticipantCountOf(call);
-            if (
-              state &&
-              state !== 'NONE' &&
-              state !== 'ENDED' &&
-              groupParticipantCount >= 2
-            ) {
-              return { ...summarizeCall(call), via: 'native-group' };
-            }
-          }
-          await delay(100);
-        }
-
-        // Runtime-validated fallback: start the first participant through the
-        // ordinary 1:1 controller, then use WAWebVoipStartCall.inviteToCall()
-        // for the remaining participants.  Both pieces are independently live
-        // tested by the upstream experimental calling implementation, and this
-        // avoids the broken direct-group path present in some WA Web builds.
-        if (stalledGroupCall) {
-          const stalledId = callIdOf(stalledGroupCall);
-          try {
-            await runNativeVoipAction(async (voipStack: any) => {
-              if (typeof voipStack?.endCall !== 'function') return false;
-              stalledGroupCall.userEndedCall = true;
-              await voipStack.endCall(2, true);
-              return true;
-            });
-          } catch (_) {}
-          for (let attempt = 0; attempt < 20; attempt += 1) {
-            const current = getCallStore()?.activeCall;
-            if (!current || callIdOf(current) !== stalledId) break;
-            await delay(100);
-          }
-        }
-
-        if (typeof win.WPP?.call?.offer !== 'function') {
-          throw new Error(
-            'Direct group call stalled and the WA-JS 1:1 call fallback is unavailable'
-          );
-        }
-        if (typeof callStart?.inviteToCall !== 'function') {
-          throw new Error(
-            'Direct group call stalled and WhatsApp inviteToCall fallback is unavailable'
-          );
-        }
-
-        // Seed through WA-JS's current supported call path instead of calling
-        // WAWebVoipStartCall.startWAWebVoipCall directly. WA-JS resolves the
-        // participant to LID, enables the current calling gates and invokes
-        // the current native start-call signature internally.
         const offeredSeed = await win.WPP.call.offer(participantIds[0], {
           isVideo: false,
         });
@@ -511,19 +461,23 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         }
         if (!seedCall) {
           throw new Error(
-            'Direct group call stalled and the 1:1 fallback did not create a live outgoing call'
+            'WA-JS group-call seed did not create a live outgoing call'
           );
         }
 
         for (const participantWid of participantWids.slice(1)) {
           await callStart.inviteToCall(participantWid);
+          console.log(
+            '[winzapp-group-call] participant invited ' +
+            JSON.stringify({ participant: serializeId(participantWid) })
+          );
           await delay(150);
         }
 
         // A resolved inviteToCall() promise only means the private controller
         // accepted the request. Do not report success until WhatsApp promotes
-        // the live call to real group metadata. This prevents the exact false
-        // 200 seen in the field: isGroup/CALLING with no remote participants.
+        // the seeded live call to real group metadata with multiple remote
+        // participants.
         let promotedCall = seedCall;
         let promoted = false;
         for (let attempt = 0; attempt < 50; attempt += 1) {
