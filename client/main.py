@@ -2683,8 +2683,22 @@ class MainWindow(wx.Frame):
         # the conversation never leaves call controls stranded in the main UI.
         # There is deliberately only this one set of call controls — see
         # _sync_voice_call_bar() for why the in-frame copy was removed.
+        #
+        # Parent is deliberately None, not self. A wx.Frame given another
+        # top-level frame as its parent becomes a Win32 OWNED window, and an
+        # owned window is unconditionally kept above its owner in the
+        # Z-order by Windows itself — clicking, Alt-Tabbing to, or otherwise
+        # activating MainWindow would still leave this window pinned on top
+        # of it, no matter what focus code does on either side. Reported
+        # live as the call window always ending up over WinZapp's own
+        # window even while trying to switch back to it. An unparented
+        # frame is a fully independent top-level window, so the two can be
+        # freely interleaved like any other two windows. This process only
+        # ever ends via os._exit() (see _perform_shutdown()/real_exit()),
+        # never a clean wx destroy cascade, so there is no lifetime cost to
+        # this window outliving MainWindow in wx's own bookkeeping.
         self.voice_call_window = wx.Frame(
-            self, title=self.i18n.t("voice_call_window_title"), size=(560, 150),
+            None, title=self.i18n.t("voice_call_window_title"), size=(560, 150),
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
         )
         call_panel = wx.Panel(self.voice_call_window)
@@ -5418,19 +5432,27 @@ class MainWindow(wx.Frame):
             # Disabling the popup means "do not interrupt what I am doing",
             # not "hide the call controls". Once the user deliberately comes
             # back with Alt+Tab, put keyboard and screen-reader focus directly
-            # on the in-window Desligar button.
+            # on the in-window Desligar button — but only for a call that is
+            # still RINGING (the bar lives inside this window, so this only
+            # ever moves focus within the window already being activated).
+            #
+            # Deliberately NOT done for a call already answered: that call
+            # lives in its own top-level window (voice_call_window)
+            # precisely so the user can move freely between it and the
+            # conversation list. An earlier version of this branch treated
+            # the two cases the same and stole focus into voice_call_window
+            # every time MainWindow itself became active — so switching to
+            # WinZapp to read a conversation while on a call immediately
+            # bounced focus (and, since SetFocus on another top-level window
+            # also raises it on Windows, the window itself) back onto the
+            # call window. Reported live: "ao mover para a janela do
+            # WinZapp, sempre cai na janela ligação de voz". See
+            # voice_call_window's own construction comment for the other
+            # half of that fix (it is no longer owned by this window either).
             answer_button = getattr(self, "incoming_call_answer_button", None)
             call_bar = getattr(self, "incoming_call_bar", None)
             if answer_button is not None and call_bar is not None and call_bar.IsShown():
                 wx.CallAfter(answer_button.SetFocus)
-            else:
-                # Same reasoning for a call already up: the controls are in
-                # their own window, so hand focus to that window's Desligar.
-                end_button = getattr(self, "voice_call_window_end_button", None)
-                call_window = getattr(self, "voice_call_window", None)
-                if (end_button is not None and call_window is not None
-                        and call_window.IsShown()):
-                    wx.CallAfter(end_button.SetFocus)
         if self.background_mode:
             event.Skip()
             return

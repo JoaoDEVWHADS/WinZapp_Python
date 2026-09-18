@@ -176,3 +176,71 @@ class TestSyncIsNeverGatedOnACall:
         gate = body.index("self._voice_call_in_progress()")
         first_fetch = body.index("self.get_remote_chats(")
         assert gate < first_fetch
+
+
+class TestCallWindowDoesNotFightMainWindowForFocus:
+    """voice_call_window must behave like a genuinely independent window.
+
+    Two things fought that, reported live as "moving back to WinZapp's own
+    window always falls back onto the call window":
+
+    - It was parented to MainWindow (`wx.Frame(self, ...)`), which on Windows
+      makes it an OWNED window. An owned window is kept unconditionally above
+      its owner in the Z-order by the OS itself — clicking, Alt-Tabbing to, or
+      SetForegroundWindow()-ing MainWindow does not change that, so no amount
+      of focus code on either side can make MainWindow appear "on top" while
+      the call is up.
+    - _on_window_activate() additionally re-stole focus into the call window
+      every time MainWindow itself became the active window (not just for a
+      still-ringing call, where the answer button lives inside this same
+      window and grabbing it doesn't fight anything).
+
+    Checked statically, without constructing a real wx.Frame: this suite never
+    opens a real window unless explicitly asked to (see tests/conftest.py and
+    CLAUDE.md's Tests section — the risk is a screen reader announcing a
+    throwaway test window on someone's actual desktop).
+    """
+
+    @staticmethod
+    def _main_py_source():
+        import pathlib
+        return (pathlib.Path(__file__).parents[1] / "client" / "main.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_call_window_is_not_owned_by_main_window(self):
+        source = self._main_py_source()
+        start = source.index("self.voice_call_window = wx.Frame(")
+        construction = source[start: source.index(")", start) + 1]
+        parent_arg = construction.split("(", 1)[1].split(",", 1)[0].strip()
+        assert parent_arg == "None", (
+            f"voice_call_window is constructed with parent={parent_arg!r}. "
+            "Parenting it to another top-level frame makes it a Win32 OWNED "
+            "window, which Windows keeps unconditionally above its owner in "
+            "the Z-order — see the construction site's own comment for what "
+            "that broke."
+        )
+
+    def test_activating_main_window_never_steals_focus_into_the_call_window(self):
+        import inspect
+
+        from main import MainWindow
+
+        body = inspect.getsource(MainWindow._on_window_activate)
+        # The method's own docstring/comments now explain this fix and
+        # therefore mention voice_call_window by name — checked against the
+        # CODE only, same as TestSyncIsNeverGatedOnACall's _body() helper.
+        code = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "voice_call_window" not in code, (
+            "MainWindow becoming active must not move focus into the "
+            "separate call window for an already-answered call — that is "
+            "what pinned it visually on top of MainWindow every time the "
+            "user switched back to browse conversations mid-call."
+        )
+        # The still-ringing case is unaffected: that bar lives INSIDE this
+        # same window, so focusing its own Answer button doesn't fight
+        # anything and must stay.
+        assert "incoming_call_answer_button" in code
+        assert "incoming_call_bar" in code
