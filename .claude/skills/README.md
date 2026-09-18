@@ -46,6 +46,25 @@ Três coisas que mudam como se usa:
 Os três agentes daqui têm a ferramenta `Skill` e são instruídos a carregar as
 skills relevantes antes de tocar em qualquer coisa.
 
+### Regras e traps: carregam quando você mexe no arquivo
+
+O `CLAUDE.md` é carregado inteiro em toda sessão, então guarda só o que vale
+para qualquer tarefa. A história por trás de cada regra — o incidente medido,
+as hipóteses descartadas, os trechos de log — fica em `docs/traps/` (e o
+material de referência em `docs/reference/`). Dois mecanismos levam o agente
+até lá sem custar tokens em toda sessão:
+
+- **`.claude/rules/<area>.md`** — cada um tem `paths:` no frontmatter e só
+  entra no contexto quando o agente toca num arquivo que bate no glob. O corpo
+  é a regra em três linhas e o ponteiro para o trap completo.
+- **A tabela no fim do `CLAUDE.md`** — "antes de mexer em X, leia o trap
+  daquela área". O agente lê com `Read` quando a tarefa pede.
+
+Escrevendo um post-mortem novo: vai para `docs/traps/`, ganha uma regra em
+`.claude/rules/` com os `paths` que ele protege, e uma linha na tabela. Não
+volta para o `CLAUDE.md`. `tests/test_claude_md_matches_reality.py` confere
+que todo caminho citado nesses arquivos existe.
+
 ### O fluxo de uma feature nova
 
 ```
