@@ -174,6 +174,9 @@ os "standards" que o `/code-review` procura são `CLAUDE.md` + `docs/traps/` +
 as skills daqui. Não é preciso rodar o setup de novo — só para trocar de
 tracker.
 
+Tutorial passo a passo, com o que cada skill manual faz e quando chamar:
+`docs/agents/como-usar-as-skills.md`.
+
 O caminho de uma feature, do jeito que o `/ask-matt` descreve, aplicado aqui:
 
 ```
