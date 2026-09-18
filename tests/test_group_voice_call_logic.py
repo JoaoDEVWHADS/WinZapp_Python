@@ -57,5 +57,7 @@ def test_main_window_posts_group_voice_call_to_group_offer_endpoint():
     source = (Path(__file__).resolve().parents[1] / "client/main.py").read_text(encoding="utf-8")
     assert "def start_group_voice_call(" in source
     assert '"group/offer",' in source
-    assert '{"participants": participants, "isVideo": False}' in source
+    assert '"participants": participants' in source
+    assert '"groupJid": group_jid' in source
+    assert '"useGroupChat": bool(use_group_chat)' in source
     assert '"is_group": True' in source

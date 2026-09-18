@@ -6396,7 +6396,11 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def start_group_voice_call(
-        self, group_jid: str, participant_jids: list[str], name: str = ""
+        self,
+        group_jid: str,
+        participant_jids: list[str],
+        name: str = "",
+        use_group_chat: bool = False,
     ):
         """Start a WhatsApp group voice call with selected group participants."""
         group_jid = self._normalize_jid(str(group_jid or ""))
@@ -6454,7 +6458,12 @@ class MainWindow(wx.Frame):
                     self._start_voice_call_audio(identity, details)
                     response = self._post_call_control(
                         "group/offer",
-                        {"participants": participants, "isVideo": False},
+                        {
+                            "participants": participants,
+                            "isVideo": False,
+                            "groupJid": group_jid,
+                            "useGroupChat": bool(use_group_chat),
+                        },
                         timeout=75,
                     )
                     if response.status_code >= 400:

@@ -25,7 +25,8 @@ def test_voice_call_button_routes_group_chats_to_participant_picker():
     assert 'unavailable = jid.endswith(("@newsletter", "@broadcast"))' in source
     assert 'if jid.endswith("@g.us"):' in source
     assert "self._open_group_voice_call_picker(jid, name)" in source
-    assert "self.main_window.start_group_voice_call(group_jid, selected, group_name)" in source
+    assert "full_group_selected = len(selected) == len(candidates)" in source
+    assert "full_group_selected," in source
 
 
 def test_group_voice_call_picker_has_translations_in_every_supported_language():
@@ -42,3 +43,13 @@ def test_group_voice_call_picker_has_translations_in_every_supported_language():
     for language in ("pt-BR", "pt-PT", "en-US", "es-ES", "pl"):
         data = json.loads(_source(f"client/languages/{language}.json"))
         assert required <= data.keys()
+
+
+def test_full_group_selection_uses_group_chat_call_context():
+    source = _source("client/ui/conversations.py")
+
+    assert "full_group_selected = len(selected) == len(candidates)" in source
+    assert "group_jid," in source
+    assert "selected," in source
+    assert "group_name," in source
+    assert "full_group_selected," in source
