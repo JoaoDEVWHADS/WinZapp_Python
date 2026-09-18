@@ -65,3 +65,20 @@ def test_status_recording_cloaks_panel_before_hiding_start_button():
     hide = method.index("self._voice_start_btn.Hide()")
     assert cloak < hide
     assert "self._voice_post_panel" in method
+
+
+def test_silent_conversation_recording_preserves_message_field_focus():
+    method = _method_source(
+        "client/ui/conversations.py", "ConversationsPanel", "_start_voice_recording"
+    )
+
+    assert "keep_message_field_focused" in method
+    assert "if keep_message_field_focused:" in method
+    assert "else:\n                self.message_field.Hide()" in method
+
+    silent_block = method.split("if keep_message_field_focused:", 1)[1].split(
+        "else:\n                self.message_field.Hide()", 1
+    )[0]
+    assert "self.message_field" not in silent_block.split(
+        "recording_controls_to_hide = [", 1
+    )[1].split("]", 1)[0]

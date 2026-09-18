@@ -3729,9 +3729,23 @@ class ConversationsPanel(wx.Panel):
             _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
             if _rec_jid and not _rec_jid.endswith("@newsletter"):
                 self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
-            if self._voice_recording_focus_suppression_enabled():
+            keep_message_field_focused = (
+                self._voice_recording_focus_suppression_enabled()
+            )
+            if keep_message_field_focused:
+                # Ctrl+R is commonly pressed while the message editor itself
+                # owns Windows focus. Hiding that focused native control makes
+                # wx/Windows transfer focus to the parent wx.Panel before our
+                # recording controls can do anything, which current NVDA
+                # announces simply as "Panel". The robust silent path is to
+                # leave the editor alive and focused for the recording
+                # session. No focus event means there is nothing for NVDA to
+                # announce or for WinZapp to race-cancel.
+                #
+                # The editor already remains visible in the sounddevice
+                # fallback path, so this also makes the normal PyAudio path
+                # consistent with that established behaviour.
                 recording_controls_to_hide = [
-                    self.message_field,
                     self.send_message_btn,
                     self.record_voice_message_btn,
                     self._add_attachment_btn,
@@ -3741,7 +3755,8 @@ class ConversationsPanel(wx.Panel):
                 cloak_panel_focus_fallback(
                     self.conversation_panel, *recording_controls_to_hide
                 )
-            self.message_field.Hide()
+            else:
+                self.message_field.Hide()
             if hasattr(self, "_emoji_btn"):
                 self._emoji_btn.Hide()
             self.send_message_btn.Hide()
