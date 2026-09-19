@@ -18,6 +18,17 @@ def test_camera_names_only_reads_video_devices():
     assert camera_names(listing) == ["Integrated Camera", "USB Camera"]
 
 
+def test_camera_names_accepts_current_ffmpeg_directshow_suffix_and_spacing():
+    listing = '''[dshow @ 000] DirectShow video devices (some may be both video and audio devices)
+[dshow @ 000]  "Integrated Camera" (video)
+[dshow @ 000]     Alternative name "@device_pnp_abc"
+[dshow @ 000]    "USB Camera"    (VIDEO)
+[dshow @ 000] DirectShow audio devices
+[dshow @ 000]  "Microphone" (audio)
+'''
+    assert camera_names(listing) == ["Integrated Camera", "USB Camera"]
+
+
 def test_jpeg_pipe_discards_noise_and_yields_complete_frames():
     frame_a = b'\xff\xd8first\xff\xd9'
     frame_b = b'\xff\xd8second\xff\xd9'
