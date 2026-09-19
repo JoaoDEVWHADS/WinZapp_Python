@@ -214,6 +214,18 @@ function installCallMediaBridgeInPage(): boolean {
     try { win.__winzappOnCallBridgeEvent?.(event, details); } catch (_) {}
   };
 
+  // Silences WhatsApp Web's own page-native sounds (ringtone, message
+  // chimes, ...) without touching real call audio, which never plays
+  // through an <audio>/<video> element in the first place — see the wiring
+  // below (scanMediaElements, HTMLMediaElement.play, `new Audio()`) for why
+  // that split is safe.
+  const silenceElement = (el: HTMLMediaElement) => {
+    try {
+      el.muted = true;
+      el.volume = 0;
+    } catch (_) {}
+  };
+
   const ensureContext = () => {
     if (!state.context || state.context.state === 'closed') {
       state.context = new AudioContextCtor({
@@ -393,6 +405,11 @@ function installCallMediaBridgeInPage(): boolean {
   const scanMediaElements = () => {
     try {
       for (const element of Array.from(document.querySelectorAll('audio, video')) as HTMLMediaElement[]) {
+        // Silencing here too (not just on .play()/new Audio()) catches
+        // anything that starts playing without going through either wrapper
+        // — e.g. the native `autoplay` attribute, which Chromium does not
+        // route through the JS-visible .play() method.
+        silenceElement(element);
         attachRemoteStream(element.srcObject instanceof MediaStream ? element.srcObject : null);
       }
     } catch (_) {}
@@ -513,86 +530,85 @@ function installCallMediaBridgeInPage(): boolean {
     }
   } catch (_) {}
 
-  // ── Diagnostic: identify the incoming-call ringtone's playback API ──────
-  // Reported live: the ringtone plays audibly through THIS Chromium process
-  // at the same time WinZapp's own ring sound plays, so the user hears it
-  // twice. It is not the call's own remote audio track — that is already
-  // routed through a muted GainNode above (attachRemoteTrack's `sink`) and
-  // never reaches context.destination audibly. So it must be a separate
-  // asset WhatsApp Web plays on `incomingcall`, through an API this bridge
-  // does not yet touch. --mute-audio cannot be turned back on to silence it
-  // (see start.js: that flag starves the Chromium audio service before the
-  // RTC pipeline above can capture PCM from it, taking the whole call down
-  // with it) — so the fix has to target only the ringtone's own API, once
-  // known. This block does not silence anything; it only reports which API
-  // fires so the real fix can be written against it. Remove once identified.
+  // ── Silence WhatsApp Web's own page-native sounds ────────────────────────
+  // Reported live: the incoming-call ringtone played audibly through THIS
+  // Chromium process at the same time WinZapp's own ring sound played, so
+  // the user heard it twice — and separately, on a call nobody answered
+  // (WhatsApp's own 120s ring timeout), it kept looping because nothing
+  // ever told the PAGE to stop it: the terminal callstate/incomingcall
+  // events are handled entirely on the Python side, which correctly stops
+  // WinZapp's own sound, but has no way to reach into the page.
+  //
+  // Diagnostic instrumentation (kept below, now silencing instead of only
+  // logging) confirmed the ringtone plays via a plain looping <audio>
+  // element's native .play():
+  //   media.play tag=AUDIO isRtcStream=false src=.../kAbvQpjkfMK.ogg loop=true
+  // That is a categorically different path from the call's own remote audio
+  // track, which never touches an <audio>/Audio() element — it is tapped
+  // directly off the RTCPeerConnection's MediaStreamTrack via the Web Audio
+  // API (attachRemoteTrack above) and was ALREADY muted before this fix
+  // (`sink.gain.value = 0`). So muting every native <audio>/<video> element
+  // and every `new Audio()` instance, unconditionally, for the life of the
+  // page, silences WhatsApp Web's own sound effects (ringtone, message
+  // chimes, anything else) without ever touching real call audio — no need
+  // to track call state and toggle mute on/off around it. Even a WhatsApp
+  // Web build that plays the remote track through a real
+  // <audio srcObject=...> element (the fallback path handled above) is
+  // unaffected: that pipeline reads PCM from the MediaStreamTrack directly,
+  // never from the element's own rendered output.
+  //
+  // --mute-audio cannot be used at the Chromium launch level to get the same
+  // effect (see start.js: that flag starves the Chromium audio SERVICE
+  // before the RTC pipeline above can even capture PCM from it, taking the
+  // whole call down) — this has to happen at the page's own API surface.
   try {
-    let diagnosticLogCount = 0;
-    const logRingtoneCandidate = (kind: string, details: string) => {
-      diagnosticLogCount += 1;
-      if (diagnosticLogCount > 40) return;
-      report('ringtone-diagnostic', `${kind} ${details}`);
+    let mutedLogCount = 0;
+    const logMuted = (kind: string, details: string) => {
+      mutedLogCount += 1;
+      if (mutedLogCount > 40) return;
+      report('page-audio-muted', `${kind} ${details}`);
     };
 
     const nativeMediaPlay = win.HTMLMediaElement?.prototype?.play;
     if (
       typeof nativeMediaPlay === 'function' &&
-      !win.HTMLMediaElement.prototype.__winzappRingtoneDiagWrapped
+      !win.HTMLMediaElement.prototype.__winzappPageAudioMuteWrapped
     ) {
       win.HTMLMediaElement.prototype.play = function (...args: any[]) {
         try {
           const el = this as HTMLMediaElement;
           const isRtcStream = el.srcObject instanceof MediaStream;
-          logRingtoneCandidate(
+          silenceElement(el);
+          logMuted(
             'media.play',
             `tag=${el.tagName} isRtcStream=${isRtcStream} ` +
-              `src=${String(el.currentSrc || (el as any).src || '').slice(0, 120)} ` +
-              `loop=${el.loop} volume=${el.volume} muted=${el.muted}`
+              `src=${String(el.currentSrc || (el as any).src || '').slice(0, 120)} loop=${el.loop}`
           );
         } catch (_) {}
         return nativeMediaPlay.apply(this, args);
       };
-      win.HTMLMediaElement.prototype.__winzappRingtoneDiagWrapped = true;
+      win.HTMLMediaElement.prototype.__winzappPageAudioMuteWrapped = true;
     }
 
     const NativeAudio = win.Audio;
-    if (typeof NativeAudio === 'function' && !win.__winzappRingtoneDiagAudioWrapped) {
+    if (typeof NativeAudio === 'function' && !win.__winzappPageAudioMuteAudioWrapped) {
       win.Audio = new Proxy(NativeAudio, {
         construct(target, args) {
+          const instance: HTMLAudioElement = Reflect.construct(target, args);
           try {
-            logRingtoneCandidate('new Audio()', `src=${String(args?.[0] || '').slice(0, 120)}`);
+            silenceElement(instance);
+            logMuted('new Audio()', `src=${String(args?.[0] || '').slice(0, 120)}`);
           } catch (_) {}
-          return Reflect.construct(target, args);
+          return instance;
         },
       });
-      win.__winzappRingtoneDiagAudioWrapped = true;
+      win.__winzappPageAudioMuteAudioWrapped = true;
     }
-
-    const contextProtoDiag = AudioContextCtor.prototype as any;
-    if (!contextProtoDiag.__winzappRingtoneDiagWrapped) {
-      const nativeCreateBufferSource = contextProtoDiag.createBufferSource;
-      if (typeof nativeCreateBufferSource === 'function') {
-        contextProtoDiag.createBufferSource = function (...args: any[]) {
-          const node = nativeCreateBufferSource.apply(this, args);
-          try {
-            const nativeStart = node.start?.bind(node);
-            if (typeof nativeStart === 'function') {
-              node.start = (...startArgs: any[]) => {
-                try {
-                  logRingtoneCandidate(
-                    'bufferSource.start',
-                    `duration=${node.buffer?.duration ?? '?'} loop=${node.loop}`
-                  );
-                } catch (_) {}
-                return nativeStart(...startArgs);
-              };
-            }
-          } catch (_) {}
-          return node;
-        };
-      }
-      contextProtoDiag.__winzappRingtoneDiagWrapped = true;
-    }
+    // The autoplay-attribute backstop (elements that start playing without
+    // going through either wrapper above) is scanMediaElements() itself,
+    // just above — it already walks every <audio>/<video> element on a
+    // 250ms interval and on every DOM mutation for the RTC srcObject case,
+    // and now silences each one it finds too.
   } catch (_) {}
 
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
