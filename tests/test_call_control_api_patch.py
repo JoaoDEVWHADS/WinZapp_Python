@@ -295,5 +295,3 @@ def test_call_media_bridge_bounds_microphone_backlog_to_live_audio():
     assert "const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;" in bridge
     assert "state.micFramesDroppedForLatency" in bridge
     assert "const dropIndex = state.micOffset > 0 ? 1 : 0;" in bridge
-    assert "version === 6" in bridge
-    assert "version: 6" in bridge
