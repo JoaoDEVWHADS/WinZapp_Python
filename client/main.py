@@ -11863,15 +11863,27 @@ class MainWindow(wx.Frame):
         self.speak_output.output(text, interrupt=interrupt)
 
     def _voice_recording_silence_active(self):
-        """True while Settings > Conteúdo Falado's "silence while recording"
-        toggle should be muting all speech — i.e. the setting is on AND a
-        voice message is actually being recorded right now. Passed as
-        AccessibleSpeechOutput's suppressed_getter, so it's ignored entirely
-        (returns False) whenever no recording is in progress."""
+        """Mute speech during recording and its start/stop focus transitions.
+
+        The short tail matters because Send/Discard must set _is_recording
+        False before restoring the composer. Without it, the native focus event
+        can announce the message-field label even though the user explicitly
+        asked the whole voice-recording flow to stay quiet.
+        """
         if not self.settings.get("speech_content", {}).get("silence_while_recording", False):
             return False
         cp = getattr(self, "conversations_panel", None)
-        return bool(cp is not None and getattr(cp, "_is_recording", False))
+        if cp is None:
+            return False
+        if getattr(cp, "_is_recording", False):
+            return True
+        try:
+            silence_until = float(
+                getattr(cp, "_voice_recording_silence_until", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            silence_until = 0.0
+        return time.monotonic() < silence_until
 
     # ── Language selection ────────────────────────────────────────────────────
 

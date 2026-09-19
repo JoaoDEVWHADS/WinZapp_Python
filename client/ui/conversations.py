@@ -69,7 +69,7 @@ from core.locale_format import get_date_format, get_time_format, get_datetime_fo
 from core.message_copy_format import format_copied_message
 from core.wrapped_text import original_range, selection_offsets, word_wrap
 from core.video_player import VideoPlayer
-from core.focus_cloak import cloak_panel_focus_fallback
+from core.focus_cloak import cloak_focus_announcement, cloak_panel_focus_fallback
 from core.spell_checker import (
     WindowsSpellChecker, spell_check_active, windows_spellcheck_enabled,
 )
@@ -536,6 +536,11 @@ class ConversationsPanel(wx.Panel):
         # switch/close that happens mid-open discard the stream once it opens.
         self._recording_starting    = False
         self._recording_open_token  = 0
+        # Keep spoken output suppressed across the UI transition that starts
+        # or ends a voice recording. _is_recording alone becomes False before
+        # focus returns to the composer, which let NVDA announce the message
+        # field ("Digite uma mensagem") even with recording silence enabled.
+        self._voice_recording_silence_until = 0.0
 
         # ── Attachment staging ──────────────────────────────────────────────
         # list of {"path": str, "media_type": str}
@@ -3383,6 +3388,49 @@ class ConversationsPanel(wx.Panel):
             settings.get("speech_content", {}).get("silence_while_recording", False)
         )
 
+    def _arm_voice_recording_silence_transition(self, duration_ms=1200):
+        """Keep all spoken output quiet across recording UI transitions.
+
+        Sounds remain available as non-verbal feedback. This only extends the
+        speech mute long enough to cover wx/Windows focus/layout events after
+        recording starts or stops, especially the message editor receiving
+        focus again after Send/Discard.
+        """
+        if not self._voice_recording_silence_enabled():
+            return False
+        try:
+            duration = max(0.0, float(duration_ms)) / 1000.0
+        except (TypeError, ValueError):
+            duration = 1.2
+        self._voice_recording_silence_until = max(
+            float(getattr(self, "_voice_recording_silence_until", 0.0) or 0.0),
+            time.monotonic() + duration,
+        )
+        self._silence_send_voice_focus_if_enabled()
+        return True
+
+    def _focus_message_field_after_voice_recording(self):
+        """Restore composer focus without announcing it after voice recording."""
+        suppress_focus = self._voice_recording_focus_suppression_enabled()
+        if self._voice_recording_silence_enabled():
+            self._arm_voice_recording_silence_transition()
+
+        try:
+            already_focused = bool(self.message_field.HasFocus())
+        except Exception:
+            already_focused = False
+
+        if suppress_focus and not already_focused:
+            # Arm before SetFocus so the MSAA event is already cloaked when
+            # NVDA inspects it. The cancellation burst below also covers UIA.
+            cloak_focus_announcement(self.message_field, duration_ms=1000)
+
+        if not already_focused:
+            self.message_field.SetFocus()
+
+        if suppress_focus:
+            self._silence_send_voice_focus_if_enabled()
+
     def _voice_recording_focus_suppression_enabled(self):
         """Whether WinZapp's automatic recording-button focus stays silent.
 
@@ -3521,6 +3569,7 @@ class ConversationsPanel(wx.Panel):
                         self._recording_frames.append(indata.tobytes())
                 self._recording_actual_rate = 48000
                 self._recording_actual_ch = 1
+                self._arm_voice_recording_silence_transition()
                 self._is_recording = True
                 
                 # UI updates INSTANTLY (0.01s)
@@ -3542,6 +3591,7 @@ class ConversationsPanel(wx.Panel):
                 self._voice_panel.Show()
                 self.conversation_panel.Layout()
                 self._focus_recording_button_silently(self._send_voice_btn)
+                self._silence_send_voice_focus_if_enabled()
 
                 def _bg_start_mic():
                     try:
@@ -3712,6 +3762,7 @@ class ConversationsPanel(wx.Panel):
             self._recording_actual_rate = rate
             self._recording_actual_ch   = ch
 
+            self._arm_voice_recording_silence_transition()
             self._is_recording = True
 
             # UI: play sound, swap buttons, focus the configured recording action.
@@ -3766,6 +3817,7 @@ class ConversationsPanel(wx.Panel):
                 self._focus_recording_button_silently(self._discard_voice_btn)
             else:
                 self._focus_recording_button_silently(self._send_voice_btn)
+            self._silence_send_voice_focus_if_enabled()
 
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 
@@ -3818,6 +3870,7 @@ class ConversationsPanel(wx.Panel):
         """Discard the current recording without sending."""
         if not self._is_recording:
             return
+        self._arm_voice_recording_silence_transition()
         self.main_window.voicemsg_discard_sound.play()
         threading.Thread(target=self._stop_recording_stream, daemon=True).start()
         self._is_recording     = False
@@ -3828,7 +3881,7 @@ class ConversationsPanel(wx.Panel):
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
             self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
         self._hide_voice_panel()
-        self.message_field.SetFocus()
+        self._focus_message_field_after_voice_recording()
 
     def _toggle_pause_recording(self, event):
         """Pause or resume the ongoing recording."""
@@ -3938,6 +3991,10 @@ class ConversationsPanel(wx.Panel):
         _t0 = _time.perf_counter()
         logging.info("[VOICE_TIMING] T+0.000s — user clicked send, stopping recording stream")
 
+        # Keep speech muted across the state flip and focus restoration. The
+        # old predicate ended exactly at _is_recording=False, which exposed
+        # native focus speech from the message field.
+        self._arm_voice_recording_silence_transition()
         # Stop the recording stream in background FIRST so the audio device is fully released
         # without blocking the UI thread before BASS plays the send sound.
         threading.Thread(target=self._stop_recording_stream, daemon=True).start()
@@ -3956,7 +4013,7 @@ class ConversationsPanel(wx.Panel):
 
         if not frames:
             self._hide_voice_panel()
-            self.message_field.SetFocus()
+            self._focus_message_field_after_voice_recording()
             return
 
         # ── Phase 2: instant UI update ────────────────────────────────────────
@@ -4016,7 +4073,7 @@ class ConversationsPanel(wx.Panel):
         self.main_window._schedule_set_chats()
         self._on_cancel_reply()
         self._hide_voice_panel()
-        self.message_field.SetFocus()
+        self._focus_message_field_after_voice_recording()
 
         # ── Phase 3: heavy work off UI thread ─────────────────────────────────
         # • Join PCM frames

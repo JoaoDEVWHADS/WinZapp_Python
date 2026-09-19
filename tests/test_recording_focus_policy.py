@@ -82,3 +82,51 @@ def test_silent_conversation_recording_preserves_message_field_focus():
     assert "self.message_field" not in silent_block.split(
         "recording_controls_to_hide = [", 1
     )[1].split("]", 1)[0]
+
+
+def test_voice_recording_start_arms_full_speech_silence_transition():
+    method = _method_source(
+        "client/ui/conversations.py", "ConversationsPanel", "_start_voice_recording"
+    )
+
+    assert method.count("_arm_voice_recording_silence_transition()") >= 2
+    assert method.count("_silence_send_voice_focus_if_enabled()") >= 2
+
+
+def test_voice_send_keeps_speech_suppressed_through_focus_restore():
+    method = _method_source(
+        "client/ui/conversations.py", "ConversationsPanel", "_send_voice_message"
+    )
+
+    assert "_arm_voice_recording_silence_transition()" in method
+    assert method.index("_arm_voice_recording_silence_transition()") < method.index(
+        "self._is_recording     = False"
+    )
+    assert method.count("_focus_message_field_after_voice_recording()") == 2
+    assert "self.message_field.SetFocus()" not in method
+
+
+def test_voice_discard_keeps_speech_suppressed_through_focus_restore():
+    method = _method_source(
+        "client/ui/conversations.py", "ConversationsPanel", "_discard_voice_message"
+    )
+
+    assert "_arm_voice_recording_silence_transition()" in method
+    assert method.index("_arm_voice_recording_silence_transition()") < method.index(
+        "self._is_recording     = False"
+    )
+    assert "_focus_message_field_after_voice_recording()" in method
+    assert "self.message_field.SetFocus()" not in method
+
+
+def test_voice_focus_restore_cloaks_native_field_announcement_and_cancels_speech():
+    method = _method_source(
+        "client/ui/conversations.py",
+        "ConversationsPanel",
+        "_focus_message_field_after_voice_recording",
+    )
+
+    assert "cloak_focus_announcement(self.message_field" in method
+    assert "self.message_field.SetFocus()" in method
+    assert "_silence_send_voice_focus_if_enabled()" in method
+    assert "_arm_voice_recording_silence_transition()" in method

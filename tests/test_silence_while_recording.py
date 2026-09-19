@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -154,7 +155,10 @@ class TestVoiceRecordingSilenceActive:
         stub = types.SimpleNamespace()
         stub.settings = {"speech_content": {"silence_while_recording": silence_setting}}
         if has_panel:
-            stub.conversations_panel = types.SimpleNamespace(_is_recording=is_recording)
+            stub.conversations_panel = types.SimpleNamespace(
+                _is_recording=is_recording,
+                _voice_recording_silence_until=0.0,
+            )
         from main import MainWindow
         stub._voice_recording_silence_active = types.MethodType(
             MainWindow._voice_recording_silence_active, stub
@@ -172,6 +176,16 @@ class TestVoiceRecordingSilenceActive:
     def test_true_when_setting_enabled_and_recording(self):
         stub = self._make_stub(silence_setting=True, is_recording=True)
         assert stub._voice_recording_silence_active() is True
+
+    def test_true_during_post_recording_silence_tail(self):
+        stub = self._make_stub(silence_setting=True, is_recording=False)
+        stub.conversations_panel._voice_recording_silence_until = time.monotonic() + 1.0
+        assert stub._voice_recording_silence_active() is True
+
+    def test_false_after_post_recording_silence_tail_expires(self):
+        stub = self._make_stub(silence_setting=True, is_recording=False)
+        stub.conversations_panel._voice_recording_silence_until = time.monotonic() - 1.0
+        assert stub._voice_recording_silence_active() is False
 
     def test_false_when_no_conversations_panel_yet(self):
         stub = self._make_stub(silence_setting=True, is_recording=True, has_panel=False)
