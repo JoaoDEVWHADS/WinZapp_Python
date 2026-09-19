@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import logging
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ except ImportError:  # pragma: no cover - packaging always installs it
 CALL_SAMPLE_RATE = 48_000
 CALL_FRAME_MS = 20
 CALL_FRAME_SAMPLES = CALL_SAMPLE_RATE * CALL_FRAME_MS // 1000
+# 40 ms leaves two 20 ms hardware periods for ordinary Windows driver jitter
+# without adding the large latency of PortAudio's generic "high" preset.
+CALL_DEVICE_LATENCY_SECONDS = 0.040
 CALL_MIC_QUEUE_LIMIT = 12
 CALL_MIC_TARGET_BACKLOG_FRAMES = 2
 CALL_OUTPUT_QUEUE_LIMIT = 40
@@ -204,10 +208,29 @@ class CallAudioSession:
                 candidates.append(index)
         return candidates[0] if candidates else None
 
+    def _default_device_index(self, *, input_device: bool) -> Optional[int]:
+        """Return PortAudio's concrete default device instead of opaque None."""
+        try:
+            defaults = getattr(getattr(self._sd, "default", None), "device", None)
+            index = defaults[0 if input_device else 1]
+            index = int(index)
+            return index if index >= 0 else None
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+
     def _candidate_devices(self, stored_name: str, *, input_device: bool):
         preferred = self._resolve_device(stored_name, input_device=input_device)
+        default_device = self._default_device_index(input_device=input_device)
         yielded = set()
-        for index in (preferred, None):
+        ordered = []
+        if preferred is not None:
+            ordered.append(preferred)
+        if default_device is not None:
+            ordered.append(default_device)
+        # Keep PortAudio's implicit default as a compatibility fallback, but
+        # prefer the concrete default index so we can inspect its native rate.
+        ordered.append(None)
+        for index in ordered:
             key = -1 if index is None else int(index)
             if key not in yielded:
                 yielded.add(key)
@@ -220,18 +243,50 @@ class CallAudioSession:
             yield index
 
     def _candidate_rates(self, device_index: Optional[int]):
-        rates = [CALL_SAMPLE_RATE]
+        # Opening the Windows mixer at its own rate avoids needless device
+        # reconfiguration/resampling in the driver. The call transport stays
+        # 48 kHz; Python already resamples at the boundary.
+        rates = []
         try:
             info = self._sd.query_devices(device_index)
             native = int(round(float(info.get("default_samplerate") or 0)))
-            if native > 0 and native not in rates:
+            if native > 0:
                 rates.append(native)
         except Exception:
             pass
-        for rate in (44_100, 32_000, 16_000):
+        for rate in (CALL_SAMPLE_RATE, 44_100, 32_000, 16_000):
             if rate not in rates:
                 rates.append(rate)
         return rates
+
+    def _stream_extra_settings(
+        self, device_index: Optional[int], *, input_device: bool
+    ):
+        """Keep WASAPI in shared mode so a call cannot take over the device."""
+        if sys.platform != "win32":
+            return None
+        actual_index = device_index
+        if actual_index is None:
+            actual_index = self._default_device_index(input_device=input_device)
+        if actual_index is None:
+            return None
+        try:
+            info = self._sd.query_devices(actual_index)
+            hostapi = self._sd.query_hostapis(int(info.get("hostapi", -1)))
+            if "wasapi" not in str(hostapi.get("name", "")).lower():
+                return None
+            settings_type = getattr(self._sd, "WasapiSettings", None)
+            if settings_type is None:
+                return None
+            # Explicitly shared; auto_convert is only a fallback for a device
+            # whose native rate cannot be opened for some reason.
+            return settings_type(exclusive=False, auto_convert=True)
+        except Exception:
+            logging.debug(
+                "[call_audio] could not apply shared WASAPI settings",
+                exc_info=True,
+            )
+            return None
 
     def _open_input_stream(self):
         last_error = None
@@ -244,10 +299,18 @@ class CallAudioSession:
                         device=device,
                         channels=1,
                         dtype="float32",
-                        latency="low",
+                        latency=CALL_DEVICE_LATENCY_SECONDS,
+                        extra_settings=self._stream_extra_settings(
+                            device, input_device=True
+                        ),
                         callback=self._on_microphone_frame(rate),
                     )
-                    logging.info("[call_audio] input opened device=%r rate=%s", device, rate)
+                    logging.info(
+                        "[call_audio] input opened device=%r rate=%s latency=%r",
+                        device,
+                        rate,
+                        getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
+                    )
                     return stream, rate
                 except Exception as exc:
                     last_error = exc
@@ -264,9 +327,17 @@ class CallAudioSession:
                         device=device,
                         channels=1,
                         dtype="float32",
-                        latency="low",
+                        latency=CALL_DEVICE_LATENCY_SECONDS,
+                        extra_settings=self._stream_extra_settings(
+                            device, input_device=False
+                        ),
                     )
-                    logging.info("[call_audio] output opened device=%r rate=%s", device, rate)
+                    logging.info(
+                        "[call_audio] output opened device=%r rate=%s latency=%r",
+                        device,
+                        rate,
+                        getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
+                    )
                     return stream, rate
                 except Exception as exc:
                     last_error = exc

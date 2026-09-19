@@ -4,6 +4,7 @@ import time
 import numpy as np
 
 from core.call_audio import (
+    CALL_DEVICE_LATENCY_SECONDS,
     CALL_FRAME_SAMPLES,
     CALL_MIC_TARGET_BACKLOG_FRAMES,
     CallAudioConfig,
@@ -56,19 +57,47 @@ class _OutputStream:
         self.closed = True
 
 
+class _Defaults:
+    device = (0, 1)
+
+
+class _WasapiSettings:
+    def __init__(self, *, exclusive=False, auto_convert=False):
+        self.exclusive = exclusive
+        self.auto_convert = auto_convert
+
+
 class _SoundDevice:
+    default = _Defaults()
+    WasapiSettings = _WasapiSettings
+
     def __init__(self):
         self.input_streams = []
         self.output_streams = []
         self.devices = [
-            {"name": "Mic", "max_input_channels": 1, "max_output_channels": 0, "default_samplerate": 48000},
-            {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2, "default_samplerate": 48000},
+            {
+                "name": "Mic",
+                "max_input_channels": 1,
+                "max_output_channels": 0,
+                "default_samplerate": 48000,
+                "hostapi": 0,
+            },
+            {
+                "name": "Speaker",
+                "max_input_channels": 0,
+                "max_output_channels": 2,
+                "default_samplerate": 48000,
+                "hostapi": 0,
+            },
         ]
 
     def query_devices(self, device=None):
         if device is None:
             return self.devices
         return self.devices[int(device)]
+
+    def query_hostapis(self, index=None):
+        return {"name": "Windows WASAPI"}
 
     def InputStream(self, **kwargs):
         stream = _InputStream(kwargs["callback"])
@@ -222,3 +251,49 @@ def test_microphone_backlog_skips_old_audio_instead_of_adding_delay():
     assert pcm == frames[5]
     assert dropped == 5
     assert session._mic_queue.qsize() == CALL_MIC_TARGET_BACKLOG_FRAMES
+
+
+
+def test_call_audio_prefers_native_device_rate_and_safe_driver_latency():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    sounddevice.devices[0]["default_samplerate"] = 44100
+    sounddevice.devices[1]["default_samplerate"] = 44100
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start()
+
+    input_kwargs = sounddevice.input_streams[0][0]
+    output_kwargs = sounddevice.output_streams[0][0]
+    assert input_kwargs["device"] == 0
+    assert output_kwargs["device"] == 1
+    assert input_kwargs["samplerate"] == 44100
+    assert output_kwargs["samplerate"] == 44100
+    assert input_kwargs["latency"] == CALL_DEVICE_LATENCY_SECONDS
+    assert output_kwargs["latency"] == CALL_DEVICE_LATENCY_SECONDS
+
+    session.stop()
+
+
+def test_windows_wasapi_settings_are_explicitly_shared(monkeypatch):
+    import core.call_audio as call_audio
+
+    monkeypatch.setattr(call_audio.sys, "platform", "win32")
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        _Socket(),
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=sounddevice,
+    )
+
+    input_settings = session._stream_extra_settings(0, input_device=True)
+    output_settings = session._stream_extra_settings(1, input_device=False)
+
+    assert input_settings.exclusive is False
+    assert input_settings.auto_convert is True
+    assert output_settings.exclusive is False
+    assert output_settings.auto_convert is True
