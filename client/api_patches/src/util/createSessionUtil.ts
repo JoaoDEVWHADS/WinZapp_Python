@@ -1902,6 +1902,20 @@ export default class CreateSessionUtil {
               call?.groupJid?.toString?.() ||
               ''
             );
+          const groupParticipantCountOf = (call: any): number => {
+            const participants = call?.groupCallParticipants ?? call?.get?.('groupCallParticipants');
+            if (Array.isArray(participants)) return participants.length;
+            try {
+              const models = participants?.getModelsArray?.();
+              if (Array.isArray(models)) return models.length;
+            } catch (_) {}
+            if (typeof participants?.size === 'number') return participants.size;
+            if (typeof participants?.length === 'number') return participants.length;
+            return 0;
+          };
+          const isGroupCall = (call: any): boolean =>
+            !!call?.isGroup || !!call?.isGroupCall ||
+            !!groupJidOf(call) || groupParticipantCountOf(call) > 1;
           const callStateOf = (call: any) => {
             const raw = String(
               call?.getState?.() || call?.state || call?.get?.('state') || ''
@@ -2013,7 +2027,7 @@ export default class CreateSessionUtil {
               peerJid,
               callId,
               !!call?.isVideo || !!call?.isVideoCall,
-              !!call?.isGroup || !!call?.isGroupCall,
+              isGroupCall(call),
               groupJidOf(call),
               !!call?.outgoing,
               Math.floor(callTimestampOf(call) / 1000),
@@ -2030,7 +2044,7 @@ export default class CreateSessionUtil {
               peerJid,
               callId,
               !!call?.isVideo || !!call?.isVideoCall,
-              !!call?.isGroup || !!call?.isGroupCall,
+              isGroupCall(call),
               groupJidOf(call),
               Math.floor(callTimestampOf(call) / 1000),
               Math.floor(Date.now() / 1000)
@@ -2078,7 +2092,7 @@ export default class CreateSessionUtil {
             const id = callIdOf(call);
             const richCall = findCall(id) || call;
             if (isHistoricalIncomingCall(richCall, source)) return;
-            const isGroup = !!richCall?.isGroup || !!richCall?.isGroupCall;
+            const isGroup = isGroupCall(richCall);
             if (isGroup && !groupJidOf(richCall) && attempt < 10) {
               window.setTimeout(() => {
                 // A terminal Store event removes this id. Do not resurrect a
@@ -2146,7 +2160,7 @@ export default class CreateSessionUtil {
                       id: callId,
                       state,
                       outgoing: definitelyOutgoing,
-                      isGroup: !!activeCall?.isGroup || !!activeCall?.isGroupCall,
+                      isGroup: isGroupCall(activeCall),
                       hasPeer: !!peerJidOf(activeCall),
                       hasGroup: !!groupJidOf(activeCall),
                     })
@@ -2160,7 +2174,7 @@ export default class CreateSessionUtil {
                     !definitelyOutgoing &&
                     !terminal &&
                     !!callId &&
-                    (isIncomingRingingCall(activeCall) || !state || !!activeCall?.isGroup || !!activeCall?.isGroupCall);
+                    (isIncomingRingingCall(activeCall) || !state || isGroupCall(activeCall));
                   if (incomingCandidate) {
                     if (isHistoricalIncomingCall(activeCall, 'activeCallChange')) return;
                     rememberCall(activeCall);
