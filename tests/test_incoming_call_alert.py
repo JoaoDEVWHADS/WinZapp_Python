@@ -93,6 +93,11 @@ class _MainStub:
     _stop_active_voice_call_if_matches = MainWindow._stop_active_voice_call_if_matches
     on_call_remote_audio = MainWindow.on_call_remote_audio
     on_voice_call_state_event = MainWindow.on_voice_call_state_event
+    # The real bridged comparison, not string equality: the whole point of
+    # core/call_matching.py is that one call's events do not agree on whether
+    # the peer is an @lid or a phone JID.
+    _chat_jids_equivalent = MainWindow._chat_jids_equivalent
+    _jid_address_forms = MainWindow._jid_address_forms
 
     def __init__(self):
         self._active_incoming_calls = {}
@@ -108,6 +113,8 @@ class _MainStub:
         self.armed_watchdogs = []
         self.cancelled_watchdogs = []
         self.chats = {}
+        self._lid_to_phone = {}
+        self._phone_to_lid = {}
         self._group_name_cache = {}
         self.popups = []
         self.incoming_call_bar = _Bar()

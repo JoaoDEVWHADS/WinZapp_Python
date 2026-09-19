@@ -14,6 +14,33 @@ const linuxAudioProcesses = new Map<
 >();
 const LINUX_PULSE_SERVER = 'unix:/run/pulse/winzapp-native';
 
+/*
+ * Everything below down to ensureLinuxCallAudio() is for ONE deployment, and
+ * it is not the one it looks like: WinZapp itself never runs on Linux.
+ *
+ * With local API mode off, the user points WinZapp at a WPPConnect Server
+ * running on their own Linux host, so the Chrome holding the WhatsApp session
+ * is on that host and not on the machine the person is sitting at. The page
+ * bridge further down cannot help there: it hands PCM to and from the *page*,
+ * but on a headless Linux server there is no audio device for Chrome to talk
+ * to at all. So each session gets its own pair of virtual PulseAudio devices
+ * (a null sink plus a remapped source, named winzapp_<kind>_<session> so
+ * nothing here can touch another application's), Chrome is bound to them
+ * through PULSE_SOURCE/PULSE_SINK, and `pacat`/`parec` move the bytes between
+ * those devices and the Socket.IO stream the Windows client is on.
+ *
+ * Which is why every function in this block starts by refusing to run unless
+ * process.platform is 'linux' AND PULSE_SERVER is the socket above: on the
+ * normal Windows install the page bridge is the whole mechanism and none of
+ * this exists. Reading it as dead Linux code and deleting it would silently
+ * remove calls from remote-API installs, where they would go on *appearing*
+ * to work — signaling, ringing and the call window all come from the page.
+ *
+ * pulse_audio_lifecycle.py at the repository root is the other half: the
+ * modules loaded here outlive a crashed Node, so the start/stop scripts sweep
+ * the winzapp_-prefixed ones before a new session creates its own.
+ */
+
 function linuxDeviceName(kind: 'mic' | 'speaker', session: string): string {
   return `winzapp_${kind}_${session.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48)}`;
 }
@@ -190,6 +217,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   const report = (event: string, details = '') => {
     try { win.__winzappOnCallBridgeEvent?.(event, details); } catch (_) {}
+  };
+
+  // Silences WhatsApp Web's own page-native sounds (ringtone, message
+  // chimes, ...) without touching real call audio, which never plays
+  // through an <audio>/<video> element in the first place — see the wiring
+  // below (scanMediaElements, HTMLMediaElement.play, `new Audio()`) for why
+  // that split is safe.
+  const silenceElement = (el: HTMLMediaElement) => {
+    try {
+      el.muted = true;
+      el.volume = 0;
+    } catch (_) {}
   };
 
   state.pushCameraFrame = (jpeg: string) => {
@@ -437,6 +476,11 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const scanMediaElements = () => {
     try {
       for (const element of Array.from(document.querySelectorAll('audio, video')) as HTMLMediaElement[]) {
+        // Silencing here too (not just on .play()/new Audio()) catches
+        // anything that starts playing without going through either wrapper
+        // — e.g. the native `autoplay` attribute, which Chromium does not
+        // route through the JS-visible .play() method.
+        silenceElement(element);
         attachRemoteStream(element.srcObject instanceof MediaStream ? element.srcObject : null);
       }
     } catch (_) {}
@@ -563,6 +607,87 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     }
   } catch (_) {}
 
+  // ── Silence WhatsApp Web's own page-native sounds ────────────────────────
+  // Reported live: the incoming-call ringtone played audibly through THIS
+  // Chromium process at the same time WinZapp's own ring sound played, so
+  // the user heard it twice — and separately, on a call nobody answered
+  // (WhatsApp's own 120s ring timeout), it kept looping because nothing
+  // ever told the PAGE to stop it: the terminal callstate/incomingcall
+  // events are handled entirely on the Python side, which correctly stops
+  // WinZapp's own sound, but has no way to reach into the page.
+  //
+  // Diagnostic instrumentation (kept below, now silencing instead of only
+  // logging) confirmed the ringtone plays via a plain looping <audio>
+  // element's native .play():
+  //   media.play tag=AUDIO isRtcStream=false src=.../kAbvQpjkfMK.ogg loop=true
+  // That is a categorically different path from the call's own remote audio
+  // track, which never touches an <audio>/Audio() element — it is tapped
+  // directly off the RTCPeerConnection's MediaStreamTrack via the Web Audio
+  // API (attachRemoteTrack above) and was ALREADY muted before this fix
+  // (`sink.gain.value = 0`). So muting every native <audio>/<video> element
+  // and every `new Audio()` instance, unconditionally, for the life of the
+  // page, silences WhatsApp Web's own sound effects (ringtone, message
+  // chimes, anything else) without ever touching real call audio — no need
+  // to track call state and toggle mute on/off around it. Even a WhatsApp
+  // Web build that plays the remote track through a real
+  // <audio srcObject=...> element (the fallback path handled above) is
+  // unaffected: that pipeline reads PCM from the MediaStreamTrack directly,
+  // never from the element's own rendered output.
+  //
+  // --mute-audio cannot be used at the Chromium launch level to get the same
+  // effect (see start.js: that flag starves the Chromium audio SERVICE
+  // before the RTC pipeline above can even capture PCM from it, taking the
+  // whole call down) — this has to happen at the page's own API surface.
+  try {
+    let mutedLogCount = 0;
+    const logMuted = (kind: string, details: string) => {
+      mutedLogCount += 1;
+      if (mutedLogCount > 40) return;
+      report('page-audio-muted', `${kind} ${details}`);
+    };
+
+    const nativeMediaPlay = win.HTMLMediaElement?.prototype?.play;
+    if (
+      typeof nativeMediaPlay === 'function' &&
+      !win.HTMLMediaElement.prototype.__winzappPageAudioMuteWrapped
+    ) {
+      win.HTMLMediaElement.prototype.play = function (...args: any[]) {
+        try {
+          const el = this as HTMLMediaElement;
+          const isRtcStream = el.srcObject instanceof MediaStream;
+          silenceElement(el);
+          logMuted(
+            'media.play',
+            `tag=${el.tagName} isRtcStream=${isRtcStream} ` +
+              `src=${String(el.currentSrc || (el as any).src || '').slice(0, 120)} loop=${el.loop}`
+          );
+        } catch (_) {}
+        return nativeMediaPlay.apply(this, args);
+      };
+      win.HTMLMediaElement.prototype.__winzappPageAudioMuteWrapped = true;
+    }
+
+    const NativeAudio = win.Audio;
+    if (typeof NativeAudio === 'function' && !win.__winzappPageAudioMuteAudioWrapped) {
+      win.Audio = new Proxy(NativeAudio, {
+        construct(target, args) {
+          const instance: HTMLAudioElement = Reflect.construct(target, args);
+          try {
+            silenceElement(instance);
+            logMuted('new Audio()', `src=${String(args?.[0] || '').slice(0, 120)}`);
+          } catch (_) {}
+          return instance;
+        },
+      });
+      win.__winzappPageAudioMuteAudioWrapped = true;
+    }
+    // The autoplay-attribute backstop (elements that start playing without
+    // going through either wrapper above) is scanMediaElements() itself,
+    // just above — it already walks every <audio>/<video> element on a
+    // 250ms interval and on every DOM mutation for the RTC srcObject case,
+    // and now silences each one it finds too.
+  } catch (_) {}
+
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
   const permissionResult = (
     permissionName: string,
@@ -584,6 +709,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
         writable: true,
         value: async (descriptor: PermissionDescriptor) => {
           const name = String((descriptor as any)?.name || '');
+          // Microphone only. WhatsApp's VoIP bootstrap gates on this, and the
+          // physical device is never opened anyway — getUserMedia below hands
+          // back a synthetic track. The camera is deliberately NOT claimed:
+          // video calls are out of scope, and answering 'granted' here would
+          // undo removing videoCapture from the CDP grant for any page that
+          // checks before asking.
           if (name === 'microphone' || name === 'camera') {
             return permissionResult(name, 'granted');
           }
@@ -608,7 +739,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       }
       return stream;
     }
-    if (linuxAudio || !constraints?.audio) return nativeGetUserMedia(constraints);
+    if (!constraints?.audio && !constraints?.video) {
+      return nativeGetUserMedia(constraints);
+    }
+    if (linuxAudio) return nativeGetUserMedia(constraints);
 
     // Never let WhatsApp Web open the physical microphone. Even while the
     // Python call engine is not active, expose a live silent synthetic track so

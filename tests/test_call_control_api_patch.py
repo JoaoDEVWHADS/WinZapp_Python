@@ -46,15 +46,15 @@ def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
     assert "call:audio:remote" in bridge
     assert "RTCPeerConnection" in bridge
     assert "__winzappOnCallRemoteAudio" in bridge
-    assert "if (linuxAudio || !constraints?.audio) return nativeGetUserMedia(constraints)" in bridge
+    assert "if (!constraints?.audio && !constraints?.video) {" in bridge
     assert "new MediaStream([cameraTrack()])" in bridge
     assert "call:video:camera" in bridge
     assert "call:video:remote" in bridge
+    assert "video-request-refused" not in bridge
     assert "microphone" in bridge
     assert "camera" in bridge
     assert "webkitGetUserMedia" in bridge
     assert "if (!state.enabled || !constraints?.audio)" not in bridge
-
 
 def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     start_js = _source("client/api_patches/start.js")
@@ -118,10 +118,18 @@ def test_chromium_keeps_rendering_backend_available_for_voip_runtime():
 
 def test_cdp_permission_grant_includes_voip_capture_permissions():
     create_session = _source("client/api_patches/src/util/createSessionUtil.ts")
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
-    assert "audioCapture" in create_session
-    assert "videoCapture" in create_session
-
+    granted = [
+        line for line in create_session.splitlines()
+        if "permissions: [" in line and not line.lstrip().startswith("//")
+    ]
+    assert len(granted) == 1, granted
+    assert "'audioCapture'" in granted[0]
+    assert "'videoCapture'" in granted[0]
+    assert "name === 'microphone' || name === 'camera'" in bridge
+    assert "new MediaStream([cameraTrack()])" in bridge
+    assert "video-request-refused" not in bridge
 
 def test_setup_api_copies_call_patch_files_into_runtime_api():
     setup_api = _source("setup_api.py")
@@ -133,8 +141,12 @@ def test_setup_api_copies_call_patch_files_into_runtime_api():
 def test_outgoing_call_allows_native_voip_more_than_generic_http_timeout():
     main_py = _source("client/main.py")
 
-    assert '"offer",\n                        {"to": peer_jid, "isVideo": is_video},\n                        timeout=75,' in main_py
-
+    offer = main_py[main_py.index("def _start_individual_call"):]
+    offer = offer[: offer.index("threading.Thread(target=_worker")]
+    assert '"offer",' in offer
+    assert "timeout=75," in offer
+    assert "dial_jid = self._resolve_jid_for_send(peer_jid) or peer_jid" in offer
+    assert '{"to": dial_jid, "isVideo": is_video}' in offer
 
 def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
     controller = _source("client/api_patches/src/controller/callController.ts")
@@ -198,12 +210,14 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
     assert "retryWAWebVoipInitAfterFailure" in controller
 
 
-def test_wa_js_voip_initialization_can_retry_after_lazy_backend_failure():
-    source = _source("client/api_patches/src/controller/callController.ts")
+def test_voip_initialization_can_retry_after_lazy_backend_failure():
+    """A failed lazy VoIP initialization must be retried by WinZapp's bridge."""
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
-    assert "retryWAWebVoipInitAfterFailure" in source
-    assert "WhatsApp VoIP initializer completed without becoming ready" in source
-
+    assert "WPP?.call?.enableCallInterface" in bridge
+    assert "getDidVoipInitError" in bridge
+    assert "retryWAWebVoipInitAfterFailure" in bridge
+    assert "attempt < 10" in bridge
 
 def test_voip_runtime_warmup_is_deduplicated_per_session():
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
@@ -213,3 +227,40 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "delete (client as any).__winzappVoipWarmupPromise" in bridge
     assert "winzapp_session_warmup" in bridge
     assert "getDidVoipInitError" in bridge
+
+
+def test_page_native_audio_is_always_muted_without_touching_real_call_audio():
+    """WhatsApp Web's own sounds (ringtone, message chimes) must never be
+    audible through this Chromium process. The prior diagnostic
+    instrumentation confirmed live that the ringtone plays as a plain,
+    looping <audio> element's native .play() (isRtcStream=false) — a
+    categorically different path from the call's own remote audio track,
+    which never touches an <audio>/Audio() element at all: it is tapped
+    directly off the RTCPeerConnection's MediaStreamTrack via the Web Audio
+    API and was already silenced before this fix (attachRemoteTrack's
+    `sink` GainNode, gain=0). So muting every native <audio>/<video> element
+    and every `new Audio()` instance, unconditionally, is safe — there is no
+    call-state window where it would also mute real call audio, so nothing
+    needs to be tracked or toggled back on.
+
+    This also fixes the sibling report from the same investigation: a
+    missed/unanswered call left the page's own ringtone looping forever,
+    because the terminal callstate/incomingcall handling in main.py only
+    ever stops WinZapp's own sound — it has no way to reach into the page.
+    Muting page audio unconditionally removes that dependency entirely.
+    """
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "el.muted = true;" in bridge
+    assert "el.volume = 0;" in bridge
+    assert "win.HTMLMediaElement.prototype.play = function" in bridge
+    assert "return nativeMediaPlay.apply(this, args);" in bridge
+    assert "win.Audio = new Proxy(NativeAudio" in bridge
+    # The autoplay-attribute backstop is scanMediaElements() itself — it must
+    # silence every element it finds, not only the RTC-stream ones.
+    scan = bridge[bridge.index("const scanMediaElements = ()"):]
+    scan = scan[: scan.index("\n  };")]
+    assert "silenceElement(element);" in scan
+    # Bounded, so a call with a looping/reactivating ringtone cannot flood
+    # wppconnect.log for the rest of the session.
+    assert "if (mutedLogCount > 40) return;" in bridge

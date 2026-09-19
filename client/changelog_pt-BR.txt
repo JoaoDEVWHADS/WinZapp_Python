@@ -4,6 +4,8 @@ Esta versão corrige situações em que o WinZapp pedia para parear de novo sem 
 
 NOVIDADES
 
+- Mostrar na pasta um arquivo salvo com Salvar como. Quando essa cópia escolhida pelo usuário existir, use Ctrl+Enter, o item "Mostrar na pasta" do menu de contexto ou o botão acessível com Tab ao lado de Abrir e Salvar como; apenas o download interno do WinZapp não exibe a ação.
+
 - Escolher se as mensagens favoritas ficam ao limpar uma conversa. A confirmação de limpar agora traz a opção "Manter mensagens favoritas", marcada por padrão, como no WhatsApp Web. Desmarcada, as favoritas são apagadas junto com o resto, também no celular. Vale para limpar uma conversa, várias selecionadas ou uma arquivada.
 
 - Confirmação ao marcar todas as conversas como lidas. O comando agora pergunta antes, com Não como padrão, para que um Alt seguido de Enter por engano não marque tudo como lido, também no celular. A pergunta tem a opção "Não mostrar novamente": marcada e confirmada com Sim, as próximas vezes marcam direto. Para voltar a ser perguntado, use a opção "Pedir confirmação ao marcar todas as conversas como lidas", na aba Interface do usuário das Configurações.
@@ -39,6 +41,8 @@ CORREÇÕES
 - A velocidade padrão de reprodução de áudio não volta mais para 1x sozinha. Ao abrir as Configurações, o campo da aba Reprodução de áudio aparecia vazio, qualquer que fosse a velocidade salva, e acionar Aplicar e depois OK gravava 1x por cima dela. Agora a velocidade salva aparece selecionada e é mantida.
 
 - Depois que o WinZapp recupera o perfil do navegador, conversas com mensagens não lidas não aparecem mais como lidas.
+
+- Ao copiar um trecho da janela de texto da mensagem (Alt+C), o texto vinha com quebras de linha que a mensagem não tinha, nos pontos em que a janela divide as linhas longas para facilitar a leitura. Agora a cópia traz a mensagem como foi escrita, só com as quebras de linha dela.
 
 V1.1.1.0
 

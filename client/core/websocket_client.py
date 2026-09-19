@@ -1480,11 +1480,16 @@ class WebSocketClient:
             # sync echo, own-send echo, or a genuine live dispatch) a given
             # message id took, instead of only knowing the event arrived.
             key = msg.get("key", {})
+            # quoted= is what settles "the reply shows a quote in WinZapp but
+            # not on WhatsApp": the echo is WhatsApp's own record of the send,
+            # so a reply echoed back without a stanzaId never carried one.
+            ctx = msg.get("contextInfo")
             logging.info(
                 "[WebSocketClient] on_messages_upsert: id=%s remoteJid=%s fromMe=%s "
-                "type=%s isMdHistoryMsg=%s",
+                "type=%s isMdHistoryMsg=%s quoted=%s",
                 key.get("id", ""), key.get("remoteJid", ""), key.get("fromMe"),
                 msg.get("messageType", ""), msg.get("isMdHistoryMsg"),
+                (ctx.get("stanzaId") or "-") if isinstance(ctx, dict) else "-",
             )
 
             # ── Skip history-sync echoes ───────────────────────────────────────
@@ -2451,9 +2456,13 @@ class WebSocketClient:
                 return
             normalized = dict(payload)
             normalized["id"] = str(normalized.get("id") or "")
+            # One canonical key, not two: leaving `peer_jid` beside `peerJid`
+            # gives every consumer downstream a second place to read the peer
+            # from, and they will not stay in step.
             normalized["peerJid"] = str(
-                normalized.get("peerJid") or normalized.get("peer_jid") or ""
+                normalized.get("peerJid") or normalized.pop("peer_jid", "") or ""
             )
+            normalized.pop("peer_jid", None)
             normalized["state"] = str(normalized.get("state") or "").upper()
             normalized["event"] = str(normalized.get("event") or "state").lower()
             normalized["outgoing"] = bool(normalized.get("outgoing", False))

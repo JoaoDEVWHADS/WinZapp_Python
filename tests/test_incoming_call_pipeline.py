@@ -17,8 +17,7 @@ def _source(relative: str) -> str:
 def test_api_patch_forwards_native_call_events_to_socket_io():
     source = _source("client/api_patches/src/util/createSessionUtil.ts")
     assert "WPP.on('call.incoming_call'" in source
-    assert ".emit('incomingcall', {" in source
-    assert "req.io.to(`session:${client.session}`)" in source
+    assert "req.io.to(`session:${client.session}`).emit('incomingcall'" in source
     assert "call?.id?.toString?.()" in source
     assert "ignored historical offer" in source
 

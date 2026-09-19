@@ -1106,8 +1106,16 @@ class SettingsDialog(wx.Dialog):
         self._calls_page.SetSizer(calls_sizer)
         self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
         self._call_alerts_check.Bind(wx.EVT_CHECKBOX, self._on_call_alerts_toggle)
+        # Bound to a local forwarder, not to self.main_window's own method:
+        # every wxgui test in this file's suites stands a plain wx.Frame in for
+        # MainWindow, so reaching for one of its methods while BUILDING the
+        # dialog raised AttributeError in __init__ and left a half-constructed
+        # dialog behind. 155 tests failed on that, most of them only as
+        # cascade — once enough part-built dialogs leak, wx starts answering
+        # "Failed to create dialog. Incorrect DLGTEMPLATE?" to everything, and
+        # the real cause is buried a thousand log lines up.
         self._call_audio_settings_button.Bind(
-            wx.EVT_BUTTON, self.main_window.open_call_audio_settings
+            wx.EVT_BUTTON, self._on_call_audio_settings
         )
 
         # ── Profile backup tab ───────────────────────────────────────────────
@@ -1913,6 +1921,18 @@ class SettingsDialog(wx.Dialog):
     def _on_custom_api_toggle(self, event):
         self._update_fields_state()
         event.Skip()
+
+    def _on_call_audio_settings(self, event):
+        """Open the call microphone/speaker chooser, if the app can.
+
+        Looked up when the button is pressed rather than when it is built, for
+        the reason given where it is bound.
+        """
+        opener = getattr(self.main_window, "open_call_audio_settings", None)
+        if opener is None:
+            return
+        # Parented to this dialog, so the chooser cannot end up underneath it.
+        opener(event, parent=self)
 
     def _on_call_alerts_toggle(self, event):
         self._update_call_fields_state()

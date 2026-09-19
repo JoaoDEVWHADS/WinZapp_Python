@@ -141,15 +141,94 @@ def _default_proc_create_time(pid: int):
         return _CT_UNKNOWN  # unknown -> fail closed
 
 
+def _expected_process_basenames() -> set:
+    """Lower-cased executable basenames a live WinZapp process could have.
+
+    sys.executable covers both the frozen build (WinZapp.exe) and a dev-mode
+    run (python.exe/pythonw.exe); the literal fallback guards the unlikely
+    case sys.executable reports something else in a bundled runner."""
+    names = {"winzapp.exe"}
+    try:
+        exe = os.path.basename(sys.executable or "").lower()
+        if exe:
+            names.add(exe)
+    except Exception:
+        pass
+    return names
+
+
+def _default_proc_matches_us(pid: int) -> Optional[bool]:
+    """True/False if *pid*'s executable image can be positively identified as
+    (not) a WinZapp process; None when inconclusive — callers must treat None
+    exactly like an unknown create_time (fail closed, i.e. still "alive")."""
+    expected = _expected_process_basenames()
+    try:
+        import psutil  # type: ignore
+        try:
+            return psutil.Process(pid).name().lower() in expected
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.Error:
+            return None
+    except ImportError:
+        pass
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not h:
+        err = ctypes.get_last_error()
+        ERROR_INVALID_PARAMETER = 87  # pid doesn't exist -> provably dead
+        if err == ERROR_INVALID_PARAMETER:
+            return False
+        return None  # access denied etc. -> inconclusive, fail closed
+    try:
+        query = getattr(kernel32, "QueryFullProcessImageNameW", None)
+        if query is None:
+            return None
+        query.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                          ctypes.POINTER(wintypes.DWORD))
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if not query(h, 0, buf, ctypes.byref(size)):
+            return None
+        return os.path.basename(buf.value).lower() in expected
+    finally:
+        kernel32.CloseHandle(h)
+
+
 def lease_alive(pid: int, create_time: float,
-                proc_create_time: Callable[[int], Optional[float]] = _default_proc_create_time) -> bool:
+                proc_create_time: Callable[[int], Optional[float]] = _default_proc_create_time,
+                proc_matches_us: Callable[[int], Optional[bool]] = None) -> bool:
     """True iff a process with this pid AND matching create_time is alive.
-    The 0.0 sentinel (unknown create_time) matches leases recorded as 0.0."""
+
+    The 0.0 sentinel (unknown create_time) matches leases recorded as 0.0 —
+    but only while *pid* could plausibly still be us. Left unqualified, that
+    match never expires: a lease is written once at process start and never
+    refreshed, so a process that crashes or is killed without reaching
+    release_runtime_lease() leaves a 0.0-recorded lease on disk forever, and
+    once Windows reuses that pid for ANY other process (routine — measured
+    live: svchost, a browser tab, an unrelated service), proc_create_time()
+    keeps returning a real value and this kept saying "alive". Reported live
+    on a genuinely single-account install: 11 leaked 0.0 leases going back
+    over two weeks, one of them colliding with whatever pid a live Windows
+    process happened to hold that moment, so try_begin_update() refused the
+    install believing another account was still open.
+    proc_matches_us disambiguates by process IMAGE NAME rather than by
+    existence alone — the one thing that can positively PROVE a pid is no
+    longer ours (a definite False), as opposed to merely being unable to
+    prove it's dead (None, which still fails closed, same as before)."""
     ct = proc_create_time(pid)
     if ct is None:
         return False
     if ct == 0.0 or create_time == 0.0:
-        return True
+        matcher = proc_matches_us or _default_proc_matches_us
+        return matcher(pid) is not False
     return abs(ct - create_time) < 1e-6
 
 
@@ -344,18 +423,48 @@ def _is_update_in_progress_locked(global_dir: str,
     return True
 
 
+def _is_own_lease(lease: dict, pid: int, create_time: float) -> bool:
+    """True iff *lease* was written by the process identified by (pid,
+    create_time) — same tolerance as lease_alive(), including its 0.0
+    "unknown create_time" sentinel."""
+    if lease.get("_corrupt") or lease.get("pid") != pid:
+        return False
+    ct = float(lease.get("create_time") or 0.0)
+    return ct == 0.0 or create_time == 0.0 or abs(ct - create_time) < 1e-6
+
+
+def other_live_leases(global_dir: str, pid: Optional[int] = None,
+                      create_time: Optional[float] = None,
+                      is_alive: Callable[[int, float], bool] = lease_alive) -> list[dict]:
+    """Every live runtime lease except the caller's own.
+
+    The updater runs inside a live account, so "any lease at all" was never a
+    question it could ask: its own lease made the answer always yes, which is
+    why try_begin_update() sat unused while its docstring in updater.py claimed
+    it gated the install. What actually matters is whether *another* process
+    still holds the exe and its DLLs open — that is what makes xcopy fail with
+    a sharing violation and relaunch the old build, the "atualiza e não muda"
+    loop reported with two accounts open."""
+    pid, create_time = _resolve_identity(pid, create_time)
+    with updater_lock(global_dir):
+        return [l for l in _live_leases_locked(global_dir, is_alive)
+                if not _is_own_lease(l, pid, create_time)]
+
+
 def try_begin_update(global_dir: str, pid: Optional[int] = None,
                      create_time: Optional[float] = None,
                      is_alive: Callable[[int, float], bool] = lease_alive):
     """Atomically claim the update slot. Returns an owner-token dict on success,
-    or None if a live updater owns it OR any account lease is live. The token
+    or None if a live updater owns it OR any OTHER account lease is live (the
+    caller's own lease is expected — see other_live_leases()). The token
     carries a random owner_token so only THIS install run can end it
     (GPT r2 #2 / r3 #2). All check+write under one updater_lock."""
     pid, create_time = _resolve_identity(pid, create_time)
     with updater_lock(global_dir):
         if _is_update_in_progress_locked(global_dir, is_alive):
             return None
-        if _live_leases_locked(global_dir, is_alive):
+        if any(not _is_own_lease(l, pid, create_time)
+               for l in _live_leases_locked(global_dir, is_alive)):
             return None
         token = {"owner_pid": pid, "owner_create_time": create_time,
                  "owner_token": uuid.uuid4().hex}

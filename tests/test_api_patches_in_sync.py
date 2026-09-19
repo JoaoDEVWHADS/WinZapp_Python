@@ -65,6 +65,7 @@ MIRRORED_FILES = [
     "decrypt.js",
     "src/config.ts",
     "src/index.ts",
+    "src/util/callMediaBridge.ts",
     "src/util/createSessionUtil.ts",
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
