@@ -297,3 +297,20 @@ def test_group_voice_call_rejects_ghost_calling_model_without_participants():
     assert "groupParticipantCountOf(current) >= 2" in controller
     assert "activeId !== previousActiveId" in controller
     assert "!preexistingIds.has(activeId)" in controller
+
+
+def test_group_call_api_emits_high_detail_diagnostics():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    assert "WinZapp group-call request" in controller
+    assert "WinZapp group-call result" in controller
+    assert "const functionDiagnostic =" in controller
+    assert "const callStoreSnapshot =" in controller
+    assert "enable_web_voip_proxy_and_sctp_workers" in controller
+    assert "enable_web_voip_webtransport_group_calls" in controller
+    assert "stackStartGroupCall" in controller
+    assert "startWAWebVoipGroupCallFromChat" in controller
+    assert "startWAWebVoipGroupCallFromWids" in controller
+    assert "for (const waitMs of [250, 500, 1000, 2000])" in controller
+    assert "diagnostics.timeline" in controller
+    assert "diagnostics," in controller

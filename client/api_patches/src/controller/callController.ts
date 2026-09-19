@@ -34,11 +34,25 @@ function getWhatsappPage(req: Request): any {
 
 async function evaluateWppCall(req: Request, action: string, payload: CallActionPayload = {}) {
   const page = getWhatsappPage(req);
+  const logger = (req as any).logger;
+  const session = String((req.client as any)?.session || 'unknown');
   // Session startup warms the lazy VoIP bundle in the background. Await it in
   // Node, before entering the browser context, so the browser callback never
   // tries to resolve a Node-side helper name.
-  await warmCallVoipRuntime(req.client, (req as any).logger);
-  return page.evaluate(
+  await warmCallVoipRuntime(req.client, logger);
+
+  if (action === 'offer-group') {
+    logger?.info?.(
+      `[${session}] WinZapp group-call request ` +
+        JSON.stringify({
+          participantCount: Array.isArray(payload.participants) ? payload.participants.length : 0,
+          groupJid: payload.groupJid || '',
+          useGroupChat: payload.useGroupChat === true,
+        })
+    );
+  }
+
+  const result = await page.evaluate(
     async ({ action, payload }) => {
       const win = window as any;
       if (!win.WPP?.call) throw new Error('WPP.call is not available');
@@ -180,6 +194,25 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         groupParticipantCount: groupParticipantCountOf(call),
         outgoing: !!call?.outgoing,
       });
+
+      const functionDiagnostic = (fn: any) => {
+        if (typeof fn !== 'function') return { type: typeof fn, arity: null, source: '' };
+        let source = '';
+        try {
+          source = String(fn).replace(/\s+/g, ' ').slice(0, 900);
+        } catch (_) {}
+        return { type: 'function', arity: fn.length, source };
+      };
+
+      const callStoreSnapshot = () => {
+        const store = getCallStore();
+        const models = getModels(store);
+        return {
+          activeCall: store?.activeCall ? summarizeCall(store.activeCall) : null,
+          modelCount: models.length,
+          models: models.slice(-8).map((model) => summarizeCall(model)),
+        };
+      };
 
       const forgetIncomingCall = (callId: string) => {
         if (!callId) return;
@@ -387,6 +420,93 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           throw new Error('WhatsApp Web group calling gate is disabled');
         }
 
+        const functions = win.WPP?.whatsapp?.functions || {};
+        const stackForDiagnostics = await getNativeVoipStack();
+        let backendForDiagnostics: any = null;
+        try {
+          const requireBackend =
+            functions.requireVoipJsBackend || win.WPP?.whatsapp?.requireVoipJsBackend;
+          if (typeof requireBackend === 'function') {
+            backendForDiagnostics = await requireBackend();
+          }
+        } catch (_) {}
+
+        let abProps: any = null;
+        let environment: any = null;
+        try {
+          abProps = win.require?.('WAWebABProps');
+        } catch (_) {}
+        try {
+          environment = win.require?.('WAWebEnvironment');
+        } catch (_) {}
+
+        const readAb = (key: string) => {
+          try {
+            return abProps?.getABPropConfigValue?.(key);
+          } catch (_) {
+            return undefined;
+          }
+        };
+
+        const diagnostics: any = {
+          voip: {
+            isVoipInitialized: isVoipInitialized(),
+            stackType: stackForDiagnostics?.type || '',
+            stackStartGroupCall: functionDiagnostic(stackForDiagnostics?.startGroupCall),
+            stackKeys: stackForDiagnostics ? Object.keys(stackForDiagnostics).sort() : [],
+            backendKeys: backendForDiagnostics ? Object.keys(backendForDiagnostics).sort() : [],
+            emitterReady:
+              backendForDiagnostics?.WAWebVoipInit?.VoipInitEventEmitter?.getIsVoipInited?.(),
+            emitterFailed:
+              backendForDiagnostics?.WAWebVoipInit?.VoipInitEventEmitter?.getDidVoipInitError?.(),
+          },
+          environment: {
+            isWindows: environment?.isWindows,
+            isWeb: environment?.isWeb,
+            isGuest: environment?.isGuest,
+            userAgent: navigator.userAgent,
+            webdriver: navigator.webdriver,
+            hardwareConcurrency: navigator.hardwareConcurrency,
+            crossOriginIsolated: win.crossOriginIsolated,
+          },
+          gating: {
+            gateBefore,
+            gateAfter,
+            isWebGroupCallingUsable:
+              typeof gating?.isWebGroupCallingUsable === 'function'
+                ? !!gating.isWebGroupCallingUsable()
+                : null,
+            isWebTransportConfigured:
+              typeof gating?.isWebTransportConfigured === 'function'
+                ? !!gating.isWebTransportConfigured()
+                : null,
+            isWebTransportEnabled:
+              typeof gating?.isWebTransportEnabled === 'function'
+                ? !!gating.isWebTransportEnabled()
+                : null,
+            isCurrentCallGroup:
+              typeof gating?.isCurrentCallGroup === 'function'
+                ? !!gating.isCurrentCallGroup()
+                : null,
+          },
+          ab: {
+            enable_web_calling: readAb('enable_web_calling'),
+            enable_web_group_calling: readAb('enable_web_group_calling'),
+            enable_web_voip_proxy_and_sctp_workers:
+              readAb('enable_web_voip_proxy_and_sctp_workers'),
+            enable_web_voip_webtransport: readAb('enable_web_voip_webtransport'),
+            enable_web_voip_webtransport_group_calls:
+              readAb('enable_web_voip_webtransport_group_calls'),
+            web_voip_deferred_boot_init: readAb('web_voip_deferred_boot_init'),
+          },
+          native: {
+            fromChat: functionDiagnostic(callStart.startWAWebVoipGroupCallFromChat),
+            fromWids: functionDiagnostic(callStart.startWAWebVoipGroupCallFromWids),
+          },
+          before: callStoreSnapshot(),
+          timeline: [],
+        };
+
         const widFactory =
           win.WPP?.whatsapp?.WidFactory ||
           win.Store?.WidFactory ||
@@ -448,12 +568,15 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           // WAWebGroupCallParticipantSelector does when all participants are
           // selected: FromChat + GROUP_CHAT_DIRECT + NOT_OPENED. It preserves
           // group JID, name and icon all the way to startVoipGroupCall().
+          const nativeStartedAt = Date.now();
           await callStart.startWAWebVoipGroupCallFromChat(
             groupChat,
             false,
             callFromUi,
             lobbyEntryPoint
           );
+          diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
+          diagnostics.nativePath = 'startWAWebVoipGroupCallFromChat';
           via = 'native-group-chat';
         } else {
           if (typeof callStart.startWAWebVoipGroupCallFromWids !== 'function') {
@@ -500,12 +623,16 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             })
           );
 
+          diagnostics.resolvedParticipantWids = participantWids.map((wid) => serializeId(wid));
+          const nativeStartedAt = Date.now();
           await callStart.startWAWebVoipGroupCallFromWids(
             participantWids,
             false,
             callFromUi,
             lobbyEntryPoint
           );
+          diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
+          diagnostics.nativePath = 'startWAWebVoipGroupCallFromWids';
           via = 'native-group-wids';
         }
 
@@ -533,9 +660,19 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         }
 
         if (!startedCall) {
+          diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
           throw new Error(
             'WhatsApp group-call controller did not create a live outgoing group call'
           );
+        }
+
+        // Temporary high-detail diagnostics for the current group-call bug.
+        // Keep the samples sparse enough not to hammer CallStore while still
+        // showing whether signaling progresses past CALLING.
+        diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
+        for (const waitMs of [250, 500, 1000, 2000]) {
+          await delay(waitMs);
+          diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
         }
 
         return {
@@ -547,6 +684,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           gateAfter,
           callFromUi,
           lobbyEntryPoint,
+          diagnostics,
         };
       }
 
@@ -605,6 +743,15 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
     },
     { action, payload }
   );
+
+  if (action === 'offer-group') {
+    logger?.info?.(
+      `[${session}] WinZapp group-call result ` +
+        JSON.stringify(result)
+    );
+  }
+
+  return result;
 }
 
 function ok(res: Response, response: any) {
