@@ -307,6 +307,9 @@ def test_group_call_api_emits_high_detail_diagnostics():
     assert "diagnostics.timeline" in controller
     assert "groupParticipantStates: groupParticipantStatesOf(call)" in controller
     assert "finalSeedCall: summarizeCall(startedCall)" in controller
+    assert "diagnostics.voip.stackInvocation" in controller
+    assert "original.apply(this, args)" in controller
+    assert "restoreStartGroupCall?.()" in controller
     assert "diagnostics," in controller
 
 
