@@ -2725,13 +2725,17 @@ class MainWindow(wx.Frame):
         self.voice_call_window_end_button = wx.Button(call_panel, label=self.i18n.t("voice_call_end_button"))
         self.voice_call_window_settings_button = wx.Button(call_panel, label=self.i18n.t("voice_call_settings_button"))
         self.voice_call_window_mute_button = wx.Button(call_panel, label=self.i18n.t("voice_call_mute_button"))
+        self.voice_call_window_video_button = wx.Button(call_panel, label=self.i18n.t("voice_call_video_off_button"))
+        self.voice_call_window_video_button.Hide()
         self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
         self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
         self.voice_call_window_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
+        self.voice_call_window_video_button.Bind(wx.EVT_BUTTON, self.toggle_call_video)
         controls.Add(self.voice_call_window_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 12)
         controls.Add(self.voice_call_window_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         controls.Add(self.voice_call_window_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         controls.Add(self.voice_call_window_mute_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        controls.Add(self.voice_call_window_video_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         call_sizer.Add(controls, 0, wx.EXPAND)
         call_panel.SetSizer(call_sizer)
         self.voice_call_window.Bind(wx.EVT_CLOSE, self._on_voice_call_window_close)
@@ -6277,12 +6281,7 @@ class MainWindow(wx.Frame):
             pending.cancel()
             self._call_audio_stop_timer = None
         self._call_audio_session = None
-        camera = getattr(self, "_call_camera_capture", None)
-        self._call_camera_capture = None
-        if camera is not None:
-            camera.stop()
-        self._call_camera_available = None
-        self._call_camera_enabled = False
+        self._stop_call_camera(reset_availability=True)
         self._active_voice_call = None
         self._voice_call_last_announced_state = ""
         if session is not None:
@@ -6397,6 +6396,8 @@ class MainWindow(wx.Frame):
         sender = getattr(ws, "send_call_camera_frame", None)
         if sender is None:
             logging.warning("[call_video] local camera transport is unavailable")
+            if hasattr(self, "voice_call_window"):
+                wx.CallAfter(self._sync_voice_call_bar)
             return False
 
         capture = CameraCapture(self._find_api_ffmpeg(), sender)
@@ -6411,6 +6412,8 @@ class MainWindow(wx.Frame):
                 "[call_video] local camera unavailable; continuing receive-only video call",
                 exc_info=True,
             )
+            if hasattr(self, "voice_call_window"):
+                wx.CallAfter(self._sync_voice_call_bar)
             return False
 
         if not getattr(self, "_active_voice_call", None):
@@ -6420,7 +6423,38 @@ class MainWindow(wx.Frame):
         self._call_camera_capture = capture
         self._call_camera_available = True
         self._call_camera_enabled = True
+        if hasattr(self, "voice_call_window"):
+            wx.CallAfter(self._sync_voice_call_bar)
         return True
+
+    def _stop_call_camera(self, *, reset_availability: bool = False):
+        """Stop only local video capture, leaving audio and remote video alive."""
+        camera = getattr(self, "_call_camera_capture", None)
+        self._call_camera_capture = None
+        self._call_camera_enabled = False
+        if camera is not None:
+            try:
+                camera.stop()
+            except Exception:
+                logging.exception("[call_video] failed to stop local camera")
+        if reset_availability:
+            self._call_camera_available = None
+        if hasattr(self, "voice_call_window"):
+            wx.CallAfter(self._sync_voice_call_bar)
+
+    def toggle_call_video(self, _event=None):
+        """Enable/disable local camera video without changing the call itself."""
+        active = getattr(self, "_active_voice_call", None) or {}
+        if not active.get("is_video") or getattr(self, "_call_camera_available", None) is not True:
+            return
+        if getattr(self, "_call_camera_capture", None) is not None:
+            self._stop_call_camera()
+            return
+
+        # Opening DirectShow can block for a moment; never do it on the wx UI
+        # thread. _start_call_camera() re-probes the camera and refreshes the
+        # button when capture is ready (or hides it if the device disappeared).
+        threading.Thread(target=self._start_call_camera, daemon=True).start()
 
     def accept_incoming_call(self, identity: str):
         if getattr(self, "_active_voice_call", None) is not None:
@@ -6668,6 +6702,24 @@ class MainWindow(wx.Frame):
         active_text = self.i18n.t(active_call_label_key(active)).format(name=name)
         is_video = bool(active.get("is_video"))
         self.call_video_image.Show(is_video)
+
+        # Local-camera controls are independent from remote video reception.
+        # Until camera probing succeeds the button stays hidden; on a PC with
+        # no camera it never appears, while the remote image above remains
+        # visible for the duration of the video call.
+        video_button = getattr(self, "voice_call_window_video_button", None)
+        local_camera_available = getattr(self, "_call_camera_available", None) is True
+        local_camera_enabled = bool(getattr(self, "_call_camera_enabled", False))
+        if video_button is not None:
+            video_button.Show(is_video and local_camera_available)
+            if is_video and local_camera_available:
+                video_button.SetLabel(
+                    self.i18n.t(
+                        "voice_call_video_off_button"
+                        if local_camera_enabled
+                        else "voice_call_video_on_button"
+                    )
+                )
         window.SetTitle(
             self.i18n.t(
                 "video_call_window_title" if is_video else "voice_call_window_title"

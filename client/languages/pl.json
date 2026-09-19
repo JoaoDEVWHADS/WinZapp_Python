@@ -860,6 +860,8 @@
     "voice_call_settings_button": "&Ustawienia",
     "voice_call_mute_button": "&Wycisz mikrofon",
     "voice_call_unmute_button": "&Włącz mikrofon",
+    "voice_call_video_off_button": "&Wyłącz wideo",
+    "voice_call_video_on_button": "Włącz &wideo",
     "voice_call_window_title": "Połączenie głosowe",
     "video_call_window_title": "Połączenie wideo",
     "voice_call_settings_title": "Ustawienia połączenia",

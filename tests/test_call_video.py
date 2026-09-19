@@ -52,6 +52,8 @@ def test_video_button_and_labels_exist_in_all_languages():
         entries = json.loads(path.read_text(encoding='utf-8'))
         assert entries['video_call_button']
         assert entries['video_call_window_title']
+        assert entries['voice_call_video_off_button']
+        assert entries['voice_call_video_on_button']
         assert '{name}' in entries['incoming_video_call_announcement']
 
 
@@ -102,3 +104,11 @@ def test_missing_camera_does_not_end_or_clear_video_call(monkeypatch):
     assert stub._call_camera_capture is None
     assert stub._call_camera_available is False
     assert stub._call_camera_enabled is False
+
+
+def test_call_window_video_toggle_is_hidden_without_camera():
+    source = (Path(__file__).parents[1] / 'client' / 'main.py').read_text(encoding='utf-8')
+    assert 'self.voice_call_window_video_button.Hide()' in source
+    assert 'video_button.Show(is_video and local_camera_available)' in source
+    assert 'self.voice_call_window_video_button.Bind(wx.EVT_BUTTON, self.toggle_call_video)' in source
+    assert 'def _stop_call_camera(self, *, reset_availability: bool = False):' in source
