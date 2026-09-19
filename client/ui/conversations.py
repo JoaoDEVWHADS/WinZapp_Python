@@ -3506,7 +3506,10 @@ class ConversationsPanel(wx.Panel):
 
         _silence_now()
         wx.CallAfter(_silence_now)
-        for delay_ms in (40, 90, 160, 260, 400):
+        # Native focus speech may start only a few milliseconds after wx
+        # changes focus. Dense early cancellations prevent the first syllable
+        # from leaking before the older 40 ms retry ("Di..." from "Digite").
+        for delay_ms in (5, 15, 30, 50, 90, 160, 260, 400, 650):
             wx.CallLater(delay_ms, _silence_now)
 
     def _start_voice_recording(self):

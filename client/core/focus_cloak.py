@@ -48,11 +48,26 @@ class FocusCloakAccessible(wx.Accessible):
         # about the control that just took focus, nothing else.
         if not self.cloaked or childId != 0:
             return (wx.ACC_NOT_IMPLEMENTED, 0)
-        # Focusable, but explicitly not focused. Reporting the control as
-        # unavailable or invisible instead would also drop the announcement,
-        # but it lies about the control to every other consumer; "not the
-        # focus" is the single fact we are actually suppressing.
         return (wx.ACC_OK, wx.ACC_STATE_SYSTEM_FOCUSABLE)
+
+    def GetRole(self, childId):
+        if not self.cloaked or childId != 0:
+            return (wx.ACC_NOT_IMPLEMENTED, wx.ROLE_NONE)
+        # PANE is one of NVDA's silent roles on focus. During this very short
+        # armed interval, presenting the control as a nameless structural pane
+        # prevents the native control name/role from leaking before silence()
+        # gets a chance to cancel it ("Di..." / "Indisponível").
+        return (wx.ACC_OK, wx.ROLE_SYSTEM_PANE)
+
+    def GetName(self, childId):
+        if not self.cloaked or childId != 0:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        return (wx.ACC_OK, "")
+
+    def GetDescription(self, childId):
+        if not self.cloaked or childId != 0:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        return (wx.ACC_OK, "")
 
 
 def _get_or_install_cloak(window):

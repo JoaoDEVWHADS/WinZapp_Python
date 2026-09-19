@@ -145,6 +145,7 @@ class _Stub:
     _cleanup_recorded_audio_temp_file = StatusPanel._cleanup_recorded_audio_temp_file
     _silence_send_voice_focus_if_enabled = StatusPanel._silence_send_voice_focus_if_enabled
     _voice_recording_silence_enabled = StatusPanel._voice_recording_silence_enabled
+    _arm_voice_recording_silence_transition = StatusPanel._arm_voice_recording_silence_transition
     _voice_recording_focus_suppression_enabled = StatusPanel._voice_recording_focus_suppression_enabled
     _focus_recording_button_silently = StatusPanel._focus_recording_button_silently
 
@@ -175,6 +176,7 @@ class _Stub:
         # survive that setup to reach the behaviour this class asserts.
         self._recording_paused = False
         self._is_recording = False
+        self._voice_recording_silence_until = 0.0
         self._voice_status_lbl = _FakeLabel()
         self._voice_start_btn = _FakeButton()
         self._voice_pause_btn = _FakeButton()

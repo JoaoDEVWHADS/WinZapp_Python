@@ -148,6 +148,18 @@ class _VoiceButtonAccessible(wx.Accessible):
             setattr(window, "_winzapp_focus_cloak", self)
 
     def GetName(self, childId):
+        if self.cloaked and childId == 0:
+            return (wx.ACC_OK, "")
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+    def GetRole(self, childId):
+        if self.cloaked and childId == 0:
+            return (wx.ACC_OK, wx.ROLE_SYSTEM_PANE)
+        return (wx.ACC_NOT_IMPLEMENTED, wx.ROLE_NONE)
+
+    def GetDescription(self, childId):
+        if self.cloaked and childId == 0:
+            return (wx.ACC_OK, "")
         return (wx.ACC_NOT_IMPLEMENTED, "")
 
     def GetState(self, childId):

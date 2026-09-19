@@ -11863,27 +11863,26 @@ class MainWindow(wx.Frame):
         self.speak_output.output(text, interrupt=interrupt)
 
     def _voice_recording_silence_active(self):
-        """Mute speech during recording and its start/stop focus transitions.
-
-        The short tail matters because Send/Discard must set _is_recording
-        False before restoring the composer. Without it, the native focus event
-        can announce the message-field label even though the user explicitly
-        asked the whole voice-recording flow to stay quiet.
-        """
+        """Mute speech for every voice recorder and its focus transitions."""
         if not self.settings.get("speech_content", {}).get("silence_while_recording", False):
             return False
-        cp = getattr(self, "conversations_panel", None)
-        if cp is None:
-            return False
-        if getattr(cp, "_is_recording", False):
-            return True
-        try:
-            silence_until = float(
-                getattr(cp, "_voice_recording_silence_until", 0.0) or 0.0
-            )
-        except (TypeError, ValueError):
-            silence_until = 0.0
-        return time.monotonic() < silence_until
+
+        now = time.monotonic()
+        for panel_name in ("conversations_panel", "status_panel"):
+            panel = getattr(self, panel_name, None)
+            if panel is None:
+                continue
+            if getattr(panel, "_is_recording", False):
+                return True
+            try:
+                silence_until = float(
+                    getattr(panel, "_voice_recording_silence_until", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                silence_until = 0.0
+            if now < silence_until:
+                return True
+        return False
 
     # ── Language selection ────────────────────────────────────────────────────
 

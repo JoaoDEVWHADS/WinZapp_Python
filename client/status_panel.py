@@ -19,7 +19,7 @@ from core.save_location import resolve_save_dialog_folder
 from core.save_dialog_selection import schedule_deselect_extension
 from core.utils import format_number, normalize_line_separators, is_voice_message
 from core.video_player import VideoPlayer
-from core.focus_cloak import cloak_panel_focus_fallback
+from core.focus_cloak import cloak_focus_announcement, cloak_panel_focus_fallback
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
@@ -879,6 +879,7 @@ class StatusPanel(wx.Panel):
         # once it finally arrives.
         self._recording_starting   = False
         self._recording_open_token = 0
+        self._voice_recording_silence_until = 0.0
 
         self.SetSizer(sizer)
 
@@ -2351,7 +2352,14 @@ class StatusPanel(wx.Panel):
 
     def _leave_status_composer(self):
         """Return from any Add Status flow to the clean status browser."""
-        self._hide_post_panels()
+        silent_voice = bool(
+            self._voice_post_panel.IsShown()
+            and self._voice_recording_focus_suppression_enabled()
+        )
+
+        # Bring back a stable destination before disabling the composer. If
+        # Send/Discard is focused and its parent is disabled first, Windows
+        # announces the focused control as "Indisponível".
         for widget in (
             self._add_status_btn,
             self._refresh_status_btn,
@@ -2360,7 +2368,20 @@ class StatusPanel(wx.Panel):
         ):
             widget.Show()
         self.Layout()
-        self._status_list.SetFocus()
+
+        if silent_voice:
+            if self._voice_recording_silence_enabled():
+                self._arm_voice_recording_silence_transition()
+            cloak_focus_announcement(self._status_list, duration_ms=1200)
+            self._silence_send_voice_focus_if_enabled()
+            self._status_list.SetFocus()
+            self._silence_send_voice_focus_if_enabled()
+
+        self._hide_post_panels()
+        self.Layout()
+
+        if not silent_voice:
+            self._status_list.SetFocus()
 
     # ── Record & post voice status ───────────────────────────────────────────
 
@@ -2552,6 +2573,7 @@ class StatusPanel(wx.Panel):
             self._recording_stream   = stream
             self._recording_rate     = rate
             self._recording_channels = ch
+            self._arm_voice_recording_silence_transition()
             self._is_recording       = True
 
             if hasattr(self.main_window, "voicemsg_startrecording_sound"):
@@ -2561,17 +2583,22 @@ class StatusPanel(wx.Panel):
             self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
             self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
             self._voice_close_btn.Show()
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+            self._voice_pause_btn.Show()
+            self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
+            self._voice_send_btn.Show()
+
+            # Focus the stable Send control before hiding the focused Start
+            # control. Otherwise Windows moves focus to the parent panel and
+            # NVDA announces "Painel".
+            self._focus_recording_button_silently(self._voice_send_btn)
             if self._voice_recording_focus_suppression_enabled():
                 cloak_panel_focus_fallback(
                     self._voice_post_panel, self._voice_start_btn
                 )
             self._voice_start_btn.Hide()
-            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
-            self._voice_pause_btn.Show()
-            self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
-            self._voice_send_btn.Show()
             self.Layout()
-            self._focus_recording_button_silently(self._voice_send_btn)
+            self._silence_send_voice_focus_if_enabled()
 
         threading.Thread(target=_bg_open_stream, daemon=True).start()
 
@@ -2581,6 +2608,21 @@ class StatusPanel(wx.Panel):
         return bool(
             settings.get("speech_content", {}).get("silence_while_recording", False)
         )
+
+    def _arm_voice_recording_silence_transition(self, duration_ms=1400):
+        """Keep status-recording speech muted across focus/layout changes."""
+        if not self._voice_recording_silence_enabled():
+            return False
+        try:
+            duration = max(0.0, float(duration_ms)) / 1000.0
+        except (TypeError, ValueError):
+            duration = 1.4
+        self._voice_recording_silence_until = max(
+            float(getattr(self, "_voice_recording_silence_until", 0.0) or 0.0),
+            time.monotonic() + duration,
+        )
+        self._silence_send_voice_focus_if_enabled()
+        return True
 
     def _voice_recording_focus_suppression_enabled(self):
         """Whether WinZapp's automatic recording-button focus stays silent.
@@ -2599,14 +2641,19 @@ class StatusPanel(wx.Panel):
         return bool(silence_recording or not extended_enabled)
 
     def _focus_recording_button_silently(self, button):
-        """Apply recording focus without creating a suppressed focus event.
+        """Move focus to the recording action without exposing its announcement.
 
-        See ConversationsPanel._focus_recording_button_silently: when silence
-        is requested, the reliable cross-API solution is not to move focus to
-        Send at all.  The status recording shortcuts remain available.
+        Status cannot safely leave focus on the Start button: that button is
+        hidden as recording begins, and Windows then focuses the parent panel
+        ("Painel"). Cloak the real destination first, focus it, and cancel any
+        delayed UIA/MSAA speech while keeping keyboard navigation correct.
         """
         if self._voice_recording_focus_suppression_enabled():
-            return False
+            cloak_focus_announcement(button, duration_ms=1200)
+            self._silence_send_voice_focus_if_enabled()
+            button.SetFocus()
+            self._silence_send_voice_focus_if_enabled()
+            return True
         button.SetFocus()
         return True
 
@@ -2631,7 +2678,7 @@ class StatusPanel(wx.Panel):
 
         _silence_now()
         wx.CallAfter(_silence_now)
-        for delay_ms in (40, 90, 160, 260, 400):
+        for delay_ms in (5, 15, 30, 50, 90, 160, 260, 400, 650):
             wx.CallLater(delay_ms, _silence_now)
 
     def _toggle_pause_voice_recording(self, event):
@@ -2732,6 +2779,8 @@ class StatusPanel(wx.Panel):
         # instead of starting to capture into a panel the user just dismissed.
         self._recording_open_token += 1
         self._recording_starting = False
+        if self._is_recording:
+            self._arm_voice_recording_silence_transition()
         if self._is_recording and hasattr(self.main_window, "voicemsg_discard_sound"):
             try:
                 self.main_window.voicemsg_discard_sound.play()
@@ -2747,6 +2796,7 @@ class StatusPanel(wx.Panel):
     def _on_send_voice_status(self, event):
         if not self._is_recording:
             return
+        self._arm_voice_recording_silence_transition()
         if hasattr(self.main_window, "voicemsg_send_sound"):
             try:
                 self.main_window.voicemsg_send_sound.play()

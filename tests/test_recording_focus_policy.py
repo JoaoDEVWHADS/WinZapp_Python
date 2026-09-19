@@ -17,21 +17,26 @@ def _method_source(relative: str, class_name: str, method_name: str) -> str:
     raise AssertionError(f"{class_name}.{method_name} not found in {relative}")
 
 
-@pytest.mark.parametrize(
-    ("relative", "class_name"),
-    [
-        ("client/ui/conversations.py", "ConversationsPanel"),
-        ("client/status_panel.py", "StatusPanel"),
-    ],
-)
-def test_silent_recording_does_not_manufacture_send_focus_event(relative, class_name):
-    method = _method_source(relative, class_name, "_focus_recording_button_silently")
+def test_conversation_silent_recording_does_not_manufacture_send_focus_event():
+    method = _method_source(
+        "client/ui/conversations.py", "ConversationsPanel",
+        "_focus_recording_button_silently"
+    )
 
     assert "if self._voice_recording_focus_suppression_enabled():" in method
     assert "return False" in method
     assert method.count("button.SetFocus()") == 1
     assert method.index("return False") < method.index("button.SetFocus()")
-    assert "cloak_focus_announcement" not in method
+
+
+def test_status_silent_recording_uses_cloaked_real_focus_instead_of_panel_fallback():
+    method = _method_source(
+        "client/status_panel.py", "StatusPanel", "_focus_recording_button_silently"
+    )
+
+    assert "cloak_focus_announcement(button" in method
+    assert method.count("button.SetFocus()") == 2
+    assert "_silence_send_voice_focus_if_enabled()" in method
 
 
 def test_panel_focus_fallback_uses_nvda_silent_pane_role():
@@ -130,3 +135,33 @@ def test_voice_focus_restore_cloaks_native_field_announcement_and_cancels_speech
     assert "self.message_field.SetFocus()" in method
     assert "_silence_send_voice_focus_if_enabled()" in method
     assert "_arm_voice_recording_silence_transition()" in method
+
+
+def test_focus_cloak_hides_name_and_role_during_silent_focus():
+    source = (ROOT / "client/core/focus_cloak.py").read_text(encoding="utf-8")
+
+    assert "def GetRole(self, childId):" in source
+    assert "wx.ROLE_SYSTEM_PANE" in source
+    assert "def GetName(self, childId):" in source
+    assert "def GetDescription(self, childId):" in source
+
+
+def test_status_silent_recording_focuses_send_before_hiding_start():
+    method = _method_source(
+        "client/status_panel.py", "StatusPanel", "_start_voice_recording"
+    )
+
+    focus = method.index("_focus_recording_button_silently(self._voice_send_btn)")
+    hide = method.index("self._voice_start_btn.Hide()")
+    assert focus < hide
+
+
+def test_status_leave_moves_focus_before_disabling_voice_composer():
+    method = _method_source(
+        "client/status_panel.py", "StatusPanel", "_leave_status_composer"
+    )
+
+    focus = method.index("self._status_list.SetFocus()")
+    hide = method.index("self._hide_post_panels()")
+    assert focus < hide
+    assert "cloak_focus_announcement(self._status_list" in method
