@@ -410,6 +410,66 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
         await ensureVoipRuntimeReady();
 
+        // Probe the real Emscripten/WASM return code. WhatsApp's Web stack
+        // intentionally logs non-zero startVoipGroupCall() results but does
+        // not return them to callers. On the direct stack the backend API
+        // exposes the same WASM module instance, so wrap just this method and
+        // leave all behavior/return values unchanged.
+        let wasmProbe: any = {
+          installed: false,
+          error: '',
+          lastStatus: null,
+        };
+        try {
+          const backendApi = win.require?.('WAWebBackendApi');
+          const frontendSendAndReceive = backendApi?.frontendSendAndReceive;
+          if (typeof frontendSendAndReceive === 'function') {
+            const wasm = await frontendSendAndReceive.call(
+              backendApi,
+              'initializeVoipWasm'
+            );
+            if (wasm && typeof wasm.startVoipGroupCall === 'function') {
+              if (!wasm.__winzappStartVoipGroupCallProbe) {
+                const originalStartVoipGroupCall =
+                  wasm.startVoipGroupCall.bind(wasm);
+                wasm.startVoipGroupCall = (...args: any[]) => {
+                  const status = originalStartVoipGroupCall(...args);
+                  const listSize = (value: any) => {
+                    try {
+                      if (typeof value?.size === 'function') return value.size();
+                      if (typeof value?.length === 'number') return value.length;
+                    } catch (_) {}
+                    return null;
+                  };
+                  win.__winzappLastStartVoipGroupCallStatus = {
+                    at: Date.now(),
+                    status,
+                    argCount: args.length,
+                    pnCount: listSize(args[0]),
+                    lidCount: listSize(args[1]),
+                    deviceCsvCount: listSize(args[2]),
+                    callId: String(args[3] || ''),
+                    useVideo: !!args[4],
+                    groupJid: String(args[5] || ''),
+                    isLightWeight: !!args[6],
+                    callFromUi: args[10] ?? null,
+                    lobbyEntryPoint: args[11] ?? null,
+                  };
+                  return status;
+                };
+                wasm.__winzappStartVoipGroupCallProbe = true;
+              }
+              wasmProbe.installed = true;
+            } else {
+              wasmProbe.error = 'initializeVoipWasm returned no startVoipGroupCall function';
+            }
+          } else {
+            wasmProbe.error = 'WAWebBackendApi.frontendSendAndReceive is unavailable';
+          }
+        } catch (error: any) {
+          wasmProbe.error = String(error?.message || error || 'unknown error');
+        }
+
         const callStart = win.require?.('WAWebVoipStartCall');
         if (!callStart) {
           throw new Error('WhatsApp native group-call controller is unavailable');
@@ -528,6 +588,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             fromChat: functionDiagnostic(callStart.startWAWebVoipGroupCallFromChat),
             fromWids: functionDiagnostic(callStart.startWAWebVoipGroupCallFromWids),
           },
+          wasmProbe,
           before: callStoreSnapshot(),
           timeline: [],
         };
@@ -699,6 +760,8 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           await delay(waitMs);
           diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
         }
+        diagnostics.wasmProbe.lastStatus =
+          win.__winzappLastStartVoipGroupCallStatus || null;
 
         const finalActiveCall = getCallStore()?.activeCall;
         const finalState = callStateOf(finalActiveCall || startedCall);

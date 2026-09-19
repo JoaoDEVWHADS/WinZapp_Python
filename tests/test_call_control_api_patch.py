@@ -339,3 +339,16 @@ def test_group_call_failure_preserves_browser_diagnostics_in_node_logs():
     assert "WinZapp group-call result" in controller
     assert "WinZapp group-call diagnostics" in controller
     assert "error.winzappGroupCallDiagnostics = result?.diagnostics || null" in controller
+
+
+def test_group_call_probes_wasm_start_status():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    assert "WAWebBackendApi" in controller
+    assert "initializeVoipWasm" in controller
+    assert "__winzappStartVoipGroupCallProbe" in controller
+    assert "__winzappLastStartVoipGroupCallStatus" in controller
+    assert "originalStartVoipGroupCall(...args)" in controller
+    assert "wasmProbe.lastStatus" in controller
+    assert "pnCount" in controller
+    assert "deviceCsvCount" in controller
