@@ -1,0 +1,111 @@
+name: Quick call BASS check
+
+on:
+  push:
+    branches:
+      - chatgpt/call-bass-quickcheck-20260919
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compile changed Python files
+        shell: pwsh
+        run: |
+          python -m py_compile client/core/call_audio.py client/core/audio_devices.py client/main.py tests/test_call_audio_session.py
+
+      - name: Install minimal audio test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --quiet numpy sounddevice
+
+      - name: Verify live speaker switch keeps microphone stream
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "client"
+          @'
+          from core.call_audio import CallAudioConfig, CallAudioSession
+
+          class Socket:
+              def emit(self, *_args, **_kwargs):
+                  pass
+
+          class Input:
+              def __init__(self):
+                  self.started = False
+                  self.closed = False
+              def start(self):
+                  self.started = True
+              def stop(self):
+                  self.started = False
+              def close(self):
+                  self.closed = True
+
+          class Defaults:
+              device = (0, 1)
+
+          class SD:
+              default = Defaults()
+              def __init__(self):
+                  self.inputs = []
+                  self.devices = [
+                      {"name": "Mic", "max_input_channels": 1, "max_output_channels": 0, "default_samplerate": 48000, "hostapi": 0},
+                      {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2, "default_samplerate": 48000, "hostapi": 0},
+                  ]
+              def query_devices(self, device=None):
+                  return self.devices if device is None else self.devices[int(device)]
+              def query_hostapis(self, _index=None):
+                  return {"name": "Windows WASAPI"}
+              def InputStream(self, **_kwargs):
+                  stream = Input()
+                  self.inputs.append(stream)
+                  return stream
+
+          class Out:
+              def __init__(self, name):
+                  self.name = name
+                  self.started = False
+                  self.closed = False
+                  self.switches = []
+              def start(self):
+                  self.started = True
+              def stop(self):
+                  self.started = False
+              def close(self):
+                  self.closed = True
+              def write(self, _samples):
+                  return False
+              def switch_device(self, name):
+                  self.switches.append(name)
+                  return True
+
+          sd = SD()
+          outputs = []
+          def make_output(name):
+              out = Out(name)
+              outputs.append(out)
+              return out
+
+          session = CallAudioSession(
+              Socket(),
+              CallAudioConfig(session="test", input_device_name="Mic", output_device_name="Speaker"),
+              sounddevice_module=sd,
+              output_factory=make_output,
+          )
+          session.start()
+          mic = session._input_stream
+          assert session.switch_output_device("USB Headset") is True
+          assert session._input_stream is mic
+          assert mic.started is True
+          assert mic.closed is False
+          assert len(sd.inputs) == 1
+          assert outputs[0].switches == ["USB Headset"]
+          session.stop()
+          print("quick call BASS check: ok")
+          '@ | python -
