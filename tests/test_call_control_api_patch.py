@@ -239,28 +239,38 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "getDidVoipInitError" in bridge
 
 
-def test_ringtone_diagnostic_hooks_the_candidate_playback_apis_without_muting_them():
-    """Temporary instrumentation for the duplicate-ringtone report.
+def test_page_native_audio_is_always_muted_without_touching_real_call_audio():
+    """WhatsApp Web's own sounds (ringtone, message chimes) must never be
+    audible through this Chromium process. The prior diagnostic
+    instrumentation confirmed live that the ringtone plays as a plain,
+    looping <audio> element's native .play() (isRtcStream=false) — a
+    categorically different path from the call's own remote audio track,
+    which never touches an <audio>/Audio() element at all: it is tapped
+    directly off the RTCPeerConnection's MediaStreamTrack via the Web Audio
+    API and was already silenced before this fix (attachRemoteTrack's
+    `sink` GainNode, gain=0). So muting every native <audio>/<video> element
+    and every `new Audio()` instance, unconditionally, is safe — there is no
+    call-state window where it would also mute real call audio, so nothing
+    needs to be tracked or toggled back on.
 
-    The call's own remote audio track is already silenced before it reaches
-    context.destination (attachRemoteTrack's `sink` GainNode, gain=0), so it
-    cannot be what the user hears twice. --mute-audio cannot be turned back on
-    either (test_chromium_does_not_disable_voice_input_for_python_call_bridge
-    pins it off, and start.js's own comment says why: it starves the audio
-    service before the RTC pipeline can capture PCM, taking calls down with
-    it). So this only reports which API WhatsApp Web's ringtone actually uses
-    — HTMLMediaElement.play, `new Audio()`, or a raw AudioBufferSourceNode —
-    it must never silence anything itself, or it would blindly mute call
-    audio it cannot yet tell apart from the ringtone.
+    This also fixes the sibling report from the same investigation: a
+    missed/unanswered call left the page's own ringtone looping forever,
+    because the terminal callstate/incomingcall handling in main.py only
+    ever stops WinZapp's own sound — it has no way to reach into the page.
+    Muting page audio unconditionally removes that dependency entirely.
     """
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
-    assert "ringtone-diagnostic" in bridge
+    assert "el.muted = true;" in bridge
+    assert "el.volume = 0;" in bridge
     assert "win.HTMLMediaElement.prototype.play = function" in bridge
     assert "return nativeMediaPlay.apply(this, args);" in bridge
     assert "win.Audio = new Proxy(NativeAudio" in bridge
-    assert "contextProtoDiag.createBufferSource = function" in bridge
-    assert "return nativeStart(...startArgs);" in bridge
+    # The autoplay-attribute backstop is scanMediaElements() itself — it must
+    # silence every element it finds, not only the RTC-stream ones.
+    scan = bridge[bridge.index("const scanMediaElements = ()"):]
+    scan = scan[: scan.index("\n  };")]
+    assert "silenceElement(element);" in scan
     # Bounded, so a call with a looping/reactivating ringtone cannot flood
     # wppconnect.log for the rest of the session.
-    assert "if (diagnosticLogCount > 40) return;" in bridge
+    assert "if (mutedLogCount > 40) return;" in bridge
