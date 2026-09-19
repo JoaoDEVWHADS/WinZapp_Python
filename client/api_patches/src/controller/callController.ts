@@ -52,7 +52,9 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
     );
   }
 
-  const result = await page.evaluate(
+  let result: any;
+  try {
+    result = await page.evaluate(
     async ({ action, payload }) => {
       const win = window as any;
       if (!win.WPP?.call) throw new Error('WPP.call is not available');
@@ -239,6 +241,27 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       };
 
       const ensureVoipRuntimeReady = async (): Promise<any> => {
+        // Keep the VoIP stack on the main thread. WhatsApp's current
+        // WorkerProxy fires startGroupCall as a one-way RPC and discards the
+        // underlying WASM status, which makes failed group calls look like
+        // successful short-lived CALLING models.
+        try {
+          const abProps = win.require?.('WAWebABProps');
+          if (
+            abProps &&
+            typeof abProps.getABPropConfigValue === 'function' &&
+            !abProps.__winzappDirectVoipStack
+          ) {
+            const originalGetABPropConfigValue =
+              abProps.getABPropConfigValue.bind(abProps);
+            abProps.getABPropConfigValue = (key: string, ...args: any[]) => {
+              if (key === 'enable_web_voip_proxy_and_sctp_workers') return false;
+              return originalGetABPropConfigValue(key, ...args);
+            };
+            abProps.__winzappDirectVoipStack = true;
+          }
+        } catch (_) {}
+
         // WA-JS' enableCallInterface flips the calling AB props, but it marks
         // itself enabled before its best-effort backend init. If that first
         // init races the lazy VoIP bundle, later calls never retry it. Retry
@@ -494,6 +517,8 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             enable_web_group_calling: readAb('enable_web_group_calling'),
             enable_web_voip_proxy_and_sctp_workers:
               readAb('enable_web_voip_proxy_and_sctp_workers'),
+            winzappDirectVoipStack:
+              !!win.require?.('WAWebABProps')?.__winzappDirectVoipStack,
             enable_web_voip_webtransport: readAb('enable_web_voip_webtransport'),
             enable_web_voip_webtransport_group_calls:
               readAb('enable_web_voip_webtransport_group_calls'),
@@ -675,8 +700,23 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
         }
 
+        const finalActiveCall = getCallStore()?.activeCall;
+        const finalState = callStateOf(finalActiveCall || startedCall);
+        if (
+          !finalActiveCall ||
+          finalState === 'NONE' ||
+          finalState === 'ENDED' ||
+          groupParticipantCountOf(finalActiveCall) < 2
+        ) {
+          const error: any = new Error(
+            'WhatsApp aborted the outgoing group call before remote signaling remained active'
+          );
+          error.winzappGroupCallDiagnostics = diagnostics;
+          throw error;
+        }
+
         return {
-          ...summarizeCall(startedCall),
+          ...summarizeCall(finalActiveCall),
           via,
           groupJid: useGroupChat ? groupJid : '',
           useGroupChat,
@@ -742,7 +782,19 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       throw new Error(`Unsupported call action: ${action}`);
     },
     { action, payload }
-  );
+    );
+  } catch (error: any) {
+    if (action === 'offer-group') {
+      logger?.error?.(
+        `[${session}] WinZapp group-call browser failure ` +
+          JSON.stringify({
+            message: String(error?.message || error || ''),
+            stack: String(error?.stack || ''),
+          })
+      );
+    }
+    throw error;
+  }
 
   if (action === 'offer-group') {
     logger?.info?.(

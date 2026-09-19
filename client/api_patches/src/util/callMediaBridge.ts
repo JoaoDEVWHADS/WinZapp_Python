@@ -638,6 +638,30 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
         const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
         let lastError = '';
 
+        // WinZapp needs deterministic error reporting for group calls. Current
+        // WhatsApp Web's WorkerProxy implements startGroupCall as a
+        // fire-and-forget RPC, so the numeric startVoipGroupCall() result is
+        // discarded and a failed call only appears as a short-lived local
+        // CALLING model. Force the normal main-thread Web VoIP stack before
+        // the lazy stack is created. This keeps WebTransport enabled; only the
+        // proxy/worker execution layer is disabled.
+        try {
+          const abProps = win.require?.('WAWebABProps');
+          if (
+            abProps &&
+            typeof abProps.getABPropConfigValue === 'function' &&
+            !abProps.__winzappDirectVoipStack
+          ) {
+            const originalGetABPropConfigValue =
+              abProps.getABPropConfigValue.bind(abProps);
+            abProps.getABPropConfigValue = (key: string, ...args: any[]) => {
+              if (key === 'enable_web_voip_proxy_and_sctp_workers') return false;
+              return originalGetABPropConfigValue(key, ...args);
+            };
+            abProps.__winzappDirectVoipStack = true;
+          }
+        } catch (_) {}
+
         for (let attempt = 0; attempt < 10; attempt += 1) {
           try {
             const enable = win.WPP?.call?.enableCallInterface;

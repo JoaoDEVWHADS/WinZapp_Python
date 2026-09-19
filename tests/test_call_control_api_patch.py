@@ -314,3 +314,18 @@ def test_group_call_api_emits_high_detail_diagnostics():
     assert "for (const waitMs of [250, 500, 1000, 2000])" in controller
     assert "diagnostics.timeline" in controller
     assert "diagnostics," in controller
+
+
+def test_group_call_forces_main_thread_voip_stack():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    for source in (controller, bridge):
+        assert "enable_web_voip_proxy_and_sctp_workers" in source
+        assert "__winzappDirectVoipStack" in source
+        assert "return false" in source
+
+    assert "winzappDirectVoipStack" in controller
+    assert "WhatsApp aborted the outgoing group call before remote signaling remained active" in controller
+    assert "const finalActiveCall = getCallStore()?.activeCall" in controller
+    assert "groupParticipantCountOf(finalActiveCall) < 2" in controller
