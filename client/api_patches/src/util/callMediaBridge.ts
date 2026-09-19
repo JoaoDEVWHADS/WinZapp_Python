@@ -219,31 +219,81 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     try { win.__winzappOnCallBridgeEvent?.(event, details); } catch (_) {}
   };
 
-  // Only the looping page-native ringtone is silenced. Short WhatsApp
-  // chimes (including the call-ended sound) must remain audible, and an
-  // element that stops being the ringtone must get its original audio state
-  // back in case WhatsApp reuses the same <audio> element.
+  // WhatsApp Web's page-native audio must stay out of WinZapp except for
+  // the short call-ended chime. Real call audio is carried separately by the
+  // MediaStream/WebAudio bridge below, so this policy never touches the PCM
+  // that Python sends to the user's selected call speaker.
+  //
+  // The previous selective fix only muted loop=true, which correctly stopped
+  // the incoming-call ringtone but accidentally let the ordinary incoming-
+  // message notification ping through. Keep page audio muted by default and
+  // open a very small exception window when a real WhatsApp call transitions
+  // from a live/ringing state to terminal. That preserves the familiar
+  // call-ended sound without bringing message notifications back.
   const pageAudioState = new WeakMap<
     HTMLMediaElement,
     { muted: boolean; volume: number }
   >();
+  const mutedPageElements = new Set<HTMLMediaElement>();
+  let callWasActive = false;
+  let allowCallEndChimeUntil = 0;
 
-  const isPageRingtone = (el: HTMLMediaElement) => {
+  const pageAudioNow = () => {
     try {
-      return !(el.srcObject instanceof MediaStream) && el.loop === true;
+      return Number(win.performance?.now?.() ?? Date.now());
     } catch (_) {
-      return false;
+      return Date.now();
     }
   };
 
-  const silenceRingtone = (el: HTMLMediaElement) => {
+  const pageCallState = (call: any): string => {
     try {
-      if (!pageAudioState.has(el)) {
-        pageAudioState.set(el, { muted: el.muted, volume: el.volume });
-      }
-      el.muted = true;
-      el.volume = 0;
+      const rawValue =
+        call?.getState?.() ?? call?.state ?? call?.get?.('state') ?? '';
+      const raw = String(rawValue);
+      const numericStates: Record<string, string> = {
+        '0': 'NONE',
+        '1': 'CALLING',
+        '2': 'PREACCEPT_RECEIVED',
+        '3': 'INCOMING_RING',
+        '4': 'ACCEPT_SENT',
+        '5': 'ACCEPT_RECEIVED',
+        '6': 'ACTIVE',
+        '7': 'HANDLED_REMOTELY',
+        '8': 'INCOMING_RING',
+        '9': 'REJOINING',
+        '10': 'LINK',
+        '11': 'CONNECTED_LONELY',
+        '12': 'PRE_CALLING',
+        '13': 'ENDED',
+        '14': 'CALL_B_STARTING',
+      };
+      return numericStates[raw] || raw;
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const currentPageCall = (): any => {
+    try {
+      const module = win.require?.('WAWebCallCollection');
+      const store =
+        module?.activeCall !== undefined ? module : module?.get?.() || module;
+      const active = store?.activeCall || store?.get?.('activeCall');
+      if (active) return active;
     } catch (_) {}
+    try {
+      const store = win.WPP?.whatsapp?.CallStore || win.Store?.Call;
+      return store?.activeCall || store?.get?.('activeCall') || null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const isLivePageCall = (call: any): boolean => {
+    if (!call) return false;
+    const callState = pageCallState(call);
+    return !['', '0', 'NONE', 'ENDED', 'HANDLED_REMOTELY'].includes(callState);
   };
 
   const restorePageAudio = (el: HTMLMediaElement) => {
@@ -253,16 +303,80 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       el.muted = original.muted;
       el.volume = original.volume;
       pageAudioState.delete(el);
+      mutedPageElements.delete(el);
+    } catch (_) {}
+  };
+
+  const allowCallEndChime = () => {
+    allowCallEndChimeUntil = Math.max(
+      allowCallEndChimeUntil,
+      pageAudioNow() + 2500
+    );
+    // A sound object may have been created/muted just before the call state
+    // flips. Restore those objects immediately so the terminal chime is not
+    // clipped while waiting for the next media scan.
+    for (const element of Array.from(mutedPageElements)) {
+      restorePageAudio(element);
+    }
+  };
+
+  const refreshCallAudioPolicy = () => {
+    const active = isLivePageCall(currentPageCall());
+    if (callWasActive && !active) allowCallEndChime();
+    callWasActive = active;
+  };
+
+  const isPageRingtone = (el: HTMLMediaElement) => {
+    try {
+      return !(el.srcObject instanceof MediaStream) && el.loop === true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const silencePageAudio = (el: HTMLMediaElement) => {
+    try {
+      if (!pageAudioState.has(el)) {
+        pageAudioState.set(el, { muted: el.muted, volume: el.volume });
+        el.addEventListener(
+          'ended',
+          () => mutedPageElements.delete(el),
+          { once: true }
+        );
+      }
+      mutedPageElements.add(el);
+      el.muted = true;
+      el.volume = 0;
     } catch (_) {}
   };
 
   const applyPageAudioPolicy = (el: HTMLMediaElement) => {
+    try {
+      if (el.srcObject instanceof MediaStream) {
+        restorePageAudio(el);
+        return false;
+      }
+    } catch (_) {}
+
+    refreshCallAudioPolicy();
+
+    // The ringtone is always suppressed, even if a previous call just ended
+    // and the short terminal-chime exception window is still open.
     if (isPageRingtone(el)) {
-      silenceRingtone(el);
+      silencePageAudio(el);
       return true;
     }
-    restorePageAudio(el);
-    return false;
+
+    if (pageAudioNow() <= allowCallEndChimeUntil) {
+      restorePageAudio(el);
+      return false;
+    }
+
+    // Non-looping page audio outside a call-end transition is the WhatsApp
+    // Web UI/notification path (not the RTC stream). This catches the
+    // incoming-message ping that the loop-only policy accidentally restored.
+    silencePageAudio(el);
+    return true;
   };
 
   state.pushCameraFrame = (jpeg: string) => {
@@ -436,6 +550,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   };
 
   state.reset = () => {
+    // Local reject/end stops the bridge immediately before WhatsApp performs
+    // the native action. Arm the terminal-chime exception first so that sound
+    // stays audible even if it starts before the CallStore poll observes ENDED.
+    if (callWasActive || state.enabled) allowCallEndChime();
     state.enabled = false;
     state.micQueue.length = 0;
     state.micOffset = 0;
@@ -509,10 +627,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   const scanMediaElements = () => {
     try {
+      // Keep call lifecycle tracking alive even on pages with no media
+      // elements. The HTMLMediaElement.play wrapper also refreshes this
+      // synchronously, which closes the race around the terminal chime.
+      refreshCallAudioPolicy();
       for (const element of Array.from(document.querySelectorAll('audio, video')) as HTMLMediaElement[]) {
-        // Catch autoplay and later property changes too. If a looping
-        // ringtone element is reused for a short chime, this pass restores
-        // its original mute/volume before that sound plays.
+        // Catch autoplay, element reuse and later property changes.
         applyPageAudioPolicy(element);
         attachRemoteStream(element.srcObject instanceof MediaStream ? element.srcObject : null);
       }
@@ -640,7 +760,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     }
   } catch (_) {}
 
-  // ── Silence only WhatsApp Web's looping incoming-call ringtone ──────────
+  // ── Silence WhatsApp Web notification audio, preserving call-end ────────
   // Reported live: the incoming-call ringtone played audibly through THIS
   // Chromium process at the same time WinZapp's own ring sound played, so
   // the user heard it twice — and separately, on a call nobody answered
@@ -657,15 +777,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   // track, which never touches an <audio>/Audio() element — it is tapped
   // directly off the RTCPeerConnection's MediaStreamTrack via the Web Audio
   // API (attachRemoteTrack above) and was ALREADY muted before this fix
-  // (`sink.gain.value = 0`). So muting every native <audio>/<video> element
-  // and every `new Audio()` instance, unconditionally, for the life of the
-  // page, silences WhatsApp Web's own sound effects (ringtone, message
-  // chimes, anything else) without ever touching real call audio — no need
-  // to track call state and toggle mute on/off around it. Even a WhatsApp
-  // Web build that plays the remote track through a real
-  // <audio srcObject=...> element (the fallback path handled above) is
-  // unaffected: that pipeline reads PCM from the MediaStreamTrack directly,
-  // never from the element's own rendered output.
+  // (`sink.gain.value = 0`). Page-native media can therefore be muted
+  // independently. The only exception is the short terminal-call chime,
+  // opened by the lifecycle-aware policy above; ordinary message pings remain
+  // muted. Even a WhatsApp Web build that surfaces the remote track through
+  // <audio srcObject=...> is unaffected because srcObject streams bypass this
+  // page-sound mute policy and are read directly from the MediaStreamTrack.
   //
   // --mute-audio cannot be used at the Chromium launch level to get the same
   // effect (see start.js: that flag starves the Chromium audio SERVICE

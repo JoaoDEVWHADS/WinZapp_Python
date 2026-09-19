@@ -229,33 +229,42 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "getDidVoipInitError" in bridge
 
 
-def test_page_native_audio_only_mutes_looping_ringtone_and_restores_reused_elements():
-    """Mute the duplicate incoming ringtone without suppressing short WA sounds."""
+def test_page_native_audio_mutes_message_ping_but_preserves_call_end_chime():
+    """Page audio is muted by default, except for the real terminal-call chime."""
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
-    assert "const pageAudioState = new WeakMap" in bridge
+    # The old loop-only rule was the regression: it muted the ringtone but
+    # allowed WhatsApp Web's short incoming-message ping through.
+    assert "let allowCallEndChimeUntil = 0;" in bridge
+    assert "let callWasActive = false;" in bridge
+    assert "const silencePageAudio = (el: HTMLMediaElement)" in bridge
+    assert "silencePageAudio(el);" in bridge
     assert "return !(el.srcObject instanceof MediaStream) && el.loop === true;" in bridge
-    assert "const silenceRingtone = (el: HTMLMediaElement)" in bridge
-    assert "const restorePageAudio = (el: HTMLMediaElement)" in bridge
-    assert "el.muted = original.muted;" in bridge
-    assert "el.volume = original.volume;" in bridge
-    assert "pageAudioState.delete(el);" in bridge
-    assert "const silenced = applyPageAudioPolicy(el);" in bridge
-    assert "if (silenced) {" in bridge
-    assert "win.HTMLMediaElement.prototype.play = function" in bridge
-    assert "return nativeMediaPlay.apply(this, args);" in bridge
-    assert "win.Audio = new Proxy(NativeAudio" in bridge
 
+    # A live/ringing -> terminal transition opens the only short-audio
+    # exception, and local reject/end arms it before resetting the call bridge.
+    assert "if (callWasActive && !active) allowCallEndChime();" in bridge
+    assert "if (callWasActive || state.enabled) allowCallEndChime();" in bridge
+    assert "pageAudioNow() + 2500" in bridge
+    assert "if (pageAudioNow() <= allowCallEndChimeUntil)" in bridge
+    assert "restorePageAudio(el);" in bridge
+
+    # RTC audio is a separate MediaStream path and must never be page-muted.
+    assert "if (el.srcObject instanceof MediaStream) {" in bridge
+
+    # HTMLMediaElement.play is checked synchronously; periodic scanning covers
+    # autoplay/property changes and refreshes call lifecycle even with no media.
+    assert "win.HTMLMediaElement.prototype.play = function" in bridge
+    assert "const silenced = applyPageAudioPolicy(el);" in bridge
     scan = bridge[bridge.index("const scanMediaElements = ()"):]
     scan = scan[: scan.index("\n  };")]
+    assert "refreshCallAudioPolicy();" in scan
     assert "applyPageAudioPolicy(element);" in scan
-    assert "silenceElement(element);" not in scan
 
-    # Do not permanently mute every newly-created Audio object. Whether it is
-    # the ringtone is decided when .loop/playback state is actually known.
+    # Newly-created Audio objects enter the same policy, so message pings do
+    # not escape through a separate constructor path.
     audio_proxy = bridge[bridge.index("const NativeAudio = win.Audio"):]
     audio_proxy = audio_proxy[: audio_proxy.index("win.__winzappPageAudioMuteAudioWrapped = true;")]
-    assert "silenceRingtone(instance);" not in audio_proxy
     assert "applyPageAudioPolicy(instance);" in audio_proxy
 
     assert "if (mutedLogCount > 40) return;" in bridge
