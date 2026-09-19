@@ -27,6 +27,9 @@ CALL_FRAME_MS = 20
 CALL_FRAME_SAMPLES = CALL_SAMPLE_RATE * CALL_FRAME_MS // 1000
 CALL_MIC_QUEUE_LIMIT = 75
 CALL_OUTPUT_QUEUE_LIMIT = 40
+CALL_OUTPUT_PREBUFFER_MS = 60
+CALL_OUTPUT_REBUFFER_WAIT_MS = CALL_FRAME_MS
+CALL_OUTPUT_MAX_BUFFER_MS = 200
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,8 @@ class CallAudioSession:
         self._mic_frames_sent = 0
         self._mic_bytes_sent = 0
         self._microphone_muted = False
+        self._output_rebuffer_count = 0
+        self._output_samples_dropped = 0
 
     @property
     def microphone_muted(self) -> bool:
@@ -307,19 +312,99 @@ class CallAudioSession:
                 time.sleep(0.05)
 
     def _play_remote_loop(self) -> None:
+        """Play fixed 20 ms blocks behind a small jitter reservoir.
+
+        Remote PCM reaches Python over Socket.IO and therefore does not arrive
+        at perfectly even intervals. Writing every packet immediately made the
+        Windows output device run dry between otherwise healthy packets, which
+        sounded like short cuts. Keep only a small reservoir, re-prime after a
+        real starvation, and discard old receive audio if a long stall ever
+        builds an excessive backlog.
+        """
+        pending = np.empty(0, dtype=np.float32)
+        primed = False
+        priming_started_at: Optional[float] = None
+
         while not self._stop_event.is_set():
-            try:
-                pcm, source_rate = self._output_queue.get(timeout=0.1)
-            except queue.Empty:
+            frame_samples = max(1, int(self._output_rate * CALL_FRAME_MS / 1000))
+            prebuffer_samples = max(
+                frame_samples,
+                int(self._output_rate * CALL_OUTPUT_PREBUFFER_MS / 1000),
+            )
+            max_buffer_samples = max(
+                prebuffer_samples,
+                int(self._output_rate * CALL_OUTPUT_MAX_BUFFER_MS / 1000),
+            )
+
+            if primed and pending.size >= frame_samples:
+                if pending.size > max_buffer_samples:
+                    dropped = int(pending.size - prebuffer_samples)
+                    pending = pending[-prebuffer_samples:].copy()
+                    self._output_samples_dropped += dropped
+                    logging.info(
+                        "[call_audio] remote backlog trimmed dropped_ms=%.1f total_dropped_ms=%.1f",
+                        dropped * 1000.0 / self._output_rate,
+                        self._output_samples_dropped * 1000.0 / self._output_rate,
+                    )
+
+                frame = pending[:frame_samples]
+                pending = pending[frame_samples:]
+                try:
+                    if self._output_stream is not None:
+                        underflowed = self._output_stream.write(frame.reshape(-1, 1))
+                        if underflowed:
+                            logging.debug("[call_audio] output stream reported underflow")
+                except Exception:
+                    logging.exception("[call_audio] failed to play remote call audio")
+                    time.sleep(0.01)
                 continue
+
+            timeout = (
+                CALL_OUTPUT_REBUFFER_WAIT_MS / 1000.0
+                if primed
+                else CALL_OUTPUT_PREBUFFER_MS / 1000.0
+            )
+            try:
+                pcm, source_rate = self._output_queue.get(timeout=timeout)
+            except queue.Empty:
+                now = time.monotonic()
+                if primed:
+                    primed = False
+                    priming_started_at = now if pending.size else None
+                    self._output_rebuffer_count += 1
+                    if self._output_rebuffer_count == 1 or self._output_rebuffer_count % 10 == 0:
+                        logging.info(
+                            "[call_audio] remote audio rebuffering count=%s buffered_ms=%.1f",
+                            self._output_rebuffer_count,
+                            pending.size * 1000.0 / self._output_rate,
+                        )
+                elif (
+                    pending.size >= frame_samples
+                    and priming_started_at is not None
+                    and now - priming_started_at >= CALL_OUTPUT_PREBUFFER_MS / 1000.0
+                ):
+                    # Do not strand a short final packet forever just because
+                    # it never reached the normal prebuffer target.
+                    primed = True
+                continue
+
             try:
                 samples = _pcm16_float32(pcm)
                 samples = _resample_mono(samples, source_rate, self._output_rate)
-                if samples.size and self._output_stream is not None:
-                    self._output_stream.write(samples.reshape(-1, 1))
             except Exception:
-                logging.exception("[call_audio] failed to play remote call audio")
-                time.sleep(0.05)
+                logging.exception("[call_audio] failed to decode remote call audio")
+                continue
+
+            if not samples.size:
+                continue
+            if pending.size:
+                pending = np.concatenate((pending, samples))
+            else:
+                pending = samples.copy()
+            if priming_started_at is None:
+                priming_started_at = time.monotonic()
+            if not primed and pending.size >= prebuffer_samples:
+                primed = True
 
     def _emit_start(self) -> None:
         try:

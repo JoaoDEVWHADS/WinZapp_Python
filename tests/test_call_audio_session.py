@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from core.call_audio import CallAudioConfig, CallAudioSession
+from core.call_audio import CALL_FRAME_SAMPLES, CallAudioConfig, CallAudioSession
 
 
 class _Socket:
@@ -118,12 +118,39 @@ def test_call_audio_session_plays_remote_pcm_on_python_output_device():
     )
     session.start()
 
-    pcm = (np.array([0.1, -0.1, 0.0], dtype=np.float32) * 32767).astype("<i2").tobytes()
+    samples = np.full(CALL_FRAME_SAMPLES * 3, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
     session.enqueue_remote_audio(pcm, 48000)
 
     output_stream = sounddevice.output_streams[0][1]
     assert _wait_for(lambda: bool(output_stream.writes))
-    assert output_stream.writes[0].shape == (3, 1)
+    assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES, 1)
+
+    session.stop()
+
+
+def test_call_audio_session_prebuffers_remote_pcm_before_playback():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+    session.start_output_only()
+    output_stream = sounddevice.output_streams[0][1]
+
+    samples = np.full(CALL_FRAME_SAMPLES, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
+
+    session.enqueue_remote_audio(pcm, 48000)
+    session.enqueue_remote_audio(pcm, 48000)
+    time.sleep(0.02)
+    assert output_stream.writes == []
+
+    session.enqueue_remote_audio(pcm, 48000)
+    assert _wait_for(lambda: bool(output_stream.writes))
+    assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES, 1)
 
     session.stop()
 
