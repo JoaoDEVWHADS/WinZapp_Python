@@ -54,6 +54,7 @@ class _I18n:
     def t(self, key):
         return {
             "incoming_call_announcement": "{name} está te ligando.",
+            "incoming_video_call_announcement": "{name} está te ligando por vídeo.",
             "incoming_group_call_announcement": "Chamada em grupo recebida no grupo {name}.",
             "unknown_contact": "Contato desconhecido",
             "unknown_group": "Grupo sem nome",
@@ -283,6 +284,17 @@ def test_group_offer_is_ignored():
     assert stub._active_incoming_calls == {}
 
 
+def test_video_offer_announces_and_can_be_answered():
+    stub = _MainStub()
+    event = _offer()
+    event["isVideo"] = True
+
+    stub.on_incoming_call_event(event)
+
+    assert stub.announcements == [("Fulano está te ligando por vídeo.", True)]
+    assert stub._incoming_call_details["call-1"]["is_video"] is True
+
+
 def test_answered_or_ended_state_stops_the_tone():
     stub = _MainStub()
     stub.on_incoming_call_event(_offer())
@@ -438,6 +450,7 @@ def test_websocket_normalizes_call_state_payload(monkeypatch):
         "event": "state",
         "state": "ACTIVE",
         "id": "call-1",
+        "peer_jid": "5511999999999@s.whatsapp.net",
         "peerJid": "5511999999999@s.whatsapp.net",
         "outgoing": False,
         "isVideo": False,

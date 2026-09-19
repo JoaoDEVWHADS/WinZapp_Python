@@ -771,6 +771,13 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._voice_call_btn, 0, wx.LEFT | wx.TOP, 5)
         self._voice_call_btn.Hide()
 
+        self._video_call_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("video_call_button")
+        )
+        self._video_call_btn.Bind(wx.EVT_BUTTON, self._on_video_call)
+        conv_sizer.Add(self._video_call_btn, 0, wx.LEFT | wx.TOP, 5)
+        self._video_call_btn.Hide()
+
         # ── Search in conversation button ───────────────────────────────────
         self._search_open_btn = wx.Button(
             self.conversation_panel, label=i18n.t("search_in_conv")
@@ -2322,6 +2329,7 @@ class ConversationsPanel(wx.Panel):
         jid = str(jid or "")
         unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast"))
         self._voice_call_btn.Show(bool(jid) and not unavailable)
+        self._video_call_btn.Show(bool(jid) and not unavailable)
         self.conversation_panel.Layout()
         self.Layout()
 
@@ -2331,6 +2339,13 @@ class ConversationsPanel(wx.Panel):
         jid = str(self.conversation.get("remoteJid") or "")
         name = self.conversation_name or self.conversation.get("name") or ""
         self.main_window.start_voice_call(jid, name)
+
+    def _on_video_call(self, _event=None):
+        if not self.conversation:
+            return
+        jid = str(self.conversation.get("remoteJid") or "")
+        name = self.conversation_name or self.conversation.get("name") or ""
+        self.main_window.start_video_call(jid, name)
 
     # ── Text message sending ─────────────────────────────────────────────────
 
