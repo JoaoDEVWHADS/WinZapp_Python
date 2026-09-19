@@ -12787,7 +12787,7 @@ class ConversationsPanel(wx.Panel):
             # revoke with a protocolMessage tombstone under the same message id;
             # the live revoke path updates this record in place. Removing it
             # here caused a visible disappear/reappear cycle after sync.
-            self._delete_message_for_everyone_keep_row(msg_key, jid)
+            self._delete_message_for_everyone_keep_row(msg, jid)
         else:
             self._delete_message_for_me_only(msg, msg_id, index)
 
@@ -12929,21 +12929,43 @@ class ConversationsPanel(wx.Panel):
             return conv_jid
         return msg_key.get("remoteJid", "") or conv_jid
 
-    def _delete_message_for_everyone_keep_row(self, msg_key: dict, jid: str):
-        """Revoke remotely but keep the local row until WhatsApp replaces it.
+    def _apply_confirmed_revoke(self, msg: dict, jid: str):
+        """Apply the revoke tombstone after our own API request succeeds.
 
-        A delete-for-everyone is represented by a protocolMessage tombstone.
-        Removing the row here made it disappear temporarily, then come back as
-        "message deleted" after a resync/live revoke event. Keep the original
-        row in place; MainWindow._apply_remote_revoke() will mutate that same
-        record to the tombstone and ConversationsPanel.on_message_revoked()
-        repaints it in place. Only "delete for me" removes the row locally.
+        WhatsApp normally echoes an onRevokedMessage event, but that echo is not
+        guaranteed to reach this client. The HTTP 200 is already authoritative
+        for the user-initiated revoke, so synthesize the same protocolMessage
+        MainWindow._apply_remote_revoke() handles for a live remote event.
+        A later real echo is harmless because that method is idempotent.
+        """
+        msg_id = (msg.get("key") or {}).get("id", "")
+        if not msg_id:
+            return
+        incoming = {
+            "key": dict(msg.get("key") or {}),
+            "messageType": "protocolMessage",
+            "message": {"protocolMessage": {"type": 3, "key": msg_id}},
+        }
+        self.main_window._apply_remote_revoke(msg, incoming, jid)
+
+    def _delete_message_for_everyone_keep_row(self, msg: dict, jid: str):
+        """Revoke remotely and turn the existing row into "message deleted".
+
+        Keep the row itself: a delete-for-everyone is represented by a
+        protocolMessage tombstone, not by removing the message from history.
+        Prefer WhatsApp's live revoke event, but when our own delete request is
+        confirmed first, apply the same tombstone locally immediately instead
+        of leaving stale content visible while waiting for an echo that may
+        never arrive.
         """
         i18n = self.main_window.i18n
 
-        def _revoke(k=dict(msg_key), j=jid):
+        def _revoke(record=msg, j=jid):
+            k = dict(record.get("key") or {})
             ok = self.main_window.delete_message_for_everyone(j, k)
-            if not ok:
+            if ok:
+                wx.CallAfter(self._apply_confirmed_revoke, record, j)
+            else:
                 wx.CallAfter(
                     wx.MessageBox,
                     i18n.t("delete_for_everyone_failed"),
@@ -17056,7 +17078,9 @@ class ConversationsPanel(wx.Panel):
                 # can contain items that cannot be revoked for everyone. Those
                 # still use the local-only API and are the only rows removed.
                 if for_everyone and _can_delete_for_all(msg):
-                    self.main_window.delete_message_for_everyone(jid, msg_key)
+                    ok = self.main_window.delete_message_for_everyone(jid, msg_key)
+                    if ok:
+                        wx.CallAfter(self._apply_confirmed_revoke, msg, jid)
                 else:
                     self.main_window.delete_message_for_me(jid, msg_key)
 
