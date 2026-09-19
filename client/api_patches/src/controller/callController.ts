@@ -764,13 +764,58 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         diagnostics.requestedGroupJid = groupJid;
         diagnostics.requestedUseGroupChat = useGroupChat;
         diagnostics.routingDecision = 'force-selected-participants';
+        // The WASM probe can miss the instance held by the active VoIP stack.
+        // Observe the stack boundary itself without changing its arguments or
+        // outcome, so the next failure tells us whether signaling was attempted.
+        let restoreStartGroupCall: (() => void) | null = null;
+        diagnostics.voip.stackInvocation = { observed: false, result: null, error: '' };
+        try {
+          const original = stackForDiagnostics?.startGroupCall;
+          if (typeof original === 'function') {
+            stackForDiagnostics.startGroupCall = function (...args: any[]) {
+              diagnostics.voip.stackInvocation.observed = true;
+              try {
+                const result = original.apply(this, args);
+                if (result && typeof result.then === 'function') {
+                  return result.then(
+                    (value: any) => {
+                      diagnostics.voip.stackInvocation.result = String(value).slice(0, 120);
+                      return value;
+                    },
+                    (error: any) => {
+                      diagnostics.voip.stackInvocation.error =
+                        String(error?.message || error).slice(0, 240);
+                      throw error;
+                    }
+                  );
+                }
+                diagnostics.voip.stackInvocation.result = String(result).slice(0, 120);
+                return result;
+              } catch (error: any) {
+                diagnostics.voip.stackInvocation.error =
+                  String(error?.message || error).slice(0, 240);
+                throw error;
+              }
+            };
+            restoreStartGroupCall = () => {
+              stackForDiagnostics.startGroupCall = original;
+            };
+          }
+        } catch (error: any) {
+          diagnostics.voip.stackInvocation.error =
+            `probe install: ${String(error?.message || error).slice(0, 220)}`;
+        }
         const nativeStartedAt = Date.now();
-        await callStart.startWAWebVoipGroupCallFromWids(
-          participantWids,
-          false,
-          callFromUi,
-          lobbyEntryPoint
-        );
+        try {
+          await callStart.startWAWebVoipGroupCallFromWids(
+            participantWids,
+            false,
+            callFromUi,
+            lobbyEntryPoint
+          );
+        } finally {
+          try { restoreStartGroupCall?.(); } catch (_) {}
+        }
         diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
         diagnostics.nativePath = 'startWAWebVoipGroupCallFromWids';
         via = 'native-group-wids';
