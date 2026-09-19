@@ -277,3 +277,21 @@ def test_remote_linux_call_audio_relay_can_start_while_call_is_still_ringing():
     assert "socket.on('call:audio:start'" in bridge
     assert "ensureLinuxCallAudio(session, socket, logger)" in bridge
     assert "Linux call speaker monitor started before answer" in bridge
+
+
+def test_call_media_bridge_bounds_microphone_backlog_to_live_audio():
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    # Regression: all three microphone queues were raised to 75 x 20 ms,
+    # allowing roughly 1.5 seconds of old speech to be replayed after a stall.
+    assert "const MAX_MIC_QUEUE_FRAMES = 12;" in bridge
+    assert "const MIC_TARGET_BACKLOG_FRAMES = 3;" in bridge
+    assert "queue.length > MIC_TARGET_BACKLOG_FRAMES" in bridge
+    assert "queue.splice(0, dropped)" in bridge
+
+    # The final WebAudio queue inside the WhatsApp page has its own bound and
+    # preserves only a partially-consumed head plus the freshest frames.
+    assert "const PAGE_MIC_QUEUE_FRAMES = 4;" in bridge
+    assert "const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;" in bridge
+    assert "state.micFramesDroppedForLatency" in bridge
+    assert "const dropIndex = state.micOffset > 0 ? 1 : 0;" in bridge

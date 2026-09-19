@@ -4,7 +4,11 @@ import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_proce
 import { clientsArray } from './sessionUtil';
 
 const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
-const MAX_MIC_QUEUE_FRAMES = 75;
+// Call audio is live media: after a local/page stall, stale microphone frames
+// are worse than a tiny discontinuity because they permanently put our voice
+// behind the conversation.
+const MAX_MIC_QUEUE_FRAMES = 12;
+const MIC_TARGET_BACKLOG_FRAMES = 3;
 const micQueues = new Map<string, Buffer[]>();
 const micDraining = new Set<string>();
 const micReceived = new Map<string, number>();
@@ -192,6 +196,9 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
   if (!AudioContextCtor) return false;
 
+  const PAGE_MIC_QUEUE_FRAMES = 4;
+  const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
+
   const state: any = {
     version: 5,
     enabled: false,
@@ -211,6 +218,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     micFramesPushed: 0,
     micBytesPushed: 0,
     micSamplesConsumed: 0,
+    micFramesDroppedForLatency: 0,
     remoteFramesCaptured: 0,
     remoteTracksAttached: 0,
   };
@@ -542,7 +550,22 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     state.micQueue.push(samples);
     state.micFramesPushed += 1;
     state.micBytesPushed += Math.floor(base64.length * 3 / 4);
-    while (state.micQueue.length > 75) state.micQueue.shift();
+
+    // Keep the page-side WebAudio queue close to real time. If Chromium was
+    // briefly busy, retain a partially-consumed head frame but skip old
+    // complete frames until only ~40 ms of queued microphone audio remains.
+    while (state.micQueue.length > PAGE_MIC_QUEUE_FRAMES) {
+      const dropIndex = state.micOffset > 0 ? 1 : 0;
+      if (dropIndex >= state.micQueue.length) break;
+      state.micQueue.splice(dropIndex, 1);
+      state.micFramesDroppedForLatency += 1;
+    }
+    while (state.micQueue.length > PAGE_MIC_TARGET_BACKLOG_FRAMES + (state.micOffset > 0 ? 1 : 0)) {
+      const dropIndex = state.micOffset > 0 ? 1 : 0;
+      if (dropIndex >= state.micQueue.length) break;
+      state.micQueue.splice(dropIndex, 1);
+      state.micFramesDroppedForLatency += 1;
+    }
   };
 
   state.pushMicrophoneBatch = (frames: string[]) => {
@@ -1159,7 +1182,17 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
         queue.length = 0;
         break;
       }
-      const frames = queue.splice(0, 8);
+      // page.evaluate can occasionally stall behind Chromium work. Do not
+      // replay everything accumulated during that stall; jump back near live
+      // audio and send only the freshest short batch.
+      if (queue.length > MIC_TARGET_BACKLOG_FRAMES) {
+        const dropped = queue.length - MIC_TARGET_BACKLOG_FRAMES;
+        queue.splice(0, dropped);
+        logger?.debug?.(
+          `[${session}] skipped stale microphone frames before page bridge=${dropped}`
+        );
+      }
+      const frames = queue.splice(0, MIC_TARGET_BACKLOG_FRAMES);
       if (!frames.length) continue;
       const base64Frames = frames.map((frame) => frame.toString('base64'));
       try {
