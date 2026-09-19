@@ -676,9 +676,12 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
         const callFromUiModule = win.require?.('WAWebWamEnumCallFromUi');
         const lobbyEntryModule = win.require?.('WAWebWamEnumLobbyEntryPointType');
-        const callFromUi = useGroupChat
-          ? (callFromUiModule?.CALL_FROM_UI?.GROUP_CHAT_DIRECT ?? 25)
-          : (callFromUiModule?.CALL_FROM_UI?.GROUP_CHAT_PICKER ?? 24);
+        // WinZapp deliberately uses the participant-picker semantics even
+        // when every member was selected. FromChat was observed to abort
+        // before remote ringing, while FromWids is the same native route used
+        // by WhatsApp's working "New call" multi-person flow.
+        const callFromUi =
+          callFromUiModule?.CALL_FROM_UI?.GROUP_CHAT_PICKER ?? 24;
         const lobbyEntryPoint =
           lobbyEntryModule?.LOBBY_ENTRY_POINT_TYPE?.NOT_OPENED ?? 5;
 
@@ -689,110 +692,61 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         );
 
         let via = '';
-        if (useGroupChat) {
-          if (typeof callStart.startWAWebVoipGroupCallFromChat !== 'function') {
-            throw new Error(
-              'WhatsApp group-chat call controller is unavailable'
-            );
-          }
-
-          const groupWid = createWid.call(widFactory, groupJid);
-          let groupChat: any = null;
-          const chatStores = [
-            win.WPP?.whatsapp?.ChatStore,
-            win.Store?.Chat,
-          ].filter(Boolean);
-          for (const store of chatStores) {
-            try {
-              groupChat = store?.get?.(groupWid) || store?.get?.(groupJid);
-            } catch (_) {}
-            if (groupChat) break;
-          }
-          if (!groupChat && typeof win.WPP?.chat?.get === 'function') {
-            try {
-              groupChat = await win.WPP.chat.get(groupJid);
-            } catch (_) {}
-          }
-          if (!groupChat) {
-            throw new Error(`WhatsApp group chat model is not loaded: ${groupJid}`);
-          }
-          if (!groupChat?.groupMetadata) {
-            throw new Error(
-              `WhatsApp group chat metadata is not available: ${groupJid}`
-            );
-          }
-
-          // This is exactly what WhatsApp's own
-          // WAWebGroupCallParticipantSelector does when all participants are
-          // selected: FromChat + GROUP_CHAT_DIRECT + NOT_OPENED. It preserves
-          // group JID, name and icon all the way to startVoipGroupCall().
-          const nativeStartedAt = Date.now();
-          await callStart.startWAWebVoipGroupCallFromChat(
-            groupChat,
-            false,
-            callFromUi,
-            lobbyEntryPoint
+        if (typeof callStart.startWAWebVoipGroupCallFromWids !== 'function') {
+          throw new Error(
+            'WhatsApp selected-participant group-call controller is unavailable'
           );
-          diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
-          diagnostics.nativePath = 'startWAWebVoipGroupCallFromChat';
-          via = 'native-group-chat';
-        } else {
-          if (typeof callStart.startWAWebVoipGroupCallFromWids !== 'function') {
-            throw new Error(
-              'WhatsApp selected-participant group-call controller is unavailable'
-            );
-          }
-
-          const queryExistsModule = win.require?.('WAWebQueryExistsJob');
-          const queryWidExists = queryExistsModule?.queryWidExists;
-          const publicQueryWidExists = win.WPP?.contact?.queryWidExists;
-          if (
-            typeof queryWidExists !== 'function' &&
-            typeof publicQueryWidExists !== 'function'
-          ) {
-            throw new Error('WhatsApp participant resolver is not available');
-          }
-
-          const participantWids = await Promise.all(
-            participantIds.map(async (participantId) => {
-              const requestedWid = createWid.call(widFactory, participantId);
-              if (
-                !requestedWid ||
-                requestedWid.isGroup?.() ||
-                (typeof requestedWid.isUser === 'function' && !requestedWid.isUser())
-              ) {
-                throw new Error(`Invalid group call participant: ${participantId}`);
-              }
-
-              const result =
-                typeof queryWidExists === 'function'
-                  ? await queryWidExists.call(queryExistsModule, requestedWid)
-                  : await publicQueryWidExists.call(win.WPP.contact, participantId);
-              // Match WhatsApp's participant selector: pass contact WIDs to
-              // startWAWebVoipGroupCallFromWids and let that native helper do
-              // its own LID/PN conversion, device sync and TC-token fan-out.
-              const resolvedWid = result?.wid || result?.lid;
-              if (!resolvedWid) {
-                throw new Error(
-                  `Group call participant is not registered or reachable: ${participantId}`
-                );
-              }
-              return resolvedWid;
-            })
-          );
-
-          diagnostics.resolvedParticipantWids = participantWids.map((wid) => serializeId(wid));
-          const nativeStartedAt = Date.now();
-          await callStart.startWAWebVoipGroupCallFromWids(
-            participantWids,
-            false,
-            callFromUi,
-            lobbyEntryPoint
-          );
-          diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
-          diagnostics.nativePath = 'startWAWebVoipGroupCallFromWids';
-          via = 'native-group-wids';
         }
+
+        const queryExistsModule = win.require?.('WAWebQueryExistsJob');
+        const queryWidExists = queryExistsModule?.queryWidExists;
+        const publicQueryWidExists = win.WPP?.contact?.queryWidExists;
+        if (
+          typeof queryWidExists !== 'function' &&
+          typeof publicQueryWidExists !== 'function'
+        ) {
+          throw new Error('WhatsApp participant resolver is not available');
+        }
+
+        const participantWids = await Promise.all(
+          participantIds.map(async (participantId) => {
+            const requestedWid = createWid.call(widFactory, participantId);
+            if (
+              !requestedWid ||
+              requestedWid.isGroup?.() ||
+              (typeof requestedWid.isUser === 'function' && !requestedWid.isUser())
+            ) {
+              throw new Error(`Invalid group call participant: ${participantId}`);
+            }
+
+            const result =
+              typeof queryWidExists === 'function'
+                ? await queryWidExists.call(queryExistsModule, requestedWid)
+                : await publicQueryWidExists.call(win.WPP.contact, participantId);
+            const resolvedWid = result?.wid || result?.lid;
+            if (!resolvedWid) {
+              throw new Error(
+                `Group call participant is not registered or reachable: ${participantId}`
+              );
+            }
+            return resolvedWid;
+          })
+        );
+
+        diagnostics.resolvedParticipantWids = participantWids.map((wid) => serializeId(wid));
+        diagnostics.requestedGroupJid = groupJid;
+        diagnostics.requestedUseGroupChat = useGroupChat;
+        diagnostics.routingDecision = 'force-selected-participants';
+        const nativeStartedAt = Date.now();
+        await callStart.startWAWebVoipGroupCallFromWids(
+          participantWids,
+          false,
+          callFromUi,
+          lobbyEntryPoint
+        );
+        diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
+        diagnostics.nativePath = 'startWAWebVoipGroupCallFromWids';
+        via = 'native-group-wids';
 
         let startedCall: any = null;
         const startedAt = Date.now();

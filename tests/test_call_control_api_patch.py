@@ -254,35 +254,27 @@ def test_group_voice_call_resolves_registered_participants_and_rejects_stale_act
     assert "!preexistingIds.has(activeId)" in controller
 
 
-def test_group_voice_call_uses_same_full_vs_partial_selection_paths_as_whatsapp():
+def test_group_voice_call_always_uses_selected_participant_native_path():
     controller = _source("client/api_patches/src/controller/callController.ts")
+    conversations = _source("client/ui/conversations.py")
 
-    # A group CallModel in numeric state 0 is terminal/NONE. Preserve zero.
     assert "const rawValue =" in controller
     assert "call?.getState?.() ?? call?.state" in controller
     assert "state !== 'NONE'" in controller
 
-    # WhatsApp's own group picker uses FromChat for the complete group and
-    # FromWids only for a partial participant selection.
-    assert "if (useGroupChat)" in controller
-    assert "await callStart.startWAWebVoipGroupCallFromChat(" in controller
+    # Device testing showed FromChat creates a local CALLING model that dies
+    # before ringing. WinZapp must keep group calls on the working FromWids
+    # participant-picker path even when every member is selected.
+    assert "await callStart.startWAWebVoipGroupCallFromChat(" not in controller
     assert "await callStart.startWAWebVoipGroupCallFromWids(" in controller
-    assert "GROUP_CHAT_DIRECT ?? 25" in controller
     assert "GROUP_CHAT_PICKER ?? 24" in controller
-    assert "NOT_OPENED ?? 5" in controller
-    assert "groupChat?.groupMetadata" in controller
-    assert "inviteToCall(participantWid)" not in controller
-    assert "one-to-one-plus-invites" not in controller
-    assert "group call offer result" in controller
+    assert "GROUP_CHAT_DIRECT ?? 25" not in controller
+    assert "force-selected-participants" in controller
+    assert "False," in conversations
+    assert "full_group_selected =" not in conversations
 
-    # The last native group-calling gate is checked directly before start.
     assert "WAWebVoipGatingUtils" in controller
     assert "isGroupCallingEnabled" in controller
-    assert "gateBefore" in controller
-    assert "gateAfter" in controller
-
-    # The route still verifies that WhatsApp exposed a fresh real group model.
-    assert "const groupParticipantCountOf =" in controller
     assert "groupParticipantCountOf(current) >= 2" in controller
     assert "did not create a live outgoing group call" in controller
 
@@ -291,7 +283,7 @@ def test_group_voice_call_rejects_ghost_calling_model_without_participants():
     controller = _source("client/api_patches/src/controller/callController.ts")
 
     assert "groupParticipantCount: groupParticipantCountOf(call)" in controller
-    assert "await callStart.startWAWebVoipGroupCallFromChat(" in controller
+    assert "await callStart.startWAWebVoipGroupCallFromChat(" not in controller
     assert "await callStart.startWAWebVoipGroupCallFromWids(" in controller
     assert "current?.isGroup &&" in controller
     assert "groupParticipantCountOf(current) >= 2" in controller

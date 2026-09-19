@@ -2400,16 +2400,18 @@ class ConversationsPanel(wx.Panel):
             dialog.Destroy()
         if len(selected) < 2:
             return
-        # Match WhatsApp Web's own group participant selector:
-        # a partial selection starts an ad-hoc group call from WIDs, while
-        # selecting every available group participant starts from the real
-        # group ChatModel so group JID/name/icon reach the VoIP stack.
-        full_group_selected = len(selected) == len(candidates)
+        # Always keep group calls on the explicit participant path.
+        # Real-device testing proved WhatsApp's group-chat-native FromChat
+        # route can create a short-lived local CALLING model without ringing
+        # selected devices, while the ad-hoc/multi-person FromWids route
+        # actually rings and connects. The group button still shows this
+        # participant picker; selecting everyone simply passes every selected
+        # member to FromWids instead of switching transport semantics.
         self.main_window.start_group_voice_call(
             group_jid,
             selected,
             group_name,
-            full_group_selected,
+            False,
         )
 
     # ── Text message sending ─────────────────────────────────────────────────
