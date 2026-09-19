@@ -18,9 +18,10 @@ read when you touch that area (see the index at the end and `.claude/rules/`).
    scripts that construct a wx window or hook WinEvents. Enforced by
    `tests/test_no_desktop_visible_windows.py`; history in
    `docs/traps/tests-never-open-windows.md`.
-2. **Every user-facing string goes into all five locale files**
-   (`client/languages/{pt-BR,pt-PT,en-US,es-ES,pl}.json`). `I18n.t()` has no
-   per-key fallback: a missing key renders as the raw key name. Reuse the
+2. **Every user-facing string goes into every registered locale file**
+   (`client/languages/{pt-BR,pt-PT,en-US,es-ES,pl,tr-TR}.json`; the set is
+   data, driven by `language_map.json`, not a hardcoded count). `I18n.t()` has
+   no per-key fallback: a missing key renders as the raw key name. Reuse the
    words that locale already uses for the concept (`docs/reference/i18n-terminology.md`).
    `tests/test_language_files_in_sync.py` enforces it.
 3. **A new function or fix ships with a test in the same change**, in the
