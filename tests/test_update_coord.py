@@ -241,3 +241,28 @@ def test_state_dir_instead_of_file_is_corrupt(tmp_path):
     gd = _gd(tmp_path)
     os.mkdir(os.path.join(gd, "update_state.json"))  # a directory, not a file
     assert uc.is_update_in_progress(gd) is True  # corrupt -> fail-closed
+
+
+def test_try_begin_update_ignores_the_callers_own_lease(tmp_path):
+    """The updater runs inside a live account, so its own runtime lease must
+    not count as "another account is open" — it did, which is why the gate
+    was never wired up and two accounts could xcopy over each other."""
+    gd = _gd(tmp_path)
+    uc.try_create_runtime_lease(gd, pid=900, create_time=5.0, is_alive=ALIVE)
+    tok = uc.try_begin_update(gd, pid=900, create_time=5.0, is_alive=ALIVE)
+    assert tok is not None
+    assert uc.end_update(gd, tok) is True
+
+
+def test_other_live_leases_excludes_self_and_dead(tmp_path):
+    gd = _gd(tmp_path)
+    uc.try_create_runtime_lease(gd, pid=900, create_time=5.0, is_alive=ALIVE)
+    uc.try_create_runtime_lease(gd, pid=901, create_time=6.0, is_alive=ALIVE)
+    uc.try_create_runtime_lease(gd, pid=902, create_time=7.0, is_alive=ALIVE)
+    alive = lambda pid, ct: pid != 902
+    others = uc.other_live_leases(gd, pid=900, create_time=5.0, is_alive=alive)
+    assert [l["pid"] for l in others] == [901]
+    # A lease of ours from a previous life (same pid, other create_time) is
+    # a different process and still counts.
+    stale = uc.other_live_leases(gd, pid=900, create_time=4.0, is_alive=alive)
+    assert sorted(l["pid"] for l in stale) == [900, 901]

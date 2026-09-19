@@ -1479,11 +1479,16 @@ class WebSocketClient:
             # sync echo, own-send echo, or a genuine live dispatch) a given
             # message id took, instead of only knowing the event arrived.
             key = msg.get("key", {})
+            # quoted= is what settles "the reply shows a quote in WinZapp but
+            # not on WhatsApp": the echo is WhatsApp's own record of the send,
+            # so a reply echoed back without a stanzaId never carried one.
+            ctx = msg.get("contextInfo")
             logging.info(
                 "[WebSocketClient] on_messages_upsert: id=%s remoteJid=%s fromMe=%s "
-                "type=%s isMdHistoryMsg=%s",
+                "type=%s isMdHistoryMsg=%s quoted=%s",
                 key.get("id", ""), key.get("remoteJid", ""), key.get("fromMe"),
                 msg.get("messageType", ""), msg.get("isMdHistoryMsg"),
+                (ctx.get("stanzaId") or "-") if isinstance(ctx, dict) else "-",
             )
 
             # ── Skip history-sync echoes ───────────────────────────────────────
