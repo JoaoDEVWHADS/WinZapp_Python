@@ -723,13 +723,18 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
               typeof queryWidExists === 'function'
                 ? await queryWidExists.call(queryExistsModule, requestedWid)
                 : await publicQueryWidExists.call(win.WPP.contact, participantId);
-            const resolvedWid = result?.wid || result?.lid;
-            if (!resolvedWid) {
+            if (!result?.wid && !result?.lid) {
               throw new Error(
                 `Group call participant is not registered or reachable: ${participantId}`
               );
             }
-            return resolvedWid;
+            // Preserve a corrected phone WID (for example a Brazilian number
+            // variant), but never replace the selected phone with a LID here.
+            // The native FromWids path must start with phone participants and
+            // perform its own PN/LID conversion and device fan-out.
+            return serializeId(result.wid).endsWith('@lid')
+              ? requestedWid
+              : result.wid || requestedWid;
           })
         );
 
