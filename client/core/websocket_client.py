@@ -2849,9 +2849,19 @@ class WebSocketClient:
                 "templateMessage": {}
             }
         elif msg_type == "revoked":
+            # WPPConnect gives the revoke event its own serialized `id` and
+            # points at the message being deleted through protocolMessageKey.
+            # If we keep the event id here, on_new_message() sees no duplicate
+            # key and appends a second row ("Mensagem apagada") beside the
+            # original content. Normalize the tombstone onto the target id so
+            # the existing record is mutated in place by _apply_remote_revoke().
+            revoke_target_id = clean_message_id(wpp_msg.get("protocolMessageKey"))
+            if revoke_target_id:
+                clean_id = revoke_target_id
             message_content = {
                 "protocolMessage": {
-                    "type": 3
+                    "type": 3,
+                    "key": revoke_target_id,
                 }
             }
         elif msg_type == "protocol" and wpp_msg.get("subtype") == "message_edit":
