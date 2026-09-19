@@ -100,6 +100,7 @@ PORTABLE_ZIP    = os.path.join(DIST_DIR,  "WinZapp.zip")
 CLIENT_ONLY_ZIP = os.path.join(DIST_DIR, "WinZappClient.zip")
 DISTRIBUTION_METADATA = "distribution.json"
 CLIENT_ONLY_EXCLUDED_TOP_LEVEL = {"api", "api_patches", "node", "git", ".env"}
+CLIENT_ONLY_API_DIR_NAMES = {"api", "api_patches"}
 
 SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
 
@@ -232,6 +233,55 @@ def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None, exclude_sub_di
             abs_path = os.path.join(dirpath, fname)
             rel_path = os.path.relpath(abs_path, root).replace("\\", "/")
             yield abs_path, rel_path
+
+def _client_only_path_is_excluded(rel_path: str) -> bool:
+    """Return True for files that must never ship in WinZappClient.zip."""
+    normalized = str(rel_path or "").replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    if normalized == DISTRIBUTION_METADATA:
+        return True
+
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if parts[0] in CLIENT_ONLY_EXCLUDED_TOP_LEVEL:
+        return True
+
+    # PyInstaller may collect project data under _internal/ directly or under
+    # _internal/client/. Those API copies are still local-API payload.
+    if parts[0] == "_internal":
+        if len(parts) >= 2 and parts[1] in CLIENT_ONLY_API_DIR_NAMES:
+            return True
+        if (
+            len(parts) >= 3
+            and parts[1] == "client"
+            and parts[2] in CLIENT_ONLY_API_DIR_NAMES
+        ):
+            return True
+    return False
+
+
+def _assert_client_only_zip_has_no_local_api(zip_path: str) -> None:
+    """Fail the build if api/ or api_patches/ survived client-only packaging."""
+    leaked = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in zf.namelist():
+            normalized = name.replace("\\", "/").strip("/")
+            if normalized.startswith("WinZapp/"):
+                normalized = normalized[len("WinZapp/"):]
+            if (
+                normalized != DISTRIBUTION_METADATA
+                and _client_only_path_is_excluded(normalized)
+            ):
+                leaked.append(name)
+    if leaked:
+        preview = "\n".join(f"    {name}" for name in leaked[:20])
+        raise RuntimeError(
+            "WinZappClient.zip contains local API files that must be excluded:\n"
+            + preview
+        )
+
 
 def _api_patches_out_of_sync():
     """Return the client/api_patches/ relative paths that differ from (or
@@ -765,8 +815,7 @@ def create_client_only_zip():
                          compresslevel=6) as zf:
         for abs_path, rel_path in walk_dir(STAGING_DIR):
             normalized = rel_path.replace("\\", "/")
-            top = normalized.split("/", 1)[0]
-            if top in CLIENT_ONLY_EXCLUDED_TOP_LEVEL or normalized == DISTRIBUTION_METADATA:
+            if _client_only_path_is_excluded(normalized):
                 continue
             zf.write(abs_path, "WinZapp/" + normalized)
             count += 1
@@ -775,8 +824,9 @@ def create_client_only_zip():
             json.dumps({"variant": "client-only"}, separators=(",", ":")) + "\n",
         )
         count += 1
+    _assert_client_only_zip_has_no_local_api(CLIENT_ONLY_ZIP)
     size_mb = os.path.getsize(CLIENT_ONLY_ZIP) / (1024 * 1024)
-    print(f"  -> {CLIENT_ONLY_ZIP}  ({size_mb:.1f} MB, {count} entries)")
+    print(f"  -> {CLIENT_ONLY_ZIP}  ({size_mb:.1f} MB, {count} entries; local API excluded)")
 
 # -- Main --------------------------------------------------------------------
 
