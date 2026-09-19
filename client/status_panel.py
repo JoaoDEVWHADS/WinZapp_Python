@@ -2352,14 +2352,16 @@ class StatusPanel(wx.Panel):
 
     def _leave_status_composer(self):
         """Return from any Add Status flow to the clean status browser."""
-        silent_voice = bool(
-            self._voice_post_panel.IsShown()
-            and self._voice_recording_focus_suppression_enabled()
+        voice_composer = bool(self._voice_post_panel.IsShown())
+        suppress_voice_focus = bool(
+            voice_composer and self._voice_recording_focus_suppression_enabled()
         )
 
-        # Bring back a stable destination before disabling the composer. If
-        # Send/Discard is focused and its parent is disabled first, Windows
-        # announces the focused control as "Indisponível".
+        # Bring back a stable destination before disabling the voice composer.
+        # This ordering is structural, not a user preference: disabling a
+        # focused Send/Discard button first makes Windows expose it as
+        # "Indisponível". The accessibility settings only decide whether the
+        # *new* focus event itself should be silenced.
         for widget in (
             self._add_status_btn,
             self._refresh_status_btn,
@@ -2369,18 +2371,20 @@ class StatusPanel(wx.Panel):
             widget.Show()
         self.Layout()
 
-        if silent_voice:
-            if self._voice_recording_silence_enabled():
-                self._arm_voice_recording_silence_transition()
-            cloak_focus_announcement(self._status_list, duration_ms=1200)
-            self._silence_send_voice_focus_if_enabled()
+        if voice_composer:
+            if suppress_voice_focus:
+                if self._voice_recording_silence_enabled():
+                    self._arm_voice_recording_silence_transition()
+                cloak_focus_announcement(self._status_list, duration_ms=1200)
+                self._silence_send_voice_focus_if_enabled()
             self._status_list.SetFocus()
-            self._silence_send_voice_focus_if_enabled()
+            if suppress_voice_focus:
+                self._silence_send_voice_focus_if_enabled()
 
         self._hide_post_panels()
         self.Layout()
 
-        if not silent_voice:
+        if not voice_composer:
             self._status_list.SetFocus()
 
     # ── Record & post voice status ───────────────────────────────────────────

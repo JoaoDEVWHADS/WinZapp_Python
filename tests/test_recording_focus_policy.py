@@ -164,4 +164,36 @@ def test_status_leave_moves_focus_before_disabling_voice_composer():
     focus = method.index("self._status_list.SetFocus()")
     hide = method.index("self._hide_post_panels()")
     assert focus < hide
+    assert "if voice_composer:" in method
+    assert "self._status_list.SetFocus()" in method.split("if voice_composer:", 1)[1].split(
+        "self._hide_post_panels()", 1
+    )[0]
     assert "cloak_focus_announcement(self._status_list" in method
+
+
+def test_status_unavailable_fix_does_not_depend_on_silence_setting():
+    method = _method_source(
+        "client/status_panel.py", "StatusPanel", "_leave_status_composer"
+    )
+
+    voice_block = method.split("if voice_composer:", 1)[1].split(
+        "self._hide_post_panels()", 1
+    )[0]
+    set_focus = voice_block.index("self._status_list.SetFocus()")
+    suppress_if = voice_block.index("if suppress_voice_focus:")
+    assert set_focus > suppress_if
+    # SetFocus is outside the suppression-only block: every voice-composer
+    # exit moves focus before the focused controls are disabled.
+    before_focus = voice_block[:set_focus]
+    assert before_focus.rstrip().endswith(
+        "self._silence_send_voice_focus_if_enabled()"
+    ) or "if suppress_voice_focus:" in before_focus
+
+
+def test_status_voice_exit_focus_is_unconditional_within_voice_composer():
+    method = _method_source(
+        "client/status_panel.py", "StatusPanel", "_leave_status_composer"
+    )
+    lines = method.splitlines()
+    focus_lines = [line for line in lines if "self._status_list.SetFocus()" in line]
+    assert any(line.startswith(" " * 12) for line in focus_lines)
