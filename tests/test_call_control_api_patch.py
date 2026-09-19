@@ -69,8 +69,8 @@ def test_call_media_bridge_advertises_virtual_camera_on_headless_hosts():
     assert "cameraTrackRequests" in bridge
     assert "cameraFramesReceived" in bridge
     assert "call camera frames received from desktop=" in bridge
-    assert "version === 7" in bridge
-    assert "version: 7" in bridge
+    assert "version === 8" in bridge
+    assert "version: 8" in bridge
 
 def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     start_js = _source("client/api_patches/start.js")
@@ -264,6 +264,8 @@ def test_page_native_audio_mutes_message_ping_but_preserves_call_end_chime():
     assert "pageAudioNow() + 2500" in bridge
     assert "if (pageAudioNow() <= allowCallEndChimeUntil)" in bridge
     assert "restorePageAudio(el);" in bridge
+    assert "bridgeAllowedPageAudio(el)" in bridge
+    assert "context.createMediaElementSource(el)" in bridge
 
     # RTC audio is a separate MediaStream path and must never be page-muted.
     assert "if (el.srcObject instanceof MediaStream) {" in bridge
@@ -313,17 +315,22 @@ def test_call_media_bridge_bounds_microphone_backlog_to_live_audio():
     assert "const dropIndex = state.micOffset > 0 ? 1 : 0;" in bridge
 
 
-def test_local_api_routes_chromium_page_audio_to_call_output_device():
+def test_local_api_routes_page_audio_through_python_bass_speaker_bridge():
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
-    assert "state.setOutputDeviceName = async (deviceName: string)" in bridge
-    assert "device.kind === 'audiooutput'" in bridge
-    assert "setSinkId.call(element, state.outputSinkId || '')" in bridge
-    assert "socket.on('call:audio:output-device'" in bridge
-    assert "payload?.outputDeviceName" in bridge
-    assert "if (process.platform !== 'win32') return false;" in bridge
-    assert "setLocalBrowserOutputDevice(" in bridge
-
-    # The browser microphone remains synthetic/bridged. Selecting a call
-    # speaker must not make Chromium open the physical microphone.
+    assert "bridgeAllowedPageAudio = (el: HTMLMediaElement)" in bridge
+    assert "context.createMediaElementSource(el)" in bridge
+    assert "page-speaker-bridge" in bridge
+    assert "__winzappOnCallRemoteAudio" in bridge
+    assert "local call speaker bridge uses Python/BASS output" in bridge
+    assert "setSinkId.call(" not in bridge
+    assert "setLocalBrowserOutputDevice(" not in bridge
+    assert "call:audio:output-device" not in bridge
+    assert "if (linuxAudio) return false;" in bridge
     assert "const micTrack = ensureMicTrack().clone();" in bridge
+
+
+def test_call_end_keeps_bass_alive_for_page_speaker_bridge():
+    main = _source("client/main.py")
+
+    assert main.count("self._stop_voice_call_audio(grace_seconds=2.5)") == 2

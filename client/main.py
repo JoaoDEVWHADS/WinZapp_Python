@@ -6602,7 +6602,7 @@ class MainWindow(wx.Frame):
                         True,
                     )
                 finally:
-                    self._stop_voice_call_audio(grace_seconds=1.25)
+                    self._stop_voice_call_audio(grace_seconds=2.5)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -6872,7 +6872,7 @@ class MainWindow(wx.Frame):
             "HANDLED_REMOTELY", "REMOTE_CALL_IN_PROGRESS",
         }
         if state in terminal_states or event.get("event") in {"ended", "timeout"}:
-            self._stop_voice_call_audio(grace_seconds=1.25)
+            self._stop_voice_call_audio(grace_seconds=2.5)
             self.output(self.i18n.t("voice_call_ended"), interrupt=True)
             return
         if state == "REJOINING":

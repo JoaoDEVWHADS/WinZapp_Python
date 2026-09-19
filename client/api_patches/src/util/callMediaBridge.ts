@@ -190,7 +190,7 @@ function ensureLinuxCallAudio(
 
 function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 7) return true;
+  if (win.__winzappCallMediaBridge?.version === 8) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
@@ -200,7 +200,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
 
   const state: any = {
-    version: 7,
+    version: 8,
     enabled: false,
     context: null,
     micDestination: null,
@@ -224,9 +224,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     micFramesDroppedForLatency: 0,
     remoteFramesCaptured: 0,
     remoteTracksAttached: 0,
-    outputDeviceName: '',
-    outputSinkId: '',
-    applyOutputSink: null,
   };
 
   const report = (event: string, details = '') => {
@@ -249,6 +246,8 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     { muted: boolean; volume: number }
   >();
   const mutedPageElements = new Set<HTMLMediaElement>();
+  const pageAudioBridgePipelines = new WeakMap<HTMLMediaElement, any>();
+  let bridgeAllowedPageAudio = (_el: HTMLMediaElement): boolean => false;
   let callWasActive = false;
   let allowCallEndChimeUntil = 0;
 
@@ -331,6 +330,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     // clipped while waiting for the next media scan.
     for (const element of Array.from(mutedPageElements)) {
       restorePageAudio(element);
+      if (!linuxAudio) bridgeAllowedPageAudio(element);
     }
   };
 
@@ -366,9 +366,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   const applyPageAudioPolicy = (el: HTMLMediaElement) => {
     try {
-      void state.applyOutputSink?.(el);
-    } catch (_) {}
-    try {
       if (el.srcObject instanceof MediaStream) {
         restorePageAudio(el);
         return false;
@@ -386,6 +383,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
     if (pageAudioNow() <= allowCallEndChimeUntil) {
       restorePageAudio(el);
+      if (!linuxAudio && !bridgeAllowedPageAudio(el)) {
+        // Never fall back to Chromium's physical/default speaker: if this
+        // local PCM bridge cannot be built, keep the element silent instead.
+        silencePageAudio(el);
+        return true;
+      }
       return false;
     }
 
@@ -516,6 +519,45 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     return btoa(binary);
   };
 
+  bridgeAllowedPageAudio = (el: HTMLMediaElement): boolean => {
+    if (linuxAudio) return false;
+    try {
+      if (el.srcObject instanceof MediaStream) return false;
+    } catch (_) {}
+    if (pageAudioBridgePipelines.has(el)) return true;
+
+    try {
+      const context = ensureContext();
+      // MediaElementSource diverts the element from Chromium's hardware
+      // output. Its PCM goes only to the callback below; the connected sink
+      // is zero-gain and exists solely to keep WebAudio scheduling alive.
+      const source = context.createMediaElementSource(el);
+      const processor = context.createScriptProcessor(1024, 1, 1);
+      const sink = context.createGain();
+      sink.gain.value = 0;
+
+      processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        event.outputBuffer.getChannelData(0).fill(0);
+        if (pageAudioNow() > allowCallEndChimeUntil) return;
+        const input = event.inputBuffer.getChannelData(0);
+        const callback = win.__winzappOnCallRemoteAudio;
+        if (typeof callback !== 'function' || !input.length) return;
+        callback(encodePcm16(input), context.sampleRate).catch?.(() => undefined);
+      };
+
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(context.destination);
+      pageAudioBridgePipelines.set(el, { source, processor, sink });
+      report('page-speaker-bridge',
+        'src=' + String(el.currentSrc || (el as any).src || '').slice(0, 120));
+      return true;
+    } catch (error: any) {
+      report('page-speaker-bridge-failed',
+        'error=' + String(error?.message || error));
+      return false;
+    }
+  };
   const ensureMicTrack = () => {
     const context = ensureContext();
     if (state.micDestination?.stream?.getAudioTracks?.()[0]?.readyState === 'live') {
@@ -893,76 +935,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const nativeEnumerateDevices = navigator.mediaDevices.enumerateDevices?.bind(
     navigator.mediaDevices
   );
-
-  const normalizeOutputName = (value: string) =>
-    String(value || '')
-      .replace(/[()]/g, '')
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
-
-  state.applyOutputSink = async (element: HTMLMediaElement) => {
-    const setSinkId = (element as any)?.setSinkId;
-    if (typeof setSinkId !== 'function') return false;
-    try {
-      await setSinkId.call(element, state.outputSinkId || '');
-      return true;
-    } catch (error: any) {
-      report(
-        'browser-output-failed',
-        `device=${state.outputDeviceName || '<default>'} error=${error?.message || error}`
-      );
-      return false;
-    }
-  };
-
-  state.setOutputDeviceName = async (deviceName: string) => {
-    const requested = String(deviceName || '');
-    let sinkId = '';
-
-    if (requested && nativeEnumerateDevices) {
-      try {
-        const outputs = (await nativeEnumerateDevices()).filter(
-          (device: MediaDeviceInfo) => device.kind === 'audiooutput'
-        );
-        const wanted = normalizeOutputName(requested);
-        let match = outputs.find(
-          (device: MediaDeviceInfo) => normalizeOutputName(device.label) === wanted
-        );
-        if (!match) {
-          match = outputs.find((device: MediaDeviceInfo) => {
-            const actual = normalizeOutputName(device.label);
-            return !!actual && !!wanted && (actual.includes(wanted) || wanted.includes(actual));
-          });
-        }
-        if (match) {
-          sinkId = match.deviceId;
-        } else {
-          report('browser-output-unresolved', `device=${requested}`);
-        }
-      } catch (error: any) {
-        report(
-          'browser-output-enumeration-failed',
-          `device=${requested} error=${error?.message || error}`
-        );
-      }
-    }
-
-    state.outputDeviceName = requested;
-    state.outputSinkId = sinkId;
-
-    const elements = Array.from(
-      document.querySelectorAll('audio, video')
-    ) as HTMLMediaElement[];
-    await Promise.allSettled(
-      elements.map((element) => state.applyOutputSink(element))
-    );
-    report(
-      'browser-output',
-      `device=${requested || '<default>'} sink=${sinkId || '<default>'}`
-    );
-    return true;
-  };
 
   // A remote/headless WPPConnect host has no physical webcam.  WhatsApp Web
   // checks the media-device inventory before it asks getUserMedia() for video,
@@ -1354,38 +1326,6 @@ async function drainMicrophoneQueue(session: string, logger: any): Promise<void>
   }
 }
 
-async function setLocalBrowserOutputDevice(
-  session: string,
-  deviceName: string,
-  logger: any
-): Promise<boolean> {
-  // Local API only. A remote Linux API must keep Chromium routed to the
-  // per-session PulseAudio virtual sink used by the network relay.
-  if (process.platform !== 'win32') return false;
-  const client: any = (clientsArray as any)[session];
-  const page = client?.waPage || client?.page;
-  if (!page) return false;
-
-  try {
-    const changed = !!(await page.evaluate(async (name: string) => {
-      const bridge = (window as any).__winzappCallMediaBridge;
-      if (typeof bridge?.setOutputDeviceName !== 'function') return false;
-      return !!(await bridge.setOutputDeviceName(name));
-    }, String(deviceName || '')));
-    if (changed) {
-      logger?.info?.(
-        `[${session}] local Chromium call output device=${deviceName || '<default>'}`
-      );
-    }
-    return changed;
-  } catch (error: any) {
-    logger?.debug?.(
-      `[${session}] could not route local Chromium call output: ${error?.message || error}`
-    );
-    return false;
-  }
-}
-
 export function registerCallAudioSocket(
   socket: Socket,
   logger: any,
@@ -1402,23 +1342,8 @@ export function registerCallAudioSocket(
     if (linuxAudio) {
       logger?.info?.(`[${session}] Linux call speaker monitor started before answer`);
     } else {
-      void setLocalBrowserOutputDevice(
-        session,
-        String(payload?.outputDeviceName || ''),
-        logger
-      );
+      logger?.info?.(`[${session}] local call speaker bridge uses Python/BASS output`);
     }
-  });
-
-  socket.on('call:audio:output-device', (payload: any) => {
-    const session = String(payload?.session || '');
-    if (!session || session !== authenticatedSession) return;
-    if (!(clientsArray as any)[session]) return;
-    void setLocalBrowserOutputDevice(
-      session,
-      String(payload?.outputDeviceName || ''),
-      logger
-    );
   });
 
   socket.on('call:video:camera', (payload: any) => {

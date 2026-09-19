@@ -211,10 +211,8 @@ def test_call_audio_session_can_start_receive_only_without_opening_microphone():
     assert session.running is False
     assert sounddevice.output_streams[0][1].started is True
     assert sounddevice.input_streams == []
-    assert (
-        "call:audio:start",
-        {"session": "winzapp", "outputDeviceName": "Speaker"},
-    ) in sio.events
+    assert ("call:audio:start", {"session": "winzapp"}) in sio.events
+    assert not any("outputDeviceName" in payload for _, payload in sio.events)
     assert not any(name == "call:audio:mic" for name, _ in sio.events)
 
     pcm = (np.array([0.1, -0.1, 0.0], dtype=np.float32) * 32767).astype("<i2").tobytes()
@@ -359,10 +357,7 @@ def test_call_output_switches_live_without_reopening_microphone():
 
     assert session.switch_output_device("USB Headset") is True
     assert outputs[0].switches == ["USB Headset"]
-    assert (
-        "call:audio:output-device",
-        {"session": "winzapp", "outputDeviceName": "USB Headset"},
-    ) in sio.events
+    assert not any(event == "call:audio:output-device" for event, _ in sio.events)
     assert sounddevice.input_streams[0][1] is microphone_stream
     assert len(sounddevice.input_streams) == 1
     assert microphone_stream.started is True
