@@ -12,9 +12,8 @@
 # Nothing release- or alpha-specific lives here. Resolving a version, creating
 # tags, and publishing releases stay in the callers, because that is precisely
 # where the three legitimately differ. This workflow only ever produces the
-# same four files and hands them back as an artifact:
-#   dist/WinZappInstaller.exe, dist/WinZapp.zip, dist/WinZappClient.zip,
-#   dist/SHA256SUMS.txt
+# same three files and hands them back as an artifact:
+#   dist/WinZappInstaller.exe, dist/WinZapp.zip, dist/SHA256SUMS.txt
 #
 # The caller picks them up with actions/download-artifact in a later job.
 name: Build (reusable)
@@ -288,35 +287,6 @@ jobs:
             $zip.Dispose()
           }
 
-      - name: Verify dist/WinZappClient.zip is client-only
-        shell: pwsh
-        run: |
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist\WinZappClient.zip")
-          try {
-            $entries = $zip.Entries | ForEach-Object { $_.FullName }
-            $required = @("WinZapp/WinZapp.exe", "WinZapp/distribution.json", "WinZapp/lib/ffmpeg.exe")
-            foreach ($entry in $required) {
-              if (($entries | Where-Object { $_ -eq $entry }).Count -eq 0) {
-                Write-Error "dist/WinZappClient.zip is missing required entry $entry"
-                exit 1
-              }
-            }
-            $forbidden = @("WinZapp/api/", "WinZapp/api_patches/", "WinZapp/node/", "WinZapp/git/")
-            foreach ($prefix in $forbidden) {
-              if (($entries | Where-Object { $_ -like "$prefix*" }).Count -gt 0) {
-                Write-Error "dist/WinZappClient.zip unexpectedly contains $prefix"
-                exit 1
-              }
-            }
-            if (($entries | Where-Object { $_ -eq "WinZapp/.env" }).Count -gt 0) {
-              Write-Error "dist/WinZappClient.zip unexpectedly contains the API build .env"
-              exit 1
-            }
-          } finally {
-            $zip.Dispose()
-          }
-
       # Published alongside the release so updater.py (client/updater.py) can
       # verify a downloaded ZIP's integrity before extracting it and handing
       # it elevated write access to the install directory — without this,
@@ -340,7 +310,7 @@ jobs:
           if ($ver -ne "") {
             $lines += "# winzapp-version: $($ver.ToLower())"
           }
-          foreach ($f in @("dist/WinZappInstaller.exe", "dist/WinZapp.zip", "dist/WinZappClient.zip")) {
+          foreach ($f in @("dist/WinZappInstaller.exe", "dist/WinZapp.zip")) {
             $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             $name = Split-Path $f -Leaf
             $lines += "$hash  $name"
@@ -359,5 +329,4 @@ jobs:
           path: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
-            dist/WinZappClient.zip
             dist/SHA256SUMS.txt
