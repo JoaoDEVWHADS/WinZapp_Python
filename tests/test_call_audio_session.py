@@ -3,7 +3,12 @@ import time
 
 import numpy as np
 
-from core.call_audio import CALL_FRAME_SAMPLES, CallAudioConfig, CallAudioSession
+from core.call_audio import (
+    CALL_FRAME_SAMPLES,
+    CALL_MIC_TARGET_BACKLOG_FRAMES,
+    CallAudioConfig,
+    CallAudioSession,
+)
 
 
 class _Socket:
@@ -200,3 +205,20 @@ def test_receive_only_session_promotes_to_full_duplex_on_answer():
     assert _wait_for(lambda: any(name == "call:audio:mic" for name, _ in sio.events))
 
     session.stop()
+
+
+def test_microphone_backlog_skips_old_audio_instead_of_adding_delay():
+    session = CallAudioSession(
+        _Socket(),
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=_SoundDevice(),
+    )
+    frames = [bytes([marker]) * 8 for marker in range(8)]
+    for frame in frames:
+        session._mic_queue.put_nowait(frame)
+
+    pcm, dropped = session._dequeue_fresh_microphone_frame()
+
+    assert pcm == frames[5]
+    assert dropped == 5
+    assert session._mic_queue.qsize() == CALL_MIC_TARGET_BACKLOG_FRAMES

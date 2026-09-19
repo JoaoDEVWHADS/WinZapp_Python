@@ -25,7 +25,8 @@ except ImportError:  # pragma: no cover - packaging always installs it
 CALL_SAMPLE_RATE = 48_000
 CALL_FRAME_MS = 20
 CALL_FRAME_SAMPLES = CALL_SAMPLE_RATE * CALL_FRAME_MS // 1000
-CALL_MIC_QUEUE_LIMIT = 75
+CALL_MIC_QUEUE_LIMIT = 12
+CALL_MIC_TARGET_BACKLOG_FRAMES = 2
 CALL_OUTPUT_QUEUE_LIMIT = 40
 CALL_OUTPUT_PREBUFFER_MS = 60
 CALL_OUTPUT_REBUFFER_WAIT_MS = CALL_FRAME_MS
@@ -88,6 +89,7 @@ class CallAudioSession:
         self._player_thread: Optional[threading.Thread] = None
         self._mic_frames_sent = 0
         self._mic_bytes_sent = 0
+        self._mic_frames_dropped_for_latency = 0
         self._microphone_muted = False
         self._output_rebuffer_count = 0
         self._output_samples_dropped = 0
@@ -282,12 +284,39 @@ class CallAudioSession:
 
         return _callback
 
+    def _dequeue_fresh_microphone_frame(self) -> tuple[bytes, int]:
+        """Return current microphone audio instead of replaying stale backlog."""
+        pcm = self._mic_queue.get(timeout=0.1)
+        dropped = 0
+        while self._mic_queue.qsize() > CALL_MIC_TARGET_BACKLOG_FRAMES:
+            try:
+                pcm = self._mic_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        return pcm, dropped
+
     def _send_microphone_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                pcm = self._mic_queue.get(timeout=0.1)
+                pcm, dropped = self._dequeue_fresh_microphone_frame()
             except queue.Empty:
                 continue
+
+            if dropped:
+                previous_dropped = self._mic_frames_dropped_for_latency
+                self._mic_frames_dropped_for_latency += dropped
+                if previous_dropped == 0 or (
+                    previous_dropped // 50
+                    != self._mic_frames_dropped_for_latency // 50
+                ):
+                    logging.info(
+                        "[call_audio] skipped stale microphone audio frames=%s total=%s backlog=%s",
+                        dropped,
+                        self._mic_frames_dropped_for_latency,
+                        self._mic_queue.qsize(),
+                    )
+
             try:
                 if self._microphone_muted:
                     pcm = b"\x00" * len(pcm)
