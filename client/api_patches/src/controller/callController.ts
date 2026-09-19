@@ -241,6 +241,72 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       };
 
       const ensureVoipRuntimeReady = async (): Promise<any> => {
+        const installEarlyWasmProbe = () => {
+          try {
+            const backendApi = win.require?.('WAWebBackendApi');
+            if (
+              !backendApi ||
+              typeof backendApi.frontendSendAndReceive !== 'function' ||
+              backendApi.__winzappWasmProbeInstalled
+            ) {
+              return;
+            }
+
+            const originalFrontendSendAndReceive =
+              backendApi.frontendSendAndReceive.bind(backendApi);
+
+            const wrapWasm = (wasm: any) => {
+              if (!wasm || typeof wasm.startVoipGroupCall !== 'function') return wasm;
+              if (wasm.__winzappStartVoipGroupCallProbe) return wasm;
+
+              const originalStartVoipGroupCall =
+                wasm.startVoipGroupCall.bind(wasm);
+              wasm.startVoipGroupCall = (...args: any[]) => {
+                const status = originalStartVoipGroupCall(...args);
+                const listSize = (value: any) => {
+                  try {
+                    if (typeof value?.size === 'function') return value.size();
+                    if (typeof value?.length === 'number') return value.length;
+                  } catch (_) {}
+                  return null;
+                };
+                win.__winzappLastStartVoipGroupCallStatus = {
+                  at: Date.now(),
+                  status,
+                  argCount: args.length,
+                  pnCount: listSize(args[0]),
+                  lidCount: listSize(args[1]),
+                  deviceCsvCount: listSize(args[2]),
+                  callId: String(args[3] || ''),
+                  useVideo: !!args[4],
+                  groupJid: String(args[5] || ''),
+                  isLightWeight: !!args[6],
+                  callFromUi: args[10] ?? null,
+                  lobbyEntryPoint: args[11] ?? null,
+                };
+                return status;
+              };
+              wasm.__winzappStartVoipGroupCallProbe = true;
+              return wasm;
+            };
+
+            backendApi.frontendSendAndReceive = async (...args: any[]) => {
+              const value = await originalFrontendSendAndReceive(...args);
+              if (args[0] === 'initializeVoipWasm') {
+                return wrapWasm(value);
+              }
+              return value;
+            };
+            backendApi.__winzappWasmProbeInstalled = true;
+            win.__winzappEarlyWasmProbeInstalled = true;
+          } catch (error: any) {
+            win.__winzappEarlyWasmProbeError =
+              String(error?.message || error || 'unknown error');
+          }
+        };
+
+        installEarlyWasmProbe();
+
         // Keep the VoIP stack on the main thread. WhatsApp's current
         // WorkerProxy fires startGroupCall as a one-way RPC and discards the
         // underlying WASM status, which makes failed group calls look like
@@ -417,8 +483,10 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         // leave all behavior/return values unchanged.
         let wasmProbe: any = {
           installed: false,
+          earlyHookInstalled: !!win.__winzappEarlyWasmProbeInstalled,
+          earlyHookError: String(win.__winzappEarlyWasmProbeError || ''),
           error: '',
-          lastStatus: null,
+          lastStatus: win.__winzappLastStartVoipGroupCallStatus || null,
         };
         try {
           const backendApi = win.require?.('WAWebBackendApi');
@@ -460,6 +528,10 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
                 wasm.__winzappStartVoipGroupCallProbe = true;
               }
               wasmProbe.installed = true;
+              wasmProbe.earlyHookInstalled =
+                !!win.__winzappEarlyWasmProbeInstalled;
+              wasmProbe.earlyHookError =
+                String(win.__winzappEarlyWasmProbeError || '');
             } else {
               wasmProbe.error = 'initializeVoipWasm returned no startVoipGroupCall function';
             }

@@ -638,6 +638,72 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
         const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
         let lastError = '';
 
+        const installEarlyWasmProbe = () => {
+          try {
+            const backendApi = win.require?.('WAWebBackendApi');
+            if (
+              !backendApi ||
+              typeof backendApi.frontendSendAndReceive !== 'function' ||
+              backendApi.__winzappWasmProbeInstalled
+            ) {
+              return;
+            }
+
+            const originalFrontendSendAndReceive =
+              backendApi.frontendSendAndReceive.bind(backendApi);
+
+            const wrapWasm = (wasm: any) => {
+              if (!wasm || typeof wasm.startVoipGroupCall !== 'function') return wasm;
+              if (wasm.__winzappStartVoipGroupCallProbe) return wasm;
+
+              const originalStartVoipGroupCall =
+                wasm.startVoipGroupCall.bind(wasm);
+              wasm.startVoipGroupCall = (...args: any[]) => {
+                const status = originalStartVoipGroupCall(...args);
+                const listSize = (value: any) => {
+                  try {
+                    if (typeof value?.size === 'function') return value.size();
+                    if (typeof value?.length === 'number') return value.length;
+                  } catch (_) {}
+                  return null;
+                };
+                win.__winzappLastStartVoipGroupCallStatus = {
+                  at: Date.now(),
+                  status,
+                  argCount: args.length,
+                  pnCount: listSize(args[0]),
+                  lidCount: listSize(args[1]),
+                  deviceCsvCount: listSize(args[2]),
+                  callId: String(args[3] || ''),
+                  useVideo: !!args[4],
+                  groupJid: String(args[5] || ''),
+                  isLightWeight: !!args[6],
+                  callFromUi: args[10] ?? null,
+                  lobbyEntryPoint: args[11] ?? null,
+                };
+                return status;
+              };
+              wasm.__winzappStartVoipGroupCallProbe = true;
+              return wasm;
+            };
+
+            backendApi.frontendSendAndReceive = async (...args: any[]) => {
+              const value = await originalFrontendSendAndReceive(...args);
+              if (args[0] === 'initializeVoipWasm') {
+                return wrapWasm(value);
+              }
+              return value;
+            };
+            backendApi.__winzappWasmProbeInstalled = true;
+            win.__winzappEarlyWasmProbeInstalled = true;
+          } catch (error: any) {
+            win.__winzappEarlyWasmProbeError =
+              String(error?.message || error || 'unknown error');
+          }
+        };
+
+        installEarlyWasmProbe();
+
         // WinZapp needs deterministic error reporting for group calls. Current
         // WhatsApp Web's WorkerProxy implements startGroupCall as a
         // fire-and-forget RPC, so the numeric startVoipGroupCall() result is
@@ -725,6 +791,10 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
                 acceptCall: typeof stack.acceptCall === 'function',
                 rejectCall: typeof stack.rejectCall === 'function',
                 endCall: typeof stack.endCall === 'function',
+                earlyWasmProbeInstalled:
+                  !!win.__winzappEarlyWasmProbeInstalled,
+                earlyWasmProbeError:
+                  String(win.__winzappEarlyWasmProbeError || ''),
               };
             }
             lastError = 'VoIP stack interface returned no value';
@@ -740,7 +810,9 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
       if (result?.ready) {
         logger?.info?.(
           `[${client.session}] WinZapp VoIP runtime warmed ` +
-            `(accept=${!!result.acceptCall}, reject=${!!result.rejectCall}, end=${!!result.endCall})`
+            `(accept=${!!result.acceptCall}, reject=${!!result.rejectCall}, end=${!!result.endCall}, ` +
+            `earlyWasmProbe=${!!result.earlyWasmProbeInstalled}, ` +
+            `probeError=${result.earlyWasmProbeError || 'none'})`
         );
         return true;
       }

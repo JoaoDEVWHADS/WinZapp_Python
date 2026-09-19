@@ -352,3 +352,18 @@ def test_group_call_probes_wasm_start_status():
     assert "wasmProbe.lastStatus" in controller
     assert "pnCount" in controller
     assert "deviceCsvCount" in controller
+
+
+def test_group_call_installs_wasm_probe_before_voip_warmup():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    for source in (controller, bridge):
+        assert "const installEarlyWasmProbe = () =>" in source
+        assert "__winzappWasmProbeInstalled" in source
+        assert "__winzappEarlyWasmProbeInstalled" in source
+        assert "args[0] === 'initializeVoipWasm'" in source
+        assert "__winzappLastStartVoipGroupCallStatus" in source
+
+    assert "earlyHookInstalled" in controller
+    assert "earlyWasmProbe=" in bridge
