@@ -28,6 +28,32 @@ opening the webcam with no prompt and no indicator, in a page the user never
 sees, while a test asserting on the removed expression passed. Assert on the
 shape of the guard, not on the absence of a string.
 
+**Calls depend on the WhatsApp Web build, which is chosen by the age of the
+install's catalogue — so "works for some testers, not others" is the expected
+shape of a stale catalogue, not of a bug.** Measured on the first alpha: one
+install failed every call with `WhatsApp VoIP initialization failed: WhatsApp
+VoIP initializer completed without becoming ready`, and never received a single
+`incomingcall` event either — a companion whose VoIP never initialises is not
+offered calls by the server, so "cannot call" and "does not ring" are one
+defect. It was pinned to `2.3000.1046948731-alpha` from a 417-entry catalogue.
+An in-app API reinstall moved it to `2.3000.1047835881-alpha` (430 entries) and
+the same profile logged `VoIP runtime warmed (accept=true, reject=true,
+end=true)` within seconds. The server went 2.10.24 -> 2.10.27 in the same
+reinstall, and that is **not** what fixed it: upstream changed only
+express/sharp/minimatch between those tags, and wa-js stayed 4.6.0. The
+catalogue is `@wppconnect/wa-version`, a *transitive* dependency of wppconnect
+that is deliberately left updateable, so it only refreshes when `node_modules`
+is rebuilt from scratch — which the in-app update does (`ApiSetupDialog` deletes
+everything but `tokens`, `userDataDir` and the log) and a plain `npm install`
+over a preserved tree does not. Bumping `wpp_minimum_version.txt` is therefore
+the lever that reaches every tester, even when the server bump itself carries
+nothing: it trips `ensure_wpp_version()`, whose update wipes `node_modules`.
+Two limits worth knowing: that prompt can be declined, and it never appears in
+`--background` mode, so an install started with Windows keeps its old build
+until someone opens WinZapp in the foreground. When a tester reports calls not
+working, the `Pinning WhatsApp Web to ...` line at the top of `wppconnect.log`
+is the first thing to compare against a working install.
+
 **A call event names the peer in whichever address form its source happened to
 hold, and the two sources disagree.** The offer arrives through
 `call.incoming_call` carrying whatever WhatsApp signalled with; the page's own
