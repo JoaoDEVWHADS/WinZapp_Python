@@ -9254,7 +9254,7 @@ class ConversationsPanel(wx.Panel):
         for jid in mentioned or []:
             mw_ref = self.main_window
             if mw_ref._is_self_jid(jid):
-                name = "eu"
+                name = mw_ref.self_reference_label()
             else:
                 name = self._get_participant_name(jid)
 
