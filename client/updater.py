@@ -551,12 +551,15 @@ def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
         f'>> "{log_path}" echo xcopy OK\n'
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
-        "goto :EOF\n"
-        ":OTHER_ACCOUNT_TIMEOUT\n"
-        f'>> "{log_path}" echo timed out waiting for another WinZapp account to exit\n'
-        f'echo update failed: another WinZapp account did not exit > "{marker_path}"\n'
-        f'if exist "{exe_path}" start "" "{exe_path}"\n'
-        "exit /b 1\n"
+        + (
+            "goto :EOF\n"
+            ":OTHER_ACCOUNT_TIMEOUT\n"
+            f'>> "{log_path}" echo timed out waiting for another WinZapp account to exit\n'
+            f'echo update failed: another WinZapp account did not exit > "{marker_path}"\n'
+            f'if exist "{exe_path}" start "" "{exe_path}"\n'
+            "exit /b 1\n"
+            if extra_pids else ""
+        )
     )
 
 
