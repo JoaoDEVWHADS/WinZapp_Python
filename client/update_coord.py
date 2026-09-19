@@ -160,7 +160,20 @@ def _expected_process_basenames() -> set:
 def _default_proc_matches_us(pid: int) -> Optional[bool]:
     """True/False if *pid*'s executable image can be positively identified as
     (not) a WinZapp process; None when inconclusive — callers must treat None
-    exactly like an unknown create_time (fail closed, i.e. still "alive")."""
+    exactly like an unknown create_time (fail closed, i.e. still "alive").
+
+    Measured live on a real install: the leaked 0.0-create_time leases this
+    exists to reap had their pids reused by Windows SERVICE processes
+    (svchost.exe, vmms.exe, vmcompute.exe — session 0, running as SYSTEM).
+    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) against one of those from
+    an ordinary user-session WinZapp.exe fails with access-denied, not "no
+    such process" — indistinguishable, to that API, from a process we simply
+    aren't allowed to ask about. That turned every real collision into the
+    inconclusive case, which still fails closed, so the fix never actually
+    broke the tie it was written for. CreateToolhelp32Snapshot lists every
+    process's image name system-wide without opening a handle to any of
+    them, so it reads a SYSTEM service's name with the same ordinary-user
+    permissions that list it in Task Manager."""
     expected = _expected_process_basenames()
     try:
         import psutil  # type: ignore
@@ -176,30 +189,42 @@ def _default_proc_matches_us(pid: int) -> Optional[bool]:
         return None
     import ctypes
     from ctypes import wintypes
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-    if not h:
-        err = ctypes.get_last_error()
-        ERROR_INVALID_PARAMETER = 87  # pid doesn't exist -> provably dead
-        if err == ERROR_INVALID_PARAMETER:
-            return False
-        return None  # access denied etc. -> inconclusive, fail closed
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+        return None  # inconclusive -> fail closed
     try:
-        query = getattr(kernel32, "QueryFullProcessImageNameW", None)
-        if query is None:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
             return None
-        query.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
-                          ctypes.POINTER(wintypes.DWORD))
-        buf = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buf))
-        if not query(h, 0, buf, ctypes.byref(size)):
-            return None
-        return os.path.basename(buf.value).lower() in expected
+        while True:
+            if entry.th32ProcessID == pid:
+                return entry.szExeFile.lower() in expected
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                return False  # walked every process; this pid isn't one of them
     finally:
-        kernel32.CloseHandle(h)
+        kernel32.CloseHandle(snapshot)
 
 
 def lease_alive(pid: int, create_time: float,
