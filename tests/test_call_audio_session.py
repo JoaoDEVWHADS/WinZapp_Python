@@ -126,3 +126,50 @@ def test_call_audio_session_plays_remote_pcm_on_python_output_device():
     assert output_stream.writes[0].shape == (3, 1)
 
     session.stop()
+
+
+def test_call_audio_session_can_start_receive_only_without_opening_microphone():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", input_device_name="Mic", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+
+    assert session.output_running is True
+    assert session.running is False
+    assert sounddevice.output_streams[0][1].started is True
+    assert sounddevice.input_streams == []
+    assert ("call:audio:start", {"session": "winzapp"}) in sio.events
+    assert not any(name == "call:audio:mic" for name, _ in sio.events)
+
+    pcm = (np.array([0.1, -0.1, 0.0], dtype=np.float32) * 32767).astype("<i2").tobytes()
+    session.enqueue_remote_audio(pcm, 48000)
+    assert _wait_for(lambda: bool(sounddevice.output_streams[0][1].writes))
+
+    session.stop()
+
+
+def test_receive_only_session_promotes_to_full_duplex_on_answer():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", input_device_name="Mic", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+    output_stream = sounddevice.output_streams[0][1]
+    session.start()
+
+    assert session.running is True
+    assert sounddevice.output_streams[0][1] is output_stream
+    assert len(sounddevice.output_streams) == 1
+    assert len(sounddevice.input_streams) == 1
+    assert _wait_for(lambda: any(name == "call:audio:mic" for name, _ in sio.events))
+
+    session.stop()
