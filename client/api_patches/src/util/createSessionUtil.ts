@@ -1900,6 +1900,8 @@ export default class CreateSessionUtil {
             String(
               call?.groupJid?._serialized ||
               call?.groupJid?.toString?.() ||
+              call?.get?.('groupJid')?._serialized ||
+              call?.get?.('groupJid')?.toString?.() ||
               ''
             );
           const groupParticipantCountOf = (call: any): number => {
@@ -1915,6 +1917,7 @@ export default class CreateSessionUtil {
           };
           const isGroupCall = (call: any): boolean =>
             !!call?.isGroup || !!call?.isGroupCall ||
+            !!call?.get?.('isGroup') || !!call?.peerJid?.isGroupCall?.() ||
             !!groupJidOf(call) || groupParticipantCountOf(call) > 1;
           const callStateOf = (call: any) => {
             const raw = String(
@@ -2014,7 +2017,7 @@ export default class CreateSessionUtil {
               call?.from?.toString?.() ||
               ''
             );
-          const emitCallState = (event: string, call: any, state = '') => {
+          const emitCallState = (event: string, call: any, state = '', evidence?: any) => {
             const callId = callIdOf(call);
             const peerJid = peerJidOf(call) || groupJidOf(call);
             // Group activeCall models can be published before peerJid/groupJid
@@ -2027,14 +2030,14 @@ export default class CreateSessionUtil {
               peerJid,
               callId,
               !!call?.isVideo || !!call?.isVideoCall,
-              isGroupCall(call),
-              groupJidOf(call),
+              isGroupCall(call) || isGroupCall(evidence),
+              groupJidOf(call) || groupJidOf(evidence),
               !!call?.outgoing,
               Math.floor(callTimestampOf(call) / 1000),
               Math.floor(Date.now() / 1000)
             );
           };
-          const emitCall = (event: string, call: any, state = '') => {
+          const emitCall = (event: string, call: any, state = '', evidence?: any) => {
             const callId = callIdOf(call);
             const peerJid = peerJidOf(call) || groupJidOf(call);
             if (!callId && !peerJid) return;
@@ -2044,12 +2047,12 @@ export default class CreateSessionUtil {
               peerJid,
               callId,
               !!call?.isVideo || !!call?.isVideoCall,
-              isGroupCall(call),
-              groupJidOf(call),
+              isGroupCall(call) || isGroupCall(evidence),
+              groupJidOf(call) || groupJidOf(evidence),
               Math.floor(callTimestampOf(call) / 1000),
               Math.floor(Date.now() / 1000)
             );
-            emitCallState(event, call, state);
+            emitCallState(event, call, state, evidence);
           };
           const rememberCall = (call: any) => {
             const id = callIdOf(call);
@@ -2092,8 +2095,8 @@ export default class CreateSessionUtil {
             const id = callIdOf(call);
             const richCall = findCall(id) || call;
             if (isHistoricalIncomingCall(richCall, source)) return;
-            const isGroup = isGroupCall(richCall);
-            if (isGroup && !groupJidOf(richCall) && attempt < 10) {
+            const isGroup = isGroupCall(richCall) || isGroupCall(call);
+            if (isGroup && !groupJidOf(richCall) && !groupJidOf(call) && attempt < 10) {
               window.setTimeout(() => {
                 // A terminal Store event removes this id. Do not resurrect a
                 // call that ended while we were waiting for group metadata.
@@ -2102,7 +2105,7 @@ export default class CreateSessionUtil {
               }, 100);
               return;
             }
-            emitCall('offer', richCall, 'INCOMING_RING');
+            emitCall('offer', richCall, 'INCOMING_RING', call);
           };
 
           // ── Layer 1: WPP.on('call.incoming_call') ──────────────────
