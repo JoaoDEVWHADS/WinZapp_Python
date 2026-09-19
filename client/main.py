@@ -11642,28 +11642,45 @@ class MainWindow(wx.Frame):
         dlg.ShowModal()
         dlg.Destroy()
 
-    def apply_language_changes(self):
-        """Refresh all visible translatable text after a language change."""
-        if not hasattr(self, "navigation_panel"):
-            return
-        self.navigation_panel.refresh_labels()
-        self.conversations_panel.refresh_labels()
-        if hasattr(self, "archived_conversations_panel"):
-            self.archived_conversations_panel.refresh_labels()
-        if hasattr(self, "status_panel"):
-            self.status_panel.refresh_labels()
-        if hasattr(self, "incoming_call_answer_button"):
+    def _refresh_call_language_surfaces(self):
+        """Re-translate call UI that can stay alive while Settings is open."""
+        details_map = getattr(self, "_incoming_call_details", {})
+        dialogs = getattr(self, "_incoming_call_dialogs", {})
+        for identity, details in list(details_map.items()):
+            if not isinstance(details, dict):
+                continue
+            name = details.get("name") or self.i18n.t("unknown_contact")
+            announcement_key = (
+                "incoming_video_call_announcement"
+                if details.get("is_video")
+                else "incoming_call_announcement"
+            )
+            message = self.i18n.t(announcement_key).format(name=name)
+            details["message"] = message
+            dialog = dialogs.get(identity)
+            refresh = getattr(dialog, "refresh_labels", None)
+            if callable(refresh):
+                refresh(message=message)
+
+        # The in-window incoming-call bar reads details["message"], so this
+        # repaints its text as well as the buttons after the message above was
+        # regenerated in the new language.
+        if hasattr(self, "incoming_call_bar"):
             self.incoming_call_answer_button.SetLabel(
                 self.i18n.t("incoming_call_answer_button")
             )
-        if hasattr(self, "incoming_call_reject_button"):
             self.incoming_call_reject_button.SetLabel(
                 self.i18n.t("incoming_call_reject_button")
             )
-        if hasattr(self, "incoming_call_stop_button"):
             self.incoming_call_stop_button.SetLabel(
                 self.i18n.t("incoming_call_silence_button")
             )
+            self._sync_incoming_call_bar()
+
+        # The call frame is created once at startup and reused for every call.
+        # Relabel every persistent control; _sync_voice_call_bar() supplies the
+        # active voice/video title, participant text, mute state and video
+        # on/off state without recreating the window.
         if hasattr(self, "voice_call_window_end_button"):
             self.voice_call_window_end_button.SetLabel(
                 self.i18n.t("voice_call_end_button")
@@ -11672,8 +11689,32 @@ class MainWindow(wx.Frame):
                 self.i18n.t("voice_call_settings_button")
             )
             self.voice_call_window.SetTitle(self.i18n.t("voice_call_window_title"))
-            # Relabels the mute button too, in whichever state it is in.
             self._sync_voice_call_bar()
+
+    def apply_language_changes(self):
+        """Refresh all visible and already-materialized text after a language change."""
+        if not hasattr(self, "navigation_panel"):
+            return
+        self.navigation_panel.refresh_labels()
+        self.conversations_panel.refresh_labels()
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.refresh_labels()
+        if hasattr(self, "status_panel"):
+            self.status_panel.refresh_labels()
+
+        self._refresh_call_language_surfaces()
+
+        # Message rows and chat-list previews contain translated runtime text
+        # ("Mensagem apagada", media labels, delivery/status wording, dates,
+        # etc.). refresh_labels() only changes static controls, so repaint the
+        # already-materialized rows too; otherwise those strings keep the old
+        # language until the chat is reopened or the application restarts.
+        cp = self.conversations_panel
+        if getattr(cp, "conversation", None) is not None:
+            cp.populate_messages(preserve_focus=True)
+        self._chats_ui_fp = None
+        self.add_chats_to_ui()
+
         # Update frame title (unread indicator + any status suffix)
         self._update_title()
         self.main_panel.Layout()

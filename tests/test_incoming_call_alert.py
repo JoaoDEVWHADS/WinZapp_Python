@@ -23,9 +23,13 @@ class _Sound:
 class _Dialog:
     def __init__(self):
         self.closed = False
+        self.refreshed_messages = []
 
     def close_from_call_lifecycle(self):
         self.closed = True
+
+    def refresh_labels(self, message=None):
+        self.refreshed_messages.append(message)
 
 
 class _Bar:
@@ -88,6 +92,7 @@ class _MainStub:
     stop_all_incoming_call_alerts = MainWindow.stop_all_incoming_call_alerts
     _close_incoming_call_dialog = MainWindow._close_incoming_call_dialog
     _sync_incoming_call_bar = MainWindow._sync_incoming_call_bar
+    _refresh_call_language_surfaces = MainWindow._refresh_call_language_surfaces
     _first_incoming_call_identity = MainWindow._first_incoming_call_identity
     _call_control_payload = MainWindow._call_control_payload
     _stop_active_voice_call_if_matches = MainWindow._stop_active_voice_call_if_matches
@@ -531,3 +536,23 @@ def test_remote_call_audio_uses_ringing_monitor_before_answer():
     stub.on_call_remote_audio(b"\x03\x04", 48000)
 
     assert received == [(b"\x03\x04", 48000)]
+
+
+def test_language_change_retranslates_an_already_ringing_call():
+    stub = _MainStub()
+    stub._active_incoming_calls["call-1"] = "5511999999999@s.whatsapp.net"
+    stub._incoming_call_details["call-1"] = {
+        "call_id": "call-1",
+        "peer_jid": "5511999999999@s.whatsapp.net",
+        "is_video": True,
+        "name": "Fulano",
+        "message": "OLD LANGUAGE",
+    }
+    dialog = _Dialog()
+    stub._incoming_call_dialogs["call-1"] = dialog
+
+    stub._refresh_call_language_surfaces()
+
+    expected = "Fulano está te ligando por vídeo."
+    assert stub._incoming_call_details["call-1"]["message"] == expected
+    assert dialog.refreshed_messages == [expected]
