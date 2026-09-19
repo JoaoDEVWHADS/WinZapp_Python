@@ -329,3 +329,13 @@ def test_group_call_forces_main_thread_voip_stack():
     assert "WhatsApp aborted the outgoing group call before remote signaling remained active" in controller
     assert "const finalActiveCall = getCallStore()?.activeCall" in controller
     assert "groupParticipantCountOf(finalActiveCall) < 2" in controller
+
+
+def test_group_call_failure_preserves_browser_diagnostics_in_node_logs():
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    assert "__winzappGroupCallFailure: true" in controller
+    assert "Do not throw inside page.evaluate here" in controller
+    assert "WinZapp group-call result" in controller
+    assert "WinZapp group-call diagnostics" in controller
+    assert "error.winzappGroupCallDiagnostics = result?.diagnostics || null" in controller

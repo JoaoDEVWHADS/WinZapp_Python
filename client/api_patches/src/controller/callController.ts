@@ -708,11 +708,18 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           finalState === 'ENDED' ||
           groupParticipantCountOf(finalActiveCall) < 2
         ) {
-          const error: any = new Error(
-            'WhatsApp aborted the outgoing group call before remote signaling remained active'
-          );
-          error.winzappGroupCallDiagnostics = diagnostics;
-          throw error;
+          // Do not throw inside page.evaluate here. Puppeteer serializes an
+          // Error down to message/stack and drops custom diagnostic fields.
+          // Return a structured failure envelope so Node can log the complete
+          // VoIP/AB/timeline snapshot before converting it into HTTP 500.
+          return {
+            __winzappGroupCallFailure: true,
+            error:
+              'WhatsApp aborted the outgoing group call before remote signaling remained active',
+            finalCall: finalActiveCall ? summarizeCall(finalActiveCall) : null,
+            finalState,
+            diagnostics,
+          };
         }
 
         return {
@@ -801,6 +808,16 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       `[${session}] WinZapp group-call result ` +
         JSON.stringify(result)
     );
+    if (result?.__winzappGroupCallFailure) {
+      const error: any = new Error(
+        String(
+          result?.error ||
+            'WhatsApp aborted the outgoing group call before remote signaling remained active'
+        )
+      );
+      error.winzappGroupCallDiagnostics = result?.diagnostics || null;
+      throw error;
+    }
   }
 
   return result;
@@ -812,6 +829,13 @@ function ok(res: Response, response: any) {
 
 function fail(req: Request, res: Response, action: string, error: unknown) {
   req.logger.error(error);
+  const diagnostics = (error as any)?.winzappGroupCallDiagnostics;
+  if (diagnostics) {
+    req.logger.error(
+      `[${String((req.client as any)?.session || 'unknown')}] WinZapp group-call diagnostics ` +
+        JSON.stringify(diagnostics)
+    );
+  }
   const message = error instanceof Error ? error.message : String(error);
   res.status(500).json({ status: 'error', message: `Error on ${action}`, error: message });
 }
