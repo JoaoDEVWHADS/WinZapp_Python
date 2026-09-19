@@ -11,6 +11,7 @@ Flow:
 """
 
 import hashlib
+import json
 import os
 import re
 import sys
@@ -109,6 +110,51 @@ def log_updater(level: int, msg: str, *args, **kwargs):
         _ensure_updater_logger().log(level, msg, *args, **kwargs)  # dedicated
     except Exception:
         pass
+
+
+FULL_UPDATE_ASSET = "WinZapp.zip"
+CLIENT_ONLY_UPDATE_ASSET = "WinZappClient.zip"
+DISTRIBUTION_METADATA = "distribution.json"
+
+
+def _distribution_variant(install_dir: str | None = None) -> str:
+    """Return the installed package flavor; old installs default to full."""
+    root = install_dir or _outer_exe_dir()
+    path = os.path.join(root, DISTRIBUTION_METADATA)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        variant = str(data.get("variant") or "").strip().lower()
+        if variant == "client-only":
+            return "client-only"
+    except Exception:
+        pass
+    return "full"
+
+
+def is_client_only_install(install_dir: str | None = None) -> bool:
+    return _distribution_variant(install_dir) == "client-only"
+
+
+def find_zip_asset(assets, *, client_only: bool | None = None) -> str:
+    """Find the update ZIP matching this installation's distribution flavor.
+
+    Client-only installations deliberately have no fallback to WinZapp.zip:
+    falling back would silently reinstall node/, api/, api_patches/ and git/.
+    """
+    if client_only is None:
+        client_only = is_client_only_install()
+    desired = CLIENT_ONLY_UPDATE_ASSET if client_only else FULL_UPDATE_ASSET
+    fallback = ""
+    for asset in assets or []:
+        name = str(asset.get("name") or "")
+        url = asset.get("browser_download_url") or ""
+        if name.lower() == desired.lower():
+            return url
+        if (not client_only and name.lower().endswith(".zip")
+                and name.lower() != CLIENT_ONLY_UPDATE_ASSET.lower() and not fallback):
+            fallback = url
+    return "" if client_only else fallback
 
 
 def _find_sha256sums_asset(assets: list) -> str:
@@ -827,16 +873,14 @@ class UpdateChecker:
             self._schedule_retry()
             return
 
-        # Find the portable ZIP asset (prefer WinZapp.zip by exact name)
-        zip_url = ""
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            url  = asset.get("browser_download_url", "")
-            if name == "winzapp.zip":
-                zip_url = url
-                break
-            if name.endswith(".zip") and not zip_url:
-                zip_url = url
+        client_only = is_client_only_install()
+        zip_url = find_zip_asset(data.get("assets", []), client_only=client_only)
+        log_updater(
+            logging.INFO,
+            "Update package flavor=%s asset=%s",
+            "client-only" if client_only else "full",
+            CLIENT_ONLY_UPDATE_ASSET if client_only else FULL_UPDATE_ASSET,
+        )
 
         if not zip_url:
             log_updater(logging.WARNING, "No ZIP asset found in release %s", tag_name)
@@ -894,15 +938,8 @@ class UpdateChecker:
         tag_name       = data.get("tag_name", "")
         remote_version = tag_name.lstrip("vV") or tag_name
 
-        zip_url = ""
-        for asset in data.get("assets", []):
-            name = asset.get("name", "").lower()
-            url  = asset.get("browser_download_url", "")
-            if name == "winzapp.zip":
-                zip_url = url
-                break
-            if name.endswith(".zip") and not zip_url:
-                zip_url = url
+        client_only = is_client_only_install()
+        zip_url = find_zip_asset(data.get("assets", []), client_only=client_only)
 
         if not zip_url:
             log_updater(logging.WARNING, "No ZIP asset found in latest release %s", tag_name)

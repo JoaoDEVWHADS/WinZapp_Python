@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import zipfile
 import argparse
+import json
 import io
 import glob
 import tarfile
@@ -96,6 +97,9 @@ UNINSTALLER_RES = os.path.join(BUILD_DIR, "uninstaller_res.o")
 UNINSTALLER_EXE = os.path.join(BUILD_DIR, "uninstall.exe")
 INSTALLER_OUT   = os.path.join(DIST_DIR,  "WinZappInstaller.exe")
 PORTABLE_ZIP    = os.path.join(DIST_DIR,  "WinZapp.zip")
+CLIENT_ONLY_ZIP = os.path.join(DIST_DIR, "WinZappClient.zip")
+DISTRIBUTION_METADATA = "distribution.json"
+CLIENT_ONLY_EXCLUDED_TOP_LEVEL = {"api", "api_patches", "node", "git", ".env"}
 
 SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
 
@@ -443,6 +447,14 @@ def assemble_staging():
         shutil.rmtree(STAGING_DIR)
     os.makedirs(STAGING_DIR)
 
+    # Every package identifies its distribution flavor. The updater uses this
+    # marker to keep client-only installations on client-only updates instead
+    # of silently downloading the full local-API bundle later.
+    with open(os.path.join(STAGING_DIR, DISTRIBUTION_METADATA), "w", encoding="utf-8") as f:
+        json.dump({"variant": "full"}, f, separators=(",", ":"))
+        f.write("\n")
+    print(f"  -> {DISTRIBUTION_METADATA} (full)")
+
     shutil.copy2(PYINST_EXE, os.path.join(STAGING_DIR, "WinZapp.exe"))
     print(f"  -> WinZapp.exe")
 
@@ -738,6 +750,34 @@ def create_portable_zip():
         size_mb = os.path.getsize(PORTABLE_ZIP) / (1024 * 1024)
         print(f"  -> {PORTABLE_ZIP}  ({size_mb:.1f} MB, {count} entries)")
 
+def create_client_only_zip():
+    """Create a portable build for remote-API users with no local API stack.
+
+    The client still keeps lib/ffmpeg.exe because camera capture and client-side
+    media conversion use it even when WPPConnect itself runs on another host.
+    Everything whose only purpose is the bundled local API is omitted: api/,
+    api_patches/, node/, git/, and the build-time .env.
+    """
+    step("8b/8 Creating client-only WinZappClient.zip")
+    os.makedirs(DIST_DIR, exist_ok=True)
+    count = 0
+    with zipfile.ZipFile(CLIENT_ONLY_ZIP, "w", compression=zipfile.ZIP_DEFLATED,
+                         compresslevel=6) as zf:
+        for abs_path, rel_path in walk_dir(STAGING_DIR):
+            normalized = rel_path.replace("\\", "/")
+            top = normalized.split("/", 1)[0]
+            if top in CLIENT_ONLY_EXCLUDED_TOP_LEVEL or normalized == DISTRIBUTION_METADATA:
+                continue
+            zf.write(abs_path, "WinZapp/" + normalized)
+            count += 1
+        zf.writestr(
+            "WinZapp/" + DISTRIBUTION_METADATA,
+            json.dumps({"variant": "client-only"}, separators=(",", ":")) + "\n",
+        )
+        count += 1
+    size_mb = os.path.getsize(CLIENT_ONLY_ZIP) / (1024 * 1024)
+    print(f"  -> {CLIENT_ONLY_ZIP}  ({size_mb:.1f} MB, {count} entries)")
+
 # -- Main --------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -763,8 +803,10 @@ if __name__ == "__main__":
         compile_installer_stub()
         append_zip_to_stub()
         create_portable_zip()
+        create_client_only_zip()
         print(f"\n{'='*60}")
         print(f"  Build complete!")
         print(f"  Installer  : {INSTALLER_OUT}")
         print(f"  Portable   : {PORTABLE_ZIP}")
+        print(f"  Client only: {CLIENT_ONLY_ZIP}")
         print(f"{'='*60}\n")

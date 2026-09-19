@@ -217,7 +217,7 @@ jobs:
       # signing is set up), so nothing else would stop an empty release.
       - name: Verify the required assets are present
         run: |
-          for f in dist/WinZappInstaller.exe dist/WinZapp.zip dist/SHA256SUMS.txt; do
+          for f in dist/WinZappInstaller.exe dist/WinZapp.zip dist/WinZappClient.zip dist/SHA256SUMS.txt; do
             test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
           done
 
@@ -307,6 +307,7 @@ jobs:
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
+            dist/WinZappClient.zip
             dist/SHA256SUMS.txt
             dist/SHA256SUMS.txt.sig
 

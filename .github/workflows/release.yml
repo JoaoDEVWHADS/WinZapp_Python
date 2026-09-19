@@ -125,4 +125,5 @@ jobs:
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
+            dist/WinZappClient.zip
           generate_release_notes: true
