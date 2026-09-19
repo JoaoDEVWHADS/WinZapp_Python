@@ -205,9 +205,7 @@ def test_offer_stores_call_details_for_real_answer_or_reject():
     assert stub._incoming_call_details["call-1"] == {
         "call_id": "call-1",
         "peer_jid": "5511999999999@s.whatsapp.net",
-        "group_jid": "",
         "is_video": False,
-        "is_group": False,
         "name": "Fulano",
         "message": "Fulano está te ligando.",
     }
@@ -269,7 +267,7 @@ def test_in_window_stop_button_clears_non_popup_call_surface():
     assert stub.call_incoming_sound.stop_calls == 1
 
 
-def test_group_offer_announces_group_name_without_changing_personal_resolution():
+def test_group_offer_is_ignored():
     stub = _MainStub()
     group_jid = "120363427511142886@g.us"
     stub.chats[group_jid] = {
@@ -281,9 +279,8 @@ def test_group_offer_announces_group_name_without_changing_personal_resolution()
     event.update({"isGroup": True, "groupJid": group_jid})
     stub.on_incoming_call_event(event)
 
-    assert stub.announcements == [
-        ("Chamada em grupo recebida no grupo Família.", True)
-    ]
+    assert stub.announcements == []
+    assert stub._active_incoming_calls == {}
 
 
 def test_answered_or_ended_state_stops_the_tone():
