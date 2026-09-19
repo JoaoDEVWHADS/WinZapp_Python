@@ -18,7 +18,14 @@ stale claim read as alive, for as long as that process lived.
 Fixed twice over: the fallback reads the real creation time (GetProcessTimes),
 and the prompt claim — which only ever guards against a second dialog — is
 held only on a positive (pid, create_time) match. Install leases keep failing
-closed (tests/test_update_coord.py::test_ct_unknown_sentinel_is_alive).
+closed on a merely UNKNOWN create_time
+(tests/test_update_coord.py::test_ct_unknown_sentinel_is_alive) — but a lease
+recorded at 0.0 is written once and never refreshed, so a crashed/killed
+process's leftover lease could never be disproved once its pid was reused,
+permanently blocking future updates. That gap is closed by proc_matches_us:
+a definite proof the pid's own executable image is not WinZapp
+(tests/test_update_coord.py::
+test_ct_unknown_sentinel_with_positive_proof_of_a_different_process_is_dead).
 """
 
 import json
@@ -86,8 +93,15 @@ class TestPromptOwnerAlive:
         assert uc.prompt_owner_alive(42, 0.0, proc_create_time=lambda pid: 1000.5) is False
 
     def test_install_leases_still_fail_closed(self):
-        assert uc.lease_alive(42, 0.0, proc_create_time=lambda pid: 1000.5) is True
-        assert uc.lease_alive(42, 1000.5, proc_create_time=lambda pid: uc._CT_UNKNOWN) is True
+        # Unlike the prompt claim above, an install lease still fails closed
+        # on an unknown create_time — but only while the pid's own identity
+        # is ALSO inconclusive (proc_matches_us=None). A definite mismatch is
+        # covered separately: tests/test_update_coord.py::
+        # test_ct_unknown_sentinel_with_positive_proof_of_a_different_process_is_dead
+        assert uc.lease_alive(42, 0.0, proc_create_time=lambda pid: 1000.5,
+                              proc_matches_us=lambda pid: None) is True
+        assert uc.lease_alive(42, 1000.5, proc_create_time=lambda pid: uc._CT_UNKNOWN,
+                              proc_matches_us=lambda pid: None) is True
 
 
 def _write_claim(gd, owner_pid, owner_create_time):
