@@ -46,7 +46,10 @@ def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
     assert "call:audio:remote" in bridge
     assert "RTCPeerConnection" in bridge
     assert "__winzappOnCallRemoteAudio" in bridge
-    assert "if (!constraints?.audio) return nativeGetUserMedia(constraints)" in bridge
+    assert "if (linuxAudio || !constraints?.audio) return nativeGetUserMedia(constraints)" in bridge
+    assert "new MediaStream([cameraTrack()])" in bridge
+    assert "call:video:camera" in bridge
+    assert "call:video:remote" in bridge
     assert "microphone" in bridge
     assert "camera" in bridge
     assert "webkitGetUserMedia" in bridge
@@ -130,7 +133,7 @@ def test_setup_api_copies_call_patch_files_into_runtime_api():
 def test_outgoing_call_allows_native_voip_more_than_generic_http_timeout():
     main_py = _source("client/main.py")
 
-    assert '"offer",\n                        {"to": peer_jid, "isVideo": False},\n                        timeout=75,' in main_py
+    assert '"offer",\n                        {"to": peer_jid, "isVideo": is_video},\n                        timeout=75,' in main_py
 
 
 def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
@@ -196,11 +199,10 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
 
 
 def test_wa_js_voip_initialization_can_retry_after_lazy_backend_failure():
-    source = _source("rm download/wa-js/src/call/functions/enableCallInterface.ts")
+    source = _source("client/api_patches/src/controller/callController.ts")
 
-    assert "initializationPromise" in source
-    assert "isEnabled = false" in source
-    assert "throw err" in source
+    assert "retryWAWebVoipInitAfterFailure" in source
+    assert "WhatsApp VoIP initializer completed without becoming ready" in source
 
 
 def test_voip_runtime_warmup_is_deduplicated_per_session():

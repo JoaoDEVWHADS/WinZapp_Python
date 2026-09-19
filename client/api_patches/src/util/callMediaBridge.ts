@@ -157,16 +157,16 @@ function ensureLinuxCallAudio(
   return processes;
 }
 
-function installCallMediaBridgeInPage(): boolean {
+function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 4) return true;
+  if (win.__winzappCallMediaBridge?.version === 5) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
   if (!AudioContextCtor) return false;
 
   const state: any = {
-    version: 4,
+    version: 5,
     enabled: false,
     context: null,
     micDestination: null,
@@ -175,6 +175,11 @@ function installCallMediaBridgeInPage(): boolean {
     micOffset: 0,
     remotePipelines: new Map<string, any>(),
     remoteTrackIds: new Set<string>(),
+    remoteVideoIds: new Set<string>(),
+    remoteVideoTimers: new Map<string, number>(),
+    cameraCanvas: null,
+    cameraTrack: null,
+    cameraPending: false,
     localTrackIds: new Set<string>(),
     micFramesPushed: 0,
     micBytesPushed: 0,
@@ -185,6 +190,68 @@ function installCallMediaBridgeInPage(): boolean {
 
   const report = (event: string, details = '') => {
     try { win.__winzappOnCallBridgeEvent?.(event, details); } catch (_) {}
+  };
+
+  state.pushCameraFrame = (jpeg: string) => {
+    if (typeof jpeg !== 'string' || jpeg.length > 350_000 || state.cameraPending) return;
+    state.cameraPending = true;
+    const canvas = state.cameraCanvas || document.createElement('canvas');
+    if (!state.cameraCanvas) {
+      canvas.width = 640;
+      canvas.height = 360;
+      state.cameraCanvas = canvas;
+      const context = canvas.getContext('2d');
+      context?.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    const picture = new Image();
+    picture.onload = () => {
+      try { canvas.getContext('2d')?.drawImage(picture, 0, 0, 640, 360); } finally {
+        state.cameraPending = false;
+      }
+    };
+    picture.onerror = () => { state.cameraPending = false; };
+    picture.src = `data:image/jpeg;base64,${jpeg}`;
+  };
+
+  const cameraTrack = () => {
+    if (!state.cameraCanvas) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 360;
+      canvas.getContext('2d')?.fillRect(0, 0, 640, 360);
+      state.cameraCanvas = canvas;
+    }
+    if (!state.cameraTrack || state.cameraTrack.readyState !== 'live') {
+      state.cameraTrack = state.cameraCanvas.captureStream(10).getVideoTracks()[0];
+    }
+    return state.cameraTrack.clone();
+  };
+
+  const attachRemoteVideo = (track: MediaStreamTrack) => {
+    if (!track || track.kind !== 'video' || state.remoteVideoIds.has(track.id)) return;
+    state.remoteVideoIds.add(track.id);
+    const video = document.createElement('video');
+    video.muted = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.srcObject = new MediaStream([track]);
+    void video.play().catch(() => undefined);
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 360;
+    const timer = win.setInterval(() => {
+      if (track.readyState !== 'live' || !video.videoWidth) return;
+      canvas.getContext('2d')?.drawImage(video, 0, 0, 640, 360);
+      const jpeg = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+      if (jpeg) win.__winzappOnCallRemoteVideo?.(jpeg).catch?.(() => undefined);
+    }, 125);
+    state.remoteVideoTimers.set(track.id, timer);
+    track.addEventListener('ended', () => {
+      win.clearInterval(timer);
+      state.remoteVideoTimers.delete(track.id);
+      state.remoteVideoIds.delete(track.id);
+      video.srcObject = null;
+    }, { once: true });
   };
 
   const ensureContext = () => {
@@ -306,6 +373,9 @@ function installCallMediaBridgeInPage(): boolean {
     }
     state.remotePipelines.clear();
     state.remoteTrackIds.clear();
+    for (const timer of state.remoteVideoTimers.values()) win.clearInterval(timer);
+    state.remoteVideoTimers.clear();
+    state.remoteVideoIds.clear();
     state.localTrackIds.clear();
   };
 
@@ -360,6 +430,7 @@ function installCallMediaBridgeInPage(): boolean {
   const attachRemoteStream = (stream: MediaStream | null | undefined) => {
     try {
       for (const track of stream?.getAudioTracks?.() || []) attachRemoteTrack(track);
+      for (const track of stream?.getVideoTracks?.() || []) attachRemoteVideo(track);
     } catch (_) {}
   };
 
@@ -377,10 +448,16 @@ function installCallMediaBridgeInPage(): boolean {
     tagged.__winzappCallMediaAttached = true;
     const attachRemoteReceivers = () => {
       try {
-        for (const receiver of pc.getReceivers?.() || []) attachRemoteTrack(receiver?.track);
+        for (const receiver of pc.getReceivers?.() || []) {
+          attachRemoteTrack(receiver?.track);
+          attachRemoteVideo(receiver?.track);
+        }
       } catch (_) {}
     };
-    pc.addEventListener('track', (event) => attachRemoteTrack(event.track));
+    pc.addEventListener('track', (event) => {
+      attachRemoteTrack(event.track);
+      attachRemoteVideo(event.track);
+    });
     // Some WhatsApp Web builds populate receivers while applying the remote
     // description without dispatching a page-visible `track` event. Inspecting
     // receivers after the native promise settles covers that path too.
@@ -517,7 +594,21 @@ function installCallMediaBridgeInPage(): boolean {
   } catch (_) {}
 
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
-    if (!constraints?.audio) return nativeGetUserMedia(constraints);
+    if (constraints.video) {
+      const stream = new MediaStream([cameraTrack()]);
+      if (constraints.audio) {
+        if (linuxAudio) {
+          const nativeAudio = await nativeGetUserMedia({ audio: constraints.audio, video: false });
+          nativeAudio.getAudioTracks().forEach((track) => stream.addTrack(track));
+        } else {
+          const micTrack = ensureMicTrack().clone();
+          if (micTrack.id) state.localTrackIds.add(micTrack.id);
+          stream.addTrack(micTrack);
+        }
+      }
+      return stream;
+    }
+    if (linuxAudio || !constraints?.audio) return nativeGetUserMedia(constraints);
 
     // Never let WhatsApp Web open the physical microphone. Even while the
     // Python call engine is not active, expose a live silent synthetic track so
@@ -525,10 +616,7 @@ function installCallMediaBridgeInPage(): boolean {
     // Once state.enabled becomes true, Python PCM is written into this track.
     const micTrack = ensureMicTrack().clone();
     if (micTrack.id) state.localTrackIds.add(micTrack.id);
-    if (!constraints.video) return new MediaStream([micTrack]);
-    const videoOnly = await nativeGetUserMedia({ video: constraints.video, audio: false });
-    videoOnly.addTrack(micTrack);
-    return videoOnly;
+    return new MediaStream([micTrack]);
   };
   try {
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
@@ -562,9 +650,7 @@ function toBuffer(value: any): Buffer | null {
 }
 
 export async function ensureCallMediaBridge(client: any, io: any, logger: any): Promise<boolean> {
-  if (process.platform === 'linux' && process.env.PULSE_SERVER === LINUX_PULSE_SERVER) {
-    return true;
-  }
+  const linuxAudio = process.platform === 'linux' && process.env.PULSE_SERVER === LINUX_PULSE_SERVER;
   const page = client?.waPage || client?.page;
   if (!page) return false;
 
@@ -596,8 +682,20 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
   }
 
   try {
+    await page.exposeFunction('__winzappOnCallRemoteVideo', (jpeg: string) => {
+      if (typeof jpeg !== 'string' || jpeg.length > 350_000) return;
+      io.to(`session:${client.session}`).emit('call:video:remote', {
+        session: client.session,
+        jpeg,
+      });
+    });
+  } catch (_) {
+    // Puppeteer bindings survive navigation.
+  }
+
+  try {
     if (!(client as any).__winzappCallMediaNewDocumentInstalled) {
-      await page.evaluateOnNewDocument(installCallMediaBridgeInPage);
+      await page.evaluateOnNewDocument(installCallMediaBridgeInPage, linuxAudio);
       (client as any).__winzappCallMediaNewDocumentInstalled = true;
 
       // WPPConnect hands the page to us only after WhatsApp Web has loaded.
@@ -613,7 +711,7 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 120000 });
       }
     }
-    const installed = await page.evaluate(installCallMediaBridgeInPage);
+    const installed = await page.evaluate(installCallMediaBridgeInPage, linuxAudio);
     if (installed) logger?.info?.(`[${client.session}] WinZapp call media bridge ready`);
     return !!installed;
   } catch (error: any) {
@@ -701,10 +799,6 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
                 acceptCall: typeof stack.acceptCall === 'function',
                 rejectCall: typeof stack.rejectCall === 'function',
                 endCall: typeof stack.endCall === 'function',
-                earlyWasmProbeInstalled:
-                  !!win.__winzappEarlyWasmProbeInstalled,
-                earlyWasmProbeError:
-                  String(win.__winzappEarlyWasmProbeError || ''),
               };
             }
             lastError = 'VoIP stack interface returned no value';
@@ -720,9 +814,7 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
       if (result?.ready) {
         logger?.info?.(
           `[${client.session}] WinZapp VoIP runtime warmed ` +
-            `(accept=${!!result.acceptCall}, reject=${!!result.rejectCall}, end=${!!result.endCall}, ` +
-            `earlyWasmProbe=${!!result.earlyWasmProbeInstalled}, ` +
-            `probeError=${result.earlyWasmProbeError || 'none'})`
+            `(accept=${!!result.acceptCall}, reject=${!!result.rejectCall}, end=${!!result.endCall})`
         );
         return true;
       }
@@ -804,6 +896,20 @@ export function registerCallAudioSocket(
   logger: any,
   authenticatedSession: string
 ): void {
+  let cameraBusy = false;
+  socket.on('call:video:camera', (payload: any) => {
+    const session = String(payload?.session || '');
+    const jpeg = payload?.jpeg;
+    if (session !== authenticatedSession || typeof jpeg !== 'string' ||
+        jpeg.length > 350_000 || cameraBusy) return;
+    const client: any = (clientsArray as any)[session];
+    const page = client?.waPage || client?.page;
+    if (!page) return;
+    cameraBusy = true;
+    page.evaluate((frame: string) => {
+      (window as any).__winzappCallMediaBridge?.pushCameraFrame?.(frame);
+    }, jpeg).catch(() => undefined).finally(() => { cameraBusy = false; });
+  });
   socket.on('call:audio:mic', (payload: any) => {
     const session = String(payload?.session || '');
     const pcm =
