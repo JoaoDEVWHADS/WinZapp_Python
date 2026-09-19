@@ -1,10 +1,9 @@
 """Enumeration and selection helpers for the Settings > Audio Devices tab.
 
-Output (playback) device switching goes through sound_lib/BASS — a single
-process-wide `Output` device, shared by every stream anywhere in the app
-(program sounds, conversation audio, status audio). Input (recording) device
-selection only affects PyAudio, used solely for voice-message recording in
-`ui/conversations.py`.
+Output (playback) device enumeration is shared through sound_lib/BASS.
+Program playback owns the main BASS output; effect sounds and received call
+audio can pin their own BASS channels to another enabled output device.
+Input (recording) selection remains a separate PortAudio/PyAudio path.
 
 Devices are stored in settings by friendly name, not raw index — BASS/PortAudio
 device indices are not stable across reboots or device (dis)connections, so a

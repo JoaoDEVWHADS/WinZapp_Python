@@ -297,3 +297,62 @@ def test_windows_wasapi_settings_are_explicitly_shared(monkeypatch):
     assert input_settings.auto_convert is True
     assert output_settings.exclusive is False
     assert output_settings.auto_convert is True
+
+class _SwitchableOutput:
+    def __init__(self, initial_name):
+        self.initial_name = initial_name
+        self.started = False
+        self.closed = False
+        self.writes = []
+        self.switches = []
+
+    def start(self):
+        self.started = True
+
+    def write(self, samples):
+        self.writes.append(np.asarray(samples).copy())
+        return False
+
+    def switch_device(self, name):
+        self.switches.append(name)
+        return True
+
+    def stop(self):
+        self.started = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_call_output_switches_live_without_reopening_microphone():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    outputs = []
+
+    def make_output(name):
+        output = _SwitchableOutput(name)
+        outputs.append(output)
+        return output
+
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(
+            session="winzapp",
+            input_device_name="Mic",
+            output_device_name="Speaker",
+        ),
+        sounddevice_module=sounddevice,
+        output_factory=make_output,
+    )
+    session.start()
+    microphone_stream = sounddevice.input_streams[0][1]
+
+    assert session.switch_output_device("USB Headset") is True
+    assert outputs[0].switches == ["USB Headset"]
+    assert sounddevice.input_streams[0][1] is microphone_stream
+    assert len(sounddevice.input_streams) == 1
+    assert microphone_stream.started is True
+    assert microphone_stream.closed is False
+
+    session.stop()
+

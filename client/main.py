@@ -50,6 +50,7 @@ from core.audio_devices import (
     find_input_device_index,
     test_input_device,
     enumerate_input_devices,
+    enumerate_output_devices,
 )
 from core.bulk_read_state import run_bulk_read_state
 from core.call_matching import call_event_matches_active
@@ -6296,6 +6297,36 @@ class MainWindow(wx.Frame):
         if hasattr(self, "voice_call_window"):
             wx.CallAfter(self._sync_voice_call_bar)
 
+    def _switch_active_call_output_device(self, device_name: str):
+        """Move only the live BASS call output; keep microphone capture alive."""
+        session = (
+            getattr(self, "_call_audio_session", None)
+            or getattr(self, "_call_ring_audio_session", None)
+        )
+        if session is None:
+            return
+
+        def _worker():
+            try:
+                session.switch_output_device(device_name or "")
+                logging.info(
+                    "[call_audio] active call output switched live to %r",
+                    device_name or "<default>",
+                )
+            except Exception:
+                logging.exception("[call_audio] failed to switch active call output")
+                wx.CallAfter(
+                    self.output,
+                    self.i18n.t("voice_call_device_switch_failed"),
+                    True,
+                )
+
+        threading.Thread(
+            target=_worker,
+            name="WinZappCallOutputSwitch",
+            daemon=True,
+        ).start()
+
     def _restart_active_voice_call_audio(self):
         """Apply changed call devices without ending the WhatsApp call."""
         active = dict(getattr(self, "_active_voice_call", {}) or {})
@@ -6546,13 +6577,11 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def open_call_audio_settings(self, _event=None, parent=None):
-        """Choose the call microphone and speaker without changing global audio settings.
+        """Choose call devices; speaker changes apply live through BASS.
 
-        ``parent`` is passed by whoever opened this. It matters: parented to the
-        main window while the Settings dialog is what opened it, the chooser has
-        an enabled sibling that can sit on top of it.
+        ``parent`` is passed by whoever opened this so the chooser remains
+        correctly modal above Settings as well as above the active-call window.
         """
-        import sounddevice as sd
         if parent is None:
             call_window = getattr(self, "voice_call_window", None)
             parent = call_window if (call_window is not None and call_window.IsShown()) else self
@@ -6561,11 +6590,21 @@ class MainWindow(wx.Frame):
         root = wx.BoxSizer(wx.VERTICAL)
         cfg = self.settings.setdefault("call_audio_devices", {})
         try:
-            output_names = [str(d.get("name", "")).strip() for d in sd.query_devices()
-                            if d.get("max_output_channels", 0) > 0]
+            output_names = [name for _, name in enumerate_output_devices()]
         except Exception:
+            logging.exception("[call_audio] could not enumerate BASS output devices")
             output_names = []
         input_names = [name for _, name in enumerate_input_devices()]
+
+        # Keep a disconnected saved device visible rather than silently
+        # replacing its setting just because it is temporarily unavailable.
+        saved_input = cfg.get("input_device_name", "")
+        saved_output = cfg.get("output_device_name", "")
+        if saved_input and saved_input not in input_names:
+            input_names.append(saved_input)
+        if saved_output and saved_output not in output_names:
+            output_names.append(saved_output)
+
         default_name = self.i18n.t("audio_device_default")
 
         def add_combo(label_key, names, selected):
@@ -6578,9 +6617,9 @@ class MainWindow(wx.Frame):
             return combo
 
         input_combo = add_combo("voice_call_recording_devices",
-                                input_names, cfg.get("input_device_name", ""))
+                                input_names, saved_input)
         output_combo = add_combo("voice_call_playback_devices",
-                                 output_names, cfg.get("output_device_name", ""))
+                                 output_names, saved_output)
 
         buttons = wx.StdDialogButtonSizer()
         cancel_button = wx.Button(dialog, wx.ID_CANCEL, self.i18n.t("cancel"))
@@ -6588,13 +6627,32 @@ class MainWindow(wx.Frame):
         ok_button = wx.Button(dialog, wx.ID_OK, self.i18n.t("ok"))
         buttons.AddButton(cancel_button); buttons.AddButton(apply_button); buttons.AddButton(ok_button); buttons.Realize()
         root.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+
         def apply(_evt=None):
-            cfg["input_device_name"] = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
-            cfg["output_device_name"] = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
+            old_input = cfg.get("input_device_name", "")
+            old_output = cfg.get("output_device_name", "")
+            new_input = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
+            new_output = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
+            cfg["input_device_name"] = new_input
+            cfg["output_device_name"] = new_output
             self.save_settings()
-            if getattr(self, "_call_audio_session", None) is not None:
-                self._restart_active_voice_call_audio()
+
+            active_audio = getattr(self, "_call_audio_session", None)
+            ringing_audio = getattr(self, "_call_ring_audio_session", None)
+            if active_audio is not None:
+                if new_input != old_input:
+                    # Microphone capture still uses PortAudio; reopening it is
+                    # only necessary when the microphone itself changed.
+                    self._restart_active_voice_call_audio()
+                elif new_output != old_output:
+                    self._switch_active_call_output_device(new_output)
+            elif ringing_audio is not None and new_output != old_output:
+                # Incoming-call monitoring has no microphone open yet, so its
+                # speaker can always move in place too.
+                self._switch_active_call_output_device(new_output)
+
             wx.CallAfter(input_combo.SetFocus)
+
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
         cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))

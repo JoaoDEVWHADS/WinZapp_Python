@@ -73,13 +73,213 @@ def _pcm16_float32(pcm: bytes) -> np.ndarray:
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
+class _BassCallOutput:
+    """BASS push stream for received call audio.
+
+    Calls use the same BASS output-device namespace as normal program audio and
+    effect sounds, but keep their own stream so the selected call speaker can
+    be changed independently without touching the microphone or ending the
+    WhatsApp call.
+    """
+
+    def __init__(self, device_name: str = ""):
+        self._lock = threading.RLock()
+        self._stream = None
+        self._started = False
+        self._device_name = str(device_name or "")
+        self._device_index = self._resolve_device(self._device_name, allow_fallback=True)
+        self._create_stream_locked()
+
+    @staticmethod
+    def _resolve_device(device_name: str, *, allow_fallback: bool) -> int:
+        from core.audio_devices import (
+            find_default_output_device_index,
+            find_output_device_index,
+        )
+
+        if device_name:
+            index = find_output_device_index(device_name)
+            if index is not None:
+                return int(index)
+            if not allow_fallback:
+                raise CallAudioUnavailable(
+                    f"BASS output device is not available: {device_name}"
+                )
+            logging.warning(
+                "[call_audio] BASS output %r is unavailable; using system default",
+                device_name,
+            )
+
+        index = find_default_output_device_index()
+        if index is None:
+            raise CallAudioUnavailable("No BASS output device is available for the call")
+        return int(index)
+
+    @staticmethod
+    def _ensure_device(device_index: int) -> None:
+        """Initialise one extra BASS output without changing the app default."""
+        from sound_lib.external.pybass import (
+            BASS_ERROR_ALREADY,
+            BASS_ErrorGetCode,
+            BASS_GetDevice,
+            BASS_Init,
+            BASS_SetDevice,
+        )
+
+        try:
+            previous = int(BASS_GetDevice())
+        except Exception:
+            previous = 0
+
+        ok = bool(BASS_Init(int(device_index), CALL_SAMPLE_RATE, 0, 0, None))
+        if not ok:
+            error = int(BASS_ErrorGetCode())
+            if error != BASS_ERROR_ALREADY:
+                raise CallAudioUnavailable(
+                    f"Could not initialise BASS output device {device_index} "
+                    f"(error {error})"
+                )
+
+        # BASS_Init makes the just-initialised device current. Restore the
+        # program output immediately so unrelated streams do not jump devices.
+        if previous > 0 and previous != int(device_index):
+            if not BASS_SetDevice(previous):
+                logging.warning(
+                    "[call_audio] could not restore BASS current device %s",
+                    previous,
+                )
+
+    def _create_stream_locked(self) -> None:
+        from sound_lib.stream import PushStream
+
+        self._ensure_device(self._device_index)
+        old = self._stream
+        self._stream = None
+        if old is not None:
+            try:
+                old.free()
+            except Exception:
+                pass
+
+        try:
+            stream = PushStream(freq=CALL_SAMPLE_RATE, chans=1)
+            if int(stream.get_device()) != int(self._device_index):
+                stream.set_device(int(self._device_index))
+            self._stream = stream
+            if self._started:
+                self._stream.play()
+        except Exception as exc:
+            try:
+                if self._stream is not None:
+                    self._stream.free()
+            except Exception:
+                pass
+            self._stream = None
+            raise CallAudioUnavailable(
+                f"Could not open BASS call output: {exc}"
+            ) from exc
+
+    def start(self) -> None:
+        with self._lock:
+            if self._stream is None:
+                self._create_stream_locked()
+            self._started = True
+            self._stream.play()
+
+    def write(self, samples) -> bool:
+        data = _pcm16_bytes(np.asarray(samples, dtype=np.float32).reshape(-1))
+        if not data:
+            return False
+        with self._lock:
+            if self._stream is None:
+                self._create_stream_locked()
+            try:
+                self._stream.push(data)
+            except Exception:
+                # Changing another BASS output can invalidate a channel on a
+                # device that was reinitialised. Recover the call stream in
+                # place instead of tearing down the whole CallAudioSession.
+                logging.warning(
+                    "[call_audio] BASS call stream became invalid; rebuilding it",
+                    exc_info=True,
+                )
+                self._create_stream_locked()
+                self._stream.push(data)
+        return False
+
+    def switch_device(self, device_name: str) -> bool:
+        """Move the live BASS channel to another output device."""
+        target_name = str(device_name or "")
+        target = self._resolve_device(target_name, allow_fallback=False)
+        with self._lock:
+            if target == self._device_index:
+                self._device_name = target_name
+                return True
+
+            self._ensure_device(target)
+            if self._stream is None:
+                self._device_index = target
+                self._device_name = target_name
+                self._create_stream_locked()
+                return True
+
+            try:
+                self._stream.set_device(target)
+            except Exception as exc:
+                raise CallAudioUnavailable(
+                    f"Could not move call output to BASS device {target}: {exc}"
+                ) from exc
+
+            self._device_index = target
+            self._device_name = target_name
+
+        logging.info(
+            "[call_audio] BASS call output switched device=%r index=%s",
+            self._device_name or "<default>",
+            self._device_index,
+        )
+        return True
+
+    def stop(self) -> None:
+        with self._lock:
+            self._started = False
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        with self._lock:
+            stream = self._stream
+            self._stream = None
+            self._started = False
+            if stream is not None:
+                try:
+                    stream.free()
+                except Exception:
+                    logging.debug(
+                        "[call_audio] failed to free BASS call stream",
+                        exc_info=True,
+                    )
+
+
 class CallAudioSession:
     """Own the Python side of one low-latency voice-call audio pipeline."""
 
-    def __init__(self, sio, config: CallAudioConfig, *, sounddevice_module=None):
+    def __init__(
+        self,
+        sio,
+        config: CallAudioConfig,
+        *,
+        sounddevice_module=None,
+        output_factory=None,
+    ):
         self._sio = sio
         self._config = config
-        self._sd = sounddevice_module or sd
+        self._sounddevice_injected = sounddevice_module is not None
+        self._sd = sd if sounddevice_module is None else sounddevice_module
+        self._output_factory = output_factory
         self._input_stream = None
         self._output_stream = None
         self._input_rate = CALL_SAMPLE_RATE
@@ -119,9 +319,6 @@ class CallAudioSession:
         """Open receive audio while ringing without opening the microphone."""
         if self.output_running:
             return
-        if self._sd is None:
-            raise CallAudioUnavailable("sounddevice is not available in this Python runtime")
-
         self._stop_event.clear()
         self._output_stream, self._output_rate = self._open_output_stream()
         try:
@@ -180,6 +377,18 @@ class CallAudioSession:
         except (TypeError, ValueError):
             sample_rate = CALL_SAMPLE_RATE
         self._put_drop_oldest(self._output_queue, (bytes(pcm), sample_rate))
+
+    def switch_output_device(self, device_name: str) -> bool:
+        """Move received call audio without restarting capture or the call."""
+        stream = self._output_stream
+        if stream is None:
+            raise CallAudioUnavailable("Call output is not running")
+        switch = getattr(stream, "switch_device", None)
+        if switch is None:
+            raise CallAudioUnavailable(
+                "The active call output backend cannot switch devices in place"
+            )
+        return bool(switch(device_name or ""))
 
     def _query_devices(self):
         try:
@@ -317,6 +526,14 @@ class CallAudioSession:
         raise CallAudioUnavailable(f"No microphone could be opened for the call: {last_error}")
 
     def _open_output_stream(self):
+        # Production call playback uses BASS, exactly like the program/effect
+        # output device selectors. Explicitly injected sounddevice modules are
+        # retained for the existing platform-neutral transport tests.
+        if self._output_factory is not None:
+            return self._output_factory(self._config.output_device_name), CALL_SAMPLE_RATE
+        if not self._sounddevice_injected:
+            return _BassCallOutput(self._config.output_device_name), CALL_SAMPLE_RATE
+
         last_error = None
         for device in self._candidate_devices(self._config.output_device_name, input_device=False):
             for rate in self._candidate_rates(device):
@@ -333,7 +550,7 @@ class CallAudioSession:
                         ),
                     )
                     logging.info(
-                        "[call_audio] output opened device=%r rate=%s latency=%r",
+                        "[call_audio] injected test output opened device=%r rate=%s latency=%r",
                         device,
                         rate,
                         getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
