@@ -390,6 +390,204 @@ def _wrap_changelog_text(text: str, width: int = 100) -> str:
 
 # ── Install helpers ───────────────────────────────────────────────────────────
 
+def _oem_encoding() -> str:
+    """The code page cmd.exe decodes a .bat file with.
+
+    Not the one Python writes text in by default, and not UTF-8: a console
+    reads a batch script in the OEM code page (CP852 on a Polish Windows,
+    CP850 on a Portuguese one, ...). GetOEMCP() is what actually answers
+    that; cp850 is a last-resort guess if the call is unavailable.
+    """
+    try:
+        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    except Exception:
+        return "cp850"
+
+
+def _console_safe_path(path: str) -> str:
+    """*path* in a form a batch script can carry safely — its 8.3 short form
+    when the long one has characters outside ASCII.
+
+    A path like ``C:\\Users\\Paweł\\AppData\\Local\\WinZapp`` written into a
+    .bat as UTF-8 reaches cmd.exe as mojibake, because cmd decodes the file in
+    the OEM code page (see _oem_encoding()). Every command that path appears
+    in then addresses a directory that does not exist — which is exactly how
+    an update could copy nothing, write no failure marker (the marker path
+    contains the same character), and never relaunch the app (so does the
+    exe path), leaving no trace of why. Reported from a Windows account whose
+    name contains "ł" (issue #83).
+
+    GetShortPathNameW returns the 8.3 alias, which is pure ASCII, so the
+    script becomes code-page-independent. It needs the path to exist and 8.3
+    generation to be enabled on the volume; when either isn't true it returns
+    the long path unchanged and the caller falls back to writing the script
+    in the OEM code page instead.
+    """
+    if not path or path.isascii() or sys.platform != "win32":
+        return path
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf))
+        if length and buf.value and buf.value.isascii():
+            return buf.value
+        logging.info(
+            "Auto-updater: no ASCII 8.3 name for %r (8.3 generation disabled?) "
+            "— falling back to the OEM code page for the script.", path,
+        )
+    except Exception:
+        logging.exception("Auto-updater: GetShortPathNameW failed for %r", path)
+    return path
+
+
+def _build_installer_script(source_dir: str, install_dir: str, exe_path: str,
+                            log_path: str, marker_path: str, pid: int,
+                            api_port: int, extra_pids: "list[int] | tuple" = ()) -> str:
+    """The batch script text. Pure — every path is already console-safe.
+
+    Kept apart from _run_batch_installer() so what the script says can be
+    asserted without launching anything.
+
+    ``extra_pids`` are the other accounts' processes: the script must not
+    copy over WinZapp.exe and its DLLs while any of them still has those
+    files mapped — that xcopy fails with a sharing violation and relaunches
+    the old build, which the next update check offers again (the "atualiza
+    e não muda" loop with two accounts open). They have already been asked
+    to quit over IPC by the time this runs; waiting here covers the seconds
+    between their ACK and the process actually being gone.
+    """
+    in_progress_marker = os.path.join(install_dir, "update_in_progress.marker")
+
+    wait_blocks = "".join(
+        f"set /a WAIT{i}_SECONDS=0\n"
+        f":WAIT{i}\n"
+        f'tasklist /FI "PID eq {p}" 2>NUL | find "{p}" >NUL\n'
+        "if not errorlevel 1 (\n"
+        f"    set /a WAIT{i}_SECONDS+=1\n"
+        f"    if !WAIT{i}_SECONDS! GEQ 60 goto OTHER_ACCOUNT_TIMEOUT\n"
+        "    timeout /t 1 /nobreak >NUL\n"
+        f"    goto WAIT{i}\n"
+        ")\n"
+        for i, p in enumerate(extra_pids, start=1)
+    )
+    return (
+        "@echo off\n"
+        "setlocal EnableDelayedExpansion\n"
+        # Keep one previous run's log (as .old) before truncating: this file
+        # is the only record of what the installer actually did, and an
+        # update that goes wrong right as the app exits (issue: a Node/
+        # WPPConnect crash mid-update, "desconexão ao atualizar") is exactly
+        # the case where the CURRENT run's log alone can't show whether this
+        # same update flow has misbehaved before. A silent `> "{log_path}"`
+        # below would erase that history on every single update, healthy or
+        # not — so move it aside first (best-effort; a locked/missing file
+        # from the very first update ever just does nothing here).
+        f'move /Y "{log_path}" "{log_path}.old" >NUL 2>&1\n'
+        f'echo update_in_progress > "{in_progress_marker}"\n'
+        f'> "{log_path}" echo [WinZapp] update started %DATE% %TIME%\n'
+        # The active code page goes into the log first: when a path does come
+        # out wrong, this is the single fact that explains it, and the old
+        # script left no record of anything at all.
+        f'>> "{log_path}" chcp\n'
+        f'>> "{log_path}" echo source: {source_dir}\n'
+        f'>> "{log_path}" echo target: {install_dir}\n'
+        ":WAIT\n"
+        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
+        "if not errorlevel 1 (\n"
+        "    timeout /t 1 /nobreak >NUL\n"
+        "    goto WAIT\n"
+        ")\n"
+        + wait_blocks +
+        # Give child processes a moment to exit, then kill stragglers holding file locks.
+        "timeout /t 2 /nobreak >NUL\n"
+        "taskkill /F /IM node.exe >NUL 2>&1\n"
+        "taskkill /F /IM chrome-headless-shell.exe >NUL 2>&1\n"
+        "taskkill /F /IM chrome.exe >NUL 2>&1\n"
+        "taskkill /F /IM chromium.exe >NUL 2>&1\n"
+        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "timeout /t 1 /nobreak >NUL\n"
+        f'if exist "{install_dir}\\api\\src" rmdir /s /q "{install_dir}\\api\\src"\n'
+        f'if exist "{install_dir}\\api\\dist" rmdir /s /q "{install_dir}\\api\\dist"\n'
+        f'if exist "{install_dir}\\api_patches" rmdir /s /q "{install_dir}\\api_patches"\n'
+        # xcopy's exit code was previously never checked, so a failed copy
+        # (locked file, disk full, permissions) silently relaunched whatever
+        # was already in install_dir — the user saw the app come back and
+        # assumed the update worked. errorlevel 4+ means xcopy itself failed
+        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
+        # leave a marker file WinZapp checks on next startup so the user is
+        # told instead of silently running a stale/partial install.
+        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\" >> "{log_path}" 2>&1\n'
+        # One retry, because the failure this converts is transient and
+        # common. Reported live: an update that copied hundreds of files
+        # into the install directory and then died on "Violacao de
+        # compartilhamento" — a sharing violation on a freshly-written
+        # .pyd, i.e. an on-access antivirus scan holding a file xcopy had
+        # just put there. WinZapp itself had already exited (the WAIT loop
+        # above) and its Node was killed, so nothing of ours held it; five
+        # seconds later it would have been free. Without a retry the user
+        # got update_failed.marker, an install that had ALREADY been
+        # partially overwritten, and the old exe relaunched over it.
+        #
+        # Safe to repeat: xcopy /E /Y /I /H is idempotent — every file it
+        # already wrote is overwritten with the same bytes — so the second
+        # pass either finishes the copy or fails the same way, and only
+        # then is the update declared failed.
+        "if errorlevel 4 (\n"
+        f'    >> "{log_path}" echo xcopy hit a locked file - retrying once in 5s\n'
+        "    timeout /t 5 /nobreak >NUL\n"
+        f'    xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\" >> "{log_path}" 2>&1\n'
+        ")\n"
+        "if errorlevel 4 (\n"
+        f'    >> "{log_path}" echo xcopy FAILED\n'
+        f'    echo update failed > "{marker_path}"\n'
+        f'    del /q "{in_progress_marker}" 2>NUL\n'
+        f'    if exist "{exe_path}" start "" "{exe_path}"\n'
+        # Deliberately not deleted on failure: the script and its log are the
+        # only evidence of what went wrong, and erasing them is what made the
+        # original report impossible to diagnose from the user's machine.
+        "    exit /b 1\n"
+        ")\n"
+        f'>> "{log_path}" echo xcopy OK\n'
+        f'del /q "{in_progress_marker}" 2>NUL\n'
+        f'if exist "{exe_path}" start "" "{exe_path}"\n'
+        'del "%~f0"\n'
+        "goto :EOF\n"
+        ":OTHER_ACCOUNT_TIMEOUT\n"
+        f'>> "{log_path}" echo timed out waiting for another WinZapp account to exit\n'
+        f'echo update failed: another WinZapp account did not exit > "{marker_path}"\n'
+        f'del /q "{in_progress_marker}" 2>NUL\n'
+        f'if exist "{exe_path}" start "" "{exe_path}"\n'
+        "exit /b 1\n"
+    )
+
+
+def _write_installer_script(bat_path: str, script: str) -> bool:
+    """Write *script* so cmd.exe reads it back correctly. Returns success.
+
+    ASCII (the normal case, and what _console_safe_path() aims for) is written
+    as-is. Anything left over is written in the code page cmd will decode it
+    with — never UTF-8, which is what made a non-ASCII install path unusable.
+    A script that cannot be represented at all is refused rather than written
+    corrupt: the caller then reports a failed update instead of closing the
+    app for an installer that would quietly do nothing.
+    """
+    encoding = "ascii" if script.isascii() else _oem_encoding()
+    try:
+        with open(bat_path, "w", encoding=encoding, errors="strict", newline="\r\n") as f:
+            f.write(script)
+    except (UnicodeEncodeError, LookupError) as exc:
+        logging.error(
+            "Auto-updater: installer script cannot be written in %s (%s) — "
+            "the install path has characters cmd.exe cannot read back. "
+            "Aborting instead of running a script with broken paths.",
+            encoding, exc,
+        )
+        return False
+    logging.info("Auto-updater: Wrote batch installer script to %s (encoding=%s)",
+                 bat_path, encoding)
+    return True
+
+
 def _needs_admin() -> bool:
     """Return True if the install directory is not writable by the current user."""
     install_dir = _outer_exe_dir()
@@ -403,10 +601,11 @@ def _needs_admin() -> bool:
         return True
 
 
-def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300) -> bool:
+def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300,
+                         extra_pids: "list[int] | tuple" = ()) -> bool:
     """
     Write a batch script that:
-      1. Waits for PID to exit.
+      1. Waits for PID (and every other account's PID in extra_pids) to exit.
       2. Kills any leftover WPPConnect Server (api_port) and PostgreSQL (5433) processes.
       3. Copies all extracted files to install_dir.
       4. Restarts the client executable.
@@ -426,79 +625,48 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     bat_fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="winzapp_upd_")
     os.close(bat_fd)
 
-    exe_path = os.path.join(install_dir, exe_name)
-    log_file = os.path.join(install_dir, "logs", "updater_installer.log")
-    in_progress_marker = os.path.join(install_dir, "update_in_progress.marker")
-    bat_log_dir = os.path.join(install_dir, "logs")
+    # Every path the script carries is made console-safe: a non-ASCII install
+    # path (a Windows account named "Paweł", issue #83) reached cmd.exe as
+    # mojibake and every command in the script then addressed a directory that
+    # does not exist. Only the DIRECTORIES are converted — GetShortPathNameW
+    # answers for paths that exist, and the exe/marker/log are files the
+    # script is about to create — so the ASCII file names are joined onto the
+    # already-safe directory afterwards.
+    safe_source  = _console_safe_path(source_dir)
+    safe_install = _console_safe_path(install_dir)
 
-    bat = (
-        "@echo off\n"
-        "setlocal EnableExtensions\n"
-        # The logs dir is NOT guaranteed to exist in the install root (a fresh
-        # install may never have created it). Create it before any redirect,
-        # or every `>> updater_installer.log` below fails silently and the
-        # batch leaves no trace at all — exactly what made this failure
-        # invisible. Also drop a marker the newly launched app checks on boot
-        # so it does not open while the copy is still finishing (which used to
-        # lock files mid-xcopy and leave the old version installed).
-        f'if not exist "{bat_log_dir}" mkdir "{bat_log_dir}"\n'
-        f'echo update_in_progress > "{in_progress_marker}"\n'
-        f'echo [%date% %time%] [UPDATER_BAT] Starting batch update execution for PID {pid}... >> "{log_file}"\n'
-        ":WAIT\n"
-        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
-        "if not errorlevel 1 (\n"
-        "    timeout /t 1 /nobreak >NUL\n"
-        "    goto WAIT\n"
-        ")\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Process PID {pid} has exited. Proceeding to kill residual processes... >> "{log_file}"\n'
-        # Give child processes a moment to exit, then kill stragglers holding file locks.
-        "timeout /t 2 /nobreak >NUL\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Terminating node.exe, chrome-headless-shell.exe, chrome.exe, chromium.exe... >> "{log_file}"\n'
-        f'"taskkill" /F /IM node.exe >> "{log_file}" 2>&1\n'
-        f'"taskkill" /F /IM chrome-headless-shell.exe >> "{log_file}" 2>&1\n'
-        f'"taskkill" /F /IM chrome.exe >> "{log_file}" 2>&1\n'
-        f'"taskkill" /F /IM chromium.exe >> "{log_file}" 2>&1\n'
-        f'echo [%date% %time%] [UPDATER_BAT] Clearing processes listening on ports {api_port} and 5433... >> "{log_file}"\n'
-        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >> \"{log_file}\" 2>&1\n"
-        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >> \"{log_file}\" 2>&1\n"
-        "timeout /t 1 /nobreak >NUL\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Cleaning legacy api directories... >> "{log_file}"\n'
-        f'if exist "{install_dir}\\api\\src" rmdir /s /q "{install_dir}\\api\\src"\n'
-        f'if exist "{install_dir}\\api\\dist" rmdir /s /q "{install_dir}\\api\\dist"\n'
-        f'if exist "{install_dir}\\api_patches" rmdir /s /q "{install_dir}\\api_patches"\n'
-        f'echo [%date% %time%] [UPDATER_BAT] Copying updated files from "{source_dir}" to "{install_dir}"... >> "{log_file}"\n'
-        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\" >> "{log_file}" 2>&1\n'
-        "if errorlevel 1 (\n"
-        f'    echo [%date% %time%] [UPDATER_BAT] ERROR: xcopy failed with errorlevel %errorlevel%! >> "{log_file}"\n'
-        f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
-        ") else (\n"
-        f'    echo [%date% %time%] [UPDATER_BAT] xcopy completed successfully. >> "{log_file}"\n'
-        ")\n"
-        # Wait for file system to finish writing the new exe before launching it.
-        "timeout /t 3 /nobreak >NUL\n"
-        f'if exist "{exe_path}" (\n'
-        f'    echo [%date% %time%] [UPDATER_BAT] Launching updated executable: "{exe_path}" >> "{log_file}"\n'
-        f'    start "" "{exe_path}"\n'
-        ") else (\n"
-        f'    echo [%date% %time%] [UPDATER_BAT] ERROR: Executable not found at "{exe_path}"! >> "{log_file}"\n'
-        f'    echo WinZapp exe not found after update: {exe_path} >> "{install_dir}\\update_failed.marker"\n'
-        ")\n"
-        # Batch copy/relaunch is done — the marker must go before the new app
-        # boots, or the freshly launched instance would refuse to start / wait
-        # forever on its in-progress guard on first launch.
-        f'del /q "{in_progress_marker}" 2>NUL\n'
-        f'echo [%date% %time%] [UPDATER_BAT] Batch update finished. Deleting temporary script. >> "{log_file}"\n'
-        'del "%~f0"\n'
+    # The log goes into the current account's own logs/ folder (same place
+    # log.log and shutdown_audit.log live), not loose next to the exe —
+    # multi-account installs share one exe dir across every account's
+    # process, and dropping an unaccounted-for file there is exactly the
+    # "solto com os arquivos principais do programa" complaint this fixes.
+    # update_failed.marker stays in the install dir on purpose: main.py
+    # reads it at the very start of __init__, before an account is even
+    # chosen, so it has to live somewhere account-agnostic.
+    try:
+        account_log_dir = log_path()
+        os.makedirs(account_log_dir, exist_ok=True)
+        safe_log_dir = _console_safe_path(account_log_dir)
+    except Exception:
+        # No active account yet (shouldn't happen — this runs from a live
+        # MainWindow instance — but the update must not be blocked by it).
+        safe_log_dir = safe_install
+
+    script = _build_installer_script(
+        safe_source,
+        safe_install,
+        os.path.join(safe_install, exe_name),
+        os.path.join(safe_log_dir, "update_install.log"),
+        os.path.join(safe_install, "update_failed.marker"),
+        pid,
+        api_port,
+        extra_pids=extra_pids,
     )
-
-    with open(bat_path, "w", encoding="utf-8") as f:
-        f.write(bat)
-    log_updater(logging.INFO, "Wrote batch installer script to %s", bat_path)
-    log_updater(logging.INFO, "Batch script will write step-by-step output to %s", log_file)
+    if not _write_installer_script(bat_path, script):
+        return False
 
     if sys.platform == "win32":
         needs_admin = _needs_admin()
-        log_updater(logging.INFO, "needs_admin=%s for install dir %s", needs_admin, install_dir)
         if needs_admin:
             # ShellExecuteW returns an HINSTANCE-shaped value that is > 32 on
             # success and an SE_ERR_* code <= 32 on failure — notably
@@ -510,24 +678,38 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
             result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
             )
-            log_updater(logging.INFO, "ShellExecuteW('runas', ...) result=%s", result)
             if result <= 32:
-                log_updater(
-                    logging.WARNING,
-                    "ShellExecuteW('runas', ...) failed or was declined by the user (result=%s); batch installer was not launched.",
-                    result,
+                logging.warning(
+                    "Auto-updater: ShellExecuteW('runas', ...) failed or was "
+                    "declined by the user (result=%s); batch installer was "
+                    "not launched.", result,
                 )
                 return False
         else:
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACH_PROCESS", 0)
-            log_updater(logging.INFO, "Launching batch via subprocess.Popen (CREATE_NO_WINDOW|DETACH_PROCESS)…")
+            # DETACHED_PROCESS is deliberately NOT used here: it gives the child no
+            # console at all, and a console-less cmd.exe decodes the batch
+            # script's text with the ANSI code page instead of the OEM one
+            # _oem_encoding()/_write_installer_script() use — reintroducing
+            # issue #83 (non-ASCII path mojibake) for any user whose ANSI and
+            # OEM code pages differ, which is most non-English Windows
+            # installs. CREATE_NO_WINDOW alone still gives the child a
+            # hidden console using the system's default OEM code page, which
+            # is exactly what matches _oem_encoding()'s GetOEMCP() call —
+            # confirmed empirically (see tests/test_updater_unicode_paths.py).
+            #
+            # This used to read `| getattr(subprocess, "DETACH_PROCESS", 0)`,
+            # which only ever contributed 0 because the real constant is
+            # DETACHED_PROCESS — the correct behaviour depended on the typo
+            # surviving, which is the kind of thing a linter or a helpful
+            # reviewer "fixes" straight back into issue #83.
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.Popen(
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,
             )
         return True
     else:
-        log_updater(logging.WARNING, "Platform %s is not supported for batch installer execution.", sys.platform)
+        logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
         return False
 
 
@@ -624,6 +806,8 @@ class UpdateProgressDialog(wx.Dialog):
 
     def _worker(self):
         """Download, extract, and launch installer — all in a background thread."""
+        update_token = None
+        installer_handed_off = False
         try:
             # ── Download ──────────────────────────────────────────────────────
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="winzapp_upd_")
@@ -713,9 +897,33 @@ class UpdateProgressDialog(wx.Dialog):
             exe_name    = os.path.basename(sys.argv[0]) if sys.argv else "WinZapp.exe"
             pid         = os.getpid()
 
-            log_updater(logging.INFO, "Launching batch installer from %s (PID %d)", install_dir, pid)
-            launched = _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "wpp_port", 6300))
+            # Every account is a separate WinZapp process sharing the same
+            # program directory. A second live process keeps DLLs such as
+            # lib\\bass.dll mapped, which makes xcopy fail with a sharing
+            # violation. Ask peers to quit first, then atomically claim the
+            # machine-wide install slot before handing off to the batch file.
+            other_pids = self._quit_other_accounts()
+            update_token = self._claim_install_slot()
+            if update_token is None:
+                self._error_msg = self._main_window.i18n.t("update_other_accounts_running")
+                wx.CallAfter(self.EndModal, wx.ID_ABORT)
+                return
+
+            log_updater(
+                logging.INFO,
+                "Launching batch installer from %s (PID %d, also waiting on %s)",
+                install_dir, pid, other_pids or "no other account",
+            )
+            launched = _run_batch_installer(
+                extract_dir,
+                install_dir,
+                exe_name,
+                pid,
+                api_port=getattr(self._main_window, "wpp_port", 6300),
+                extra_pids=other_pids,
+            )
             if not launched:
+                self._end_install_slot(update_token)
                 log_updater(logging.ERROR, "Batch installer was NOT launched (launched=False) — update reported as FAILED.")
                 self._error_msg = self._main_window.i18n.t("update_uac_declined")
                 wx.CallAfter(self.EndModal, wx.ID_ABORT)
@@ -723,18 +931,108 @@ class UpdateProgressDialog(wx.Dialog):
             log_updater(
                 logging.INFO,
                 "Batch installer launched OK — install_dir=%s exe=%s pid=%d. "
-                "install_ok set True; batch will write updater_installer.log "
-                "in the install dir while the app closes and copies files.",
+                "install_ok set True; batch will write logs/update_install.log "
+                "while the app closes and copies files.",
                 install_dir, exe_name, pid,
             )
             self._install_ok = True
+            installer_handed_off = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
             log_updater(logging.INFO, "EndModal(wx.ID_OK) queued — dialog will now close and app will exit for the batch to finish.")
 
         except Exception as exc:
             log_updater(logging.ERROR, "Exception during update installation", exc_info=True)
+            if update_token and not installer_handed_off:
+                self._end_install_slot(update_token)
             self._error_msg = str(exc)
             wx.CallAfter(self.EndModal, wx.ID_ABORT)
+
+
+    # ── Multi-account installation coordination ──────────────────────────────
+    def _coord(self):
+        """Return (global_dir, account_id), or None when coordination is unavailable."""
+        gd = getattr(self._main_window, "global_dir", None)
+        acc = getattr(self._main_window, "account_id", None)
+        return (gd, acc) if gd and acc else None
+
+    def _quit_other_accounts(self) -> list:
+        """Ask every other live WinZapp account to quit and return their PIDs."""
+        coord = self._coord()
+        if coord is None:
+            return []
+        gd, acc_id = coord
+        pids = []
+        try:
+            import ipc
+            import node_coord
+            import update_coord
+
+            pids = [
+                int(lease["pid"])
+                for lease in update_coord.other_live_leases(gd)
+                if not lease.get("_corrupt") and lease.get("pid")
+            ]
+            others = [
+                lease.get("account_id")
+                for lease in node_coord.live_node_leases(
+                    gd, is_alive=update_coord.lease_alive
+                )
+                if not lease.get("_corrupt")
+            ]
+            others = [account for account in others if account and account != acc_id]
+            if others:
+                wx.CallAfter(
+                    self._status_label.SetLabel,
+                    self._main_window.i18n.t("update_closing_other_accounts"),
+                )
+            for other in others:
+                try:
+                    log_updater(
+                        logging.INFO,
+                        "Asking account %s to quit before installing update.",
+                        other,
+                    )
+                    ipc.request_quit(gd, other)
+                except Exception:
+                    log_updater(
+                        logging.ERROR,
+                        "request_quit failed for account %s",
+                        other,
+                        exc_info=True,
+                    )
+        except Exception:
+            log_updater(
+                logging.ERROR,
+                "Failed to enumerate other WinZapp accounts before update.",
+                exc_info=True,
+            )
+        return pids
+
+    def _claim_install_slot(self):
+        """Claim the global install slot; fail closed if coordination is uncertain."""
+        coord = self._coord()
+        if coord is None:
+            return {}
+        try:
+            import update_coord
+            return update_coord.try_begin_update(coord[0])
+        except Exception:
+            log_updater(
+                logging.ERROR,
+                "try_begin_update failed — blocking installation to avoid locked/partial update.",
+                exc_info=True,
+            )
+            return None
+
+    def _end_install_slot(self, token) -> None:
+        coord = self._coord()
+        if coord is None or not token:
+            return
+        try:
+            import update_coord
+            update_coord.end_update(coord[0], token)
+        except Exception:
+            log_updater(logging.ERROR, "end_update failed", exc_info=True)
 
 
 # ── UpdateDialog ──────────────────────────────────────────────────────────────
