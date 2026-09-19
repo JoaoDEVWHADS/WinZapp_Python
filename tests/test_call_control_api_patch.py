@@ -237,3 +237,30 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "delete (client as any).__winzappVoipWarmupPromise" in bridge
     assert "winzapp_session_warmup" in bridge
     assert "getDidVoipInitError" in bridge
+
+
+def test_ringtone_diagnostic_hooks_the_candidate_playback_apis_without_muting_them():
+    """Temporary instrumentation for the duplicate-ringtone report.
+
+    The call's own remote audio track is already silenced before it reaches
+    context.destination (attachRemoteTrack's `sink` GainNode, gain=0), so it
+    cannot be what the user hears twice. --mute-audio cannot be turned back on
+    either (test_chromium_does_not_disable_voice_input_for_python_call_bridge
+    pins it off, and start.js's own comment says why: it starves the audio
+    service before the RTC pipeline can capture PCM, taking calls down with
+    it). So this only reports which API WhatsApp Web's ringtone actually uses
+    — HTMLMediaElement.play, `new Audio()`, or a raw AudioBufferSourceNode —
+    it must never silence anything itself, or it would blindly mute call
+    audio it cannot yet tell apart from the ringtone.
+    """
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "ringtone-diagnostic" in bridge
+    assert "win.HTMLMediaElement.prototype.play = function" in bridge
+    assert "return nativeMediaPlay.apply(this, args);" in bridge
+    assert "win.Audio = new Proxy(NativeAudio" in bridge
+    assert "contextProtoDiag.createBufferSource = function" in bridge
+    assert "return nativeStart(...startArgs);" in bridge
+    # Bounded, so a call with a looping/reactivating ringtone cannot flood
+    # wppconnect.log for the rest of the session.
+    assert "if (diagnosticLogCount > 40) return;" in bridge

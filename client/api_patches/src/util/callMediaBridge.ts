@@ -513,6 +513,88 @@ function installCallMediaBridgeInPage(): boolean {
     }
   } catch (_) {}
 
+  // ── Diagnostic: identify the incoming-call ringtone's playback API ──────
+  // Reported live: the ringtone plays audibly through THIS Chromium process
+  // at the same time WinZapp's own ring sound plays, so the user hears it
+  // twice. It is not the call's own remote audio track — that is already
+  // routed through a muted GainNode above (attachRemoteTrack's `sink`) and
+  // never reaches context.destination audibly. So it must be a separate
+  // asset WhatsApp Web plays on `incomingcall`, through an API this bridge
+  // does not yet touch. --mute-audio cannot be turned back on to silence it
+  // (see start.js: that flag starves the Chromium audio service before the
+  // RTC pipeline above can capture PCM from it, taking the whole call down
+  // with it) — so the fix has to target only the ringtone's own API, once
+  // known. This block does not silence anything; it only reports which API
+  // fires so the real fix can be written against it. Remove once identified.
+  try {
+    let diagnosticLogCount = 0;
+    const logRingtoneCandidate = (kind: string, details: string) => {
+      diagnosticLogCount += 1;
+      if (diagnosticLogCount > 40) return;
+      report('ringtone-diagnostic', `${kind} ${details}`);
+    };
+
+    const nativeMediaPlay = win.HTMLMediaElement?.prototype?.play;
+    if (
+      typeof nativeMediaPlay === 'function' &&
+      !win.HTMLMediaElement.prototype.__winzappRingtoneDiagWrapped
+    ) {
+      win.HTMLMediaElement.prototype.play = function (...args: any[]) {
+        try {
+          const el = this as HTMLMediaElement;
+          const isRtcStream = el.srcObject instanceof MediaStream;
+          logRingtoneCandidate(
+            'media.play',
+            `tag=${el.tagName} isRtcStream=${isRtcStream} ` +
+              `src=${String(el.currentSrc || (el as any).src || '').slice(0, 120)} ` +
+              `loop=${el.loop} volume=${el.volume} muted=${el.muted}`
+          );
+        } catch (_) {}
+        return nativeMediaPlay.apply(this, args);
+      };
+      win.HTMLMediaElement.prototype.__winzappRingtoneDiagWrapped = true;
+    }
+
+    const NativeAudio = win.Audio;
+    if (typeof NativeAudio === 'function' && !win.__winzappRingtoneDiagAudioWrapped) {
+      win.Audio = new Proxy(NativeAudio, {
+        construct(target, args) {
+          try {
+            logRingtoneCandidate('new Audio()', `src=${String(args?.[0] || '').slice(0, 120)}`);
+          } catch (_) {}
+          return Reflect.construct(target, args);
+        },
+      });
+      win.__winzappRingtoneDiagAudioWrapped = true;
+    }
+
+    const contextProtoDiag = AudioContextCtor.prototype as any;
+    if (!contextProtoDiag.__winzappRingtoneDiagWrapped) {
+      const nativeCreateBufferSource = contextProtoDiag.createBufferSource;
+      if (typeof nativeCreateBufferSource === 'function') {
+        contextProtoDiag.createBufferSource = function (...args: any[]) {
+          const node = nativeCreateBufferSource.apply(this, args);
+          try {
+            const nativeStart = node.start?.bind(node);
+            if (typeof nativeStart === 'function') {
+              node.start = (...startArgs: any[]) => {
+                try {
+                  logRingtoneCandidate(
+                    'bufferSource.start',
+                    `duration=${node.buffer?.duration ?? '?'} loop=${node.loop}`
+                  );
+                } catch (_) {}
+                return nativeStart(...startArgs);
+              };
+            }
+          } catch (_) {}
+          return node;
+        };
+      }
+      contextProtoDiag.__winzappRingtoneDiagWrapped = true;
+    }
+  } catch (_) {}
+
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
   const permissionResult = (
     permissionName: string,
