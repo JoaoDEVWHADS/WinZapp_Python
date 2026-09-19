@@ -5,6 +5,7 @@ from threading import Event
 
 from core.call_logic import active_call_label_key, incoming_call_can_answer
 from core.call_video import camera_names, jpeg_frames
+from main import MainWindow
 
 
 def test_camera_names_only_reads_video_devices():
@@ -59,3 +60,45 @@ def test_video_button_is_restricted_to_individual_chats():
     assert 'unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast"))' in source
     assert 'self._video_call_btn.Show(bool(jid) and not unavailable)' in source
     assert 'self.main_window.start_video_call(jid, name)' in source
+
+
+class _NoCameraWs:
+    def send_call_camera_frame(self, _frame):
+        pass
+
+
+class _NoCameraMainWindow:
+    _start_call_camera = MainWindow._start_call_camera
+
+    def __init__(self):
+        self.ws = _NoCameraWs()
+        self._active_voice_call = {"identity": "call-1", "is_video": True}
+        self._call_camera_capture = None
+
+    def _find_api_ffmpeg(self):
+        return "ffmpeg.exe"
+
+
+def test_missing_camera_does_not_end_or_clear_video_call(monkeypatch):
+    import core.call_video as call_video
+
+    class MissingCameraCapture:
+        def __init__(self, _ffmpeg, _send_frame):
+            self.stopped = False
+
+        def start(self):
+            raise RuntimeError("No camera found")
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(call_video, "CameraCapture", MissingCameraCapture)
+    stub = _NoCameraMainWindow()
+    active_before = stub._active_voice_call
+
+    assert stub._start_call_camera() is False
+    assert stub._active_voice_call is active_before
+    assert stub._active_voice_call["is_video"] is True
+    assert stub._call_camera_capture is None
+    assert stub._call_camera_available is False
+    assert stub._call_camera_enabled is False

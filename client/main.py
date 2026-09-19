@@ -6281,6 +6281,8 @@ class MainWindow(wx.Frame):
         self._call_camera_capture = None
         if camera is not None:
             camera.stop()
+        self._call_camera_available = None
+        self._call_camera_enabled = False
         self._active_voice_call = None
         self._voice_call_last_announced_state = ""
         if session is not None:
@@ -6381,17 +6383,44 @@ class MainWindow(wx.Frame):
             logging.exception("[call_video] failed to display remote frame")
 
     def _start_call_camera(self):
+        """Start local camera capture without making video calls depend on it.
+
+        A video call is still useful on a PC with no camera: audio continues and
+        remote JPEG frames can still be displayed. Camera discovery/opening is
+        therefore a local capability, not a prerequisite for the call itself.
+        """
         from core.call_video import CameraCapture
+
+        self._call_camera_available = False
+        self._call_camera_enabled = False
         ws = getattr(self, "ws", None)
         sender = getattr(ws, "send_call_camera_frame", None)
         if sender is None:
-            raise RuntimeError("Video transport is unavailable")
+            logging.warning("[call_video] local camera transport is unavailable")
+            return False
+
         capture = CameraCapture(self._find_api_ffmpeg(), sender)
-        capture.start()
+        try:
+            capture.start()
+        except Exception:
+            try:
+                capture.stop()
+            except Exception:
+                pass
+            logging.warning(
+                "[call_video] local camera unavailable; continuing receive-only video call",
+                exc_info=True,
+            )
+            return False
+
         if not getattr(self, "_active_voice_call", None):
             capture.stop()
-            raise RuntimeError("Call ended while camera was starting")
+            return False
+
         self._call_camera_capture = capture
+        self._call_camera_available = True
+        self._call_camera_enabled = True
+        return True
 
     def accept_incoming_call(self, identity: str):
         if getattr(self, "_active_voice_call", None) is not None:
