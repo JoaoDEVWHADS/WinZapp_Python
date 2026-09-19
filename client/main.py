@@ -27707,6 +27707,16 @@ class MainWindow(wx.Frame):
         """
         stored = 0
         for _ in range(self._DEEP_PAGES_PER_VISIT):
+            # A call can begin while this method is already walking one chat.
+            # The outer backfill loop checks before starting a chat, but without
+            # this inner gate an in-flight visit could still fetch several more
+            # 200-message pages after audio became active.
+            if self._voice_call_in_progress():
+                logging.info(
+                    "[deep-backfill] Pausing %s during active voice call.",
+                    remote_jid,
+                )
+                break
             if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
                 break
             if remote_jid in getattr(self, "_exhausted_chats", set()):
