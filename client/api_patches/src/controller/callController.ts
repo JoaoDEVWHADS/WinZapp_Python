@@ -187,6 +187,25 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return 0;
       };
 
+      const groupParticipantStatesOf = (call: any): any[] => {
+        const participants = call?.groupCallParticipants ?? call?.get?.('groupCallParticipants');
+        let models: any[] = [];
+        if (Array.isArray(participants)) models = participants;
+        else {
+          try {
+            models = participants?.getModelsArray?.() || participants?.models || [];
+          } catch (_) {}
+        }
+        const scalar = (value: any) =>
+          value == null ? null : String(value).slice(0, 120);
+        return models.slice(0, 8).map((participant: any) => ({
+          jid: serializeId(participant?.wid || participant?.jid || participant?.id),
+          state: scalar(participant?.get?.('state') ?? participant?.state),
+          status: scalar(participant?.get?.('status') ?? participant?.status),
+          reason: scalar(participant?.get?.('reason') ?? participant?.reason),
+        }));
+      };
+
       const summarizeCall = (call: any) => ({
         id: callIdOf(call),
         peerJid: peerJidOf(call),
@@ -194,6 +213,9 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         isVideo: !!call?.isVideo,
         isGroup: !!call?.isGroup,
         groupParticipantCount: groupParticipantCountOf(call),
+        groupParticipantStates: groupParticipantStatesOf(call),
+        endReason: String(call?.get?.('endReason') ?? call?.endReason ?? '').slice(0, 120),
+        error: String(call?.get?.('error') ?? call?.error ?? '').slice(0, 120),
         outgoing: !!call?.outgoing,
       });
 
@@ -811,6 +833,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             error:
               'WhatsApp aborted the outgoing group call before remote signaling remained active',
             finalCall: finalActiveCall ? summarizeCall(finalActiveCall) : null,
+            finalSeedCall: summarizeCall(startedCall),
             finalState,
             diagnostics,
           };

@@ -305,6 +305,8 @@ def test_group_call_api_emits_high_detail_diagnostics():
     assert "startWAWebVoipGroupCallFromWids" in controller
     assert "for (const waitMs of [250, 500, 1000, 2000])" in controller
     assert "diagnostics.timeline" in controller
+    assert "groupParticipantStates: groupParticipantStatesOf(call)" in controller
+    assert "finalSeedCall: summarizeCall(startedCall)" in controller
     assert "diagnostics," in controller
 
 
