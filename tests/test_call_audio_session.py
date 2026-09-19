@@ -58,7 +58,7 @@ class _OutputStream:
 
 
 class _Defaults:
-    device = (0, 1)
+    device = (0, 2)
 
 
 class _WasapiSettings:
@@ -77,6 +77,13 @@ class _SoundDevice:
         self.devices = [
             {
                 "name": "Mic",
+                "max_input_channels": 1,
+                "max_output_channels": 0,
+                "default_samplerate": 48000,
+                "hostapi": 0,
+            },
+            {
+                "name": "Mic 2",
                 "max_input_channels": 1,
                 "max_output_channels": 0,
                 "default_samplerate": 48000,
@@ -273,7 +280,7 @@ def test_call_audio_prefers_native_device_rate_and_safe_driver_latency():
     input_kwargs = sounddevice.input_streams[0][0]
     output_kwargs = sounddevice.output_streams[0][0]
     assert input_kwargs["device"] == 0
-    assert output_kwargs["device"] == 1
+    assert output_kwargs["device"] == 2
     assert input_kwargs["samplerate"] == 44100
     assert output_kwargs["samplerate"] == 44100
     assert input_kwargs["latency"] == CALL_DEVICE_LATENCY_SECONDS
@@ -294,7 +301,7 @@ def test_windows_wasapi_settings_are_explicitly_shared(monkeypatch):
     )
 
     input_settings = session._stream_extra_settings(0, input_device=True)
-    output_settings = session._stream_extra_settings(1, input_device=False)
+    output_settings = session._stream_extra_settings(2, input_device=False)
 
     assert input_settings.exclusive is False
     assert input_settings.auto_convert is True
@@ -360,6 +367,69 @@ def test_call_output_switches_live_without_reopening_microphone():
     assert len(sounddevice.input_streams) == 1
     assert microphone_stream.started is True
     assert microphone_stream.closed is False
+
+    session.stop()
+
+def test_call_microphone_switches_live_without_restarting_output_or_sender():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(
+            session="winzapp",
+            input_device_name="Mic",
+            output_device_name="Speaker",
+        ),
+        sounddevice_module=sounddevice,
+    )
+    session.start()
+
+    old_input = session._input_stream
+    output_stream = session._output_stream
+    sender_thread = session._sender_thread
+
+    assert session.switch_input_device("Mic 2") is True
+
+    assert len(sounddevice.input_streams) == 2
+    new_kwargs, new_input = sounddevice.input_streams[-1]
+    assert new_kwargs["device"] == 1
+    assert session._input_stream is new_input
+    assert new_input.started is True
+    assert new_input.closed is False
+    assert old_input.closed is True
+
+    # The live call session itself stays intact: no new speaker stream and no
+    # replacement sender thread / browser media bridge are needed.
+    assert session._output_stream is output_stream
+    assert len(sounddevice.output_streams) == 1
+    assert session._sender_thread is sender_thread
+    assert sender_thread.is_alive()
+
+    session.stop()
+
+
+def test_ringing_session_remembers_microphone_change_until_answer():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(
+            session="winzapp",
+            input_device_name="Mic",
+            output_device_name="Speaker",
+        ),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+    assert session.switch_input_device("Mic 2") is True
+    assert sounddevice.input_streams == []
+
+    session.start()
+
+    input_kwargs, input_stream = sounddevice.input_streams[0]
+    assert input_kwargs["device"] == 1
+    assert input_stream.started is True
 
     session.stop()
 

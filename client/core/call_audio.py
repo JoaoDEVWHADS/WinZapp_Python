@@ -283,6 +283,9 @@ class CallAudioSession:
         self._input_stream = None
         self._output_stream = None
         self._input_rate = CALL_SAMPLE_RATE
+        self._input_device_name = str(config.input_device_name or "")
+        self._input_lock = threading.RLock()
+        self._input_generation = 0
         self._output_rate = CALL_SAMPLE_RATE
         self._mic_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=CALL_MIC_QUEUE_LIMIT)
         self._output_queue: "queue.Queue[tuple[bytes, int]]" = queue.Queue(
@@ -345,7 +348,10 @@ class CallAudioSession:
         # was ringing. Reuse it and only add microphone capture on answer.
         self.start_output_only()
         try:
-            self._input_stream, self._input_rate = self._open_input_stream()
+            self._input_stream, self._input_rate = self._open_input_stream(
+                device_name=self._input_device_name,
+                generation=self._input_generation,
+            )
             self._input_stream.start()
         except Exception:
             self._close_stream(self._input_stream)
@@ -362,9 +368,11 @@ class CallAudioSession:
     def stop(self) -> None:
         self._stop_event.set()
         self._emit_stop()
-        self._close_stream(self._input_stream)
+        with self._input_lock:
+            self._input_generation += 1
+            self._close_stream(self._input_stream)
+            self._input_stream = None
         self._close_stream(self._output_stream)
-        self._input_stream = None
         self._output_stream = None
         self._drain_queue(self._mic_queue)
         self._drain_queue(self._output_queue)
@@ -377,6 +385,59 @@ class CallAudioSession:
         except (TypeError, ValueError):
             sample_rate = CALL_SAMPLE_RATE
         self._put_drop_oldest(self._output_queue, (bytes(pcm), sample_rate))
+
+    def switch_input_device(self, device_name: str) -> bool:
+        """Switch only microphone capture while keeping the call session alive.
+
+        If receive-only ringing audio is active and the microphone has not been
+        opened yet, just remember the new name so answering opens that device.
+        During an active call the replacement stream is opened and started
+        before the old stream is closed, avoiding a full call-audio restart.
+        """
+        requested = str(device_name or "")
+        if self._sd is None:
+            raise CallAudioUnavailable(
+                "sounddevice is not available in this Python runtime"
+            )
+
+        with self._input_lock:
+            if self._input_stream is None:
+                self._input_device_name = requested
+                logging.info(
+                    "[call_audio] microphone preference changed before capture starts device=%r",
+                    requested or "<default>",
+                )
+                return True
+
+            next_generation = self._input_generation + 1
+            new_stream = None
+            try:
+                new_stream, new_rate = self._open_input_stream(
+                    device_name=requested,
+                    strict=bool(requested),
+                    generation=next_generation,
+                )
+                new_stream.start()
+            except Exception:
+                self._close_stream(new_stream)
+                raise
+
+            old_stream = self._input_stream
+            self._input_stream = new_stream
+            self._input_rate = new_rate
+            self._input_device_name = requested
+            self._input_generation = next_generation
+
+            # Never replay PCM captured from the old device after the switch.
+            self._drain_queue(self._mic_queue)
+            self._close_stream(old_stream)
+
+        logging.info(
+            "[call_audio] microphone switched live device=%r rate=%s",
+            requested or "<default>",
+            self._input_rate,
+        )
+        return True
 
     def switch_output_device(self, device_name: str) -> bool:
         """Move received call audio without restarting capture or the call."""
@@ -500,9 +561,29 @@ class CallAudioSession:
             )
             return None
 
-    def _open_input_stream(self):
+    def _open_input_stream(
+        self,
+        *,
+        device_name: Optional[str] = None,
+        strict: bool = False,
+        generation: Optional[int] = None,
+    ):
+        selected_name = self._input_device_name if device_name is None else str(device_name or "")
+        if generation is None:
+            generation = self._input_generation
+
+        if strict and selected_name:
+            preferred = self._resolve_device(selected_name, input_device=True)
+            if preferred is None:
+                raise CallAudioUnavailable(
+                    f"Selected microphone is not available: {selected_name}"
+                )
+            candidates = (preferred,)
+        else:
+            candidates = self._candidate_devices(selected_name, input_device=True)
+
         last_error = None
-        for device in self._candidate_devices(self._config.input_device_name, input_device=True):
+        for device in candidates:
             for rate in self._candidate_rates(device):
                 try:
                     stream = self._sd.InputStream(
@@ -515,7 +596,7 @@ class CallAudioSession:
                         extra_settings=self._stream_extra_settings(
                             device, input_device=True
                         ),
-                        callback=self._on_microphone_frame(rate),
+                        callback=self._on_microphone_frame(rate, generation),
                     )
                     logging.info(
                         "[call_audio] input opened device=%r rate=%s latency=%r",
@@ -563,11 +644,15 @@ class CallAudioSession:
                     last_error = exc
         raise CallAudioUnavailable(f"No speaker could be opened for the call: {last_error}")
 
-    def _on_microphone_frame(self, source_rate: int):
+    def _on_microphone_frame(self, source_rate: int, generation: int):
         def _callback(indata, _frames, _time_info, status):
             if status:
                 logging.debug("[call_audio] microphone status: %s", status)
-            if self._stop_event.is_set() or indata is None:
+            if (
+                self._stop_event.is_set()
+                or indata is None
+                or generation != self._input_generation
+            ):
                 return
             samples = _resample_mono(np.asarray(indata), source_rate, CALL_SAMPLE_RATE)
             if samples.size:

@@ -6297,6 +6297,36 @@ class MainWindow(wx.Frame):
         if hasattr(self, "voice_call_window"):
             wx.CallAfter(self._sync_voice_call_bar)
 
+    def _switch_active_call_input_device(self, device_name: str):
+        """Move only microphone capture; keep speaker/bridge/call alive."""
+        session = (
+            getattr(self, "_call_audio_session", None)
+            or getattr(self, "_call_ring_audio_session", None)
+        )
+        if session is None:
+            return
+
+        def _worker():
+            try:
+                session.switch_input_device(device_name or "")
+                logging.info(
+                    "[call_audio] active call microphone switched live to %r",
+                    device_name or "<default>",
+                )
+            except Exception:
+                logging.exception("[call_audio] failed to switch active call microphone")
+                wx.CallAfter(
+                    self.output,
+                    self.i18n.t("voice_call_device_switch_failed"),
+                    True,
+                )
+
+        threading.Thread(
+            target=_worker,
+            name="WinZappCallInputSwitch",
+            daemon=True,
+        ).start()
+
     def _switch_active_call_output_device(self, device_name: str):
         """Move only the live BASS call output; keep microphone capture alive."""
         session = (
@@ -6639,17 +6669,11 @@ class MainWindow(wx.Frame):
 
             active_audio = getattr(self, "_call_audio_session", None)
             ringing_audio = getattr(self, "_call_ring_audio_session", None)
-            if active_audio is not None:
+            if active_audio is not None or ringing_audio is not None:
                 if new_input != old_input:
-                    # Microphone capture still uses PortAudio; reopening it is
-                    # only necessary when the microphone itself changed.
-                    self._restart_active_voice_call_audio()
-                elif new_output != old_output:
+                    self._switch_active_call_input_device(new_input)
+                if new_output != old_output:
                     self._switch_active_call_output_device(new_output)
-            elif ringing_audio is not None and new_output != old_output:
-                # Incoming-call monitoring has no microphone open yet, so its
-                # speaker can always move in place too.
-                self._switch_active_call_output_device(new_output)
 
             wx.CallAfter(input_combo.SetFocus)
 
