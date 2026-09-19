@@ -219,16 +219,50 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     try { win.__winzappOnCallBridgeEvent?.(event, details); } catch (_) {}
   };
 
-  // Silences WhatsApp Web's own page-native sounds (ringtone, message
-  // chimes, ...) without touching real call audio, which never plays
-  // through an <audio>/<video> element in the first place — see the wiring
-  // below (scanMediaElements, HTMLMediaElement.play, `new Audio()`) for why
-  // that split is safe.
-  const silenceElement = (el: HTMLMediaElement) => {
+  // Only the looping page-native ringtone is silenced. Short WhatsApp
+  // chimes (including the call-ended sound) must remain audible, and an
+  // element that stops being the ringtone must get its original audio state
+  // back in case WhatsApp reuses the same <audio> element.
+  const pageAudioState = new WeakMap<
+    HTMLMediaElement,
+    { muted: boolean; volume: number }
+  >();
+
+  const isPageRingtone = (el: HTMLMediaElement) => {
     try {
+      return !(el.srcObject instanceof MediaStream) && el.loop === true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const silenceRingtone = (el: HTMLMediaElement) => {
+    try {
+      if (!pageAudioState.has(el)) {
+        pageAudioState.set(el, { muted: el.muted, volume: el.volume });
+      }
       el.muted = true;
       el.volume = 0;
     } catch (_) {}
+  };
+
+  const restorePageAudio = (el: HTMLMediaElement) => {
+    try {
+      const original = pageAudioState.get(el);
+      if (!original) return;
+      el.muted = original.muted;
+      el.volume = original.volume;
+      pageAudioState.delete(el);
+    } catch (_) {}
+  };
+
+  const applyPageAudioPolicy = (el: HTMLMediaElement) => {
+    if (isPageRingtone(el)) {
+      silenceRingtone(el);
+      return true;
+    }
+    restorePageAudio(el);
+    return false;
   };
 
   state.pushCameraFrame = (jpeg: string) => {
@@ -476,11 +510,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const scanMediaElements = () => {
     try {
       for (const element of Array.from(document.querySelectorAll('audio, video')) as HTMLMediaElement[]) {
-        // Silencing here too (not just on .play()/new Audio()) catches
-        // anything that starts playing without going through either wrapper
-        // — e.g. the native `autoplay` attribute, which Chromium does not
-        // route through the JS-visible .play() method.
-        silenceElement(element);
+        // Catch autoplay and later property changes too. If a looping
+        // ringtone element is reused for a short chime, this pass restores
+        // its original mute/volume before that sound plays.
+        applyPageAudioPolicy(element);
         attachRemoteStream(element.srcObject instanceof MediaStream ? element.srcObject : null);
       }
     } catch (_) {}
@@ -607,7 +640,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     }
   } catch (_) {}
 
-  // ── Silence WhatsApp Web's own page-native sounds ────────────────────────
+  // ── Silence only WhatsApp Web's looping incoming-call ringtone ──────────
   // Reported live: the incoming-call ringtone played audibly through THIS
   // Chromium process at the same time WinZapp's own ring sound played, so
   // the user heard it twice — and separately, on a call nobody answered
@@ -655,12 +688,14 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
         try {
           const el = this as HTMLMediaElement;
           const isRtcStream = el.srcObject instanceof MediaStream;
-          silenceElement(el);
-          logMuted(
-            'media.play',
-            `tag=${el.tagName} isRtcStream=${isRtcStream} ` +
-              `src=${String(el.currentSrc || (el as any).src || '').slice(0, 120)} loop=${el.loop}`
-          );
+          const silenced = applyPageAudioPolicy(el);
+          if (silenced) {
+            logMuted(
+              'media.play',
+              `tag=${el.tagName} isRtcStream=${isRtcStream} ` +
+                `src=${String(el.currentSrc || (el as any).src || '').slice(0, 120)} loop=${el.loop}`
+            );
+          }
         } catch (_) {}
         return nativeMediaPlay.apply(this, args);
       };
@@ -673,8 +708,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
         construct(target, args) {
           const instance: HTMLAudioElement = Reflect.construct(target, args);
           try {
-            silenceElement(instance);
-            logMuted('new Audio()', `src=${String(args?.[0] || '').slice(0, 120)}`);
+            // Construction alone does not identify a ringtone: WhatsApp
+            // commonly sets .loop only after creating the element. The play
+            // wrapper and media scan apply the selective policy later.
+            applyPageAudioPolicy(instance);
           } catch (_) {}
           return instance;
         },

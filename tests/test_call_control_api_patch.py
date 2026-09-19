@@ -229,38 +229,34 @@ def test_voip_runtime_warmup_is_deduplicated_per_session():
     assert "getDidVoipInitError" in bridge
 
 
-def test_page_native_audio_is_always_muted_without_touching_real_call_audio():
-    """WhatsApp Web's own sounds (ringtone, message chimes) must never be
-    audible through this Chromium process. The prior diagnostic
-    instrumentation confirmed live that the ringtone plays as a plain,
-    looping <audio> element's native .play() (isRtcStream=false) — a
-    categorically different path from the call's own remote audio track,
-    which never touches an <audio>/Audio() element at all: it is tapped
-    directly off the RTCPeerConnection's MediaStreamTrack via the Web Audio
-    API and was already silenced before this fix (attachRemoteTrack's
-    `sink` GainNode, gain=0). So muting every native <audio>/<video> element
-    and every `new Audio()` instance, unconditionally, is safe — there is no
-    call-state window where it would also mute real call audio, so nothing
-    needs to be tracked or toggled back on.
-
-    This also fixes the sibling report from the same investigation: a
-    missed/unanswered call left the page's own ringtone looping forever,
-    because the terminal callstate/incomingcall handling in main.py only
-    ever stops WinZapp's own sound — it has no way to reach into the page.
-    Muting page audio unconditionally removes that dependency entirely.
-    """
+def test_page_native_audio_only_mutes_looping_ringtone_and_restores_reused_elements():
+    """Mute the duplicate incoming ringtone without suppressing short WA sounds."""
     bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
 
-    assert "el.muted = true;" in bridge
-    assert "el.volume = 0;" in bridge
+    assert "const pageAudioState = new WeakMap" in bridge
+    assert "return !(el.srcObject instanceof MediaStream) && el.loop === true;" in bridge
+    assert "const silenceRingtone = (el: HTMLMediaElement)" in bridge
+    assert "const restorePageAudio = (el: HTMLMediaElement)" in bridge
+    assert "el.muted = original.muted;" in bridge
+    assert "el.volume = original.volume;" in bridge
+    assert "pageAudioState.delete(el);" in bridge
+    assert "const silenced = applyPageAudioPolicy(el);" in bridge
+    assert "if (silenced) {" in bridge
     assert "win.HTMLMediaElement.prototype.play = function" in bridge
     assert "return nativeMediaPlay.apply(this, args);" in bridge
     assert "win.Audio = new Proxy(NativeAudio" in bridge
-    # The autoplay-attribute backstop is scanMediaElements() itself — it must
-    # silence every element it finds, not only the RTC-stream ones.
+
     scan = bridge[bridge.index("const scanMediaElements = ()"):]
     scan = scan[: scan.index("\n  };")]
-    assert "silenceElement(element);" in scan
-    # Bounded, so a call with a looping/reactivating ringtone cannot flood
-    # wppconnect.log for the rest of the session.
+    assert "applyPageAudioPolicy(element);" in scan
+    assert "silenceElement(element);" not in scan
+
+    # Do not permanently mute every newly-created Audio object. Whether it is
+    # the ringtone is decided when .loop/playback state is actually known.
+    audio_proxy = bridge[bridge.index("const NativeAudio = win.Audio"):]
+    audio_proxy = audio_proxy[: audio_proxy.index("win.__winzappPageAudioMuteAudioWrapped = true;")]
+    assert "silenceRingtone(instance);" not in audio_proxy
+    assert "applyPageAudioPolicy(instance);" in audio_proxy
+
     assert "if (mutedLogCount > 40) return;" in bridge
+
