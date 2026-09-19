@@ -54,6 +54,7 @@ class _FakeMainWindow:
 class _Stub:
     _on_menu_delete_message      = ConversationsPanel._on_menu_delete_message
     _delete_message_for_me_only  = ConversationsPanel._delete_message_for_me_only
+    _delete_message_for_everyone_keep_row = ConversationsPanel._delete_message_for_everyone_keep_row
     _confirm_local_only_delete   = ConversationsPanel._confirm_local_only_delete
     _delete_target_jid           = ConversationsPanel._delete_target_jid
     _is_separator                = ConversationsPanel._is_separator
@@ -192,3 +193,40 @@ class TestTheDeleteIsAddressedAtTheChat:
 
         (jid, _key), = stub.main_window.delete_for_me_calls
         assert jid == "group@g.us"
+
+
+
+class TestDeleteForEveryoneKeepsTheRow:
+    def test_single_revoke_calls_api_without_removing_local_row(self):
+        stub = _Stub("5511888888888@s.whatsapp.net", is_self_chat=False)
+        key = dict(stub._sorted_messages[0]["key"])
+
+        _run_and_join_threads(
+            lambda: stub._delete_message_for_everyone_keep_row(
+                key, "5511888888888@s.whatsapp.net"
+            )
+        )
+
+        assert len(stub.main_window.delete_for_everyone_calls) == 1
+        assert stub.main_window.delete_for_me_calls == []
+        assert stub.removed_ids == []
+
+    def test_single_delete_handler_routes_everyone_to_keep_row_helper(self):
+        import inspect
+
+        source = inspect.getsource(ConversationsPanel._on_menu_delete_message)
+        everyone = source[source.index("elif for_everyone:"):source.index(
+            "else:\n            self._delete_message_for_me_only"
+        )]
+        assert "_delete_message_for_everyone_keep_row" in everyone
+        assert "remove_messages_by_id" not in everyone
+        assert "DeleteItem" not in everyone
+
+    def test_bulk_delete_only_removes_effective_local_only_ids(self):
+        import inspect
+
+        source = inspect.getsource(ConversationsPanel._on_mass_delete_messages)
+        assert "local_delete_ids = {" in source
+        assert "if not (for_everyone and _can_delete_for_all(msg))" in source
+        assert "self.remove_messages_by_id(local_delete_ids" in source
+        assert "self.remove_messages_by_id(set(self.selected_messages)" not in source

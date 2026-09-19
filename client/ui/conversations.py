@@ -12783,25 +12783,11 @@ class ConversationsPanel(wx.Panel):
                 hold_for_echo=bool(msg.get("_local_pending")),
             )
         elif for_everyone:
-            # Revoke for everyone via WPPConnect API (off the UI thread). The
-            # message key carries fromMe/participant so the server can build the
-            # correct serialized id and actually revoke it.
-            def _revoke(k=dict(msg_key), j=jid):
-                ok = self.main_window.delete_message_for_everyone(j, k)
-                if not ok:
-                    wx.CallAfter(
-                        wx.MessageBox,
-                        i18n.t("delete_for_everyone_failed"),
-                        i18n.t("delete_message"),
-                        wx.OK | wx.ICON_WARNING,
-                    )
-            threading.Thread(target=_revoke, daemon=True).start()
-            # Always delete locally
-            if msg_id:
-                self.remove_messages_by_id({msg_id}, focus_previous=True)
-            else:
-                self._sorted_messages.pop(index)
-                self.messages_list.DeleteItem(index)
+            # Do NOT remove the row locally. WhatsApp represents a successful
+            # revoke with a protocolMessage tombstone under the same message id;
+            # the live revoke path updates this record in place. Removing it
+            # here caused a visible disappear/reappear cycle after sync.
+            self._delete_message_for_everyone_keep_row(msg_key, jid)
         else:
             self._delete_message_for_me_only(msg, msg_id, index)
 
@@ -12942,6 +12928,30 @@ class ConversationsPanel(wx.Panel):
         if conv_jid and self.main_window._is_self_jid(conv_jid):
             return conv_jid
         return msg_key.get("remoteJid", "") or conv_jid
+
+    def _delete_message_for_everyone_keep_row(self, msg_key: dict, jid: str):
+        """Revoke remotely but keep the local row until WhatsApp replaces it.
+
+        A delete-for-everyone is represented by a protocolMessage tombstone.
+        Removing the row here made it disappear temporarily, then come back as
+        "message deleted" after a resync/live revoke event. Keep the original
+        row in place; MainWindow._apply_remote_revoke() will mutate that same
+        record to the tombstone and ConversationsPanel.on_message_revoked()
+        repaints it in place. Only "delete for me" removes the row locally.
+        """
+        i18n = self.main_window.i18n
+
+        def _revoke(k=dict(msg_key), j=jid):
+            ok = self.main_window.delete_message_for_everyone(j, k)
+            if not ok:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    i18n.t("delete_for_everyone_failed"),
+                    i18n.t("delete_message"),
+                    wx.OK | wx.ICON_WARNING,
+                )
+
+        threading.Thread(target=_revoke, daemon=True).start()
 
     def _delete_message_for_me_only(self, msg: dict, msg_id: str, index: int):
         """Delete a message for this account only (delete_message_for_me),
@@ -17026,6 +17036,16 @@ class ConversationsPanel(wx.Panel):
             if result != wx.ID_OK:
                 return
 
+        # Only messages whose effective scope is "for me" disappear from
+        # WinZapp. A successful revoke-for-everyone must keep its row so the
+        # live protocolMessage can repaint it as "message deleted" in place.
+        local_delete_ids = {
+            msg.get("key", {}).get("id", "")
+            for msg in msgs_to_delete
+            if not (for_everyone and _can_delete_for_all(msg))
+        }
+        local_delete_ids.discard("")
+
         def _delete_bg():
             for msg in msgs_to_delete:
                 msg_key = dict(msg.get("key", {}))
@@ -17033,11 +17053,8 @@ class ConversationsPanel(wx.Panel):
                 if not jid:
                     continue
                 # Per message, never once for the batch: a mixed selection
-                # (e.g. admin revoking a mix of their own and others'
-                # messages, or a non-admin selection that also picked up a
-                # system event) can have members that aren't actually
-                # eligible for a real revoke even when "for everyone" was
-                # chosen — those still get deleted, just locally-only.
+                # can contain items that cannot be revoked for everyone. Those
+                # still use the local-only API and are the only rows removed.
                 if for_everyone and _can_delete_for_all(msg):
                     self.main_window.delete_message_for_everyone(jid, msg_key)
                 else:
@@ -17045,8 +17062,8 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_delete_bg, daemon=True).start()
 
-        # Always delete locally
-        self.remove_messages_by_id(set(self.selected_messages), focus_previous=True)
+        if local_delete_ids:
+            self.remove_messages_by_id(local_delete_ids, focus_previous=True)
         self.selected_messages.clear()
         self.main_window.output(i18n.t("success_delete"), interrupt=True)
 
