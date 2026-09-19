@@ -190,7 +190,7 @@ function ensureLinuxCallAudio(
 
 function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 5) return true;
+  if (win.__winzappCallMediaBridge?.version === 7) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
@@ -200,7 +200,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
 
   const state: any = {
-    version: 5,
+    version: 7,
     enabled: false,
     context: null,
     micDestination: null,
@@ -214,6 +214,9 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     cameraCanvas: null,
     cameraTrack: null,
     cameraPending: false,
+    cameraFramesReceived: 0,
+    cameraFramesDropped: 0,
+    cameraTrackRequests: 0,
     localTrackIds: new Set<string>(),
     micFramesPushed: 0,
     micBytesPushed: 0,
@@ -388,7 +391,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   };
 
   state.pushCameraFrame = (jpeg: string) => {
-    if (typeof jpeg !== 'string' || jpeg.length > 350_000 || state.cameraPending) return;
+    if (typeof jpeg !== 'string' || jpeg.length > 350_000) return;
+    state.cameraFramesReceived += 1;
+    if (state.cameraFramesReceived === 1 || state.cameraFramesReceived % 100 === 0) {
+      report(
+        'camera-frame',
+        `received=${state.cameraFramesReceived} dropped=${state.cameraFramesDropped}`
+      );
+    }
+    if (state.cameraPending) {
+      state.cameraFramesDropped += 1;
+      return;
+    }
     state.cameraPending = true;
     const canvas = state.cameraCanvas || document.createElement('canvas');
     if (!state.cameraCanvas) {
@@ -409,6 +423,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   };
 
   const cameraTrack = () => {
+    state.cameraTrackRequests += 1;
+    if (state.cameraTrackRequests === 1) {
+      report('camera-track', 'WhatsApp requested the synthetic video track');
+    }
     if (!state.cameraCanvas) {
       const canvas = document.createElement('canvas');
       canvas.width = 640;
@@ -866,6 +884,57 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   } catch (_) {}
 
   const nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  const nativeEnumerateDevices = navigator.mediaDevices.enumerateDevices?.bind(
+    navigator.mediaDevices
+  );
+
+  // A remote/headless WPPConnect host has no physical webcam.  WhatsApp Web
+  // checks the media-device inventory before it asks getUserMedia() for video,
+  // so merely returning our canvas track from bridgedGetUserMedia() is not
+  // enough: with zero videoinput devices the page can decide there is no
+  // camera and never request that synthetic track at all.
+  //
+  // Always advertise one stable WinZapp camera device.  getUserMedia below
+  // ignores the physical device constraint and returns cameraTrack(), whose
+  // canvas is fed by JPEG frames captured on the Windows client.  Preserve the
+  // native inventory as well so audio-device discovery keeps its normal shape.
+  if (nativeEnumerateDevices) {
+    const virtualCamera = {
+      deviceId: 'winzapp-camera',
+      kind: 'videoinput',
+      label: 'WinZapp Camera',
+      groupId: 'winzapp-call-media',
+      toJSON() {
+        return {
+          deviceId: this.deviceId,
+          kind: this.kind,
+          label: this.label,
+          groupId: this.groupId,
+        };
+      },
+    };
+    const bridgedEnumerateDevices = async () => {
+      let devices: any[] = [];
+      try {
+        devices = Array.from(await nativeEnumerateDevices());
+      } catch (_) {}
+      if (!devices.some((device: any) =>
+        device?.kind === 'videoinput' && device?.deviceId === virtualCamera.deviceId
+      )) {
+        devices.unshift(virtualCamera);
+      }
+      return devices;
+    };
+    try {
+      Object.defineProperty(navigator.mediaDevices, 'enumerateDevices', {
+        configurable: true,
+        writable: true,
+        value: bridgedEnumerateDevices,
+      });
+    } catch (_) {
+      (navigator.mediaDevices as any).enumerateDevices = bridgedEnumerateDevices;
+    }
+  }
   const permissionResult = (
     permissionName: string,
     stateValue: PermissionState = 'granted'
@@ -886,12 +955,9 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
         writable: true,
         value: async (descriptor: PermissionDescriptor) => {
           const name = String((descriptor as any)?.name || '');
-          // Microphone only. WhatsApp's VoIP bootstrap gates on this, and the
-          // physical device is never opened anyway — getUserMedia below hands
-          // back a synthetic track. The camera is deliberately NOT claimed:
-          // video calls are out of scope, and answering 'granted' here would
-          // undo removing videoCapture from the CDP grant for any page that
-          // checks before asking.
+          // WhatsApp's VoIP bootstrap gates on microphone/camera permission.
+          // Neither physical device is opened through this wrapper: audio is
+          // supplied by the WinZapp/Pulse bridge and video by cameraTrack().
           if (name === 'microphone' || name === 'camera') {
             return permissionResult(name, 'granted');
           }
@@ -1218,6 +1284,7 @@ export function registerCallAudioSocket(
   authenticatedSession: string
 ): void {
   let cameraBusy = false;
+  let cameraFramesReceived = 0;
 
   socket.on('call:audio:start', (payload: any) => {
     const session = String(payload?.session || '');
@@ -1237,6 +1304,12 @@ export function registerCallAudioSocket(
     const client: any = (clientsArray as any)[session];
     const page = client?.waPage || client?.page;
     if (!page) return;
+    cameraFramesReceived += 1;
+    if (cameraFramesReceived === 1 || cameraFramesReceived % 100 === 0) {
+      logger?.info?.(
+        `[${session}] call camera frames received from desktop=${cameraFramesReceived}`
+      );
+    }
     cameraBusy = true;
     page.evaluate((frame: string) => {
       (window as any).__winzappCallMediaBridge?.pushCameraFrame?.(frame);

@@ -56,6 +56,22 @@ def test_call_media_bridge_replaces_browser_microphone_with_python_pcm():
     assert "webkitGetUserMedia" in bridge
     assert "if (!state.enabled || !constraints?.audio)" not in bridge
 
+
+def test_call_media_bridge_advertises_virtual_camera_on_headless_hosts():
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "nativeEnumerateDevices" in bridge
+    assert "bridgedEnumerateDevices" in bridge
+    assert "deviceId: 'winzapp-camera'" in bridge
+    assert "kind: 'videoinput'" in bridge
+    assert "label: 'WinZapp Camera'" in bridge
+    assert "devices.unshift(virtualCamera)" in bridge
+    assert "cameraTrackRequests" in bridge
+    assert "cameraFramesReceived" in bridge
+    assert "call camera frames received from desktop=" in bridge
+    assert "version === 7" in bridge
+    assert "version: 7" in bridge
+
 def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     start_js = _source("client/api_patches/start.js")
     config = _source("client/api_patches/src/config.ts")

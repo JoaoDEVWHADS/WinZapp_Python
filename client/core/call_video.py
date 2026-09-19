@@ -75,6 +75,7 @@ class CameraCapture:
         devices = camera_names(listed.stderr)
         if not devices:
             raise RuntimeError('No camera found')
+        logging.info('[call_video] camera selected: %s (detected=%d)', devices[0], len(devices))
         self.process = subprocess.Popen(
             [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 'dshow',
              '-i', f'video={devices[0]}', '-an', '-vf', 'fps=10,scale=640:360:force_original_aspect_ratio=decrease',
@@ -89,9 +90,16 @@ class CameraCapture:
             raise RuntimeError('Camera did not produce video frames')
 
     def _run(self):
+        accepted_frames = 0
         try:
             for frame in jpeg_frames(self.process.stdout, self.stop_event):
                 if len(frame) <= 256_000:
+                    accepted_frames += 1
+                    if accepted_frames == 1 or accepted_frames % 100 == 0:
+                        logging.info(
+                            '[call_video] camera frames captured=%d bytes=%d',
+                            accepted_frames, len(frame),
+                        )
                     self.ready.set()
                     try:
                         self.send_frame(frame)
