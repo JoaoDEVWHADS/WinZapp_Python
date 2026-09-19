@@ -2712,11 +2712,14 @@ class MainWindow(wx.Frame):
         # Calls live in their own modeless window so changing focus back to
         # the conversation never leaves call controls stranded in the main UI.
         self.voice_call_window = wx.Frame(
-            self, title=self.i18n.t("voice_call_window_title"), size=(560, 150),
-            style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
+            self, title=self.i18n.t("voice_call_window_title"), size=(700, 520),
         )
         call_panel = wx.Panel(self.voice_call_window)
-        call_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        call_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.call_video_image = wx.StaticBitmap(call_panel, bitmap=wx.Bitmap(640, 360))
+        call_sizer.Add(self.call_video_image, 1, wx.EXPAND | wx.ALL, 8)
+        self.call_video_image.Hide()
+        controls = wx.BoxSizer(wx.HORIZONTAL)
         self.voice_call_window_label = wx.StaticText(call_panel, label="")
         self.voice_call_window_end_button = wx.Button(call_panel, label=self.i18n.t("voice_call_end_button"))
         self.voice_call_window_settings_button = wx.Button(call_panel, label=self.i18n.t("voice_call_settings_button"))
@@ -2724,10 +2727,11 @@ class MainWindow(wx.Frame):
         self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
         self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
         self.voice_call_window_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
-        call_sizer.Add(self.voice_call_window_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 12)
-        call_sizer.Add(self.voice_call_window_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
-        call_sizer.Add(self.voice_call_window_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
-        call_sizer.Add(self.voice_call_window_mute_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        controls.Add(self.voice_call_window_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 12)
+        controls.Add(self.voice_call_window_end_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        controls.Add(self.voice_call_window_settings_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        controls.Add(self.voice_call_window_mute_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        call_sizer.Add(controls, 0, wx.EXPAND)
         call_panel.SetSizer(call_sizer)
         self.voice_call_window.Bind(wx.EVT_CLOSE, self._on_voice_call_window_close)
         self.voice_call_window.Hide()
@@ -6085,6 +6089,7 @@ class MainWindow(wx.Frame):
             "peer_jid": details.get("peer_jid") or "",
             "name": details.get("name") or "",
             "outgoing": bool(details.get("outgoing", False)),
+            "is_video": bool(details.get("is_video", False)),
         }
         self._voice_call_last_announced_state = ""
         wx.CallAfter(self._sync_voice_call_bar)
@@ -6115,6 +6120,10 @@ class MainWindow(wx.Frame):
             pending.cancel()
             self._call_audio_stop_timer = None
         self._call_audio_session = None
+        camera = getattr(self, "_call_camera_capture", None)
+        self._call_camera_capture = None
+        if camera is not None:
+            camera.stop()
         self._active_voice_call = None
         self._voice_call_last_announced_state = ""
         if session is not None:
@@ -6195,14 +6204,42 @@ class MainWindow(wx.Frame):
         if session is not None:
             session.enqueue_remote_audio(pcm, sample_rate)
 
+    def on_call_remote_video(self, jpeg: bytes):
+        if not (getattr(self, "_active_voice_call", None) or {}).get("is_video"):
+            return
+        wx.CallAfter(self._show_call_remote_video, jpeg)
+
+    def _show_call_remote_video(self, jpeg: bytes):
+        if not (getattr(self, "_active_voice_call", None) or {}).get("is_video"):
+            return
+        import io
+        try:
+            image = wx.Image(io.BytesIO(jpeg), wx.BITMAP_TYPE_JPEG)
+            if image.IsOk():
+                image.Rescale(640, 360, wx.IMAGE_QUALITY_HIGH)
+                self.call_video_image.SetBitmap(wx.Bitmap(image))
+                self.voice_call_window.Layout()
+        except Exception:
+            logging.exception("[call_video] failed to display remote frame")
+
+    def _start_call_camera(self):
+        from core.call_video import CameraCapture
+        ws = getattr(self, "ws", None)
+        sender = getattr(ws, "send_call_camera_frame", None)
+        if sender is None:
+            raise RuntimeError("Video transport is unavailable")
+        capture = CameraCapture(self._find_api_ffmpeg(), sender)
+        capture.start()
+        if not getattr(self, "_active_voice_call", None):
+            capture.stop()
+            raise RuntimeError("Call ended while camera was starting")
+        self._call_camera_capture = capture
+
     def accept_incoming_call(self, identity: str):
         if getattr(self, "_active_voice_call", None) is not None:
             self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
             return
         details = dict(getattr(self, "_incoming_call_details", {}).get(identity, {}))
-        if details.get("is_video"):
-            self.output(self.i18n.t("incoming_call_video_not_supported"), interrupt=True)
-            return
         payload = self._call_control_payload(identity)
         self.stop_incoming_call_alert(identity)
         self._active_voice_call = {
@@ -6211,12 +6248,15 @@ class MainWindow(wx.Frame):
             "peer_jid": details.get("peer_jid") or "",
             "name": details.get("name") or "",
             "outgoing": False,
+            "is_video": bool(details.get("is_video")),
         }
         wx.CallAfter(self._sync_voice_call_bar)
 
         def _worker():
             with self._call_action_lock:
                 try:
+                    if details.get("is_video"):
+                        self._start_call_camera()
                     self._start_voice_call_audio(identity, details)
                     response = self._post_call_control("accept", payload)
                     if response.status_code >= 400:
@@ -6334,6 +6374,12 @@ class MainWindow(wx.Frame):
             event.Skip()
 
     def start_voice_call(self, peer_jid: str, name: str = ""):
+        self._start_individual_call(peer_jid, name, is_video=False)
+
+    def start_video_call(self, peer_jid: str, name: str = ""):
+        self._start_individual_call(peer_jid, name, is_video=True)
+
+    def _start_individual_call(self, peer_jid: str, name: str, *, is_video: bool):
         """Start a one-to-one WhatsApp voice call using Python-owned audio."""
         peer_jid = self._normalize_jid(str(peer_jid or ""))
         if not peer_jid or peer_jid.endswith(("@g.us", "@newsletter", "@broadcast")):
@@ -6351,6 +6397,7 @@ class MainWindow(wx.Frame):
             "peer_jid": peer_jid,
             "name": name or self._preview_sender_from_jid(peer_jid) or peer_jid,
             "outgoing": True,
+            "is_video": is_video,
         }
         self.output(
             self.i18n.t("voice_call_starting").format(name=details["name"]),
@@ -6363,10 +6410,12 @@ class MainWindow(wx.Frame):
         def _worker():
             with self._call_action_lock:
                 try:
+                    if is_video:
+                        self._start_call_camera()
                     self._start_voice_call_audio(identity, details)
                     response = self._post_call_control(
                         "offer",
-                        {"to": peer_jid, "isVideo": False},
+                        {"to": peer_jid, "isVideo": is_video},
                         timeout=75,
                     )
                     if response.status_code >= 400:
@@ -6401,6 +6450,7 @@ class MainWindow(wx.Frame):
             window = getattr(self, "voice_call_window", None)
             if window is not None:
                 window.Hide()
+            self.call_video_image.Hide()
             self.Layout()
             return
         muted = bool(getattr(getattr(self, "_call_audio_session", None), "microphone_muted", False))
@@ -6412,6 +6462,11 @@ class MainWindow(wx.Frame):
         name = active.get("name") or active.get("peer_jid") or self.i18n.t("unknown_contact")
         label_key = active_call_label_key(active)
         active_text = self.i18n.t(label_key).format(name=name)
+        self.call_video_image.Show(bool(active.get("is_video")))
+        self.voice_call_window.SetTitle(self.i18n.t(
+            "video_call_window_title" if active.get("is_video") else "voice_call_window_title"
+        ))
+        self.voice_call_window.SetSize((700, 520) if active.get("is_video") else (560, 150))
         label.SetLabel(active_text)
         window = getattr(self, "voice_call_window", None)
         if window is not None:
@@ -6437,11 +6492,11 @@ class MainWindow(wx.Frame):
         """Apply the complete call lifecycle emitted by the page CallStore."""
         if not isinstance(event, dict):
             return
-        if event.get("isGroup") or str(event.get("groupJid") or "").endswith("@g.us"):
-            return
         state = str(event.get("state") or "").upper()
         call_id = str(event.get("id") or "")
         peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
+        if event.get("isGroup") or peer_jid.endswith("@g.us") or str(event.get("groupJid") or "").endswith("@g.us"):
+            return
         active = getattr(self, "_active_voice_call", None)
         if not active:
             # The call may be answered from the WhatsApp page controls. In
@@ -6455,6 +6510,7 @@ class MainWindow(wx.Frame):
                 "peer_jid": peer_jid,
                 "name": self._preview_sender_from_jid(peer_jid) or peer_jid,
                 "outgoing": bool(event.get("outgoing", False)),
+                "is_video": bool(event.get("isVideo")),
             }
             self._active_voice_call = active
             self._voice_call_last_announced_state = ""
@@ -6475,6 +6531,8 @@ class MainWindow(wx.Frame):
             return
         if call_id:
             active["call_id"] = call_id
+        if event.get("isVideo"):
+            active["is_video"] = True
         if peer_jid:
             active["peer_jid"] = peer_jid
         if not active.get("name") and peer_jid:
@@ -6510,6 +6568,8 @@ class MainWindow(wx.Frame):
             if self._call_audio_session is not None:
                 return
             try:
+                if details.get("is_video"):
+                    self._start_call_camera()
                 response = self._post_call_control("audio/enable", {}, timeout=20)
                 if response.status_code >= 400:
                     raise RuntimeError(response.text[:500])
@@ -6612,12 +6672,16 @@ class MainWindow(wx.Frame):
         if not identity or identity in self._active_incoming_calls:
             return
         # The client only supports one-to-one calls. Ignore group offers.
-        if event.get("isGroup") or str(event.get("groupJid") or "").endswith("@g.us"):
+        if event.get("isGroup") or peer_jid.endswith("@g.us") or str(event.get("groupJid") or "").endswith("@g.us"):
             return
         caller_name = self._preview_sender_from_jid(peer_jid) if peer_jid else ""
         if not caller_name:
             caller_name = self.i18n.t("unknown_contact")
-        message = self.i18n.t("incoming_call_announcement").format(name=caller_name)
+        announcement_key = (
+            "incoming_video_call_announcement" if event.get("isVideo")
+            else "incoming_call_announcement"
+        )
+        message = self.i18n.t(announcement_key).format(name=caller_name)
         self._active_incoming_calls[identity] = peer_jid
         self._incoming_call_details[identity] = {
             "call_id": call_id,
