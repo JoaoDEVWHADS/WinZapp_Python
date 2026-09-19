@@ -723,13 +723,17 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
               typeof queryWidExists === 'function'
                 ? await queryWidExists.call(queryExistsModule, requestedWid)
                 : await publicQueryWidExists.call(win.WPP.contact, participantId);
-            const resolvedWid = result?.wid || result?.lid;
-            if (!resolvedWid) {
+            if (!result?.wid && !result?.lid) {
               throw new Error(
                 `Group call participant is not registered or reachable: ${participantId}`
               );
             }
-            return resolvedWid;
+            // Keep the phone WID selected by the caller. Current query-exists
+            // can return the account's LID as `wid`; passing that back into
+            // FromWids makes its native PN/LID conversion start with two LIDs
+            // and the local group call loses both remote participants before
+            // signaling. The query above remains the reachability check.
+            return requestedWid;
           })
         );
 

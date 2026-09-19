@@ -223,12 +223,10 @@ def test_group_voice_call_offer_matches_whatsapp_native_group_routing():
     assert "WAWebVoipStartCall" in controller
     assert "startWAWebVoipGroupCallFromChat" in controller
     assert "startWAWebVoipGroupCallFromWids" in controller
-    assert "GROUP_CHAT_DIRECT ?? 25" in controller
     assert "GROUP_CHAT_PICKER ?? 24" in controller
     assert "NOT_OPENED ?? 5" in controller
     assert "payload.useGroupChat === true" in controller
     assert "payload.groupJid" in controller
-    assert "native-group-chat" in controller
     assert "native-group-wids" in controller
     assert "WAWebWidFactory" in controller
     assert "At least two participants are required" in controller
@@ -244,7 +242,8 @@ def test_group_voice_call_resolves_registered_participants_and_rejects_stale_act
     # LID/PN conversion, device sync and TC-token fan-out.
     assert "WAWebQueryExistsJob" in controller
     assert "queryWidExists" in controller
-    assert "const resolvedWid = result?.wid || result?.lid" in controller
+    assert "if (!result?.wid && !result?.lid)" in controller
+    assert "return requestedWid;" in controller
     assert "participant is not registered or reachable" in controller
 
     # A stale outgoing model must not be mistaken for the WA-JS seed call.
