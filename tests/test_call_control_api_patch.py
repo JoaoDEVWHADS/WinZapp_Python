@@ -311,3 +311,19 @@ def test_call_media_bridge_bounds_microphone_backlog_to_live_audio():
     assert "const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;" in bridge
     assert "state.micFramesDroppedForLatency" in bridge
     assert "const dropIndex = state.micOffset > 0 ? 1 : 0;" in bridge
+
+
+def test_local_api_routes_chromium_page_audio_to_call_output_device():
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "state.setOutputDeviceName = async (deviceName: string)" in bridge
+    assert "device.kind === 'audiooutput'" in bridge
+    assert "setSinkId.call(element, state.outputSinkId || '')" in bridge
+    assert "socket.on('call:audio:output-device'" in bridge
+    assert "payload?.outputDeviceName" in bridge
+    assert "if (process.platform !== 'win32') return false;" in bridge
+    assert "setLocalBrowserOutputDevice(" in bridge
+
+    # The browser microphone remains synthetic/bridged. Selecting a call
+    # speaker must not make Chromium open the physical microphone.
+    assert "const micTrack = ensureMicTrack().clone();" in bridge

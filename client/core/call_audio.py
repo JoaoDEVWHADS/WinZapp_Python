@@ -388,7 +388,10 @@ class CallAudioSession:
             raise CallAudioUnavailable(
                 "The active call output backend cannot switch devices in place"
             )
-        return bool(switch(device_name or ""))
+        switched = bool(switch(device_name or ""))
+        if switched:
+            self._emit_output_device(device_name or "")
+        return switched
 
     def _query_devices(self):
         try:
@@ -725,9 +728,31 @@ class CallAudioSession:
 
     def _emit_start(self) -> None:
         try:
-            self._sio.emit("call:audio:start", {"session": self._config.session})
+            self._sio.emit(
+                "call:audio:start",
+                {
+                    "session": self._config.session,
+                    "outputDeviceName": self._config.output_device_name or "",
+                },
+            )
         except Exception:
             logging.debug("[call_audio] could not emit call:audio:start", exc_info=True)
+
+    def _emit_output_device(self, device_name: str) -> None:
+        """Keep local Chromium page audio on the same speaker as the call."""
+        try:
+            self._sio.emit(
+                "call:audio:output-device",
+                {
+                    "session": self._config.session,
+                    "outputDeviceName": device_name or "",
+                },
+            )
+        except Exception:
+            logging.debug(
+                "[call_audio] could not emit browser call output device",
+                exc_info=True,
+            )
 
     def _emit_stop(self) -> None:
         try:
