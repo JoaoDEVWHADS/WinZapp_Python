@@ -18,9 +18,6 @@ type CallActionPayload = {
   callId?: string;
   to?: string;
   isVideo?: boolean;
-  participants?: string[];
-  groupJid?: string;
-  useGroupChat?: boolean;
 };
 
 function getWhatsappPage(req: Request): any {
@@ -40,17 +37,6 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
   // Node, before entering the browser context, so the browser callback never
   // tries to resolve a Node-side helper name.
   await warmCallVoipRuntime(req.client, logger);
-
-  if (action === 'offer-group') {
-    logger?.info?.(
-      `[${session}] WinZapp group-call request ` +
-        JSON.stringify({
-          participantCount: Array.isArray(payload.participants) ? payload.participants.length : 0,
-          groupJid: payload.groupJid || '',
-          useGroupChat: payload.useGroupChat === true,
-        })
-    );
-  }
 
   let result: any;
   try {
@@ -83,9 +69,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
       const callStateOf = (call: any): string => {
         // getState() legitimately returns numeric 0 for the terminal/NONE
-        // state. Using || erased that value and made a dead CallModel look
-        // like it had no state at all, which in turn let /group/offer return
-        // HTTP 200 for a call WhatsApp had already abandoned.
+        // state. Preserve that value when inspecting call lifecycle.
         const rawValue =
           call?.getState?.() ?? call?.state ?? call?.get?.('state') ?? '';
         const raw = String(rawValue);
@@ -163,47 +147,9 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           if (exact) return exact;
         }
         return (
-          models.find((call) => isIncomingCall(call) || isOutgoingOrLiveCall(call) || call?.isGroup) ||
+          models.find((call) => isIncomingCall(call) || isOutgoingOrLiveCall(call)) ||
           null
         );
-      };
-
-      const groupParticipantCountOf = (call: any): number => {
-        const participants =
-          call?.groupCallParticipants ??
-          call?.get?.('groupCallParticipants') ??
-          call?.participants ??
-          call?.get?.('participants');
-        if (!participants) return 0;
-        if (Array.isArray(participants)) return participants.length;
-        try {
-          const models = participants?.getModelsArray?.();
-          if (Array.isArray(models)) return models.length;
-        } catch (_) {}
-        if (Array.isArray(participants?.models)) return participants.models.length;
-        if (Array.isArray(participants?._models)) return participants._models.length;
-        if (typeof participants?.size === 'number') return participants.size;
-        if (typeof participants?.length === 'number') return participants.length;
-        return 0;
-      };
-
-      const groupParticipantStatesOf = (call: any): any[] => {
-        const participants = call?.groupCallParticipants ?? call?.get?.('groupCallParticipants');
-        let models: any[] = [];
-        if (Array.isArray(participants)) models = participants;
-        else {
-          try {
-            models = participants?.getModelsArray?.() || participants?.models || [];
-          } catch (_) {}
-        }
-        const scalar = (value: any) =>
-          value == null ? null : String(value).slice(0, 120);
-        return models.slice(0, 8).map((participant: any) => ({
-          jid: serializeId(participant?.wid || participant?.jid || participant?.id),
-          state: scalar(participant?.get?.('state') ?? participant?.state),
-          status: scalar(participant?.get?.('status') ?? participant?.status),
-          reason: scalar(participant?.get?.('reason') ?? participant?.reason),
-        }));
       };
 
       const summarizeCall = (call: any) => ({
@@ -211,32 +157,10 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         peerJid: peerJidOf(call),
         state: callStateOf(call),
         isVideo: !!call?.isVideo,
-        isGroup: !!call?.isGroup,
-        groupParticipantCount: groupParticipantCountOf(call),
-        groupParticipantStates: groupParticipantStatesOf(call),
         endReason: String(call?.get?.('endReason') ?? call?.endReason ?? '').slice(0, 120),
         error: String(call?.get?.('error') ?? call?.error ?? '').slice(0, 120),
         outgoing: !!call?.outgoing,
       });
-
-      const functionDiagnostic = (fn: any) => {
-        if (typeof fn !== 'function') return { type: typeof fn, arity: null, source: '' };
-        let source = '';
-        try {
-          source = String(fn).replace(/\s+/g, ' ').slice(0, 900);
-        } catch (_) {}
-        return { type: 'function', arity: fn.length, source };
-      };
-
-      const callStoreSnapshot = () => {
-        const store = getCallStore();
-        const models = getModels(store);
-        return {
-          activeCall: store?.activeCall ? summarizeCall(store.activeCall) : null,
-          modelCount: models.length,
-          models: models.slice(-8).map((model) => summarizeCall(model)),
-        };
-      };
 
       const forgetIncomingCall = (callId: string) => {
         if (!callId) return;
@@ -263,93 +187,6 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
       };
 
       const ensureVoipRuntimeReady = async (): Promise<any> => {
-        const installEarlyWasmProbe = () => {
-          try {
-            const backendApi = win.require?.('WAWebBackendApi');
-            if (
-              !backendApi ||
-              typeof backendApi.frontendSendAndReceive !== 'function' ||
-              backendApi.__winzappWasmProbeInstalled
-            ) {
-              return;
-            }
-
-            const originalFrontendSendAndReceive =
-              backendApi.frontendSendAndReceive.bind(backendApi);
-
-            const wrapWasm = (wasm: any) => {
-              if (!wasm || typeof wasm.startVoipGroupCall !== 'function') return wasm;
-              if (wasm.__winzappStartVoipGroupCallProbe) return wasm;
-
-              const originalStartVoipGroupCall =
-                wasm.startVoipGroupCall.bind(wasm);
-              wasm.startVoipGroupCall = (...args: any[]) => {
-                const status = originalStartVoipGroupCall(...args);
-                const listSize = (value: any) => {
-                  try {
-                    if (typeof value?.size === 'function') return value.size();
-                    if (typeof value?.length === 'number') return value.length;
-                  } catch (_) {}
-                  return null;
-                };
-                win.__winzappLastStartVoipGroupCallStatus = {
-                  at: Date.now(),
-                  status,
-                  argCount: args.length,
-                  pnCount: listSize(args[0]),
-                  lidCount: listSize(args[1]),
-                  deviceCsvCount: listSize(args[2]),
-                  callId: String(args[3] || ''),
-                  useVideo: !!args[4],
-                  groupJid: String(args[5] || ''),
-                  isLightWeight: !!args[6],
-                  callFromUi: args[10] ?? null,
-                  lobbyEntryPoint: args[11] ?? null,
-                };
-                return status;
-              };
-              wasm.__winzappStartVoipGroupCallProbe = true;
-              return wasm;
-            };
-
-            backendApi.frontendSendAndReceive = async (...args: any[]) => {
-              const value = await originalFrontendSendAndReceive(...args);
-              if (args[0] === 'initializeVoipWasm') {
-                return wrapWasm(value);
-              }
-              return value;
-            };
-            backendApi.__winzappWasmProbeInstalled = true;
-            win.__winzappEarlyWasmProbeInstalled = true;
-          } catch (error: any) {
-            win.__winzappEarlyWasmProbeError =
-              String(error?.message || error || 'unknown error');
-          }
-        };
-
-        installEarlyWasmProbe();
-
-        // Keep the VoIP stack on the main thread. WhatsApp's current
-        // WorkerProxy fires startGroupCall as a one-way RPC and discards the
-        // underlying WASM status, which makes failed group calls look like
-        // successful short-lived CALLING models.
-        try {
-          const abProps = win.require?.('WAWebABProps');
-          if (
-            abProps &&
-            typeof abProps.getABPropConfigValue === 'function' &&
-            !abProps.__winzappDirectVoipStack
-          ) {
-            const originalGetABPropConfigValue =
-              abProps.getABPropConfigValue.bind(abProps);
-            abProps.getABPropConfigValue = (key: string, ...args: any[]) => {
-              if (key === 'enable_web_voip_proxy_and_sctp_workers') return false;
-              return originalGetABPropConfigValue(key, ...args);
-            };
-            abProps.__winzappDirectVoipStack = true;
-          }
-        } catch (_) {}
-
         // WA-JS' enableCallInterface flips the calling AB props, but it marks
         // itself enabled before its best-effort backend init. If that first
         // init races the lazy VoIP bundle, later calls never retry it. Retry
@@ -481,422 +318,6 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return result;
       }
 
-      if (action === 'offer-group') {
-        if (payload.isVideo) {
-          throw new Error('Video group calls are not supported by WinZapp');
-        }
-        const participantIds = Array.isArray(payload.participants)
-          ? payload.participants.map((value) => String(value || '').trim()).filter(Boolean)
-          : [];
-        if (participantIds.length < 2) {
-          throw new Error('At least two participants are required to start a group voice call');
-        }
-
-        const groupJid = String(payload.groupJid || '').trim();
-        const useGroupChat =
-          payload.useGroupChat === true && groupJid.endsWith('@g.us');
-
-        await ensureVoipRuntimeReady();
-
-        // Probe the real Emscripten/WASM return code. WhatsApp's Web stack
-        // intentionally logs non-zero startVoipGroupCall() results but does
-        // not return them to callers. On the direct stack the backend API
-        // exposes the same WASM module instance, so wrap just this method and
-        // leave all behavior/return values unchanged.
-        let wasmProbe: any = {
-          installed: false,
-          earlyHookInstalled: !!win.__winzappEarlyWasmProbeInstalled,
-          earlyHookError: String(win.__winzappEarlyWasmProbeError || ''),
-          error: '',
-          lastStatus: win.__winzappLastStartVoipGroupCallStatus || null,
-        };
-        try {
-          const backendApi = win.require?.('WAWebBackendApi');
-          const frontendSendAndReceive = backendApi?.frontendSendAndReceive;
-          if (typeof frontendSendAndReceive === 'function') {
-            const wasm = await frontendSendAndReceive.call(
-              backendApi,
-              'initializeVoipWasm'
-            );
-            if (wasm && typeof wasm.startVoipGroupCall === 'function') {
-              if (!wasm.__winzappStartVoipGroupCallProbe) {
-                const originalStartVoipGroupCall =
-                  wasm.startVoipGroupCall.bind(wasm);
-                wasm.startVoipGroupCall = (...args: any[]) => {
-                  const status = originalStartVoipGroupCall(...args);
-                  const listSize = (value: any) => {
-                    try {
-                      if (typeof value?.size === 'function') return value.size();
-                      if (typeof value?.length === 'number') return value.length;
-                    } catch (_) {}
-                    return null;
-                  };
-                  win.__winzappLastStartVoipGroupCallStatus = {
-                    at: Date.now(),
-                    status,
-                    argCount: args.length,
-                    pnCount: listSize(args[0]),
-                    lidCount: listSize(args[1]),
-                    deviceCsvCount: listSize(args[2]),
-                    callId: String(args[3] || ''),
-                    useVideo: !!args[4],
-                    groupJid: String(args[5] || ''),
-                    isLightWeight: !!args[6],
-                    callFromUi: args[10] ?? null,
-                    lobbyEntryPoint: args[11] ?? null,
-                  };
-                  return status;
-                };
-                wasm.__winzappStartVoipGroupCallProbe = true;
-              }
-              wasmProbe.installed = true;
-              wasmProbe.earlyHookInstalled =
-                !!win.__winzappEarlyWasmProbeInstalled;
-              wasmProbe.earlyHookError =
-                String(win.__winzappEarlyWasmProbeError || '');
-            } else {
-              wasmProbe.error = 'initializeVoipWasm returned no startVoipGroupCall function';
-            }
-          } else {
-            wasmProbe.error = 'WAWebBackendApi.frontendSendAndReceive is unavailable';
-          }
-        } catch (error: any) {
-          wasmProbe.error = String(error?.message || error || 'unknown error');
-        }
-
-        const callStart = win.require?.('WAWebVoipStartCall');
-        if (!callStart) {
-          throw new Error('WhatsApp native group-call controller is unavailable');
-        }
-
-        // WAWebVoipStackInterfaceWeb.startGroupCall() checks the exported
-        // WAWebVoipGatingUtils.isGroupCallingEnabled() immediately before it
-        // calls the native/WASM startVoipGroupCall(). WA-JS already patches
-        // the AB props, but explicitly validate this last gate here because a
-        // false value makes WhatsApp return silently after creating local
-        // pending state — exactly the "CALLING but nobody rings" symptom.
-        let gating: any = null;
-        try {
-          gating = win.require?.('WAWebVoipGatingUtils');
-        } catch (_) {}
-        const gateBefore =
-          typeof gating?.isGroupCallingEnabled === 'function'
-            ? !!gating.isGroupCallingEnabled()
-            : null;
-        if (gating && gateBefore === false) {
-          gating.isGroupCallingEnabled = () => true;
-          if (typeof gating.isWebGroupCallingUsable === 'function') {
-            gating.isWebGroupCallingUsable = () => true;
-          }
-        }
-        const gateAfter =
-          typeof gating?.isGroupCallingEnabled === 'function'
-            ? !!gating.isGroupCallingEnabled()
-            : null;
-        if (gateAfter === false) {
-          throw new Error('WhatsApp Web group calling gate is disabled');
-        }
-
-        const functions = win.WPP?.whatsapp?.functions || {};
-        const stackForDiagnostics = await getNativeVoipStack();
-        let backendForDiagnostics: any = null;
-        try {
-          const requireBackend =
-            functions.requireVoipJsBackend || win.WPP?.whatsapp?.requireVoipJsBackend;
-          if (typeof requireBackend === 'function') {
-            backendForDiagnostics = await requireBackend();
-          }
-        } catch (_) {}
-
-        let abProps: any = null;
-        let environment: any = null;
-        try {
-          abProps = win.require?.('WAWebABProps');
-        } catch (_) {}
-        try {
-          environment = win.require?.('WAWebEnvironment');
-        } catch (_) {}
-
-        const readAb = (key: string) => {
-          try {
-            return abProps?.getABPropConfigValue?.(key);
-          } catch (_) {
-            return undefined;
-          }
-        };
-
-        const diagnostics: any = {
-          voip: {
-            isVoipInitialized: isVoipInitialized(),
-            stackType: stackForDiagnostics?.type || '',
-            stackStartGroupCall: functionDiagnostic(stackForDiagnostics?.startGroupCall),
-            stackKeys: stackForDiagnostics ? Object.keys(stackForDiagnostics).sort() : [],
-            backendKeys: backendForDiagnostics ? Object.keys(backendForDiagnostics).sort() : [],
-            emitterReady:
-              backendForDiagnostics?.WAWebVoipInit?.VoipInitEventEmitter?.getIsVoipInited?.(),
-            emitterFailed:
-              backendForDiagnostics?.WAWebVoipInit?.VoipInitEventEmitter?.getDidVoipInitError?.(),
-          },
-          environment: {
-            isWindows: environment?.isWindows,
-            isWeb: environment?.isWeb,
-            isGuest: environment?.isGuest,
-            userAgent: navigator.userAgent,
-            webdriver: navigator.webdriver,
-            hardwareConcurrency: navigator.hardwareConcurrency,
-            crossOriginIsolated: win.crossOriginIsolated,
-          },
-          gating: {
-            gateBefore,
-            gateAfter,
-            isWebGroupCallingUsable:
-              typeof gating?.isWebGroupCallingUsable === 'function'
-                ? !!gating.isWebGroupCallingUsable()
-                : null,
-            isWebTransportConfigured:
-              typeof gating?.isWebTransportConfigured === 'function'
-                ? !!gating.isWebTransportConfigured()
-                : null,
-            isWebTransportEnabled:
-              typeof gating?.isWebTransportEnabled === 'function'
-                ? !!gating.isWebTransportEnabled()
-                : null,
-            isCurrentCallGroup:
-              typeof gating?.isCurrentCallGroup === 'function'
-                ? !!gating.isCurrentCallGroup()
-                : null,
-          },
-          ab: {
-            enable_web_calling: readAb('enable_web_calling'),
-            enable_web_group_calling: readAb('enable_web_group_calling'),
-            enable_web_voip_proxy_and_sctp_workers:
-              readAb('enable_web_voip_proxy_and_sctp_workers'),
-            winzappDirectVoipStack:
-              !!win.require?.('WAWebABProps')?.__winzappDirectVoipStack,
-            enable_web_voip_webtransport: readAb('enable_web_voip_webtransport'),
-            enable_web_voip_webtransport_group_calls:
-              readAb('enable_web_voip_webtransport_group_calls'),
-            web_voip_deferred_boot_init: readAb('web_voip_deferred_boot_init'),
-          },
-          native: {
-            fromChat: functionDiagnostic(callStart.startWAWebVoipGroupCallFromChat),
-            fromWids: functionDiagnostic(callStart.startWAWebVoipGroupCallFromWids),
-          },
-          wasmProbe,
-          before: callStoreSnapshot(),
-          timeline: [],
-        };
-
-        const widFactory =
-          win.WPP?.whatsapp?.WidFactory ||
-          win.Store?.WidFactory ||
-          win.require?.('WAWebWidFactory');
-        const createWid = widFactory?.createWid;
-        if (typeof createWid !== 'function') {
-          throw new Error('WhatsApp contact ID factory is not available');
-        }
-
-        const callFromUiModule = win.require?.('WAWebWamEnumCallFromUi');
-        const lobbyEntryModule = win.require?.('WAWebWamEnumLobbyEntryPointType');
-        // WinZapp deliberately uses the participant-picker semantics even
-        // when every member was selected. FromChat was observed to abort
-        // before remote ringing, while FromWids is the same native route used
-        // by WhatsApp's working "New call" multi-person flow.
-        const callFromUi =
-          callFromUiModule?.CALL_FROM_UI?.GROUP_CHAT_PICKER ?? 24;
-        const lobbyEntryPoint =
-          lobbyEntryModule?.LOBBY_ENTRY_POINT_TYPE?.NOT_OPENED ?? 5;
-
-        const callStore = getCallStore();
-        const previousActiveId = callIdOf(callStore?.activeCall);
-        const preexistingIds = new Set(
-          getModels(callStore).map((model) => callIdOf(model)).filter(Boolean)
-        );
-
-        let via = '';
-        if (typeof callStart.startWAWebVoipGroupCallFromWids !== 'function') {
-          throw new Error(
-            'WhatsApp selected-participant group-call controller is unavailable'
-          );
-        }
-
-        const queryExistsModule = win.require?.('WAWebQueryExistsJob');
-        const queryWidExists = queryExistsModule?.queryWidExists;
-        const publicQueryWidExists = win.WPP?.contact?.queryWidExists;
-        if (
-          typeof queryWidExists !== 'function' &&
-          typeof publicQueryWidExists !== 'function'
-        ) {
-          throw new Error('WhatsApp participant resolver is not available');
-        }
-
-        const participantWids = await Promise.all(
-          participantIds.map(async (participantId) => {
-            const requestedWid = createWid.call(widFactory, participantId);
-            if (
-              !requestedWid ||
-              requestedWid.isGroup?.() ||
-              (typeof requestedWid.isUser === 'function' && !requestedWid.isUser())
-            ) {
-              throw new Error(`Invalid group call participant: ${participantId}`);
-            }
-
-            const result =
-              typeof queryWidExists === 'function'
-                ? await queryWidExists.call(queryExistsModule, requestedWid)
-                : await publicQueryWidExists.call(win.WPP.contact, participantId);
-            if (!result?.wid && !result?.lid) {
-              throw new Error(
-                `Group call participant is not registered or reachable: ${participantId}`
-              );
-            }
-            // Preserve a corrected phone WID (for example a Brazilian number
-            // variant), but never replace the selected phone with a LID here.
-            // The native FromWids path must start with phone participants and
-            // perform its own PN/LID conversion and device fan-out.
-            return serializeId(result.wid).endsWith('@lid')
-              ? requestedWid
-              : result.wid || requestedWid;
-          })
-        );
-
-        diagnostics.resolvedParticipantWids = participantWids.map((wid) => serializeId(wid));
-        diagnostics.requestedGroupJid = groupJid;
-        diagnostics.requestedUseGroupChat = useGroupChat;
-        diagnostics.routingDecision = 'force-selected-participants';
-        // The WASM probe can miss the instance held by the active VoIP stack.
-        // Observe the stack boundary itself without changing its arguments or
-        // outcome, so the next failure tells us whether signaling was attempted.
-        let restoreStartGroupCall: (() => void) | null = null;
-        diagnostics.voip.stackInvocation = { observed: false, result: null, error: '' };
-        try {
-          const original = stackForDiagnostics?.startGroupCall;
-          if (typeof original === 'function') {
-            stackForDiagnostics.startGroupCall = function (...args: any[]) {
-              diagnostics.voip.stackInvocation.observed = true;
-              try {
-                const result = original.apply(this, args);
-                if (result && typeof result.then === 'function') {
-                  return result.then(
-                    (value: any) => {
-                      diagnostics.voip.stackInvocation.result = String(value).slice(0, 120);
-                      return value;
-                    },
-                    (error: any) => {
-                      diagnostics.voip.stackInvocation.error =
-                        String(error?.message || error).slice(0, 240);
-                      throw error;
-                    }
-                  );
-                }
-                diagnostics.voip.stackInvocation.result = String(result).slice(0, 120);
-                return result;
-              } catch (error: any) {
-                diagnostics.voip.stackInvocation.error =
-                  String(error?.message || error).slice(0, 240);
-                throw error;
-              }
-            };
-            restoreStartGroupCall = () => {
-              stackForDiagnostics.startGroupCall = original;
-            };
-          }
-        } catch (error: any) {
-          diagnostics.voip.stackInvocation.error =
-            `probe install: ${String(error?.message || error).slice(0, 220)}`;
-        }
-        const nativeStartedAt = Date.now();
-        try {
-          await callStart.startWAWebVoipGroupCallFromWids(
-            participantWids,
-            false,
-            callFromUi,
-            lobbyEntryPoint
-          );
-        } finally {
-          try { restoreStartGroupCall?.(); } catch (_) {}
-        }
-        diagnostics.nativeInvocationMs = Date.now() - nativeStartedAt;
-        diagnostics.nativePath = 'startWAWebVoipGroupCallFromWids';
-        via = 'native-group-wids';
-
-        let startedCall: any = null;
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < 5000) {
-          const current = getCallStore()?.activeCall;
-          const activeId = callIdOf(current);
-          const state = callStateOf(current);
-          if (
-            current?.outgoing &&
-            current?.isGroup &&
-            activeId &&
-            activeId !== previousActiveId &&
-            !preexistingIds.has(activeId) &&
-            state &&
-            state !== 'NONE' &&
-            state !== 'ENDED' &&
-            groupParticipantCountOf(current) >= 2
-          ) {
-            startedCall = current;
-            break;
-          }
-          await delay(100);
-        }
-
-        if (!startedCall) {
-          diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
-          throw new Error(
-            'WhatsApp group-call controller did not create a live outgoing group call'
-          );
-        }
-
-        // Temporary high-detail diagnostics for the current group-call bug.
-        // Keep the samples sparse enough not to hammer CallStore while still
-        // showing whether signaling progresses past CALLING.
-        diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
-        for (const waitMs of [250, 500, 1000, 2000]) {
-          await delay(waitMs);
-          diagnostics.timeline.push({ atMs: Date.now() - startedAt, ...callStoreSnapshot() });
-        }
-        diagnostics.wasmProbe.lastStatus =
-          win.__winzappLastStartVoipGroupCallStatus || null;
-
-        const finalActiveCall = getCallStore()?.activeCall;
-        const finalState = callStateOf(finalActiveCall || startedCall);
-        if (
-          !finalActiveCall ||
-          finalState === 'NONE' ||
-          finalState === 'ENDED' ||
-          groupParticipantCountOf(finalActiveCall) < 2
-        ) {
-          // Do not throw inside page.evaluate here. Puppeteer serializes an
-          // Error down to message/stack and drops custom diagnostic fields.
-          // Return a structured failure envelope so Node can log the complete
-          // VoIP/AB/timeline snapshot before converting it into HTTP 500.
-          return {
-            __winzappGroupCallFailure: true,
-            error:
-              'WhatsApp aborted the outgoing group call before remote signaling remained active',
-            finalCall: finalActiveCall ? summarizeCall(finalActiveCall) : null,
-            finalSeedCall: summarizeCall(startedCall),
-            finalState,
-            diagnostics,
-          };
-        }
-
-        return {
-          ...summarizeCall(finalActiveCall),
-          via,
-          groupJid: useGroupChat ? groupJid : '',
-          useGroupChat,
-          gateBefore,
-          gateAfter,
-          callFromUi,
-          lobbyEntryPoint,
-          diagnostics,
-        };
-      }
-
       if (action === 'offer') {
         let call: any = null;
         const storeBeforeOffer = getCallStore();
@@ -953,33 +374,7 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
     { action, payload }
     );
   } catch (error: any) {
-    if (action === 'offer-group') {
-      logger?.error?.(
-        `[${session}] WinZapp group-call browser failure ` +
-          JSON.stringify({
-            message: String(error?.message || error || ''),
-            stack: String(error?.stack || ''),
-          })
-      );
-    }
     throw error;
-  }
-
-  if (action === 'offer-group') {
-    logger?.info?.(
-      `[${session}] WinZapp group-call result ` +
-        JSON.stringify(result)
-    );
-    if (result?.__winzappGroupCallFailure) {
-      const error: any = new Error(
-        String(
-          result?.error ||
-            'WhatsApp aborted the outgoing group call before remote signaling remained active'
-        )
-      );
-      error.winzappGroupCallDiagnostics = result?.diagnostics || null;
-      throw error;
-    }
   }
 
   return result;
@@ -991,13 +386,6 @@ function ok(res: Response, response: any) {
 
 function fail(req: Request, res: Response, action: string, error: unknown) {
   req.logger.error(error);
-  const diagnostics = (error as any)?.winzappGroupCallDiagnostics;
-  if (diagnostics) {
-    req.logger.error(
-      `[${String((req.client as any)?.session || 'unknown')}] WinZapp group-call diagnostics ` +
-        JSON.stringify(diagnostics)
-    );
-  }
   const message = error instanceof Error ? error.message : String(error);
   res.status(500).json({ status: 'error', message: `Error on ${action}`, error: message });
 }
@@ -1055,32 +443,6 @@ export async function endCall(req: Request, res: Response) {
     ok(res, await evaluateWppCall(req, 'end', req.body || {}));
   } catch (error) {
     fail(req, res, 'endCall', error);
-  }
-}
-
-export async function offerGroupCall(req: Request, res: Response) {
-  try {
-    const body = req.body || {};
-    if (!Array.isArray(body.participants) || body.participants.length < 2) {
-      res.status(400).json({
-        status: 'error',
-        message: 'At least two participants are required!',
-      });
-      return;
-    }
-    if (body.isVideo === true) {
-      res.status(400).json({ status: 'error', message: 'Video group calls are not supported!' });
-      return;
-    }
-    await prepareAudioBridge(req);
-    const result = await evaluateWppCall(req, 'offer-group', body);
-    req.logger.info(
-      `[${req.params.session}] group call offer result: ${JSON.stringify(result)}`
-    );
-    ok(res, result);
-  } catch (error) {
-    await stopAudioBridge(req);
-    fail(req, res, 'offerGroupCall', error);
   }
 }
 
