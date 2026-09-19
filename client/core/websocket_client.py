@@ -2425,15 +2425,7 @@ class WebSocketClient:
                 ),
                 "groupJid": self._clean_jid(payload.get("groupJid")),
                 "isVideo": bool(payload.get("isVideo", False)),
-                "isGroup": bool(
-                    payload.get("isGroup", False)
-                    or payload.get("groupJid")
-                    or int(payload.get("groupParticipantCount") or 0) >= 2
-                    or int(payload.get("groupConnectedCount") or 0) >= 2
-                ),
-                "groupParticipantCount": int(payload.get("groupParticipantCount") or 0),
-                "groupConnectedCount": int(payload.get("groupConnectedCount") or 0),
-                "groupCallType": str(payload.get("groupCallType") or "direct"),
+                "isGroup": bool(payload.get("isGroup", False)),
                 "timestamp": call_timestamp,
                 "observedAt": observed_at,
                 "receivedWhileOffline": bool(
@@ -2465,21 +2457,7 @@ class WebSocketClient:
             normalized["event"] = str(normalized.get("event") or "state").lower()
             normalized["outgoing"] = bool(normalized.get("outgoing", False))
             normalized["isVideo"] = bool(normalized.get("isVideo", False))
-            normalized["groupParticipantCount"] = int(
-                normalized.get("groupParticipantCount") or 0
-            )
-            normalized["groupConnectedCount"] = int(
-                normalized.get("groupConnectedCount") or 0
-            )
-            normalized["groupCallType"] = str(
-                normalized.get("groupCallType") or "direct"
-            )
-            normalized["isGroup"] = bool(
-                normalized.get("isGroup", False)
-                or normalized.get("groupJid")
-                or normalized["groupParticipantCount"] >= 2
-                or normalized["groupConnectedCount"] >= 2
-            )
+            normalized["isGroup"] = bool(normalized.get("isGroup", False))
             wx.CallAfter(self.main_window.on_voice_call_state_event, normalized)
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_call_state error")

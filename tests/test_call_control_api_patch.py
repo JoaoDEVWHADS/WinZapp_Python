@@ -359,28 +359,3 @@ def test_group_call_installs_wasm_probe_before_voip_warmup():
 
     assert "earlyHookInstalled" in controller
     assert "earlyWasmProbe=" in bridge
-
-
-def test_incoming_ad_hoc_group_call_can_promote_after_initial_ring():
-    source = _source("client/api_patches/src/util/createSessionUtil.ts")
-    websocket = _source("client/core/websocket_client.py")
-
-    assert "const effectiveIsGroupCall =" in source
-    assert "const groupCallTypeOf =" in source
-    assert "'ad-hoc'" in source
-    assert "'group-chat'" in source
-    assert "groupParticipantCountOf(activeCall)" in source
-    assert "groupConnectedCountOf(activeCall)" in source
-
-    # Group promotion must be part of the active-call signature; otherwise a
-    # stable ACTIVE state never re-emits when WhatsApp flips only group fields.
-    assert "effectiveIsGroupCall(activeCall) ? 'group' : 'direct'" in source
-    assert "String(groupParticipantCountOf(activeCall))" in source
-    assert "String(groupConnectedCountOf(activeCall))" in source
-
-    # Ad-hoc group calls intentionally have no groupJid and must not wait for one.
-    assert "Do not delay it waiting for metadata" in source
-
-    assert '"groupParticipantCount"' in websocket
-    assert '"groupConnectedCount"' in websocket
-    assert '"groupCallType"' in websocket
