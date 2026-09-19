@@ -190,7 +190,7 @@ function ensureLinuxCallAudio(
 
 function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 5) return true;
+  if (win.__winzappCallMediaBridge?.version === 6) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const AudioContextCtor = win.AudioContext || win.webkitAudioContext;
@@ -200,7 +200,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
 
   const state: any = {
-    version: 5,
+    version: 6,
     enabled: false,
     context: null,
     micDestination: null,
