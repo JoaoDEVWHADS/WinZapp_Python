@@ -260,3 +260,11 @@ def test_page_native_audio_only_mutes_looping_ringtone_and_restores_reused_eleme
 
     assert "if (mutedLogCount > 40) return;" in bridge
 
+
+
+def test_remote_linux_call_audio_relay_can_start_while_call_is_still_ringing():
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "socket.on('call:audio:start'" in bridge
+    assert "ensureLinuxCallAudio(session, socket, logger)" in bridge
+    assert "Linux call speaker monitor started before answer" in bridge

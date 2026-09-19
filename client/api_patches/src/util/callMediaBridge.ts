@@ -1068,6 +1068,17 @@ export function registerCallAudioSocket(
   authenticatedSession: string
 ): void {
   let cameraBusy = false;
+
+  socket.on('call:audio:start', (payload: any) => {
+    const session = String(payload?.session || '');
+    if (!session || session !== authenticatedSession) return;
+    if (!(clientsArray as any)[session]) return;
+    const linuxAudio = ensureLinuxCallAudio(session, socket, logger);
+    if (linuxAudio) {
+      logger?.info?.(`[${session}] Linux call speaker monitor started before answer`);
+    }
+  });
+
   socket.on('call:video:camera', (payload: any) => {
     const session = String(payload?.session || '');
     const jpeg = payload?.jpeg;

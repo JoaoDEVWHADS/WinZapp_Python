@@ -100,35 +100,56 @@ class CallAudioSession:
     def running(self) -> bool:
         return not self._stop_event.is_set() and self._input_stream is not None
 
+    @property
+    def output_running(self) -> bool:
+        return not self._stop_event.is_set() and self._output_stream is not None
+
+    def start_output_only(self) -> None:
+        """Open receive audio while ringing without opening the microphone."""
+        if self.output_running:
+            return
+        if self._sd is None:
+            raise CallAudioUnavailable("sounddevice is not available in this Python runtime")
+
+        self._stop_event.clear()
+        self._output_stream, self._output_rate = self._open_output_stream()
+        try:
+            self._output_stream.start()
+        except Exception:
+            self._close_stream(self._output_stream)
+            self._output_stream = None
+            raise
+        self._player_thread = threading.Thread(
+            target=self._play_remote_loop,
+            name="WinZappCallRemotePlayer",
+            daemon=True,
+        )
+        self._player_thread.start()
+        self._emit_start()
+
     def start(self) -> None:
         if self.running:
             return
         if self._sd is None:
             raise CallAudioUnavailable("sounddevice is not available in this Python runtime")
 
-        self._stop_event.clear()
-        self._input_stream, self._input_rate = self._open_input_stream()
+        # An incoming call may already have opened the receive side while it
+        # was ringing. Reuse it and only add microphone capture on answer.
+        self.start_output_only()
         try:
-            self._output_stream, self._output_rate = self._open_output_stream()
+            self._input_stream, self._input_rate = self._open_input_stream()
+            self._input_stream.start()
         except Exception:
             self._close_stream(self._input_stream)
             self._input_stream = None
             raise
 
-        self._input_stream.start()
-        self._output_stream.start()
         self._sender_thread = threading.Thread(
             target=self._send_microphone_loop,
             name="WinZappCallMicSender",
             daemon=True,
         )
-        self._player_thread = threading.Thread(
-            target=self._play_remote_loop,
-            name="WinZappCallRemotePlayer",
-            daemon=True,
-        )
         self._sender_thread.start()
-        self._player_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -299,6 +320,12 @@ class CallAudioSession:
             except Exception:
                 logging.exception("[call_audio] failed to play remote call audio")
                 time.sleep(0.05)
+
+    def _emit_start(self) -> None:
+        try:
+            self._sio.emit("call:audio:start", {"session": self._config.session})
+        except Exception:
+            logging.debug("[call_audio] could not emit call:audio:start", exc_info=True)
 
     def _emit_stop(self) -> None:
         try:

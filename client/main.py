@@ -5972,8 +5972,10 @@ class MainWindow(wx.Frame):
             close_dialog(identity)
         logging.warning("[incoming_call] lifecycle timeout id=%s", identity)
         getattr(self, "_incoming_call_details", {}).pop(identity, None)
-        if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
-            self.call_incoming_sound.stop()
+        if not self._active_incoming_calls:
+            if hasattr(self, "call_incoming_sound"):
+                self.call_incoming_sound.stop()
+            self._stop_incoming_call_audio_monitor()
         self._sync_incoming_call_bar()
 
     def _close_incoming_call_dialog(self, identity: str):
@@ -6098,16 +6100,22 @@ class MainWindow(wx.Frame):
         getattr(self, "_incoming_call_details", {}).clear()
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.stop()
+        self._stop_incoming_call_audio_monitor()
         self._sync_incoming_call_bar()
 
-    def stop_incoming_call_alert(self, identity: str):
+    def stop_incoming_call_alert(
+        self, identity: str, *, keep_audio_monitor: bool = False
+    ):
         """Stop one incoming-call alert locally; the phone keeps ringing."""
         self._active_incoming_calls.pop(identity, None)
         getattr(self, "_incoming_call_details", {}).pop(identity, None)
         self._cancel_incoming_call_watchdog(identity)
         self._close_incoming_call_dialog(identity)
-        if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
-            self.call_incoming_sound.stop()
+        if not self._active_incoming_calls:
+            if hasattr(self, "call_incoming_sound"):
+                self.call_incoming_sound.stop()
+            if not keep_audio_monitor:
+                self._stop_incoming_call_audio_monitor()
         self._sync_incoming_call_bar()
 
     def _call_control_payload(self, identity: str) -> dict:
@@ -6153,19 +6161,13 @@ class MainWindow(wx.Frame):
             text = text[: self._CALL_ERROR_MAX_SPOKEN].rstrip() + "..."
         return text
 
-    def _start_voice_call_audio(self, identity: str, details: dict | None = None):
-        logging.info("[call_audio] starting session identity=%s", identity)
-        if getattr(self, "_call_audio_session", None) is not None:
-            return True
+    def _build_call_audio_session(self):
         ws = getattr(self, "ws", None)
         sio = getattr(ws, "sio", None)
         if sio is None:
             raise RuntimeError(self.i18n.t("voice_call_error_no_connection"))
         from core.call_audio import CallAudioConfig, CallAudioSession
 
-        # Call routing is deliberately independent from the global Audio
-        # Devices settings used by messages and effects. The call dialog
-        # persists these choices under call_audio_devices.
         audio_settings = self.settings.get("call_audio_devices", {})
         input_name = audio_settings.get("input_device_name", "")
         output_name = audio_settings.get("output_device_name", "")
@@ -6178,7 +6180,61 @@ class MainWindow(wx.Frame):
                 output_device_name=output_name,
             ),
         )
-        audio.start()
+        return audio, session_name
+
+    def _start_incoming_call_audio_monitor(self, identity: str):
+        """Open only the receive side while an incoming call is ringing."""
+        if getattr(self, "_call_audio_session", None) is not None:
+            return True
+        if getattr(self, "_call_ring_audio_session", None) is not None:
+            return True
+        try:
+            audio, session_name = self._build_call_audio_session()
+            audio.start_output_only()
+            self._call_ring_audio_session = audio
+            logging.info(
+                "[call_audio] ringing monitor started identity=%s session=%s",
+                identity, session_name,
+            )
+            return True
+        except Exception:
+            logging.exception("[call_audio] failed to start ringing monitor")
+            return False
+
+    def _stop_incoming_call_audio_monitor(self):
+        monitor = getattr(self, "_call_ring_audio_session", None)
+        self._call_ring_audio_session = None
+        if monitor is None:
+            return
+        try:
+            monitor.stop()
+        except Exception:
+            logging.exception("[call_audio] failed to stop ringing monitor")
+
+    def _start_voice_call_audio(self, identity: str, details: dict | None = None):
+        logging.info("[call_audio] starting session identity=%s", identity)
+        if getattr(self, "_call_audio_session", None) is not None:
+            return True
+
+        audio = getattr(self, "_call_ring_audio_session", None)
+        if audio is None:
+            audio, session_name = self._build_call_audio_session()
+        else:
+            ws = getattr(self, "ws", None)
+            session_name = str(getattr(ws, "instance_name", "") or self.token).split(":", 1)[0]
+
+        try:
+            audio.start()
+        except Exception:
+            if getattr(self, "_call_ring_audio_session", None) is audio:
+                self._call_ring_audio_session = None
+                try:
+                    audio.stop()
+                except Exception:
+                    pass
+            raise
+
+        self._call_ring_audio_session = None
         logging.info("[call_audio] streams started session=%s", session_name)
         self._call_audio_session = audio
         details = details or getattr(self, "_incoming_call_details", {}).get(identity, {})
@@ -6196,6 +6252,8 @@ class MainWindow(wx.Frame):
 
     def _stop_voice_call_audio(self, grace_seconds: float = 0.0):
         session = getattr(self, "_call_audio_session", None)
+        if session is None:
+            self._stop_incoming_call_audio_monitor()
         if session is not None and grace_seconds > 0:
             pending = getattr(self, "_call_audio_stop_timer", None)
             if pending is not None and pending.is_alive():
@@ -6297,7 +6355,10 @@ class MainWindow(wx.Frame):
             self._stop_voice_call_audio()
 
     def on_call_remote_audio(self, pcm: bytes, sample_rate: int):
-        session = getattr(self, "_call_audio_session", None)
+        session = (
+            getattr(self, "_call_audio_session", None)
+            or getattr(self, "_call_ring_audio_session", None)
+        )
         if session is not None:
             session.enqueue_remote_audio(pcm, sample_rate)
 
@@ -6338,7 +6399,9 @@ class MainWindow(wx.Frame):
             return
         details = dict(getattr(self, "_incoming_call_details", {}).get(identity, {}))
         payload = self._call_control_payload(identity)
-        self.stop_incoming_call_alert(identity)
+        # Keep the receive-only monitor alive so accepting can promote the
+        # same CallAudioSession to full duplex without reopening the speaker.
+        self.stop_incoming_call_alert(identity, keep_audio_monitor=True)
         self._active_voice_call = {
             "identity": identity,
             "call_id": details.get("call_id") or identity,
@@ -6763,8 +6826,10 @@ class MainWindow(wx.Frame):
                     close_dialog = getattr(self, "_close_incoming_call_dialog", None)
                     if close_dialog is not None:
                         close_dialog(identity)
-            if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
-                self.call_incoming_sound.stop()
+            if not self._active_incoming_calls:
+                if hasattr(self, "call_incoming_sound"):
+                    self.call_incoming_sound.stop()
+                self._stop_incoming_call_audio_monitor()
             self._sync_incoming_call_bar()
             return
 
@@ -6795,6 +6860,7 @@ class MainWindow(wx.Frame):
         }
         self._arm_incoming_call_watchdog(identity)
         self._incoming_call_details[identity]["message"] = message
+        self._start_incoming_call_audio_monitor(identity)
         self.output(message, interrupt=True)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.play()
