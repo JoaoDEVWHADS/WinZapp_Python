@@ -150,6 +150,8 @@ _CUSTOM_SRC_FILES = [
     "src/util/createSessionUtil.ts",
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
+    "src/util/callMediaBridge.ts",
+    "src/util/tokenStore/fileTokenStory.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
     "src/middleware/socketAuth.ts",
@@ -162,6 +164,7 @@ _CUSTOM_SRC_FILES = [
     "src/tests/middleware/instrumentation.test.ts",
     "src/tests/dto/sync.test.ts",
     "src/tests/middleware/errorHandler.test.ts",
+    "src/controller/callController.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
@@ -895,6 +898,34 @@ class ApiSetupDialog(wx.Dialog):
 
                 if self._cancelled:
                     return
+
+            # Even when dist/server.js already exists, the running WinZapp may be
+            # newer than the API source left by a previous installation. Refresh
+            # every shipped source patch before npm build so modules-only/update
+            # runs cannot compile a stale callController.ts or callMediaBridge.ts.
+            if modules_only:
+                for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
+                    pristine_path = os.path.join(
+                        patches_dir, rel_path.replace("/", os.sep)
+                    )
+                    if not os.path.isfile(pristine_path):
+                        continue
+                    full_path = os.path.join(
+                        api_dir, rel_path.replace("/", os.sep)
+                    )
+                    try:
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        shutil.copy2(pristine_path, full_path)
+                        logging.info(
+                            "[api_setup] Refreshed custom file for modules-only build: %s",
+                            rel_path,
+                        )
+                    except Exception as exc:
+                        logging.warning(
+                            "[api_setup] Failed to refresh custom file %s: %s",
+                            rel_path,
+                            exc,
+                        )
 
             # Preserve upstream's dependency graph and add only WinZapp-owned packages.
             self._merge_package_json_dependencies(api_dir, patches_dir)

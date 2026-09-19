@@ -65,6 +65,7 @@ CUSTOM_SRC_FILES = [
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/util/callMediaBridge.ts",
+    "src/util/tokenStore/fileTokenStory.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
     "src/middleware/socketAuth.ts",
