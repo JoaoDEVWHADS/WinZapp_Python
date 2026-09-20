@@ -1141,5 +1141,13 @@
     "contact_no_number": "Esta tarjeta de contacto no incluye ningún número de teléfono.",
     "profile_restored_from_snapshot": "El perfil del navegador estaba dañado y se ha restaurado desde la última copia guardada. Reconectando a WhatsApp.",
     "profile_corrupted_repair_needed": "El perfil del navegador que se usa para conectar con WhatsApp está dañado y no hay ninguna copia guardada para restaurar. Tendrás que desconectar la sesión y vincular de nuevo.",
-    "browser_install_broken": "El navegador interno que WinZapp usa para conectarse a WhatsApp está incompleto y no puede iniciarse. Ve a Configuración y reinstala la API. Si vuelve a ocurrir, añade la carpeta de WinZapp a las exclusiones de tu antivirus antes de reinstalar."
+    "browser_install_broken": "El navegador interno que WinZapp usa para conectarse a WhatsApp está incompleto y no puede iniciarse. Ve a Configuración y reinstala la API. Si vuelve a ocurrir, añade la carpeta de WinZapp a las exclusiones de tu antivirus antes de reinstalar.",
+    "group_voice_call_title": "Llamada de voz grupal",
+    "group_voice_call_participants_label": "Participantes",
+    "group_voice_call_participants_column": "Participante",
+    "group_voice_call_toggle_hint": "Pulsa Espacio para seleccionar o deseleccionar un participante.",
+    "group_voice_call_selected_count": "{count} seleccionados",
+    "group_voice_call_start_button": "&Iniciar llamada de voz",
+    "incoming_call_video_not_supported": "WinZapp todavía no puede responder videollamadas.",
+    "incoming_group_call_announcement": "Llamada grupal entrante en {name}."
 }
