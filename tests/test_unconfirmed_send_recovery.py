@@ -176,6 +176,8 @@ class _DeleteStub:
     _on_menu_delete_message     = ConversationsPanel._on_menu_delete_message
     _delete_message_for_me_only = ConversationsPanel._delete_message_for_me_only
     _delete_target_jid          = ConversationsPanel._delete_target_jid
+    _delete_message_for_everyone_keep_row = ConversationsPanel._delete_message_for_everyone_keep_row
+    _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
     # The real helper, not a stand-in: the cancelled_pending branch delegates
     # to it, and what it does with a cancel() that could not stop the send is
     # exactly what these tests are about.
