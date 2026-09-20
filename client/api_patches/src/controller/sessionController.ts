@@ -1313,25 +1313,25 @@ export async function subscribePresence(req: Request, res: Response) {
           ? chat.groupMetadata.participants
           : [];
 
-        const participantIds = [
-          ...new Set(
+        const participantIds: string[] = Array.from(
+          new Set<string>(
             participants
-              .map((participant: any) => {
+              .map((participant: any): string => {
                 const rawId = participant?.id;
                 if (typeof rawId === 'string') {
                   return rawId;
                 }
-                if (rawId?._serialized) {
+                if (typeof rawId?._serialized === 'string') {
                   return rawId._serialized;
                 }
                 if (rawId?.user && rawId?.server) {
-                  return `${rawId.user}@${rawId.server}`;
+                  return `${String(rawId.user)}@${String(rawId.server)}`;
                 }
                 return '';
               })
-              .filter((participantId: string) => Boolean(participantId))
-          ),
-        ];
+              .filter((participantId: string) => participantId.length > 0)
+          )
+        );
 
         for (const participantId of participantIds) {
           await subscribeOne(participantId);
@@ -1351,11 +1351,15 @@ export async function subscribePresence(req: Request, res: Response) {
       if (isGroup) {
         const groups = await req.client.getAllGroups(false);
         for (const group of groups) {
-          const groupId =
-            group?.id?._serialized ||
-            (group?.id?.user && group?.id?.server
-              ? `${group.id.user}@${group.id.server}`
-              : group?.id || '');
+          const rawGroupId: any = group?.id;
+          const groupId: string =
+            typeof rawGroupId === 'string'
+              ? rawGroupId
+              : typeof rawGroupId?._serialized === 'string'
+                ? rawGroupId._serialized
+                : rawGroupId?.user && rawGroupId?.server
+                  ? `${String(rawGroupId.user)}@${String(rawGroupId.server)}`
+                  : '';
           if (!groupId) {
             continue;
           }
