@@ -130,6 +130,46 @@ def test_camera_capture_start_falls_back_to_first_device_when_preference_is_miss
         capture.stop()
 
 
+def test_camera_capture_probe_with_transmit_false_never_sends_a_frame(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr(call_video.sys, "platform", "win32")
+    monkeypatch.setattr(call_video.subprocess, "run",
+                         lambda *a, **kw: _FakeCompletedProcess(_CAMERA_LISTING))
+    monkeypatch.setattr(call_video.subprocess, "Popen",
+                         lambda *a, **kw: _FakeCameraProcess())
+
+    sent = []
+    capture = CameraCapture("ffmpeg.exe", sent.append, transmit=False)
+    try:
+        capture.start()
+        assert capture.ready.wait(2)
+        capture.thread.join(timeout=2)
+    finally:
+        capture.stop()
+    assert sent == []
+
+
+def test_camera_capture_transmits_by_default(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr(call_video.sys, "platform", "win32")
+    monkeypatch.setattr(call_video.subprocess, "run",
+                         lambda *a, **kw: _FakeCompletedProcess(_CAMERA_LISTING))
+    monkeypatch.setattr(call_video.subprocess, "Popen",
+                         lambda *a, **kw: _FakeCameraProcess())
+
+    sent = []
+    capture = CameraCapture("ffmpeg.exe", sent.append)
+    try:
+        capture.start()
+        assert capture.ready.wait(2)
+        # The fake process's BytesIO has exactly one frame and then EOF, so
+        # _run() returns on its own; join it rather than racing send_frame().
+        capture.thread.join(timeout=2)
+    finally:
+        capture.stop()
+    assert sent == [b'\xff\xd8frame\xff\xd9']
+
+
 def test_jpeg_pipe_discards_noise_and_yields_complete_frames():
     frame_a = b'\xff\xd8first\xff\xd9'
     frame_b = b'\xff\xd8second\xff\xd9'
@@ -197,7 +237,7 @@ def test_missing_camera_does_not_end_or_clear_video_call(monkeypatch):
     monkeypatch.setattr("main.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
     class MissingCameraCapture:
-        def __init__(self, _ffmpeg, _send_frame):
+        def __init__(self, _ffmpeg, _send_frame, transmit=True):
             self.stopped = False
 
         def start(self, _preferred_name=""):
@@ -226,7 +266,7 @@ def test_missing_camera_stays_silent_when_announce_failure_is_false(monkeypatch)
     monkeypatch.setattr("main.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
     class MissingCameraCapture:
-        def __init__(self, _ffmpeg, _send_frame):
+        def __init__(self, _ffmpeg, _send_frame, transmit=True):
             pass
 
         def start(self, _preferred_name=""):
@@ -242,6 +282,35 @@ def test_missing_camera_stays_silent_when_announce_failure_is_false(monkeypatch)
     # The "answer without video" probe deliberately suppresses this: the user
     # never asked for the camera, so there is nothing to complain about.
     assert stub.announcements == []
+
+
+def test_start_call_camera_passes_transmit_through_to_camera_capture(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr("main.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+    captured_transmit = []
+
+    class RecordingCapture:
+        def __init__(self, _ffmpeg, _send_frame, transmit=True):
+            captured_transmit.append(transmit)
+
+        def start(self, _preferred_name=""):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(call_video, "CameraCapture", RecordingCapture)
+    stub = _NoCameraMainWindow()
+
+    assert stub._start_call_camera(announce_failure=False, transmit=False) is True
+    # "Answer without video" probes availability without ever letting a real
+    # frame reach send_frame — the flag reaches CameraCapture, not just
+    # main.py's own bookkeeping.
+    assert captured_transmit == [False]
+
+    stub2 = _NoCameraMainWindow()
+    assert stub2._start_call_camera() is True
+    assert captured_transmit == [False, True]
 
 
 class _RemoteVideoMainWindow:

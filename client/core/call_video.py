@@ -69,9 +69,13 @@ def jpeg_frames(stream, stop_event):
 
 
 class CameraCapture:
-    def __init__(self, ffmpeg: str, send_frame):
+    def __init__(self, ffmpeg: str, send_frame, transmit: bool = True):
         self.ffmpeg = ffmpeg
         self.send_frame = send_frame
+        # A live attribute rather than a start()-time-only choice, so a
+        # future caller could flip it on an already-open capture without
+        # tearing it down. Read fresh every frame in _run(), never cached.
+        self.transmit = transmit
         self.stop_event = threading.Event()
         self.ready = threading.Event()
         self.process = None
@@ -115,10 +119,14 @@ class CameraCapture:
                             accepted_frames, len(frame),
                         )
                     self.ready.set()
-                    try:
-                        self.send_frame(frame)
-                    except Exception:
-                        logging.exception('[call_video] failed to send camera frame')
+                    # Probing with transmit=False must never leak a frame to
+                    # the peer: skip send_frame entirely rather than racing
+                    # a caller that stops capture right after ready fires.
+                    if self.transmit:
+                        try:
+                            self.send_frame(frame)
+                        except Exception:
+                            logging.exception('[call_video] failed to send camera frame')
         except Exception:
             if not self.stop_event.is_set():
                 logging.exception('[call_video] camera capture failed')

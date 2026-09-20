@@ -68,6 +68,7 @@ class _MainStub:
         self.announcements = []
         self.camera_starts = 0
         self.camera_announce_failure_values = []
+        self.camera_transmit_values = []
         self.audio_starts = []
         self.posted_controls = []
 
@@ -82,9 +83,10 @@ class _MainStub:
     def _sync_voice_call_bar(self):
         pass
 
-    def _start_call_camera(self, *, announce_failure=True):
+    def _start_call_camera(self, *, announce_failure=True, transmit=True):
         self.camera_starts += 1
         self.camera_announce_failure_values.append(announce_failure)
+        self.camera_transmit_values.append(transmit)
         self._call_camera_available = True
         self._call_camera_capture = object()
         self._call_camera_enabled = True
@@ -150,8 +152,10 @@ def test_default_answer_on_a_video_call_starts_and_leaves_the_camera_on():
     assert stub._call_camera_available is True
     assert stub._call_camera_capture is not None
     assert stub.audio_starts == ["call-1"]
-    # The user asked for video, so a camera failure would be worth announcing.
+    # The user asked for video, so a camera failure would be worth announcing,
+    # and real frames should reach the peer as always.
     assert stub.camera_announce_failure_values == [True]
+    assert stub.camera_transmit_values == [True]
 
 
 def test_answer_without_video_keeps_the_call_a_video_call():
@@ -178,8 +182,10 @@ def test_answer_without_video_probes_the_camera_but_leaves_it_off():
     assert stub._call_camera_capture is None
     assert stub._call_camera_enabled is False
     # The user deliberately chose no video, so a camera failure here is not
-    # an error worth speaking.
+    # an error worth speaking, and the probe must never transmit a real
+    # frame to the peer — see _start_call_camera()'s ``transmit`` docstring.
     assert stub.camera_announce_failure_values == [False]
+    assert stub.camera_transmit_values == [False]
 
 
 def test_answer_without_video_on_a_voice_only_call_never_touches_the_camera():

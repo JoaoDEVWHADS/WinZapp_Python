@@ -6446,7 +6446,7 @@ class MainWindow(wx.Frame):
                 "[call_video] remote-video-render failed to display remote frame"
             )
 
-    def _start_call_camera(self, *, announce_failure: bool = True):
+    def _start_call_camera(self, *, announce_failure: bool = True, transmit: bool = True):
         """Start local camera capture without making video calls depend on it.
 
         A video call is still useful on a PC with no camera: audio continues and
@@ -6459,6 +6459,13 @@ class MainWindow(wx.Frame):
         never asked for. Every other call site — an outgoing video call, a
         normal "answer with video", and toggle_call_video()'s own "turn camera
         back on" — asked for the camera, so a failure is worth announcing.
+
+        ``transmit`` is off for that same probe: the camera is opened only to
+        prove it works and set ``_call_camera_available``, and must never send
+        a single real frame to the peer. Stopping the capture right after
+        starting it is not enough on its own — CameraCapture._run() sets its
+        ready event before its first send_frame() call, so a caller relying
+        on stop-right-after-start alone would be racing an in-flight send.
         """
         from core.call_video import CameraCapture
 
@@ -6475,7 +6482,7 @@ class MainWindow(wx.Frame):
             return False
 
         camera_name = self.settings.get("call_video_devices", {}).get("camera_name", "")
-        capture = CameraCapture(self._find_api_ffmpeg(), sender)
+        capture = CameraCapture(self._find_api_ffmpeg(), sender, transmit=transmit)
         try:
             capture.start(camera_name)
         except Exception:
@@ -6552,9 +6559,9 @@ class MainWindow(wx.Frame):
         # keeps today's behaviour: the camera starts and is left sending.
         # "Answer without video" passes False explicitly so the camera is
         # probed (so _call_camera_available becomes True and the manual
-        # video-toggle button works for the rest of the call) but is not
-        # left capturing — the same end state toggle_call_video() leaves
-        # behind when the user turns their own video off mid-call.
+        # video-toggle button works for the rest of the call) but never
+        # transmits — see _start_call_camera()'s ``transmit`` docstring for
+        # why probe-then-stop alone cannot guarantee that on its own.
         start_camera_enabled = True if with_video is None else bool(with_video)
         payload = self._call_control_payload(identity)
         # Keep the receive-only monitor alive so accepting can promote the
@@ -6575,8 +6582,15 @@ class MainWindow(wx.Frame):
                 try:
                     if is_video:
                         # "Answer without video" asked for no camera, so a
-                        # camera failure here is not an error worth speaking.
-                        self._start_call_camera(announce_failure=start_camera_enabled)
+                        # camera failure here is not an error worth speaking,
+                        # and transmit=False means the probe never sends a
+                        # real frame to the peer while proving the camera
+                        # works. _stop_call_camera() below is then just
+                        # cleanup, not a race against an in-flight frame.
+                        self._start_call_camera(
+                            announce_failure=start_camera_enabled,
+                            transmit=start_camera_enabled,
+                        )
                         if not start_camera_enabled:
                             self._stop_call_camera()
                     self._start_voice_call_audio(identity, details)
@@ -6676,9 +6690,9 @@ class MainWindow(wx.Frame):
             root.Add(combo, 0, wx.EXPAND | wx.ALL, 8)
             return combo
 
-        audio_cfg = self.settings.setdefault("call_audio_devices", {})
         input_combo = output_combo = None
         if include_audio:
+            audio_cfg = self.settings.setdefault("call_audio_devices", {})
             try:
                 output_names = [str(d.get("name", "")).strip() for d in sd.query_devices()
                                 if d.get("max_output_channels", 0) > 0]
@@ -6690,9 +6704,9 @@ class MainWindow(wx.Frame):
             output_combo = add_combo("voice_call_playback_devices",
                                      output_names, audio_cfg.get("output_device_name", ""))
 
-        video_cfg = self.settings.setdefault("call_video_devices", {})
         camera_combo = None
         if include_camera:
+            video_cfg = self.settings.setdefault("call_video_devices", {})
             camera_combo = add_combo("voice_call_camera_devices",
                                      list_camera_devices(self._find_api_ffmpeg()),
                                      video_cfg.get("camera_name", ""))
