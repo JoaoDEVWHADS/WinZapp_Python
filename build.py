@@ -72,6 +72,10 @@ NODE_DIR         = os.path.join(CLIENT_DIR, "node")
 API_DIR          = os.path.join(CLIENT_DIR, "api")
 API_PATCHES_DIR  = os.path.join(CLIENT_DIR, "api_patches")
 
+if CLIENT_DIR not in sys.path:
+    sys.path.insert(0, CLIENT_DIR)
+from core.api_patch_manifest import server_patch_files
+
 PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
 PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
 GCC_CMD         = "gcc"
@@ -127,47 +131,10 @@ API_EXCLUDE_FILES = {
 }
 API_EXCLUDE_SUB_DIRS = {"tests"}
 
-# WinZapp's own patches on top of upstream wppconnect-server (same list as
-# setup_api.py's custom_files). API_EXCLUDE_DIRS skips all of src/ wholesale
-# since only the compiled client/api/dist/server.js runs at build time — but
-# the user wants these specific source files copied into the shipped api/
-# folder too (alongside .env/start.js/package.json/config.json) so they're
-# visible/patchable directly from an extracted install, not just at dev time.
-API_CUSTOM_SRC_FILES = [
-    ".babelrc",
-    "start.js",
-    "config.json",
-    ".eslintrc.json",
-    ".prettierrc",
-    ".prettierignore",
-    "jest.config.js",
-    "decrypt.js",
-    "src/config.ts",
-    "src/index.ts",
-    "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
-    "src/util/functions.ts",
-    "src/util/callMediaBridge.ts",
-    "src/util/tokenStore/fileTokenStory.ts",
-    "src/middleware/statusConnection.ts",
-    "src/middleware/auth.ts",
-    "src/middleware/socketAuth.ts",
-    "src/dto/sync.ts",
-    "src/middleware/instrumentation.ts",
-    "src/errors/domain.ts",
-    "src/middleware/errorHandler.ts",
-    "src/services/messageResolver.ts",
-    "src/types/express/index.d.ts",
-    "src/tests/middleware/instrumentation.test.ts",
-    "src/tests/dto/sync.test.ts",
-    "src/tests/middleware/errorHandler.test.ts",
-    "src/controller/callController.ts",
-    "src/controller/deviceController.ts",
-    "src/controller/messageController.ts",
-    "src/controller/sessionController.ts",
-    "src/controller/statusController.ts",
-    "src/routes/index.ts",
-]
+# WinZapp's own patches on top of upstream wppconnect-server are discovered
+# directly from client/api_patches/. package.json and dependency-specific
+# subtrees such as api_patches/wppconnect/ are excluded by the shared policy.
+API_CUSTOM_SRC_FILES = server_patch_files(API_PATCHES_DIR)
 
 # -- CLI --------------------------------------------------------------------
 

@@ -145,19 +145,12 @@ def test_setup_api_patch_list_matches_this_one():
 
 
 def test_the_in_app_installer_restores_the_same_patches():
-    """ApiSetupDialog — the "install modules" flow every end user goes through
-    just by running the program — has its own copy of the list. It must not fall
-    behind setup_api.py's, or the API installed on users' machines is not the
-    one we develop and test against.
-
-    A containment check rather than the set equality used for setup_api.py:
-    ApiSetupDialog also restores dist/middleware/auth.js, a *compiled* artifact
-    with no counterpart in api_patches/, so there are legitimately no two
-    copies of it to compare.
-    """
+    """The end-user setup flow must use the same dynamic patch source."""
     src = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-    for rel_path in MIRRORED_FILES:
-        assert f'"{rel_path}"' in src, f"ApiSetupDialog does not restore {rel_path}"
+    assert "from core.api_patch_manifest import server_patch_files" in src
+    assert "patch_files = server_patch_files(patches_dir)" in src
+    assert "_CUSTOM_ROOT_FILES" not in src
+    assert "_CUSTOM_SRC_FILES" not in src
 
 
 def test_build_api_uses_the_canonical_patch_list_and_verifies_call_output():
@@ -221,21 +214,33 @@ def test_fluent_ffmpeg_is_gone_everywhere():
 
 
 def test_the_in_app_installer_refreshes_root_files_rather_than_only_preserving_them():
-    """start.js and config.json carry no per-install state — the API key and
-    port both come from environment variables injected at launch, and nothing
-    writes either file at runtime. Merely preserving whatever was on disk froze
-    them at whatever an older WinZapp install left behind, so a user updating
-    from an old version silently kept its config.json forever."""
+    """Dynamic discovery must still refresh root patches on every setup path."""
     dialog = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-    assert "_CUSTOM_ROOT_FILES" in dialog
-    assert "_CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES" in dialog, (
-        "root files must go through the same api_patches/ restore loop"
-    )
-    # ...while still being kept out of the upstream ZIP's way.
+    assert "patch_files = server_patch_files(patches_dir)" in dialog
+    assert "for rel_path in patch_files:" in dialog
     assert '_PRESERVE = {"start.js", ".env", "config.json"}' in dialog
 
 
-class TestRestoreRunsOnEveryPath:
+def test_wppconnect_decrypt_ts_patch_matches_the_runtime_js_intent():
+    """Keep a source-level WPPConnect patch alongside the compiled decrypt.js."""
+    source = (
+        PATCHES / "wppconnect" / "src" / "api" / "helpers" / "decrypt.ts"
+    ).read_text(encoding="utf-8")
+    for marker in (
+        "IMAGEMESSAGE: 'Image'",
+        "VIDEOMESSAGE: 'Video'",
+        "AUDIOMESSAGE: 'Audio'",
+        "DOCUMENTMESSAGE: 'Document'",
+        "STICKERMESSAGE: 'Image'",
+        "getNormalizedMediaType",
+        "const encodedBytes = new Uint8Array(fileData)",
+        "const normalizedType = getNormalizedMediaType(mediaType)",
+    ):
+        assert marker in source
+    assert "fileData.toString('hex')" not in source
+
+
+class TestRestoreRunsOnEveryPath:class TestRestoreRunsOnEveryPath:
     """Re-running setup_api.py against an existing client/api/ must repair it.
 
     The restore used to live inside the `else:` of `if already_cloned:` and

@@ -53,6 +53,7 @@ import threading
 import zipfile
 
 import requests
+from core.api_patch_manifest import server_patch_files
 from core.wpp_dependency_setup import (
     PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
     check_github_dependencies_updates,
@@ -123,56 +124,9 @@ _PRESERVE = {"start.js", ".env", "config.json"}
 # Runtime state dirs/files that should survive a re-download.
 _KEEP_RUNTIME = {"tokens", "wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
-# WinZapp's patches on top of upstream wppconnect-server — same list as
-# setup_api.py's custom_files and build.py's API_CUSTOM_SRC_FILES. Unlike
-# _PRESERVE (root-level files skipped outright during extraction), these live
-# under src/ and get deleted by the "clean previous partial setup" step and
-# then are not part of _PRESERVE's skip-list during extraction, so a vanilla
-# ZIP re-download used to silently replace them with unpatched upstream code
-# — every call to this dialog (first-run setup AND the update/force-reinstall
-# flow) stripped WinZapp's own controller/util/middleware fixes with no
-# restoration step. _run_setup() now stashes their content before the clean
-# step and restores it after extraction, mirroring setup_api.py's approach.
-_CUSTOM_ROOT_FILES = [
-    ".babelrc",
-    "start.js",
-    "config.json",
-    ".eslintrc.json",
-    ".prettierrc",
-    ".prettierignore",
-    "jest.config.js",
-]
-
-_CUSTOM_SRC_FILES = [
-    "decrypt.js",
-    "src/config.ts",
-    "src/index.ts",
-    "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
-    "src/util/functions.ts",
-    "src/util/callMediaBridge.ts",
-    "src/util/tokenStore/fileTokenStory.ts",
-    "src/middleware/statusConnection.ts",
-    "src/middleware/auth.ts",
-    "src/middleware/socketAuth.ts",
-    "src/dto/sync.ts",
-    "src/middleware/instrumentation.ts",
-    "src/errors/domain.ts",
-    "src/middleware/errorHandler.ts",
-    "src/services/messageResolver.ts",
-    "src/types/express/index.d.ts",
-    "src/tests/middleware/instrumentation.test.ts",
-    "src/tests/dto/sync.test.ts",
-    "src/tests/middleware/errorHandler.test.ts",
-    "src/controller/callController.ts",
-    "src/controller/deviceController.ts",
-    "src/controller/messageController.ts",
-    "src/controller/sessionController.ts",
-    "src/controller/statusController.ts",
-    "src/routes/index.ts",
-    "dist/middleware/auth.js",
-    "dist/controller/sessionController.js",
-]
+# WinZapp's wppconnect-server overlay is discovered dynamically from the
+# shipped api_patches/ directory. _PRESERVE and _KEEP_RUNTIME stay explicit
+# because they describe installation policy rather than patch membership.
 
 
 class ApiSetupDialog(wx.Dialog):
@@ -764,6 +718,7 @@ class ApiSetupDialog(wx.Dialog):
 
         api_dir  = resource_path("api")
         patches_dir = resource_path("api_patches")
+        patch_files = server_patch_files(patches_dir)
         puppeteer_cache = resource_path("api", ".cache")
         npm_env  = {
             **os.environ,
@@ -794,7 +749,7 @@ class ApiSetupDialog(wx.Dialog):
                         return
 
                     # Stash WinZapp's own patches before they get wiped below —
-                    # see _CUSTOM_SRC_FILES for why this is needed. This is only
+                    # see patch_files for why this is needed. This is only
                     # a FALLBACK source (used below if api_patches/ — the
                     # pristine reference copy build.py ships alongside api/,
                     # never touched by this dialog — is missing, e.g. an old
@@ -807,7 +762,7 @@ class ApiSetupDialog(wx.Dialog):
                     # for a newer WinZapp release's improved patches to ever
                     # reach an existing install.
                     custom_contents = {}
-                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
+                    for rel_path in patch_files:
                         full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(full_path):
                             try:
@@ -859,7 +814,7 @@ class ApiSetupDialog(wx.Dialog):
                     # api_dir (which may itself be an outdated/broken copy left
                     # by an older install) — see the comment above custom_contents.
                     patches_dir = resource_path("api_patches")
-                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
+                    for rel_path in patch_files:
                         pristine_path = os.path.join(patches_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(pristine_path):
                             try:
@@ -904,7 +859,7 @@ class ApiSetupDialog(wx.Dialog):
             # every shipped source patch before npm build so modules-only/update
             # runs cannot compile a stale callController.ts or callMediaBridge.ts.
             if modules_only:
-                for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
+                for rel_path in patch_files:
                     pristine_path = os.path.join(
                         patches_dir, rel_path.replace("/", os.sep)
                     )

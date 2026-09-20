@@ -39,53 +39,22 @@ _CLIENT_DIR = os.path.join(ROOT_DIR, "client")
 if _CLIENT_DIR not in sys.path:
     sys.path.insert(0, _CLIENT_DIR)
 
-# Files WinZapp patches on top of upstream wppconnect-server. client/api_patches/
-# is the permanent, always-git-tracked source of truth for all of these —
-# preferred below over whatever (if anything) happens to still be sitting in
-# client/api/ right before it gets wiped. That "stash what's currently there"
-# fallback used to be the ONLY restore path, and is worthless the moment
-# client/api/ is already gone (e.g. a user deletes it before reinstalling,
-# reported live as every patch silently regressing to whatever old snapshot
-# happened to get stashed months earlier) — client/api_patches/ never has
-# that problem since it's never inside the folder that gets deleted.
+from core.api_patch_manifest import server_patch_files
+
+_DISCOVERED_SERVER_PATCHES = server_patch_files(API_PATCHES_DIR)
 CUSTOM_ROOT_FILES = [
-    ".babelrc",
-    "start.js",
-    "config.json",
-    ".eslintrc.json",
-    ".prettierrc",
-    ".prettierignore",
-    "jest.config.js",
+    path
+    for path in _DISCOVERED_SERVER_PATCHES
+    if "/" not in path and path != "decrypt.js"
 ]
 CUSTOM_SRC_FILES = [
-    "decrypt.js",
-    "src/config.ts",
-    "src/index.ts",
-    "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
-    "src/util/functions.ts",
-    "src/util/callMediaBridge.ts",
-    "src/util/tokenStore/fileTokenStory.ts",
-    "src/middleware/statusConnection.ts",
-    "src/middleware/auth.ts",
-    "src/middleware/socketAuth.ts",
-    "src/dto/sync.ts",
-    "src/middleware/instrumentation.ts",
-    "src/errors/domain.ts",
-    "src/middleware/errorHandler.ts",
-    "src/services/messageResolver.ts",
-    "src/types/express/index.d.ts",
-    "src/tests/middleware/instrumentation.test.ts",
-    "src/tests/dto/sync.test.ts",
-    "src/tests/middleware/errorHandler.test.ts",
-    "src/controller/callController.ts",
-    "src/controller/deviceController.ts",
-    "src/controller/messageController.ts",
-    "src/controller/sessionController.ts",
-    "src/controller/statusController.ts",
-    "src/routes/index.ts",
+    path for path in _DISCOVERED_SERVER_PATCHES if path not in CUSTOM_ROOT_FILES
 ]
 
+# Files WinZapp patches on top of upstream wppconnect-server are discovered
+# from client/api_patches/ instead of maintained in a duplicated manual list.
+# The two compatibility names remain because build_api.py and tests import them,
+# but their contents are computed from the directory on every process start.
 def _load_env() -> dict:
     """Parse the root .env file and return a key→value dict."""
     env_path = os.path.join(ROOT_DIR, ".env")
