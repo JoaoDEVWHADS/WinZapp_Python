@@ -3984,7 +3984,18 @@ class MainWindow(wx.Frame):
         While offline the outgoing message queue is suspended; disabling it
         wakes the queue so pending messages are sent immediately.
         """
-        self._user_offline = not self._user_offline
+        entering_offline = not self._user_offline
+        if entering_offline:
+            # Offline mode is a hard boundary for WhatsApp calls too. End an
+            # already-active call while call control is still available, then
+            # tear down local media immediately so no audio/video remains live
+            # during the asynchronous hang-up request. Incoming alerts are
+            # dismissed locally without rejecting the phone call.
+            if getattr(self, "_active_voice_call", None) is not None:
+                self.end_active_call()
+                self._stop_voice_call_audio()
+            self.stop_all_incoming_call_alerts()
+        self._user_offline = entering_offline
         self.offline_mode_sound.play()
         if self._user_offline:
             self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
@@ -6134,6 +6145,8 @@ class MainWindow(wx.Frame):
         return {}
 
     def _post_call_control(self, endpoint: str, payload: dict, *, timeout: float = 15):
+        if getattr(self, "offline_mode", False) and endpoint != "end":
+            raise RuntimeError(self.i18n.t("offline_mode_enabled"))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/call/{endpoint}"
         return api_post(url, token=self.token, json=payload, timeout=timeout)
 
@@ -6518,6 +6531,10 @@ class MainWindow(wx.Frame):
         threading.Thread(target=self._start_call_camera, daemon=True).start()
 
     def accept_incoming_call(self, identity: str):
+        if getattr(self, "offline_mode", False):
+            self.stop_incoming_call_alert(identity)
+            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
+            return
         if getattr(self, "_active_voice_call", None) is not None:
             self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
             return
@@ -6564,6 +6581,10 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def reject_incoming_call(self, identity: str):
+        if getattr(self, "offline_mode", False):
+            self.stop_incoming_call_alert(identity)
+            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
+            return
         payload = self._call_control_payload(identity)
         self.stop_incoming_call_alert(identity)
 
@@ -6699,6 +6720,9 @@ class MainWindow(wx.Frame):
 
     def _start_individual_call(self, peer_jid: str, name: str, *, is_video: bool):
         """Start a one-to-one WhatsApp voice/video call using Python-owned media."""
+        if getattr(self, "offline_mode", False):
+            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
+            return
         peer_jid = self._normalize_jid(str(peer_jid or ""))
         if not peer_jid or peer_jid.endswith(("@g.us", "@newsletter", "@broadcast")):
             self.output(self.i18n.t("voice_call_individual_only"), interrupt=True)
@@ -6832,6 +6856,10 @@ class MainWindow(wx.Frame):
         state = str(event.get("state") or "").upper()
         call_id = str(event.get("id") or "")
         peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
+        if getattr(self, "offline_mode", False):
+            if getattr(self, "_active_voice_call", None) is not None:
+                self._stop_voice_call_audio()
+            return
         if (
             event.get("isGroup")
             or peer_jid.endswith("@g.us")
@@ -6894,6 +6922,8 @@ class MainWindow(wx.Frame):
     def _attach_audio_to_browser_call(self, details: dict):
         """Attach Python-owned audio/video when the page handled the answer."""
         with self._call_action_lock:
+            if getattr(self, "offline_mode", False):
+                return
             if self._call_audio_session is not None:
                 return
             try:
@@ -6927,6 +6957,13 @@ class MainWindow(wx.Frame):
         is_ringing = state in self._CALL_RINGING_STATES and (
             bool(state) or event_name in ("offer", "ringing", "incoming")
         )
+
+        if is_ringing and getattr(self, "offline_mode", False):
+            logging.info(
+                "[incoming_call] ignoring live offer while offline mode is active id=%s",
+                call_id,
+            )
+            return
 
         if is_ringing:
             try:
