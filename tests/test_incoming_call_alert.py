@@ -54,6 +54,15 @@ class _Label:
         self.text = text
 
 
+class _Button(_Label):
+    def __init__(self):
+        super().__init__()
+        self.enabled = True
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+
 class _I18n:
     def t(self, key):
         return {
@@ -128,6 +137,9 @@ class _MainStub:
         self.popups = []
         self.incoming_call_bar = _Bar()
         self.incoming_call_label = _Label()
+        self.incoming_call_answer_button = _Button()
+        self.incoming_call_reject_button = _Button()
+        self.incoming_call_stop_button = _Button()
         self.voice_call_bar = _Bar()
         self.voice_call_label = _Label()
         self.layout_calls = 0
@@ -472,11 +484,13 @@ def test_websocket_normalizes_call_state_payload(monkeypatch):
         },
     })
 
+    # peer_jid is folded into the one canonical peerJid key, not kept
+    # alongside it — see on_wpp_call_state()'s own comment on why a second
+    # place to read the peer from is worse than none.
     assert delivered == [{
         "event": "state",
         "state": "ACTIVE",
         "id": "call-1",
-        "peer_jid": "5511999999999@s.whatsapp.net",
         "peerJid": "5511999999999@s.whatsapp.net",
         "outgoing": False,
         "isVideo": False,
