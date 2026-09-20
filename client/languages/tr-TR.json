@@ -1137,5 +1137,17 @@
   "voice_call_start_failed": "Arama başlatılamadı: {error}",
   "voice_call_starting": "{name} aranıyor.",
   "voice_call_unmute_button": "Mikrofonu &Aç",
-  "voice_call_window_title": "Sesli arama"
+  "voice_call_window_title": "Sesli arama",
+  "group_voice_call_title": "Grup sesli araması",
+  "group_voice_call_participants_label": "Katılımcılar",
+  "group_voice_call_participants_column": "Katılımcı",
+  "group_voice_call_toggle_hint": "Bir katılımcıyı seçmek veya seçimi kaldırmak için Boşluk tuşuna basın.",
+  "group_voice_call_selected_count": "{count} seçili",
+  "group_voice_call_start_button": "Sesli aramayı &başlat",
+  "incoming_video_call_announcement": "{name} sizi görüntülü arıyor.",
+  "video_call_active_label": "Görüntülü arama: {name}.",
+  "video_call_button": "&Görüntülü arama",
+  "video_call_window_title": "Görüntülü arama",
+  "voice_call_video_off_button": "Videoyu &kapat",
+  "voice_call_video_on_button": "Videoyu &aç"
 }
