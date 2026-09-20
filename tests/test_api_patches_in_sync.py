@@ -49,46 +49,11 @@ def _setup_api_module():
     spec.loader.exec_module(module)
     return module
 
-# Mirrors setup_api.py's CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES exactly — the
-# test below asserts that equality against the real constants, in both
-# directions, so a file added to setup_api.py can no longer stay uncompared
-# here (which is what happened to auth.ts and statusController.ts: both were
-# restored by setup_api.py and documented in CLAUDE.md, but drift in either
-# went undetected because only this list was checked, and only one way round).
-MIRRORED_FILES = [
-    "start.js",
-    "config.json",
-    ".eslintrc.json",
-    ".prettierrc",
-    ".prettierignore",
-    "jest.config.js",
-    "decrypt.js",
-    "src/config.ts",
-    "src/index.ts",
-    "src/util/callMediaBridge.ts",
-    "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
-    "src/util/functions.ts",
-    "src/util/tokenStore/fileTokenStory.ts",
-    "src/middleware/statusConnection.ts",
-    "src/middleware/auth.ts",
-    "src/middleware/socketAuth.ts",
-    "src/dto/sync.ts",
-    "src/middleware/instrumentation.ts",
-    "src/errors/domain.ts",
-    "src/middleware/errorHandler.ts",
-    "src/services/messageResolver.ts",
-    "src/types/express/index.d.ts",
-    "src/tests/middleware/instrumentation.test.ts",
-    "src/tests/dto/sync.test.ts",
-    "src/tests/middleware/errorHandler.test.ts",
-    "src/controller/callController.ts",
-    "src/controller/deviceController.ts",
-    "src/controller/messageController.ts",
-    "src/controller/sessionController.ts",
-    "src/controller/statusController.ts",
-    "src/routes/index.ts",
-]
+# Patch membership is discovered from client/api_patches/ itself. This keeps
+# the tests in lockstep with setup/build/install without another hand-maintained
+# filename list. package.json and dependency-specific subtrees are excluded by
+# the same shared policy the runtime uses.
+MIRRORED_FILES = server_patch_files(str(PATCHES))
 
 
 @pytest.mark.parametrize("rel_path", MIRRORED_FILES)
@@ -240,7 +205,7 @@ def test_wppconnect_decrypt_ts_patch_matches_the_runtime_js_intent():
     assert "fileData.toString('hex')" not in source
 
 
-class TestRestoreRunsOnEveryPath:class TestRestoreRunsOnEveryPath:
+class TestRestoreRunsOnEveryPath:
     """Re-running setup_api.py against an existing client/api/ must repair it.
 
     The restore used to live inside the `else:` of `if already_cloned:` and
