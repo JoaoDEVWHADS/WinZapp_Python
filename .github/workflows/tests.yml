@@ -33,10 +33,10 @@ jobs:
         with:
           version: "0.12.13"
 
-      - name: Install dependencies
-        run: uv sync --locked
+      - name: Install test dependencies only
+        run: uv sync --locked --no-install-project
 
       - name: Run all tests
         env:
           WINZAPP_RUN_WX_GUI_TESTS: "1"
-        run: uv run pytest --run-wx-gui -ra
+        run: uv run --no-sync pytest --run-wx-gui -ra
