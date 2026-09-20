@@ -540,6 +540,24 @@ def test_websocket_forwards_remote_call_audio_to_main_window():
     assert delivered == [(b"\x01\x02\x03", 48000)]
 
 
+def test_websocket_forwards_remote_call_video_and_counts_received_frames():
+    delivered = []
+    stub = SimpleNamespace(
+        instance_name="session-a",
+        _call_remote_video_frames_received=0,
+        main_window=SimpleNamespace(on_call_remote_video=delivered.append),
+    )
+    stub._belongs_to_this_session = WebSocketClient._belongs_to_this_session.__get__(stub)
+
+    WebSocketClient.on_call_video_remote(stub, {
+        "session": "session-a",
+        "jpeg": {"type": "Buffer", "data": [1, 2, 3]},
+    })
+
+    assert delivered == [b"\x01\x02\x03"]
+    assert stub._call_remote_video_frames_received == 1
+
+
 def test_remote_call_audio_uses_ringing_monitor_before_answer():
     stub = _MainStub()
     received = []

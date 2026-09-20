@@ -366,6 +366,11 @@ class WebSocketClient:
         self._disconnect_timer = None
         self._locally_sent_reaction_ids = {}
 
+        # Diagnostic-only: how many "call:video:remote" frames Socket.IO has
+        # delivered from Node, logged 1st/every 100th so a live call's log
+        # shows whether frames the page bridge sent ever reach Python at all.
+        self._call_remote_video_frames_received = 0
+
     def _consume_own_reaction_echo(self, msg):
         """True only for an echo of a reaction just sent by WinZapp."""
         reaction = (msg.get("message") or {}).get("reactionMessage") or {}
@@ -2536,6 +2541,15 @@ class WebSocketClient:
                 return
             jpeg = _socketio_binary_to_bytes(data.get("jpeg"))
             if jpeg and len(jpeg) <= 256_000:
+                self._call_remote_video_frames_received += 1
+                if (
+                    self._call_remote_video_frames_received == 1
+                    or self._call_remote_video_frames_received % 100 == 0
+                ):
+                    logging.debug(
+                        "[WebSocketClient] remote-video-received count=%s",
+                        self._call_remote_video_frames_received,
+                    )
                 handler = getattr(self.main_window, "on_call_remote_video", None)
                 if handler is not None:
                     handler(jpeg)

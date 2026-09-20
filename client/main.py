@@ -2166,6 +2166,11 @@ class MainWindow(wx.Frame):
         self._call_audio_session = None
         self._active_voice_call = None
         self._voice_call_last_announced_state = ""
+        # Diagnostic-only: distinguish "never reached this method", "reached
+        # it but is_video gated it out" and "gate passed, frame rendered" from
+        # a live call's log without spamming a line per dropped frame.
+        self._call_remote_video_gate_blocked = 0
+        self._call_remote_video_rendered = False
         # Modeless call dialogs, keyed by the same call identity as the active
         # lifecycle maps.  Keeping ownership here lets terminal socket events
         # close a popup that is no longer relevant.
@@ -6396,6 +6401,16 @@ class MainWindow(wx.Frame):
 
     def on_call_remote_video(self, jpeg: bytes):
         if not (getattr(self, "_active_voice_call", None) or {}).get("is_video"):
+            self._call_remote_video_gate_blocked += 1
+            if (
+                self._call_remote_video_gate_blocked == 1
+                or self._call_remote_video_gate_blocked % 100 == 0
+            ):
+                logging.debug(
+                    "[call_video] remote frame reached on_call_remote_video but "
+                    "is_video gate blocked it (count=%s)",
+                    self._call_remote_video_gate_blocked,
+                )
             return
         wx.CallAfter(self._show_call_remote_video, jpeg)
 
@@ -6409,8 +6424,20 @@ class MainWindow(wx.Frame):
                 image.Rescale(640, 360, wx.IMAGE_QUALITY_HIGH)
                 self.call_video_image.SetBitmap(wx.Bitmap(image))
                 self.voice_call_window.Layout()
+                if not self._call_remote_video_rendered:
+                    self._call_remote_video_rendered = True
+                    logging.debug(
+                        "[call_video] remote-video-rendered first frame decoded "
+                        "and drawn successfully"
+                    )
+            else:
+                logging.warning(
+                    "[call_video] remote-video-render failed: wx.Image not ok"
+                )
         except Exception:
-            logging.exception("[call_video] failed to display remote frame")
+            logging.exception(
+                "[call_video] remote-video-render failed to display remote frame"
+            )
 
     def _start_call_camera(self):
         """Start local camera capture without making video calls depend on it.

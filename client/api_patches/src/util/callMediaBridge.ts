@@ -211,6 +211,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     remoteTrackIds: new Set<string>(),
     remoteVideoIds: new Set<string>(),
     remoteVideoTimers: new Map<string, number>(),
+    remoteVideoFramesSent: 0,
     cameraCanvas: null,
     cameraTrack: null,
     cameraPending: false,
@@ -443,6 +444,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const attachRemoteVideo = (track: MediaStreamTrack) => {
     if (!track || track.kind !== 'video' || state.remoteVideoIds.has(track.id)) return;
     state.remoteVideoIds.add(track.id);
+    // One-shot: proves attachPeerConnection/the track event/the receiver scan
+    // actually delivered a remote video track at all. If this never appears
+    // in a real call's log, the bug is upstream of everything below.
+    report('remote-video-track', `track=${track.id} kind=${track.kind}`);
     const video = document.createElement('video');
     video.muted = true;
     video.autoplay = true;
@@ -452,11 +457,36 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     const canvas = document.createElement('canvas');
     canvas.width = 640;
     canvas.height = 360;
+    let stalledTicks = 0;
     const timer = win.setInterval(() => {
-      if (track.readyState !== 'live' || !video.videoWidth) return;
+      if (track.readyState !== 'live' || !video.videoWidth) {
+        stalledTicks += 1;
+        // Every ~5s (40 ticks * 125ms) while blocked, not every tick: tells a
+        // log reviewer "track attached but never got real pixels" apart from
+        // the other stages below.
+        if (stalledTicks % 40 === 0) {
+          report(
+            'remote-video-stalled',
+            `readyState=${track.readyState} videoWidth=${video.videoWidth}`
+          );
+        }
+        return;
+      }
       canvas.getContext('2d')?.drawImage(video, 0, 0, 640, 360);
       const jpeg = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-      if (jpeg) win.__winzappOnCallRemoteVideo?.(jpeg).catch?.(() => undefined);
+      if (jpeg) {
+        state.remoteVideoFramesSent += 1;
+        if (
+          state.remoteVideoFramesSent === 1 ||
+          state.remoteVideoFramesSent % 100 === 0
+        ) {
+          report(
+            'remote-video-frame',
+            `sent=${state.remoteVideoFramesSent} track=${track.id}`
+          );
+        }
+        win.__winzappOnCallRemoteVideo?.(jpeg).catch?.(() => undefined);
+      }
     }, 125);
     state.remoteVideoTimers.set(track.id, timer);
     track.addEventListener('ended', () => {

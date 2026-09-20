@@ -106,6 +106,39 @@ def test_missing_camera_does_not_end_or_clear_video_call(monkeypatch):
     assert stub._call_camera_enabled is False
 
 
+class _RemoteVideoMainWindow:
+    on_call_remote_video = MainWindow.on_call_remote_video
+    _show_call_remote_video = MainWindow._show_call_remote_video
+
+    def __init__(self, is_video):
+        self._active_voice_call = {"identity": "call-1", "is_video": is_video}
+        self._call_remote_video_gate_blocked = 0
+
+
+def test_remote_video_blocked_by_is_video_gate_is_counted(monkeypatch):
+    import wx
+    scheduled = []
+    monkeypatch.setattr(wx, "CallAfter", lambda fn, *args: scheduled.append((fn, args)))
+    stub = _RemoteVideoMainWindow(is_video=False)
+
+    stub.on_call_remote_video(b"jpeg-bytes")
+
+    assert scheduled == []
+    assert stub._call_remote_video_gate_blocked == 1
+
+
+def test_remote_video_passes_gate_and_schedules_render(monkeypatch):
+    import wx
+    scheduled = []
+    monkeypatch.setattr(wx, "CallAfter", lambda fn, *args: scheduled.append((fn, args)))
+    stub = _RemoteVideoMainWindow(is_video=True)
+
+    stub.on_call_remote_video(b"jpeg-bytes")
+
+    assert scheduled == [(stub._show_call_remote_video, (b"jpeg-bytes",))]
+    assert stub._call_remote_video_gate_blocked == 0
+
+
 def test_call_window_video_toggle_is_hidden_without_camera():
     source = (Path(__file__).parents[1] / 'client' / 'main.py').read_text(encoding='utf-8')
     assert 'self.voice_call_window_video_button.Hide()' in source
