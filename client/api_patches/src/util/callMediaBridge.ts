@@ -968,7 +968,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   } catch (_) {}
 
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
-    // Instrumentation only: confirms from evolution.log whether the native
+    // Instrumentation only: confirms from wppconnect.log whether the native
     // VoIP stack (getNativeVoipStack/runNativeVoipAction/warmCallVoipRuntime
     // — see createSessionUtil.ts) ever actually asks the page for a camera
     // through this override, or acquires it some other way that would leave
