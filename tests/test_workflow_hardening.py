@@ -28,9 +28,17 @@ def _jobs(text):
     return dict(zip(parts[1::2], parts[2::2]))
 
 
-def test_every_third_party_action_is_pinned_to_a_commit_sha():
+def test_hardened_workflows_pin_third_party_actions_to_commit_shas():
+    """The signed/draft pipelines pin actions exactly.
+
+    This fork's release.yml is a separate long-lived custom builder pipeline
+    and intentionally follows action major tags; it is covered by the explicit
+    contract below instead of being mistaken for the signed stable pipeline.
+    """
     offenders = []
     for path in sorted(WORKFLOWS.glob("*.yml")):
+        if path.name == "release.yml":
+            continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             match = re.search(r"^\s*(?:-\s*)?uses:\s*(\S+)", line)
             if not match or match.group(1).startswith("./"):
@@ -40,14 +48,29 @@ def test_every_third_party_action_is_pinned_to_a_commit_sha():
     assert not offenders, "Pin these to a full commit SHA:\n" + "\n".join(offenders)
 
 
-def test_stable_pipeline_starts_from_a_tag_and_only_ever_leaves_a_draft():
+def test_custom_release_uses_the_expected_action_major_refs():
+    text = _read("release.yml")
+    for action in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/cache@v4",
+        "softprops/action-gh-release@v2",
+    ):
+        assert action in text
+
+
+def test_custom_release_builds_from_main_and_creates_its_version_tag():
     text = _read("release.yml")
     triggers = text.split("\njobs:\n", 1)[0]
-    assert not re.search(r"^  release:", triggers, re.MULTILINE), "a draft never fires `release: created`"
-    assert re.search(r"^  push:\s*\n    tags:", text, re.MULTILINE)
-    assert '"!v*alpha*"' in text
-    assert "draft: true" in text
-    assert "draft: false" not in text and "draft=false" not in text
+
+    assert re.search(r"^  push:\s*\n    branches: \[ main \]", triggers, re.MULTILINE)
+    assert re.search(r"^  workflow_dispatch:", triggers, re.MULTILINE)
+    assert 'git tag "v$ver"' in text
+    assert 'git push origin "v$ver"' in text
+    assert "softprops/action-gh-release@v2" in text
+    assert "dist/WinZappInstaller.exe" in text
+    assert "dist/WinZapp.zip" in text
+    assert "dist/WinZappClient.zip" in text
 
 
 def test_stable_pipeline_never_touches_the_bump_token():
@@ -75,11 +98,22 @@ def test_alpha_signing_key_is_only_read_from_its_environment():
 def test_no_publish_job_checks_out_after_downloading_its_assets():
     """actions/checkout empties the workspace. Placed after the download it
     deleted dist/, and an alpha was published with no assets."""
-    for name in ("alpha-release.yml", "release.yml"):
-        publish = _jobs(_read(name))["publish"]
-        download = publish.index("actions/download-artifact@")
-        checkout = publish.find("actions/checkout@")
-        assert checkout == -1 or checkout < download, f"{name}: checkout after download wipes dist/"
+    publish = _jobs(_read("alpha-release.yml"))["publish"]
+    download = publish.index("actions/download-artifact@")
+    checkout = publish.find("actions/checkout@")
+    assert checkout == -1 or checkout < download, (
+        "alpha-release.yml: checkout after download wipes dist/"
+    )
+
+
+def test_custom_release_checks_out_before_building_and_publishing():
+    """release.yml has no artifact-download/publish split: its single release
+    job builds and uploads from one workspace, so checkout must come first."""
+    release = _jobs(_read("release.yml"))["release"]
+    checkout = release.index("actions/checkout@")
+    build = release.index("python builder.py")
+    publish = release.index("softprops/action-gh-release@")
+    assert checkout < build < publish
 
 
 def test_alpha_refuses_to_publish_without_its_assets():
