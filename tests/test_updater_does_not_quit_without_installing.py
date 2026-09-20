@@ -58,6 +58,7 @@ def _checker(monkeypatch, result, install_ok):
         retries=0,
     )
     stub._schedule_retry = lambda: setattr(stub, "retries", stub.retries + 1)
+    stub._get_active_parent = types.MethodType(UpdateChecker._get_active_parent, stub)
     # Every exit from _do_install() that leaves the app running hands the
     # cross-account prompt claim back, so the next account may be offered the
     # update. Counted here so a branch that stops doing it is visible.
