@@ -116,12 +116,12 @@ class TestSplitByOverride:
 
     def test_an_overridden_key_is_separated_out(self, audit):
         changes = {
-            ("dependencies", "qrcode"): ("^1.5.4", "^1.6.0"),
+            ("dependencies", "zod"): ("^3.25.0", "^3.26.0"),
             ("dependencies", "multer"): ("^2.2.0", "^2.4.0"),
         }
         overridden, flowing = audit.split_by_override(changes)
 
-        assert list(overridden) == [("dependencies", "qrcode")]
+        assert list(overridden) == [("dependencies", "zod")]
         assert list(flowing) == [("dependencies", "multer")]
 
     def test_nothing_is_lost_or_duplicated(self, audit):

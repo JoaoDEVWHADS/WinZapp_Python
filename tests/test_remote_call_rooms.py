@@ -53,7 +53,10 @@ def test_audio_graph_hook_never_routes_the_synthetic_microphone_to_speakers():
     source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
     assert "localTrackIds: new Set<string>()" in source
     assert "if (state.localTrackIds.has(id)) return;" in source
-    assert source.count("state.localTrackIds.add(micTrack.id)") == 1
+    # Both audio-only and video+audio getUserMedia paths clone the synthetic
+    # microphone; both clones must be marked local so neither is captured as
+    # remote playback.
+    assert source.count("state.localTrackIds.add(micTrack.id)") == 2
 
 
 def test_microphone_bridge_does_not_replace_webrtc_tracks_after_call_setup():

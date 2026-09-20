@@ -36,67 +36,35 @@ import updater
 from main import MainWindow
 
 
-class TestForceReinstallGoesToTheNewestRelease:
-    def test_it_asks_for_the_newest_available_tag(self):
+class TestForceReinstallTracksLatestMain:
+    def test_force_reinstall_uses_the_shared_latest_lookup(self):
         source = inspect.getsource(updater.WppUpdateChecker._force_reinstall_worker)
-        assert "_newest_available_tag()" in source, (
-            "force reinstall must resolve the newest release, not the "
-            "homologated one — reinstalling the same version is the bug"
-        )
+        assert "tag = self._fetch_latest_tag()" in source
 
-    def test_the_newest_lookup_actually_reaches_github(self):
-        source = inspect.getsource(updater.WppUpdateChecker._newest_available_tag)
+    def test_the_lookup_delegates_to_api_setup(self):
+        source = inspect.getsource(updater.WppUpdateChecker._fetch_latest_tag)
         assert "fetch_latest_wpp_tag()" in source
 
-    def test_it_never_downgrades_below_the_homologated_release(self, monkeypatch):
-        """It must be able to move a user forward, never backward — a GitHub
-        hiccup answering with something older must not silently downgrade an
-        install below what WinZapp was built against."""
-        monkeypatch.setattr(updater, "homologated_wpp_tag", lambda _p: "v2.10.18")
-        monkeypatch.setattr(
-            "ui.dialogs.api_setup.fetch_latest_wpp_tag", lambda: "v2.10.16")
-        assert updater.WppUpdateChecker._newest_available_tag() == "v2.10.18"
-
-    def test_a_newer_release_wins(self, monkeypatch):
-        monkeypatch.setattr(updater, "homologated_wpp_tag", lambda _p: "v2.10.16")
-        monkeypatch.setattr(
-            "ui.dialogs.api_setup.fetch_latest_wpp_tag", lambda: "v2.10.18")
-        assert updater.WppUpdateChecker._newest_available_tag() == "v2.10.18"
-
-    def test_an_unreachable_github_falls_back_to_the_homologated_tag(self, monkeypatch):
-        monkeypatch.setattr(updater, "homologated_wpp_tag", lambda _p: "v2.10.16")
-        monkeypatch.setattr("ui.dialogs.api_setup.fetch_latest_wpp_tag", lambda: "")
-        assert updater.WppUpdateChecker._newest_available_tag() == "v2.10.16"
-
-    def test_the_periodic_check_still_compares_against_the_homologated_release(self):
-        """Deliberately unchanged. Prompting every user onto every
-        wppconnect-server release the day it appears is how a patch set that no
-        longer matches reaches people — which is what 2.3.2 did. Raising
-        wpp_minimum_version.txt stays the deliberate act."""
+    def test_the_periodic_check_uses_the_same_remote_lookup(self):
         source = inspect.getsource(updater.WppUpdateChecker._check_once)
-        assert "_homologated_or_latest_tag()" in source
-        assert "_newest_available_tag()" not in source
+        assert "tag = self._fetch_latest_tag()" in source
+
+    def test_the_periodic_check_compares_commit_identity(self):
+        source = inspect.getsource(updater.WppUpdateChecker._check_once)
+        assert "remote_version != installed" in source
+        assert "_version_is_older" not in source
 
 
-class TestVersionComparisonForTheFloor:
-    @pytest.mark.parametrize("candidate, reference, expected", [
-        ("v2.10.16", "v2.10.18", True),
-        ("2.10.16", "v2.10.18", True),
-        ("v2.10.18", "v2.10.18", False),
-        ("v2.10.19", "v2.10.18", False),
-        ("v2.11.0", "v2.10.18", False),
-    ])
-    def test_ordering(self, candidate, reference, expected):
-        assert updater._version_is_older(candidate, reference) is expected
+class TestRollingCommitMarker:
+    def test_a_fresh_semver_install_can_be_seeded_with_the_remote_sha(self):
+        source = inspect.getsource(updater.WppUpdateChecker._check_once)
+        assert 'if "." in installed and "." not in remote_version' in source
+        assert '".commit_sha"' in source
 
-    @pytest.mark.parametrize("candidate, reference", [
-        ("not-a-version", "v2.10.18"),
-        ("v2.10.18", ""),
-        ("", "v2.10.18"),
-    ])
-    def test_unparseable_input_never_means_downgrade(self, candidate, reference):
-        """"I cannot tell" must not become "go backwards"."""
-        assert updater._version_is_older(candidate, reference) is False
+    def test_the_remote_identifier_is_not_parsed_as_semver(self):
+        source = inspect.getsource(updater.WppUpdateChecker._check_once)
+        assert "Version(" not in source
+        assert "parse_version(" not in source
 
 
 class TestTheStartupGateCanActuallyRun:

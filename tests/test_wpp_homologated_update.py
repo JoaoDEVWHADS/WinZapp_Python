@@ -1,56 +1,50 @@
-"""client/wpp_minimum_version.txt is the single source of the WPPConnect tag.
+"""Tests for the current rolling-main WPPConnect update policy.
 
-Every install path has to reach the same WPPConnect Server release: the dev/CI
-one (setup_api.py), the end-user one (ApiSetupDialog), and the in-app update
-prompt (WppUpdateChecker). They used to each carry their own idea of it, so a
-user could be pulled onto a release WinZapp's patch set had never been built
-against — and the CI build then wrote the file from whatever client/api/
-happened to hold, which made the whole thing agree with itself by accident.
-
-The value is deliberately never written out a second time here. Repeating it
-turns moving the pin into an edit of two files that must agree, and the test
-can only ever catch the edit somebody already remembered to make.
+A tag can still be supplied explicitly through WPPCONNECT_TAG_VERSION, but
+normal installs and in-app checks follow wppconnect-server/main.  The update
+checker therefore compares the installed commit marker with the latest main
+commit rather than treating client/wpp_minimum_version.txt as the source of
+truth.
 """
 
-import re
+import inspect
 from pathlib import Path
+
+from ui.dialogs import api_setup
+from updater import WppUpdateChecker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HOMOLOGATED = (
-    (ROOT / "client/wpp_minimum_version.txt").read_text(encoding="utf-8").strip()
-)
 
 
-def test_homologated_server_version_is_shipped():
-    assert re.fullmatch(r"\d+\.\d+\.\d+", HOMOLOGATED), (
-        f"client/wpp_minimum_version.txt holds {HOMOLOGATED!r}; it must be a "
-        f"plain WPPConnect Server release version, e.g. 2.10.16 — setup_api.py "
-        f"turns it straight into the git tag v<version>."
-    )
+def test_latest_lookup_prefers_the_main_branch_commit():
+    source = inspect.getsource(api_setup.fetch_latest_wpp_tag)
+    assert "fetch_latest_wpp_commit_sha" in source
+    assert "WPP_GITHUB_API_LATEST_RELEASE" in source
 
 
-def test_all_install_paths_prefer_the_homologated_version():
+def test_the_in_app_installer_can_download_main_or_an_explicit_tag():
+    source = (ROOT / "client/ui/dialogs/api_setup.py").read_text(encoding="utf-8")
+    assert "archive/refs/heads/main.zip" in source
+    assert "archive/refs/tags/{tag}.zip" in source
+    assert "WPPCONNECT_TAG_VERSION" in source
+
+
+def test_setup_api_uses_the_environment_tag_only_as_an_optional_override():
+    source = (ROOT / "setup_api.py").read_text(encoding="utf-8")
+    assert 'env.get("WPPCONNECT_TAG_VERSION", "").strip()' in source
+    assert "refs/heads/main" in source or "wppconnect-server.git" in source
+
+
+def test_updater_uses_the_shared_latest_commit_or_release_lookup():
+    source = inspect.getsource(WppUpdateChecker._fetch_latest_tag)
+    assert "fetch_latest_wpp_tag()" in source
+
+
+def test_legacy_minimum_version_file_is_not_required_by_install_paths():
     for path in (
         ROOT / "setup_api.py",
         ROOT / "client/ui/dialogs/api_setup.py",
         ROOT / "client/updater.py",
     ):
-        source = path.read_text(encoding="utf-8")
-        assert "wpp_minimum_version.txt" in source
-        assert "homologated" in source
-
-
-def test_the_committed_file_is_not_generated_by_the_build():
-    """It used to be .gitignored and overwritten by build-windows.yml from
-    client/api/package.json, which made it an output of the build rather than
-    an input to it — self-consistent, and unable to disagree with anything.
-    The workflow now verifies it instead."""
-    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    assert "wpp_minimum_version.txt" not in gitignore
-
-    workflow = (ROOT / ".github/workflows/build-windows.yml").read_text(
-        encoding="utf-8"
-    )
-    assert r'Set-Content -Path "client\wpp_minimum_version.txt"' not in workflow
-    assert "wpp_minimum_version.txt" in workflow
+        assert "wpp_minimum_version.txt" not in path.read_text(encoding="utf-8")
