@@ -190,7 +190,7 @@ function ensureLinuxCallAudio(
 
 function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 7) return true;
+  if (win.__winzappCallMediaBridge?.version === 10) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const NativeAudioContextCtor = win.AudioContext || win.webkitAudioContext;
@@ -256,7 +256,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
 
   const state: any = {
-    version: 7,
+    version: 10,
     enabled: false,
     context: null,
     micDestination: null,
@@ -303,6 +303,9 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     { muted: boolean; volume: number }
   >();
   const mutedPageElements = new Set<HTMLMediaElement>();
+  const pageAudioBridgePipelines = new Map<HTMLMediaElement, any>();
+  let pageAudioCleanupTimer: number | null = null;
+  let bridgeAllowedPageAudio = (_el: HTMLMediaElement): boolean => false;
   let callWasActive = false;
   // A merely-ringing call (INCOMING_RING/CALLING/etc, counted "active" by
   // isLivePageCall below) that is cancelled or rejected before anyone answers
@@ -317,6 +320,24 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   // unmuted (measured 2026-09-20).
   let callWasAnswered = false;
   let allowCallEndChimeUntil = 0;
+
+  const cleanupPageAudioBridges = () => {
+    for (const pipeline of pageAudioBridgePipelines.values()) {
+      try { pipeline.source.disconnect(); } catch (_) {}
+      try { pipeline.processor.disconnect(); } catch (_) {}
+      try { pipeline.sink.disconnect(); } catch (_) {}
+    }
+    pageAudioBridgePipelines.clear();
+    pageAudioCleanupTimer = null;
+  };
+
+  const isLivePageMedia = (el: HTMLMediaElement): boolean => {
+    try {
+      return el.srcObject instanceof MediaStream;
+    } catch (_) {
+      return false;
+    }
+  };
 
   const pageAudioNow = () => {
     try {
@@ -392,11 +413,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       allowCallEndChimeUntil,
       pageAudioNow() + 2500
     );
-    // A sound object may have been created/muted just before the call state
-    // flips. Restore those objects immediately so the terminal chime is not
-    // clipped while waiting for the next media scan.
+    // Keep live RTC media muted locally, but route ordinary page audio from
+    // the terminal-chime window through the existing Python/BASS path.
     for (const element of Array.from(mutedPageElements)) {
+      if (!linuxAudio && isLivePageMedia(element)) continue;
       restorePageAudio(element);
+      if (!linuxAudio) bridgeAllowedPageAudio(element);
     }
   };
 
@@ -445,8 +467,19 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       return true;
     }
 
+    if (!linuxAudio && isLivePageMedia(el)) {
+      silencePageAudio(el);
+      return true;
+    }
+
     if (pageAudioNow() <= allowCallEndChimeUntil) {
       restorePageAudio(el);
+      if (!linuxAudio && !bridgeAllowedPageAudio(el)) {
+        // Never fall back to Chromium's physical speaker if the terminal
+        // sound cannot be diverted into the Python/BASS call output.
+        silencePageAudio(el);
+        return true;
+      }
       return false;
     }
 
@@ -574,10 +607,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   const ensureContext = () => {
     if (!state.context || state.context.state === 'closed') {
-      state.context = new AudioContextCtor({
+      state.context = createHardwareIsolatedAudioContext(AudioContextCtor, [{
         latencyHint: 'interactive',
         sampleRate: 48000,
-      });
+      }]);
     }
     if (state.context.state === 'suspended') {
       state.context.resume().catch(() => undefined);
@@ -613,6 +646,46 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       binary += String.fromCharCode(...bytes.subarray(i, i + step));
     }
     return btoa(binary);
+  };
+
+  bridgeAllowedPageAudio = (el: HTMLMediaElement): boolean => {
+    if (linuxAudio) return false;
+    if (pageAudioBridgePipelines.has(el)) return true;
+
+    try {
+      const context = ensureContext();
+      // Divert the terminal page sound away from Chromium's hardware output;
+      // forward its PCM to Python/BASS while the local graph sink stays silent.
+      const source = context.createMediaElementSource(el);
+      const processor = context.createScriptProcessor(1024, 1, 1);
+      const sink = context.createGain();
+      sink.gain.value = 0;
+
+      processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        event.outputBuffer.getChannelData(0).fill(0);
+        if (pageAudioNow() > allowCallEndChimeUntil) return;
+        const input = event.inputBuffer.getChannelData(0);
+        const callback = win.__winzappOnCallRemoteAudio;
+        if (typeof callback !== 'function' || !input.length) return;
+        callback(encodePcm16(input), context.sampleRate).catch?.(() => undefined);
+      };
+
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(context.destination);
+      pageAudioBridgePipelines.set(el, { source, processor, sink });
+      report(
+        'page-speaker-bridge',
+        'src=' + String(el.currentSrc || (el as any).src || '').slice(0, 120)
+      );
+      return true;
+    } catch (error: any) {
+      report(
+        'page-speaker-bridge-failed',
+        'error=' + String(error?.message || error)
+      );
+      return false;
+    }
   };
 
   const ensureMicTrack = () => {
@@ -660,6 +733,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   state.enable = () => {
     state.enabled = true;
+    if (pageAudioCleanupTimer !== null) {
+      win.clearTimeout(pageAudioCleanupTimer);
+      pageAudioCleanupTimer = null;
+    }
     ensureMicTrack();
     ensureContext().resume().catch(() => undefined);
     return true;
@@ -724,6 +801,15 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     state.remoteVideoTimers.clear();
     state.remoteVideoIds.clear();
     state.localTrackIds.clear();
+
+    // Keep the terminal-chime bridge alive through the exception window, then
+    // disconnect page MediaElementSource graphs. A new call cancels this timer.
+    if (!linuxAudio) {
+      if (pageAudioCleanupTimer !== null) {
+        win.clearTimeout(pageAudioCleanupTimer);
+      }
+      pageAudioCleanupTimer = win.setTimeout(cleanupPageAudioBridges, 2750);
+    }
   };
 
   const attachRemoteTrack = (track: MediaStreamTrack) => {
