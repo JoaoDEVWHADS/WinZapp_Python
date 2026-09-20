@@ -152,7 +152,6 @@ class TestSyncMediaReadsPersistedDeepHistory:
 class _SyncIfMediaStub:
     """Stub for sync_if_media() itself — the per-message download decision."""
 
-    _MEDIA_MAX_AGE_SECONDS = MainWindow._MEDIA_MAX_AGE_SECONDS
     sync_if_media = MainWindow.sync_if_media
 
     def __init__(self, connected=True, offline=False, allowed_types=None):
