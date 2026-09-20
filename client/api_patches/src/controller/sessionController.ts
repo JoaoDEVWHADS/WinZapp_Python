@@ -1254,6 +1254,7 @@ export async function subscribePresence(req: Request, res: Response) {
             properties: {
               phone: { type: "string" },
               isGroup: { type: "boolean" },
+              isLid: { type: "boolean" },
               all: { type: "boolean" },
             }
           },
@@ -1305,21 +1306,77 @@ export async function subscribePresence(req: Request, res: Response) {
       await req.client.subscribePresence(contato);
     };
 
+    const subscribeGroupParticipants = async (groupId: string) => {
+      try {
+        const chat: any = await req.client.getChatById(groupId);
+        const participants = Array.isArray(chat?.groupMetadata?.participants)
+          ? chat.groupMetadata.participants
+          : [];
+
+        const participantIds = [
+          ...new Set(
+            participants
+              .map((participant: any) => {
+                const rawId = participant?.id;
+                if (typeof rawId === 'string') {
+                  return rawId;
+                }
+                if (rawId?._serialized) {
+                  return rawId._serialized;
+                }
+                if (rawId?.user && rawId?.server) {
+                  return `${rawId.user}@${rawId.server}`;
+                }
+                return '';
+              })
+              .filter((participantId: string) => Boolean(participantId))
+          ),
+        ];
+
+        for (const participantId of participantIds) {
+          await subscribeOne(participantId);
+        }
+
+        req.logger.info(
+          `[subscribePresence] group participants subscribed: ${groupId} (${participantIds.length})`
+        );
+      } catch (groupErr) {
+        req.logger.warn(
+          `[subscribePresence] failed to subscribe participants for ${groupId}: ${groupErr}`
+        );
+      }
+    };
+
     if (all) {
-      let contacts;
       if (isGroup) {
         const groups = await req.client.getAllGroups(false);
-        contacts = groups.map((p: any) => p.id._serialized);
+        for (const group of groups) {
+          const groupId =
+            group?.id?._serialized ||
+            (group?.id?.user && group?.id?.server
+              ? `${group.id.user}@${group.id.server}`
+              : group?.id || '');
+          if (!groupId) {
+            continue;
+          }
+          await subscribeOne(groupId);
+          await subscribeGroupParticipants(groupId);
+        }
       } else {
         const chats = await req.client.getAllContacts();
-        contacts = chats.map((c: any) => c.id._serialized);
-      }
-      for (const contato of contacts) {
-        await subscribeOne(contato);
+        const contacts = chats
+          .map((contact: any) => contact?.id?._serialized || contact?.id || '')
+          .filter((contactId: string) => Boolean(contactId));
+        for (const contato of contacts) {
+          await subscribeOne(contato);
+        }
       }
     } else {
       for (const contato of contactToArray(phone, isGroup, false, isLid)) {
         await subscribeOne(contato);
+        if (isGroup && contato.endsWith('@g.us')) {
+          await subscribeGroupParticipants(contato);
+        }
       }
     }
 
