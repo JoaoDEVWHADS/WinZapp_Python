@@ -6042,6 +6042,7 @@ class MainWindow(wx.Frame):
         self._close_incoming_call_dialog(identity)
         details = getattr(self, "_incoming_call_details", {}).get(identity, {})
         can_answer = incoming_call_can_answer(details)
+        is_video = bool(details.get("is_video"))
         dialog = IncomingCallDialog(
             self,
             message,
@@ -6050,6 +6051,10 @@ class MainWindow(wx.Frame):
             on_stop=lambda: self.stop_incoming_call_alert(identity),
             on_closed=lambda: self._forget_incoming_call_dialog(identity),
             can_answer=can_answer,
+            is_video=is_video,
+            on_answer_without_video=(
+                lambda: self.accept_incoming_call(identity, with_video=False)
+            ),
         )
         self._incoming_call_dialogs[identity] = dialog
         dialog.show_accessibly()
@@ -6516,11 +6521,24 @@ class MainWindow(wx.Frame):
         # button when capture is ready (or hides it if the device disappeared).
         threading.Thread(target=self._start_call_camera, daemon=True).start()
 
-    def accept_incoming_call(self, identity: str):
+    def accept_incoming_call(self, identity: str, *, with_video: bool | None = None):
         if getattr(self, "_active_voice_call", None) is not None:
             self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
             return
         details = dict(getattr(self, "_incoming_call_details", {}).get(identity, {}))
+        # The call TYPE never changes with `with_video` — a video offer stays
+        # a video call (remote video keeps arriving, the video window still
+        # opens) whether or not the local camera happens to be on. Only the
+        # local camera's starting state is a WinZapp-side choice.
+        is_video = bool(details.get("is_video"))
+        # `with_video=None` (the default, used by the ordinary answer button)
+        # keeps today's behaviour: the camera starts and is left sending.
+        # "Answer without video" passes False explicitly so the camera is
+        # probed (so _call_camera_available becomes True and the manual
+        # video-toggle button works for the rest of the call) but is not
+        # left capturing — the same end state toggle_call_video() leaves
+        # behind when the user turns their own video off mid-call.
+        start_camera_enabled = True if with_video is None else bool(with_video)
         payload = self._call_control_payload(identity)
         # Keep the receive-only monitor alive so accepting can promote the
         # same CallAudioSession to full duplex without reopening the speaker.
@@ -6531,15 +6549,17 @@ class MainWindow(wx.Frame):
             "peer_jid": details.get("peer_jid") or "",
             "name": details.get("name") or "",
             "outgoing": False,
-            "is_video": bool(details.get("is_video")),
+            "is_video": is_video,
         }
         wx.CallAfter(self._sync_voice_call_bar)
 
         def _worker():
             with self._call_action_lock:
                 try:
-                    if details.get("is_video"):
+                    if is_video:
                         self._start_call_camera()
+                        if not start_camera_enabled:
+                            self._stop_call_camera()
                     self._start_voice_call_audio(identity, details)
                     self._raise_for_call_response(
                         self._post_call_control("accept", payload), "accept"

@@ -849,6 +849,8 @@
     "incoming_call_popup_title": "Połączenie przychodzące",
     "incoming_call_stop_button": "&Wyłącz",
     "incoming_call_answer_button": "&Odbierz",
+    "incoming_call_answer_with_video_button": "&Odbierz z wideo",
+    "incoming_call_answer_without_video_button": "Odbierz &bez wideo",
     "incoming_call_reject_button": "Od&rzuć",
     "incoming_call_silence_button": "&Wycisz alert",
     "incoming_call_group_not_supported": "WinZapp nie obsługuje jeszcze odbierania połączeń grupowych.",

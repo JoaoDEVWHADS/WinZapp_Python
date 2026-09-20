@@ -1111,6 +1111,8 @@
   "update_other_accounts_running": "Başka bir WinZapp hesabı hâlâ açık ve güncellemenin program dosyalarını değiştirmesini engelliyor. Diğer hesapları kapatıp tekrar deneyin.",
   "calls_audio_settings_button": "Arama ses ayarları",
   "incoming_call_answer_button": "&Cevapla",
+  "incoming_call_answer_with_video_button": "Görüntülü &cevapla",
+  "incoming_call_answer_without_video_button": "Görüntüsü&z cevapla",
   "incoming_call_answer_failed": "Arama yanıtlanamadı: {error}",
   "incoming_call_answered": "Arama yanıtlandı.",
   "incoming_call_end_failed": "Arama sonlandırılamadı: {error}",

@@ -849,6 +849,8 @@
     "incoming_call_popup_title": "Incoming call",
     "incoming_call_stop_button": "&Stop",
     "incoming_call_answer_button": "&Answer",
+    "incoming_call_answer_with_video_button": "&Answer with video",
+    "incoming_call_answer_without_video_button": "Answer without &video",
     "incoming_call_reject_button": "&Reject",
     "incoming_call_silence_button": "&Silence alert",
     "incoming_call_group_not_supported": "Group calls cannot be answered by WinZapp yet.",

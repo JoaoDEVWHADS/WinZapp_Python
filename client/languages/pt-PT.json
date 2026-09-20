@@ -849,6 +849,8 @@
     "incoming_call_popup_title": "Chamada recebida",
     "incoming_call_stop_button": "&Desligar",
     "incoming_call_answer_button": "&Atender",
+    "incoming_call_answer_with_video_button": "&Atender com vídeo",
+    "incoming_call_answer_without_video_button": "Atender sem &vídeo",
     "incoming_call_reject_button": "&Recusar",
     "incoming_call_silence_button": "&Silenciar alerta",
     "incoming_call_group_not_supported": "As chamadas de grupo ainda não podem ser atendidas pelo WinZapp.",
