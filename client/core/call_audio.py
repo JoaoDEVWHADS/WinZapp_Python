@@ -459,6 +459,26 @@ class CallAudioSession:
                     time.sleep(0.01)
                 continue
 
+            if primed and pending.size:
+                # A remainder shorter than one 20 ms block — e.g. a short
+                # ring-tone fragment played while start_output_only() has no
+                # microphone side to keep the loop busy. Zero-pad it out to a
+                # full block instead of holding it forever waiting for more
+                # audio that may never arrive.
+                frame = np.concatenate(
+                    (pending, np.zeros(frame_samples - pending.size, dtype=np.float32))
+                )
+                pending = np.empty(0, dtype=np.float32)
+                try:
+                    if self._output_stream is not None:
+                        underflowed = self._output_stream.write(frame.reshape(-1, 1))
+                        if underflowed:
+                            logging.debug("[call_audio] output stream reported underflow")
+                except Exception:
+                    logging.exception("[call_audio] failed to play remote call audio")
+                    time.sleep(0.01)
+                continue
+
             timeout = (
                 CALL_OUTPUT_REBUFFER_WAIT_MS / 1000.0
                 if primed
@@ -479,12 +499,15 @@ class CallAudioSession:
                             pending.size * 1000.0 / self._output_rate,
                         )
                 elif (
-                    pending.size >= frame_samples
+                    pending.size
                     and priming_started_at is not None
                     and now - priming_started_at >= CALL_OUTPUT_PREBUFFER_MS / 1000.0
                 ):
                     # Do not strand a short final packet forever just because
-                    # it never reached the normal prebuffer target.
+                    # it never reached the normal prebuffer target — even a
+                    # fragment smaller than one 20 ms block is flushed
+                    # (zero-padded) by the primed-with-a-remainder branch
+                    # above on the next iteration.
                     primed = True
                 continue
 
