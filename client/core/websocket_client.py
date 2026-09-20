@@ -400,10 +400,27 @@ class WebSocketClient:
             return True
 
     def _clean_jid(self, jid_val):
+        """Normalize every JID shape Socket.IO/WA-JS can hand us.
+
+        Newer WA-JS presence events expose presence.id as a Wid object.
+        Depending on Puppeteer/Socket.IO serialization that can arrive as
+        {"user": "...", "server": "..."} rather than carrying the older
+        _serialized field. Presence used to drop those events silently,
+        removing typing/recording announcements even while WPPConnect was
+        emitting onPresenceChanged correctly.
+        """
         if not jid_val:
             return ""
         if isinstance(jid_val, dict):
-            jid_val = jid_val.get("_serialized") or jid_val.get("id") or ""
+            nested = jid_val.get("_serialized") or jid_val.get("id")
+            if nested:
+                return self._clean_jid(nested)
+            user = jid_val.get("user")
+            server = jid_val.get("server")
+            if user and server:
+                jid_val = f"{user}@{server}"
+            else:
+                return ""
         if not isinstance(jid_val, str):
             jid_val = str(jid_val)
         return jid_val.replace("@c.us", "@s.whatsapp.net")
@@ -1726,11 +1743,18 @@ class WebSocketClient:
             if note_live:
                 note_live()
             data      = info.get("data", {})
-            jid       = data.get("id", "")
+            jid       = self._clean_jid(data.get("id", ""))
             presences = data.get("presences", {})
             if not jid or not isinstance(presences, dict):
                 return
-            wx.CallAfter(self.main_window.on_presence_update, jid, presences)
+            normalized_presences = {}
+            for participant_jid, presence in presences.items():
+                clean_participant = self._clean_jid(participant_jid)
+                if clean_participant and isinstance(presence, dict):
+                    normalized_presences[clean_participant] = presence
+            if not normalized_presences:
+                return
+            wx.CallAfter(self.main_window.on_presence_update, jid, normalized_presences)
         except Exception:
             logging.exception("[WebSocketClient] on_presence_update error")
 
@@ -1745,14 +1769,16 @@ class WebSocketClient:
             # Ignore presence events for other sessions (multi-session server).
             if not self._belongs_to_this_session(info):
                 return
-            # The id can be a string or a dict/object (Wid)
-            raw_id = info.get("id")
-            if isinstance(raw_id, dict):
-                chat_jid = raw_id.get("_serialized", "")
-            else:
-                chat_jid = str(raw_id or "")
+            # The id can be a string or a serialized Wid object. WA-JS 4.x
+            # now emits presence.id as the Wid itself, which commonly crosses
+            # Socket.IO as {user, server} with no _serialized property.
+            chat_jid = self._clean_jid(info.get("id"))
 
             if not chat_jid:
+                logging.warning(
+                    "[WebSocketClient] Dropped onpresencechanged with unparseable id: %r",
+                    info.get("id"),
+                )
                 return
 
             # WPPConnect's own `isGroup` flag has been observed false for a
@@ -1807,11 +1833,7 @@ class WebSocketClient:
                     for p in participants:
                         if not isinstance(p, dict):
                             continue
-                        p_raw_id = p.get("id")
-                        if isinstance(p_raw_id, dict):
-                            p_jid = p_raw_id.get("_serialized", "")
-                        else:
-                            p_jid = str(p_raw_id or "")
+                        p_jid = self._clean_jid(p.get("id"))
                         if p_jid:
                             p_state = map_state(p.get("state"))
                             presences[p_jid] = {

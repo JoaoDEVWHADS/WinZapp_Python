@@ -49,6 +49,7 @@ class _FakeMainWindow:
 class _Stub:
     on_wpp_presence_changed = WebSocketClient.on_wpp_presence_changed
     _belongs_to_this_session = WebSocketClient._belongs_to_this_session
+    _clean_jid = WebSocketClient._clean_jid
 
     def __init__(self):
         self.instance_name = ""
@@ -161,3 +162,57 @@ class TestIsGroupFallsBackToTheJidSuffix:
         assert presences == {
             "131928795652121@lid": {"lastKnownPresence": "available", "lastSeen": 1787320530}
         }
+
+
+class TestWidObjectPresencePayloads:
+    def test_group_wid_object_is_not_dropped(self):
+        """WA-JS 4.x presence.id may cross Socket.IO as user/server only."""
+        stub = _Stub()
+        info = {
+            "id": {"user": "120363427511142886", "server": "g.us"},
+            "isGroup": True,
+            "t": 1787320530,
+            "participants": [
+                {
+                    "id": {"user": "197813359124557", "server": "lid"},
+                    "state": "composing",
+                }
+            ],
+        }
+
+        stub.on_wpp_presence_changed(info)
+
+        (jid, presences), = stub.main_window.presence_calls
+        assert jid == "120363427511142886@g.us"
+        assert presences == {
+            "197813359124557@lid": {
+                "lastKnownPresence": "composing",
+                "lastSeen": 1787320530,
+            }
+        }
+
+    def test_private_wid_object_preserves_recording_state(self):
+        stub = _Stub()
+        info = {
+            "id": {"user": "5511999999999", "server": "c.us"},
+            "isGroup": False,
+            "state": "recording",
+            "t": 1787320530,
+        }
+
+        stub.on_wpp_presence_changed(info)
+
+        (jid, presences), = stub.main_window.presence_calls
+        assert jid == "5511999999999@s.whatsapp.net"
+        assert presences == {
+            "5511999999999@s.whatsapp.net": {
+                "lastKnownPresence": "recording",
+                "lastSeen": 1787320530,
+            }
+        }
+
+    def test_nested_id_shape_is_also_normalized(self):
+        stub = _Stub()
+        assert stub._clean_jid({
+            "id": {"user": "5511888888888", "server": "c.us"}
+        }) == "5511888888888@s.whatsapp.net"
