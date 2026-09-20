@@ -190,7 +190,14 @@ class TestInstallerScript:
     def test_a_successful_copy_relaunches_and_cleans_up(self):
         s = _script()
         assert r'if exist "C:\WinZapp\WinZapp.exe" start "" "C:\WinZapp\WinZapp.exe"' in s
-        assert s.rstrip().endswith('del "%~f0"')
+        # The script now has a later OTHER_ACCOUNT_TIMEOUT error branch, so
+        # self-deletion is no longer literally the final line of the file.
+        # It must still happen on the successful copy path, before that path
+        # jumps over the failure-only branch.
+        success_end = s.index(":OTHER_ACCOUNT_TIMEOUT")
+        success_path = s[:success_end]
+        assert 'del "%~f0"' in success_path
+        assert success_path.rfind('del "%~f0"') < success_path.rfind("goto :EOF")
 
 
 class TestWritingTheScript:
