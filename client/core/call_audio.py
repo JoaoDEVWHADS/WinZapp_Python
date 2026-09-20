@@ -29,9 +29,6 @@ CALL_FRAME_SAMPLES = CALL_SAMPLE_RATE * CALL_FRAME_MS // 1000
 CALL_MIC_QUEUE_LIMIT = 12
 CALL_MIC_TARGET_BACKLOG_FRAMES = 2
 CALL_OUTPUT_QUEUE_LIMIT = 40
-CALL_OUTPUT_PREBUFFER_MS = 60
-CALL_OUTPUT_REBUFFER_WAIT_MS = CALL_FRAME_MS
-CALL_OUTPUT_MAX_BUFFER_MS = 200
 
 
 @dataclass(frozen=True)
@@ -39,7 +36,7 @@ class CallAudioConfig:
     session: str
     input_device_name: str = ""
     output_device_name: str = ""
-    exclusive_mode: bool = True
+    exclusive_mode: bool = False
 
 
 class CallAudioUnavailable(RuntimeError):
@@ -93,9 +90,6 @@ class CallAudioSession:
         self._mic_bytes_sent = 0
         self._mic_frames_dropped_for_latency = 0
         self._microphone_muted = False
-        self._output_rebuffer_count = 0
-        self._output_samples_dropped = 0
-        self._output_underflow_count = 0
 
     @property
     def microphone_muted(self) -> bool:
@@ -451,158 +445,35 @@ class CallAudioSession:
                 time.sleep(0.05)
 
     def _play_remote_loop(self) -> None:
-        """Play fixed 20 ms blocks behind a small jitter reservoir.
+        """Write each remote packet to the device as soon as it arrives.
 
-        Remote PCM reaches Python over Socket.IO and therefore does not arrive
-        at perfectly even intervals. Writing every packet immediately made the
-        Windows output device run dry between otherwise healthy packets, which
-        sounded like short cuts. Keep only a small reservoir, re-prime after a
-        real starvation, and discard old receive audio if a long stall ever
-        builds an excessive backlog.
-
-        The reservoir alone is not enough: once primed, draining it as fast as
-        `stream.write()` allows relies entirely on that call blocking for the
-        right amount of time, which only holds if the device's own buffer is
-        close to one frame deep. A device whose driver reports a much larger
-        buffer (measured: a Bluetooth headset settling PortAudio's "low"
-        latency preset at 100 ms, five times a 20 ms frame) has room to accept
-        several queued frames without blocking at all — every one lands in a
-        burst instead of one every 20 ms, which real audio hardware (Bluetooth
-        especially) plays back as glitchy/choppy even though nothing ever
-        underflows or rebuffers. Pace every write against a wall-clock
-        deadline instead of trusting the device to do it.
+        Diagnostic bisection (2026-09-20): a prebuffer/reservoir rewrite of
+        this loop, plus every other change made to this file for video
+        calls, was suspected of causing severe choppy/high-latency call
+        audio on a real Bluetooth headset. Reverting this whole file to
+        main's original version (this exact loop included) while keeping
+        every other file from the branch fixed it; reintroducing sample-rate
+        priority, "low" latency, exclusive mode and a wall-clock write-pacing
+        layer on top of the reservoir version individually did not. That
+        isolates the defect to the reservoir/prebuffer mechanism itself, not
+        yet root-caused further — so this loop stays exactly as simple as it
+        was before any of that, one packet in, one write out, relying on the
+        network's own arrival rate to pace playback the same way it always
+        did for voice calls before this file changed.
         """
-        pending = np.empty(0, dtype=np.float32)
-        primed = False
-        priming_started_at: Optional[float] = None
-        frame_interval = CALL_FRAME_MS / 1000.0
-        next_write_at: Optional[float] = None
-
-        def _pace_and_write(frame: np.ndarray) -> None:
-            nonlocal next_write_at
-            now = time.monotonic()
-            if next_write_at is None:
-                next_write_at = now
-            elif next_write_at > now:
-                time.sleep(next_write_at - now)
-            elif now - next_write_at > frame_interval * 4:
-                # Fell far behind — a genuine stall, not just scheduler
-                # jitter. Resync to now instead of bursting several frames
-                # back to back to "catch up", which is the exact pattern
-                # this pacing exists to avoid.
-                next_write_at = now
-            next_write_at += frame_interval
-            if self._output_stream is not None:
-                underflowed = self._output_stream.write(frame.reshape(-1, 1))
-                if underflowed:
-                    self._output_underflow_count += 1
-                    if (
-                        self._output_underflow_count == 1
-                        or self._output_underflow_count % 50 == 0
-                    ):
-                        logging.info(
-                            "[call_audio] output stream reported underflow count=%s",
-                            self._output_underflow_count,
-                        )
-
         while not self._stop_event.is_set():
-            frame_samples = max(1, int(self._output_rate * CALL_FRAME_MS / 1000))
-            prebuffer_samples = max(
-                frame_samples,
-                int(self._output_rate * CALL_OUTPUT_PREBUFFER_MS / 1000),
-            )
-            max_buffer_samples = max(
-                prebuffer_samples,
-                int(self._output_rate * CALL_OUTPUT_MAX_BUFFER_MS / 1000),
-            )
-
-            if primed and pending.size >= frame_samples:
-                if pending.size > max_buffer_samples:
-                    dropped = int(pending.size - prebuffer_samples)
-                    pending = pending[-prebuffer_samples:].copy()
-                    self._output_samples_dropped += dropped
-                    logging.info(
-                        "[call_audio] remote backlog trimmed dropped_ms=%.1f total_dropped_ms=%.1f",
-                        dropped * 1000.0 / self._output_rate,
-                        self._output_samples_dropped * 1000.0 / self._output_rate,
-                    )
-
-                frame = pending[:frame_samples]
-                pending = pending[frame_samples:]
-                try:
-                    _pace_and_write(frame)
-                except Exception:
-                    logging.exception("[call_audio] failed to play remote call audio")
-                    time.sleep(0.01)
-                continue
-
-            if primed and pending.size:
-                # A remainder shorter than one 20 ms block — e.g. a short
-                # ring-tone fragment played while start_output_only() has no
-                # microphone side to keep the loop busy. Zero-pad it out to a
-                # full block instead of holding it forever waiting for more
-                # audio that may never arrive.
-                frame = np.concatenate(
-                    (pending, np.zeros(frame_samples - pending.size, dtype=np.float32))
-                )
-                pending = np.empty(0, dtype=np.float32)
-                try:
-                    _pace_and_write(frame)
-                except Exception:
-                    logging.exception("[call_audio] failed to play remote call audio")
-                    time.sleep(0.01)
-                continue
-
-            timeout = (
-                CALL_OUTPUT_REBUFFER_WAIT_MS / 1000.0
-                if primed
-                else CALL_OUTPUT_PREBUFFER_MS / 1000.0
-            )
             try:
-                pcm, source_rate = self._output_queue.get(timeout=timeout)
+                pcm, source_rate = self._output_queue.get(timeout=0.1)
             except queue.Empty:
-                now = time.monotonic()
-                if primed:
-                    primed = False
-                    priming_started_at = now if pending.size else None
-                    next_write_at = None
-                    self._output_rebuffer_count += 1
-                    if self._output_rebuffer_count == 1 or self._output_rebuffer_count % 10 == 0:
-                        logging.info(
-                            "[call_audio] remote audio rebuffering count=%s buffered_ms=%.1f",
-                            self._output_rebuffer_count,
-                            pending.size * 1000.0 / self._output_rate,
-                        )
-                elif (
-                    pending.size
-                    and priming_started_at is not None
-                    and now - priming_started_at >= CALL_OUTPUT_PREBUFFER_MS / 1000.0
-                ):
-                    # Do not strand a short final packet forever just because
-                    # it never reached the normal prebuffer target — even a
-                    # fragment smaller than one 20 ms block is flushed
-                    # (zero-padded) by the primed-with-a-remainder branch
-                    # above on the next iteration.
-                    primed = True
                 continue
-
             try:
                 samples = _pcm16_float32(pcm)
                 samples = _resample_mono(samples, source_rate, self._output_rate)
+                if samples.size and self._output_stream is not None:
+                    self._output_stream.write(samples.reshape(-1, 1))
             except Exception:
-                logging.exception("[call_audio] failed to decode remote call audio")
-                continue
-
-            if not samples.size:
-                continue
-            if pending.size:
-                pending = np.concatenate((pending, samples))
-            else:
-                pending = samples.copy()
-            if priming_started_at is None:
-                priming_started_at = time.monotonic()
-            if not primed and pending.size >= prebuffer_samples:
-                primed = True
+                logging.exception("[call_audio] failed to play remote call audio")
+                time.sleep(0.05)
 
     def _emit_start(self) -> None:
         try:

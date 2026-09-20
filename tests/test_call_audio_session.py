@@ -172,43 +172,23 @@ def test_call_audio_session_plays_remote_pcm_on_python_output_device():
 
     output_stream = sounddevice.output_streams[0][1]
     assert _wait_for(lambda: bool(output_stream.writes))
-    assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES, 1)
+    assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES * 3, 1)
 
     session.stop()
 
 
-def test_call_audio_session_paces_output_writes_instead_of_bursting():
-    """A multi-frame backlog must drain one 20 ms frame at a time, not all at
-    once. Bursting relies on stream.write() blocking for the right amount of
-    time, which only holds if the device's own buffer is close to one frame
-    deep — a Bluetooth headset settling PortAudio's "low" latency preset at
-    100 ms (five frames) has room to accept a whole burst without blocking at
-    all, which real hardware plays back as choppy even though nothing ever
-    underflows or rebuffers (see _play_remote_loop)."""
-    sio = _Socket()
-    sounddevice = _SoundDevice()
-    session = CallAudioSession(
-        sio,
-        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
-        sounddevice_module=sounddevice,
-    )
-    session.start()
-
-    samples = np.full(CALL_FRAME_SAMPLES * 5, 0.1, dtype=np.float32)
-    pcm = (samples * 32767).astype("<i2").tobytes()
-    session.enqueue_remote_audio(pcm, 48000)
-
-    output_stream = sounddevice.output_streams[0][1]
-    assert _wait_for(lambda: bool(output_stream.writes))
-    time.sleep(0.01)
-    assert len(output_stream.writes) < 5
-
-    assert _wait_for(lambda: len(output_stream.writes) >= 5, timeout=1.0)
-
-    session.stop()
-
-
-def test_call_audio_session_prebuffers_remote_pcm_before_playback():
+def test_call_audio_session_writes_remote_pcm_immediately_without_prebuffering():
+    """Diagnostic bisection (2026-09-20): a prebuffer/reservoir rewrite of
+    _play_remote_loop was suspected of causing severe choppy/high-latency
+    call audio on a real Bluetooth headset (draining several queued frames
+    in a burst once "primed", relying on stream.write() to block for the
+    right amount of time between them — which only holds if the device's own
+    buffer is close to one frame deep). Reverting the whole file to main's
+    original version fixed it; reintroducing sample-rate priority, "low"
+    latency, exclusive mode and a wall-clock write-pacing layer on top of the
+    reservoir version individually did not. So this loop stays exactly as
+    simple as it was before any of that: one packet in, one write out,
+    immediately, no reservoir to drain."""
     sio = _Socket()
     sounddevice = _SoundDevice()
     session = CallAudioSession(
@@ -221,13 +201,8 @@ def test_call_audio_session_prebuffers_remote_pcm_before_playback():
 
     samples = np.full(CALL_FRAME_SAMPLES, 0.1, dtype=np.float32)
     pcm = (samples * 32767).astype("<i2").tobytes()
+    session.enqueue_remote_audio(pcm, 48000)
 
-    session.enqueue_remote_audio(pcm, 48000)
-    session.enqueue_remote_audio(pcm, 48000)
-    time.sleep(0.02)
-    assert output_stream.writes == []
-
-    session.enqueue_remote_audio(pcm, 48000)
     assert _wait_for(lambda: bool(output_stream.writes))
     assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES, 1)
 
@@ -358,33 +333,13 @@ def test_call_audio_falls_back_to_native_rate_when_48k_is_refused():
     session.stop()
 
 
-def test_output_underflow_is_counted_and_logged(caplog):
-    sio = _Socket()
-    sounddevice = _SoundDevice()
-    session = CallAudioSession(
-        sio,
-        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
-        sounddevice_module=sounddevice,
-    )
-    session.start_output_only()
-    output_stream = sounddevice.output_streams[0][1]
-    output_stream.report_underflow = True
-
-    samples = np.full(CALL_FRAME_SAMPLES * 3, 0.1, dtype=np.float32)
-    pcm = (samples * 32767).astype("<i2").tobytes()
-    with caplog.at_level("INFO"):
-        session.enqueue_remote_audio(pcm, 48000)
-        assert _wait_for(lambda: session._output_underflow_count >= 1)
-
-    session.stop()
-
-    assert session._output_underflow_count >= 1
-    assert any(
-        "output stream reported underflow" in record.message for record in caplog.records
-    )
-
-
-def test_exclusive_mode_default_is_attempted_first():
+def test_exclusive_mode_default_is_disabled():
+    """Exclusive mode defaults off: it was suspected, then ruled out, as the
+    cause of the choppy-audio regression, but forcing every call onto a
+    device WASAPI exclusively still risks locking other applications out of
+    it — a real cost for users on a single physical microphone/speaker who
+    don't need exclusive mode. It stays available as an opt-in for whoever
+    genuinely benefits from it (see settings_dialog.py's checkbox)."""
     sio = _Socket()
     sounddevice = _SoundDevice()
     session = CallAudioSession(
@@ -397,8 +352,7 @@ def test_exclusive_mode_default_is_attempted_first():
 
     kwargs = sounddevice.output_streams[0][0]
     assert kwargs["extra_settings"] is not None
-    assert kwargs["extra_settings"].exclusive is True
-    assert kwargs["extra_settings"].auto_convert is True
+    assert kwargs["extra_settings"].exclusive is False
 
     session.stop()
 
@@ -408,7 +362,9 @@ def test_exclusive_mode_falls_back_to_shared_when_device_refuses(caplog):
     sounddevice = _SoundDevice(refuse_exclusive=True)
     session = CallAudioSession(
         sio,
-        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        CallAudioConfig(
+            session="winzapp", output_device_name="Speaker", exclusive_mode=True
+        ),
         sounddevice_module=sounddevice,
     )
 

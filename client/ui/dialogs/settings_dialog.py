@@ -1218,7 +1218,7 @@ class SettingsDialog(wx.Dialog):
         self._call_alerts_check.SetValue(call_settings.get("alerts_enabled", True))
         self._call_popup_check.SetValue(call_settings.get("popup_enabled", True))
         self._call_exclusive_mode_check.SetValue(
-            bool(self.main_window.settings.get("call_audio_devices", {}).get("exclusive_mode", True))
+            bool(self.main_window.settings.get("call_audio_devices", {}).get("exclusive_mode", False))
         )
         self._update_call_fields_state()
 

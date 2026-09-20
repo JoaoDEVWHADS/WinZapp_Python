@@ -917,7 +917,7 @@ DEFAULT_SETTINGS = {
     "call_audio_devices": {
         "output_device_name": "",
         "input_device_name": "",
-        "exclusive_mode": True
+        "exclusive_mode": False
     },
     "accessibility": {
         "extended_sr_compat_enabled": True,
