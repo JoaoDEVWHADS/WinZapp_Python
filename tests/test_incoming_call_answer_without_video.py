@@ -230,9 +230,9 @@ def test_video_call_dialog_offers_answer_with_and_without_video_buttons(wx_app):
         ),
     )
     try:
-        assert dialog._answer_button.GetLabel() == "Answer with video"
+        assert dialog._answer_button.GetLabelText() == "Answer with video"
         assert hasattr(dialog, "_answer_without_video_button")
-        assert dialog._answer_without_video_button.GetLabel() == "Answer without video"
+        assert dialog._answer_without_video_button.GetLabelText() == "Answer without video"
 
         dialog._on_answer_without_video(None)
         assert calls["answer_without_video"] == 1
@@ -258,7 +258,7 @@ def test_voice_call_dialog_keeps_the_single_answer_button(wx_app):
         on_closed=lambda: None,
     )
     try:
-        assert dialog._answer_button.GetLabel() == "Answer"
+        assert dialog._answer_button.GetLabelText() == "Answer"
         assert not hasattr(dialog, "_answer_without_video_button")
         dialog.refresh_labels()  # must not blow up looking for the second button
     finally:
