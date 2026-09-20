@@ -109,6 +109,20 @@ class AccessibleConversationDataButton(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+D")
 
 
+class AccessibleVoiceCallButton(wx.Accessible):
+    """Reports Ctrl+Shift+V as the keyboard shortcut for the Voice call button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+V")
+
+
+class AccessibleVideoCallButton(wx.Accessible):
+    """Reports Ctrl+Alt+Shift+V as the keyboard shortcut for the Video call button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Alt+Shift+V")
+
+
 class AccessibleAddAttachmentButton(wx.Accessible):
     """Reports Ctrl+Shift+A as the keyboard shortcut for the Add Attachment button."""
 
