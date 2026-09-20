@@ -265,8 +265,12 @@ def test_page_native_audio_mutes_message_ping_but_preserves_call_end_chime():
     assert "if (pageAudioNow() <= allowCallEndChimeUntil)" in bridge
     assert "restorePageAudio(el);" in bridge
 
-    # RTC audio is a separate MediaStream path and must never be page-muted.
-    assert "if (el.srcObject instanceof MediaStream) {" in bridge
+    # An element carrying the call's own live MediaStream is muted like any
+    # other page-native media (fix(calls) 810acca5): WinZapp's separate PCM
+    # tap reads the raw MediaStreamTrack directly, so this cannot affect what
+    # Python receives, and skipping it here let WhatsApp Web's own native
+    # playback double up with WinZapp's relayed copy.
+    assert "if (el.srcObject instanceof MediaStream) {" not in bridge
 
     # HTMLMediaElement.play is checked synchronously; periodic scanning covers
     # autoplay/property changes and refreshes call lifecycle even with no media.

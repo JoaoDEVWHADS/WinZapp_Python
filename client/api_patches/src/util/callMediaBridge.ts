@@ -363,13 +363,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   };
 
   const applyPageAudioPolicy = (el: HTMLMediaElement) => {
-    try {
-      if (el.srcObject instanceof MediaStream) {
-        restorePageAudio(el);
-        return false;
-      }
-    } catch (_) {}
-
     refreshCallAudioPolicy();
 
     // The ringtone is always suppressed, even if a previous call just ended
@@ -384,9 +377,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       return false;
     }
 
-    // Non-looping page audio outside a call-end transition is the WhatsApp
-    // Web UI/notification path (not the RTC stream). This catches the
-    // incoming-message ping that the loop-only policy accidentally restored.
+    // Everything else is muted here, including an element whose srcObject is
+    // the call's own live MediaStream. WinZapp's own audio/video extraction
+    // (attachRemoteTrack/attachRemoteVideo above) taps the raw
+    // MediaStreamTrack directly through the Web Audio/RTCPeerConnection
+    // APIs, never this element's rendered output, so muting it cannot affect
+    // what Python receives — it only stops WhatsApp Web's own native
+    // playback from doubling up with WinZapp's separately decoded copy. An
+    // earlier rewrite carved out an exemption for srcObject streams here,
+    // which silently reintroduced the exact duplicate/choppy call audio that
+    // fix(calls) 810acca5 had already fixed once (measured on a real call:
+    // clean native audio followed by a delayed, jittery Python-relayed
+    // copy).
     silencePageAudio(el);
     return true;
   };
@@ -852,8 +854,13 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   // independently. The only exception is the short terminal-call chime,
   // opened by the lifecycle-aware policy above; ordinary message pings remain
   // muted. Even a WhatsApp Web build that surfaces the remote track through
-  // <audio srcObject=...> is unaffected because srcObject streams bypass this
-  // page-sound mute policy and are read directly from the MediaStreamTrack.
+  // <audio srcObject=...> is muted by this same policy like everything else —
+  // an earlier version exempted srcObject streams here, which let that
+  // element's own native playback run audibly alongside WinZapp's separately
+  // decoded copy (heard on a real call as a clean track followed by a
+  // delayed, jittery duplicate). Muting it is safe because the PCM tap reads
+  // the raw MediaStreamTrack independently of the element's playback/mute
+  // state.
   //
   // --mute-audio cannot be used at the Chromium launch level to get the same
   // effect (see start.js: that flag starves the Chromium audio SERVICE
