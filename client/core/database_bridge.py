@@ -293,6 +293,11 @@ class DatabaseBridge:
     ) -> list[dict]:
         return self._call(self._db.get_messages(remote_jid, limit, offset))
 
+    def get_media_messages(
+        self, remote_jid: str, limit: int = 250, offset: int = 0
+    ) -> list[dict]:
+        return self._call(self._db.get_media_messages(remote_jid, limit, offset))
+
     def get_messages_asc(
         self, remote_jid: str, limit: int = 200, offset: int = 0
     ) -> list[dict]:

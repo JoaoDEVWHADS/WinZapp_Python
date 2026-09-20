@@ -23068,8 +23068,11 @@ class MainWindow(wx.Frame):
                 if not attempted:
                     landing_now = self.refresh_history_still_landing(
                         context=f"backfill pass {attempt}")
-                if not landing_now:
-                    self._start_deferred_media_sync()
+                # Do not start the deferred media sweep merely because RECENT
+                # stopped landing. Deep backfill may still be writing older
+                # messages to SQLite; starting here scans too early and those
+                # media rows are missed until a later launch. The final branch
+                # below starts a reconciliation after the history walk is done.
                 if not attempted and landing_now:
                     # Two things can stall the queue, and both are silent: a
                     # chunk the processing loop will never accept parked at the
@@ -23110,6 +23113,9 @@ class MainWindow(wx.Frame):
                         continue
                     logging.info("[backfill] Nothing pending — every chat is walked back to "
                                  "its beginning (or all there is) and has a name.")
+                    if self.settings.get("storage", {}).get("auto_download_media", True):
+                        self._media_sync_deferred = True
+                        self._start_deferred_media_sync()
                     return
                 # Names get the same second chance as messages. _run_sync()
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
@@ -23678,6 +23684,8 @@ class MainWindow(wx.Frame):
                 self._media_sync_running = False
                 wx.CallAfter(self._set_status, "")
                 wx.CallAfter(self.set_chats)
+                if getattr(self, "_media_sync_deferred", False):
+                    self._start_deferred_media_sync()
 
         threading.Thread(
             target=_run, daemon=True, name="deferred-media-sync").start()
@@ -23685,40 +23693,89 @@ class MainWindow(wx.Frame):
     def sync_media_for_all_chats(self, jids=None, should_stop=None) -> int:
         """Download not-yet-stored media, optionally limited to changed chats.
 
-        Returns the number of files **actually downloaded**, not the number of
-        candidate messages considered. That distinction is the whole point: it
-        used to return len(tasks), which counts every media message in the
-        cache whether or not anything was fetched for it. When the app was
-        offline, sync_if_media() returned at its first line for all of them —
-        1579 "tasks" completed in 71 ms having downloaded nothing — and the
-        caller, seeing a count above zero, announced "download de mídias
-        concluído" to the user. See start_sync()'s Phase 2.
+        The database is the source of truth for this sweep. Deep backfill keeps
+        old messages on disk instead of in self.chats so large accounts do not
+        hold their entire history in RAM; scanning self.chats alone therefore
+        missed old media until the user scrolled those rows into memory.
 
-        ``should_stop``, when given, is asked before each download starts and
-        once more at the end (issue #198): a queue of thousands left running
-        for a round that has been superseded fills media/ with files nothing on
-        disk refers to. Downloads already running finish.
+        Database pages contain media rows only and are processed one bounded
+        batch at a time. self.chats remains a compatibility fallback for tests,
+        migration states, or an unavailable database.
+
+        Returns the number of files actually downloaded, not the number of
+        candidate messages considered. should_stop, when given, is checked
+        before each download and between database pages.
         """
         if self._voice_call_in_progress():
             logging.info("[sync_media_for_all_chats] paused during active voice call")
             return 0
 
-        _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
-                        "stickerMessage", "videoMessage",
-                        "audio", "ptt", "document", "doc", "image", "sticker", "video"}
+        media_types = {"audioMessage", "documentMessage", "imageMessage",
+                       "stickerMessage", "videoMessage",
+                       "audio", "ptt", "document", "doc", "image", "sticker", "video"}
         allowed = None if jids is None else {self._normalize_jid(j) for j in jids if j}
-        tasks = [
-            msg
-            for key, chat in self.chats.items()
-            if (allowed is None or self._normalize_jid(chat.get("remoteJid") or key) in allowed)
-            for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
-            if (msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES)
-        ]
-        if not tasks:
-            return 0
+        batch_size = max(1, int(getattr(self, "_MEDIA_SYNC_DB_BATCH", 250)))
+
+        def _memory_batches():
+            batch = []
+            for key, chat in self.chats.items():
+                chat_jid = chat.get("remoteJid") or key
+                if allowed is not None and self._normalize_jid(chat_jid) not in allowed:
+                    continue
+                for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+                    if msg.get("messageType") not in media_types and msg.get("type") not in media_types:
+                        continue
+                    batch.append(msg)
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
+            if batch:
+                yield batch
+
+        def _database_batches():
+            db = getattr(self, "db", None)
+            if db is None or not hasattr(db, "get_media_messages"):
+                yield from _memory_batches()
+                return
+            try:
+                chat_jids = db.get_chat_jids()
+            except Exception as exc:
+                logging.warning(
+                    "[sync_media_for_all_chats] Could not enumerate database chats; "
+                    "falling back to in-memory messages: %s", exc)
+                yield from _memory_batches()
+                return
+
+            seen = set()
+            for jid in chat_jids:
+                normalized = self._normalize_jid(jid)
+                if allowed is not None and normalized not in allowed:
+                    continue
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                offset = 0
+                while True:
+                    if should_stop is not None and should_stop():
+                        return
+                    try:
+                        page = db.get_media_messages(jid, limit=batch_size, offset=offset)
+                    except Exception as exc:
+                        logging.warning(
+                            "[sync_media_for_all_chats] Database media page failed "
+                            "for %s at offset %d: %s", jid, offset, exc)
+                        break
+                    if not page:
+                        break
+                    yield page
+                    offset += len(page)
+                    if len(page) < batch_size:
+                        break
 
         downloaded = 0
+        candidates = 0
         timeout = self._MEDIA_SYNC_TIMEOUT
+
         def _download(msg):
             if self._voice_call_in_progress():
                 return False
@@ -23727,28 +23784,30 @@ class MainWindow(wx.Frame):
             return self.sync_if_media(msg, timeout)
 
         with ThreadPoolExecutor(max_workers=self._MEDIA_SYNC_WORKERS) as pool:
-            futs = {pool.submit(_download, msg): msg for msg in tasks}
-            for fut in as_completed(futs):
-                try:
-                    if fut.result():
-                        downloaded += 1
-                except Exception:
-                    pass
+            for batch in _database_batches():
+                if should_stop is not None and should_stop():
+                    break
+                candidates += len(batch)
+                futs = [pool.submit(_download, msg) for msg in batch]
+                for fut in as_completed(futs):
+                    try:
+                        if fut.result():
+                            downloaded += 1
+                    except Exception:
+                        pass
 
+        if candidates == 0:
+            return 0
         if should_stop is not None and should_stop():
-            # Not saved: the run that superseded this one has emptied or
-            # replaced media_failed.json for its own data, and this run's
-            # expired ids stay in memory for the next save that is current.
             logging.info(
                 "[sync_media_for_all_chats] Superseded — stopped after %d "
-                "download(s) of %d candidate(s).", downloaded, len(tasks))
+                "download(s) of %d candidate(s).", downloaded, candidates)
             return downloaded
 
-        # Persist the set of expired IDs accumulated during this sync run.
         self._save_media_failed_ids()
         logging.info(
             "[sync_media_for_all_chats] Downloaded %d of %d candidate media message(s).",
-            downloaded, len(tasks),
+            downloaded, candidates,
         )
         return downloaded
 
@@ -25199,11 +25258,13 @@ class MainWindow(wx.Frame):
                      len(msg_ids), remote_jid)
         cp.remove_messages_by_id(msg_ids, focus_previous=True)
 
-    # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
-    # to download older media causes the WPPConnect to enter a 5-second retry
-    # loop for every expired URL, which starves the API thread pool and eventually
-    # breaks sends.  Never request media older than this threshold.
-    _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
+    # A failed 403/410 is a retry damper, not an age verdict. Modern WPPConnect
+    # can refresh an old media reference through WhatsApp Web, so message age
+    # itself must never prevent an automatic attempt when the user's day limit
+    # is 0 (unlimited). We only remember a failed ID temporarily to avoid
+    # hammering the same unavailable media on every sync pass.
+    _MEDIA_FAILURE_CACHE_TTL_SECONDS = 14 * 24 * 3600
+    _MEDIA_SYNC_DB_BATCH  = 250              # media-only SQLite rows loaded at once
     _MEDIA_SYNC_WORKERS    = 1               # parallel workers during bulk sync — kept
                                               # low because WPPConnect proxies every
                                               # request through a single Puppeteer/Chrome
@@ -25228,9 +25289,8 @@ class MainWindow(wx.Frame):
     def _media_max_download_days(self) -> int:
         """User-configurable cap (Settings > Armazenamento) on how old a
         message can be and still have its media auto-downloaded. 0 means
-        unlimited (still subject to the hard _MEDIA_MAX_AGE_SECONDS CDN-TTL
-        floor above, which is not user-configurable — downloading past that
-        point fails regardless of what the user asked for)."""
+        genuinely unlimited: the client still handles a real unavailable-media
+        response, but it no longer guesses availability from message age."""
         try:
             return int(self.settings.get("storage", {}).get("media_max_days", 30))
         except (TypeError, ValueError):
@@ -25250,13 +25310,10 @@ class MainWindow(wx.Frame):
         previously expired (403/410) — checked by sync_if_media() to skip a
         pointless repeat download attempt.
 
-        This was a bare set with no eviction, growing forever and persisted
-        across every restart (data/media_failed.json) — for an account with
-        a lot of old/expired media, a genuine unbounded-growth source. Every
-        entry is provably dead weight once its message is older than
-        _MEDIA_MAX_AGE_SECONDS anyway: sync_if_media()'s own age check skips
-        it before ever consulting this set, so there is nothing lost by
-        pruning entries past that point — they can never be looked up again.
+        This was once a permanent blacklist. It is now only a temporary retry
+        damper: WPPConnect may be able to refresh an old media reference later,
+        so an earlier 403/410 must not make that message impossible to fetch
+        forever. Entries age out after _MEDIA_FAILURE_CACHE_TTL_SECONDS.
         """
         try:
             with open(data_path("media_failed.json"), "r", encoding="utf-8") as f:
@@ -25267,7 +25324,7 @@ class MainWindow(wx.Frame):
         if isinstance(raw, dict):
             return {
                 mid: ts for mid, ts in raw.items()
-                if isinstance(ts, (int, float)) and (now - ts) <= self._MEDIA_MAX_AGE_SECONDS
+                if isinstance(ts, (int, float)) and (now - ts) <= self._MEDIA_FAILURE_CACHE_TTL_SECONDS
             }
         if isinstance(raw, list):
             # Legacy format (plain list from before this became a dict) —
@@ -25321,8 +25378,8 @@ class MainWindow(wx.Frame):
         """Download media for a single message during the background sync phase.
 
         Returns True only when a file was actually downloaded. Every skip
-        below — offline, not a media message, past the CDN TTL, past the
-        user's day/size caps, a known-expired id, already on disk — returns
+        below — offline, not a media message, past the user's explicit
+        day/size caps, a temporarily failed id, already on disk — returns
         False, so sync_media_for_all_chats() can count real work rather than
         candidates.
         """
@@ -25355,14 +25412,12 @@ class MainWindow(wx.Frame):
         if not auto_download_allows(self.settings, msg):
             return False
 
-        # Skip messages older than the CDN TTL — URLs have certainly expired.
-        ts = int(msg.get("messageTimestamp", 0) or 0)
-        if ts and (time.time() - ts) > self._MEDIA_MAX_AGE_SECONDS:
-            return False
-
         # User-configurable age cap (Settings > Armazenamento > "Baixar
-        # mídias de até (dias)"). 0 means unlimited — falls back to whatever
-        # the CDN-TTL check above already allows.
+        # mídias de até (dias)"). 0 means unlimited. Do not impose a hidden
+        # CDN-age cutoff here: WPPConnect can refresh old media references and
+        # the manual download path already proves some old files remain
+        # retrievable long after the old fixed threshold.
+        ts = int(msg.get("messageTimestamp", 0) or 0)
         max_days = self._media_max_download_days()
         if ts and max_days > 0 and (time.time() - ts) > max_days * 86400:
             return False

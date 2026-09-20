@@ -4,9 +4,9 @@ This set (message IDs whose media CDN URL previously expired, so
 sync_if_media() skips a pointless repeat download) used to be a bare set
 with no eviction — persisted to data/media_failed.json and reloaded in
 full on every startup, growing forever for an account with a lot of old
-media. Every entry is provably dead weight once its message is older than
-_MEDIA_MAX_AGE_SECONDS: sync_if_media()'s own age check skips it before
-ever consulting this set, so pruning stale entries on load loses nothing.
+media. Entries are only a temporary retry damper. They age out after
+_MEDIA_FAILURE_CACHE_TTL_SECONDS so an old media reference can be tried again
+later instead of becoming a permanent blacklist.
 
 MainWindow is a wx.Frame and cannot be instantiated without a running
 wx.App, so _load_media_failed_ids()/_save_media_failed_ids() are exercised
@@ -26,7 +26,7 @@ from main import MainWindow
 class _Stub:
     """Minimal stand-in for MainWindow for the media-failed-ids cache."""
 
-    _MEDIA_MAX_AGE_SECONDS = MainWindow._MEDIA_MAX_AGE_SECONDS
+    _MEDIA_FAILURE_CACHE_TTL_SECONDS = MainWindow._MEDIA_FAILURE_CACHE_TTL_SECONDS
     _load_media_failed_ids = MainWindow._load_media_failed_ids
     _save_media_failed_ids = MainWindow._save_media_failed_ids
 
@@ -64,7 +64,7 @@ class TestLoadMediaFailedIds:
     def test_stale_entries_are_pruned(self, fake_data_path):
         import time as time_module
         now = time_module.time()
-        stale_ts = now - MainWindow._MEDIA_MAX_AGE_SECONDS - 1  # just past the cutoff
+        stale_ts = now - MainWindow._MEDIA_FAILURE_CACHE_TTL_SECONDS - 1  # just past the cutoff
         fake_data_path.write_text(json.dumps({
             "OLD": stale_ts,
             "NEW": now,
@@ -82,7 +82,7 @@ class TestLoadMediaFailedIds:
         # A few seconds of slack versus the exact cutoff: the load function
         # computes its own "now" a moment after this test does, so an exact
         # zero-slack boundary would flake on timing alone.
-        boundary_ts = now - MainWindow._MEDIA_MAX_AGE_SECONDS + 5
+        boundary_ts = now - MainWindow._MEDIA_FAILURE_CACHE_TTL_SECONDS + 5
         fake_data_path.write_text(json.dumps({"EDGE": boundary_ts}))
         stub = _Stub()
 

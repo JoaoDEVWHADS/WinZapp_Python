@@ -327,6 +327,29 @@ class TestMessages:
         count = await in_memory_db.get_message_count("jid@w")
         assert count == 10
 
+    async def test_get_media_messages_filters_text_and_pages(self, in_memory_db):
+        rows = [
+            ("t1", "conversation"),
+            ("i1", "imageMessage"),
+            ("a1", "audioMessage"),
+            ("t2", "extendedTextMessage"),
+            ("v1", "videoMessage"),
+        ]
+        for index, (mid, message_type) in enumerate(rows):
+            await in_memory_db.insert_message("jid@w", {
+                "key": {"remoteJid": "jid@w", "id": mid},
+                "messageTimestamp": index,
+                "messageType": message_type,
+                "message": ({message_type: {}}
+                            if message_type != "conversation"
+                            else {"conversation": "x"}),
+            })
+
+        first = await in_memory_db.get_media_messages("jid@w", limit=2, offset=0)
+        second = await in_memory_db.get_media_messages("jid@w", limit=2, offset=2)
+        assert [m["key"]["id"] for m in first] == ["v1", "a1"]
+        assert [m["key"]["id"] for m in second] == ["i1"]
+
     async def test_get_messages_empty_chat(self, in_memory_db):
         msgs = await in_memory_db.get_messages("nonexistent@w")
         assert msgs == []

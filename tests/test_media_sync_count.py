@@ -117,6 +117,38 @@ class TestSyncMediaForAllChatsCount:
         assert s._saved is True
 
 
+class _MediaDb:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def get_chat_jids(self):
+        return list(self.pages)
+
+    def get_media_messages(self, jid, limit=250, offset=0):
+        self.calls.append((jid, limit, offset))
+        rows = self.pages[jid]
+        return rows[offset:offset + limit]
+
+
+class TestSyncMediaReadsPersistedDeepHistory:
+    def test_media_not_resident_in_self_chats_is_still_downloaded(self):
+        newest = _media_msg("NEW")
+        old1 = _media_msg("OLD1")
+        old2 = _media_msg("OLD2")
+        s = _Stub(
+            chats={"a@s.whatsapp.net": _chat(newest)},
+            downloads={"NEW": True, "OLD1": True, "OLD2": True},
+        )
+        s.db = _MediaDb({"a@s.whatsapp.net": [newest, old1, old2]})
+        s._MEDIA_SYNC_DB_BATCH = 2
+        s._normalize_jid = lambda jid: jid.replace("@c.us", "@s.whatsapp.net")
+
+        assert s.sync_media_for_all_chats() == 3
+        assert sorted(s.seen) == ["NEW", "OLD1", "OLD2"]
+        assert [offset for _jid, _limit, offset in s.db.calls] == [0, 2]
+
+
 class _SyncIfMediaStub:
     """Stub for sync_if_media() itself — the per-message download decision."""
 
@@ -181,10 +213,17 @@ class TestSyncIfMediaReturnValue:
         s._media_failed_ids = {"3EB0AA": 0}
         assert s.sync_if_media(self._msg()) is False
 
-    def test_returns_false_past_the_cdn_ttl(self):
+    def test_zero_day_limit_really_allows_old_media(self):
         s = _SyncIfMediaStub()
         msg = self._msg()
-        msg["messageTimestamp"] = 1  # 1970
+        msg["messageTimestamp"] = 1
+        assert s.sync_if_media(msg) is True
+
+    def test_a_nonzero_day_limit_still_filters_old_media(self):
+        s = _SyncIfMediaStub()
+        s._media_max_download_days = lambda: 30
+        msg = self._msg()
+        msg["messageTimestamp"] = 1
         assert s.sync_if_media(msg) is False
 
     def test_returns_false_for_a_still_pending_local_message(self):

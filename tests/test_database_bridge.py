@@ -42,6 +42,22 @@ class TestNormalOperation:
         chats = bridge.get_chats()
         assert chats["jid@w"]["pushName"] == "Foo"
 
+    def test_get_media_messages_delegates_filtered_read(self, bridge):
+        bridge.upsert_chat("jid@w", {"remoteJid": "jid@w"})
+        bridge.insert_message("jid@w", {
+            "key": {"remoteJid": "jid@w", "id": "text"},
+            "messageTimestamp": 1,
+            "messageType": "conversation",
+            "message": {"conversation": "hello"},
+        })
+        bridge.insert_message("jid@w", {
+            "key": {"remoteJid": "jid@w", "id": "photo"},
+            "messageTimestamp": 2,
+            "messageType": "imageMessage",
+            "message": {"imageMessage": {}},
+        })
+        assert [m["key"]["id"] for m in bridge.get_media_messages("jid@w")] == ["photo"]
+
     def test_get_chats_default_limit_matches_page_size(self, bridge):
         """Same regression this session fixed at the DatabaseManager level:
         the bridge's own default used to be 5 too."""

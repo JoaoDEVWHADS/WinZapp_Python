@@ -185,6 +185,13 @@ def _delivery_status(msg: dict) -> int:
     return 0
 
 
+_MEDIA_MESSAGE_TYPES = (
+    "audioMessage", "documentMessage", "imageMessage", "stickerMessage",
+    "videoMessage", "audio", "ptt", "document", "doc", "image", "sticker",
+    "video",
+)
+
+
 def _message_type(msg: dict) -> str:
     """Determine the message-type label from a normalized message."""
     mt = msg.get("messageType", "")
@@ -658,6 +665,37 @@ class DatabaseManager:
                ORDER BY timestamp DESC, message_id
                LIMIT ? OFFSET ?""",
             (*jids, limit, offset),
+        )
+        rows = await cursor.fetchall()
+        result = []
+        for row in rows:
+            msg = self._decrypt_json(row["message_json"])
+            if msg:
+                result.append(msg)
+        return result
+
+    async def get_media_messages(
+        self, remote_jid: str, limit: int = 250, offset: int = 0
+    ) -> list[dict]:
+        """Return only media messages for a chat, newest-first.
+
+        The deep-history media sweep uses this instead of get_messages() so a
+        20k-message conversation does not decrypt thousands of ordinary text
+        rows just to discover the comparatively small media subset. Pagination
+        keeps memory bounded; callers discard each page before requesting the
+        next one.
+        """
+        conn = await self._ensure_conn()
+        jids = self._jid_variants(remote_jid)
+        jid_placeholders = ",".join("?" for _ in jids)
+        type_placeholders = ",".join("?" for _ in _MEDIA_MESSAGE_TYPES)
+        cursor = await conn.execute(
+            f"""SELECT message_json FROM messages
+               WHERE remote_jid IN ({jid_placeholders})
+                 AND message_type IN ({type_placeholders})
+               ORDER BY timestamp DESC, message_id
+               LIMIT ? OFFSET ?""",
+            (*jids, *_MEDIA_MESSAGE_TYPES, limit, offset),
         )
         rows = await cursor.fetchall()
         result = []
