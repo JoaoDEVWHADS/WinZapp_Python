@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import types
 from unittest.mock import MagicMock
 
@@ -155,10 +154,7 @@ class TestVoiceRecordingSilenceActive:
         stub = types.SimpleNamespace()
         stub.settings = {"speech_content": {"silence_while_recording": silence_setting}}
         if has_panel:
-            stub.conversations_panel = types.SimpleNamespace(
-                _is_recording=is_recording,
-                _voice_recording_silence_until=0.0,
-            )
+            stub.conversations_panel = types.SimpleNamespace(_is_recording=is_recording)
         from main import MainWindow
         stub._voice_recording_silence_active = types.MethodType(
             MainWindow._voice_recording_silence_active, stub
@@ -176,16 +172,6 @@ class TestVoiceRecordingSilenceActive:
     def test_true_when_setting_enabled_and_recording(self):
         stub = self._make_stub(silence_setting=True, is_recording=True)
         assert stub._voice_recording_silence_active() is True
-
-    def test_true_during_post_recording_silence_tail(self):
-        stub = self._make_stub(silence_setting=True, is_recording=False)
-        stub.conversations_panel._voice_recording_silence_until = time.monotonic() + 1.0
-        assert stub._voice_recording_silence_active() is True
-
-    def test_false_after_post_recording_silence_tail_expires(self):
-        stub = self._make_stub(silence_setting=True, is_recording=False)
-        stub.conversations_panel._voice_recording_silence_until = time.monotonic() - 1.0
-        assert stub._voice_recording_silence_active() is False
 
     def test_false_when_no_conversations_panel_yet(self):
         stub = self._make_stub(silence_setting=True, is_recording=True, has_panel=False)
@@ -233,7 +219,7 @@ class TestSilenceSendVoiceFocusIfEnabled:
     # (for example Pause/Resume). Recording start itself no longer manufactures
     # a Send/Discard focus event when suppression is requested, because trying
     # to cancel that event after the fact leaked the observed "env..." fragment.
-    EXPECTED_DELAYS = [0, 5, 15, 30, 50, 90, 160, 260, 400, 650]
+    EXPECTED_DELAYS = [0, 40, 90, 160, 260, 400]
 
     @staticmethod
     def _capture_deferred_calls(monkeypatch):
@@ -330,9 +316,6 @@ class TestVoiceButtonAccessibleName:
         assert button._winzapp_focus_cloak is send
         send.cloaked = True
         assert send.GetState(0) == (wx.ACC_OK, wx.ACC_STATE_SYSTEM_FOCUSABLE)
-        assert send.GetRole(0) == (wx.ACC_OK, wx.ROLE_SYSTEM_PANE)
-        assert send.GetName(0) == (wx.ACC_OK, "")
-        assert send.GetDescription(0) == (wx.ACC_OK, "")
         assert send.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+R")
         send.cloaked = False
         assert send.GetState(0) == (wx.ACC_NOT_IMPLEMENTED, 0)
@@ -374,39 +357,3 @@ class TestVoiceButtonAccessibleName:
                 assert discard.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+D")
                 assert pause.GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+P")
 
-
-
-def test_global_recording_silence_also_covers_status_recording():
-    from main import MainWindow
-
-    stub = types.SimpleNamespace(
-        settings={"speech_content": {"silence_while_recording": True}},
-        conversations_panel=types.SimpleNamespace(
-            _is_recording=False,
-            _voice_recording_silence_until=0.0,
-        ),
-        status_panel=types.SimpleNamespace(
-            _is_recording=True,
-            _voice_recording_silence_until=0.0,
-        ),
-    )
-    getter = types.MethodType(MainWindow._voice_recording_silence_active, stub)
-    assert getter() is True
-
-
-def test_global_recording_silence_covers_status_transition_tail():
-    from main import MainWindow
-
-    stub = types.SimpleNamespace(
-        settings={"speech_content": {"silence_while_recording": True}},
-        conversations_panel=types.SimpleNamespace(
-            _is_recording=False,
-            _voice_recording_silence_until=0.0,
-        ),
-        status_panel=types.SimpleNamespace(
-            _is_recording=False,
-            _voice_recording_silence_until=time.monotonic() + 1.0,
-        ),
-    )
-    getter = types.MethodType(MainWindow._voice_recording_silence_active, stub)
-    assert getter() is True

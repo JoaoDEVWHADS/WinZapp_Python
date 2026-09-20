@@ -150,6 +150,10 @@ class _FakeMainWindow:
         self.everyone_calls.append((jid, key))
         return True
 
+    def _apply_remote_revoke(self, existing, incoming, jid):
+        existing["messageType"] = incoming["messageType"]
+        existing["message"] = incoming["message"]
+
     def delete_message_for_me(self, jid, key):
         self.for_me_calls.append((jid, key))
         return True
@@ -175,9 +179,9 @@ class _FakeMainWindow:
 class _DeleteStub:
     _on_menu_delete_message     = ConversationsPanel._on_menu_delete_message
     _delete_message_for_me_only = ConversationsPanel._delete_message_for_me_only
-    _delete_target_jid          = ConversationsPanel._delete_target_jid
     _delete_message_for_everyone_keep_row = ConversationsPanel._delete_message_for_everyone_keep_row
-    _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
+    _apply_confirmed_revoke     = ConversationsPanel._apply_confirmed_revoke
+    _delete_target_jid          = ConversationsPanel._delete_target_jid
     # The real helper, not a stand-in: the cancelled_pending branch delegates
     # to it, and what it does with a cancel() that could not stop the send is
     # exactly what these tests are about.
@@ -293,6 +297,10 @@ class TestANormalSentMessageIsUnaffected:
 
     def test_for_everyone_still_calls_the_api(self, monkeypatch, tmp_path):
         _patch_delete_dialog(monkeypatch, result=wx.ID_OK, everyone_selected=True, tmp_path=tmp_path)
+        # A successful revoke reports back via wx.CallAfter from the
+        # background thread — run it inline, no wx.App here.
+        monkeypatch.setattr("ui.conversations.wx.CallAfter",
+                             lambda fn, *a, **kw: fn(*a, **kw))
         stub = _DeleteStub(_real_sent_msg())
 
         stub._on_menu_delete_message(0)

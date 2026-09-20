@@ -125,6 +125,12 @@ from ui.conversations import (
     ConversationsPanel, ArchivedConversationsPanel, probe_media_duration,
 )
 from status_panel import StatusPanel
+from ui.accessible import (
+    AccessibleCallEndButton,
+    AccessibleCallMuteButton,
+    AccessibleCallSettingsButton,
+    AccessibleCallVideoToggleButton,
+)
 from version import __version__
 from window_title import format_window_title
 import json
@@ -2161,6 +2167,11 @@ class MainWindow(wx.Frame):
         self._call_audio_session = None
         self._active_voice_call = None
         self._voice_call_last_announced_state = ""
+        # Diagnostic-only: distinguish "never reached this method", "reached
+        # it but is_video gated it out" and "gate passed, frame rendered" from
+        # a live call's log without spamming a line per dropped frame.
+        self._call_remote_video_gate_blocked = 0
+        self._call_remote_video_rendered = False
         # Modeless call dialogs, keyed by the same call identity as the active
         # lifecycle maps.  Keeping ownership here lets terminal socket events
         # close a popup that is no longer relevant.
@@ -2728,8 +2739,12 @@ class MainWindow(wx.Frame):
         self.voice_call_window_mute_button = wx.Button(call_panel, label=self.i18n.t("voice_call_mute_button"))
         self.voice_call_window_video_button = wx.Button(call_panel, label=self.i18n.t("voice_call_video_off_button"))
         self.voice_call_window_video_button.Hide()
+        self.voice_call_window_end_button.SetAccessible(AccessibleCallEndButton())
+        self.voice_call_window_settings_button.SetAccessible(AccessibleCallSettingsButton())
+        self.voice_call_window_mute_button.SetAccessible(AccessibleCallMuteButton())
+        self.voice_call_window_video_button.SetAccessible(AccessibleCallVideoToggleButton())
         self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
-        self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
+        self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self._open_active_call_settings)
         self.voice_call_window_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
         self.voice_call_window_video_button.Bind(wx.EVT_BUTTON, self.toggle_call_video)
         controls.Add(self.voice_call_window_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 12)
@@ -2740,6 +2755,27 @@ class MainWindow(wx.Frame):
         call_sizer.Add(controls, 0, wx.EXPAND)
         call_panel.SetSizer(call_sizer)
         self.voice_call_window.Bind(wx.EVT_CLOSE, self._on_voice_call_window_close)
+
+        # Dedicated Ctrl-based shortcuts for the four call controls, reported
+        # to screen readers by the AccessibleCall* classes above — this is a
+        # standalone top-level window (see the note on parenting above), so
+        # its own accelerator table can't collide with MainWindow's or
+        # ConversationsPanel's.
+        self.ID_CALL_END      = wx.NewIdRef()  # end call            (Ctrl+Shift+Q)
+        self.ID_CALL_MUTE     = wx.NewIdRef()  # mute/unmute mic     (Ctrl+M)
+        self.ID_CALL_SETTINGS = wx.NewIdRef()  # call settings       (Ctrl+C)
+        self.ID_CALL_VIDEO    = wx.NewIdRef()  # toggle video        (Ctrl+V)
+        call_accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("Q"), self.ID_CALL_END),
+            (wx.ACCEL_CTRL,                  ord("M"), self.ID_CALL_MUTE),
+            (wx.ACCEL_CTRL,                  ord("C"), self.ID_CALL_SETTINGS),
+            (wx.ACCEL_CTRL,                  ord("V"), self.ID_CALL_VIDEO),
+        ])
+        self.voice_call_window.SetAcceleratorTable(call_accel_tbl)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.end_active_call,          id=self.ID_CALL_END)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.toggle_call_microphone,   id=self.ID_CALL_MUTE)
+        self.voice_call_window.Bind(wx.EVT_MENU, self._open_active_call_settings, id=self.ID_CALL_SETTINGS)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.toggle_call_video,        id=self.ID_CALL_VIDEO)
         self.voice_call_window.Hide()
 
         self.main_panel = wx.Panel(self)
@@ -6018,6 +6054,7 @@ class MainWindow(wx.Frame):
         self._close_incoming_call_dialog(identity)
         details = getattr(self, "_incoming_call_details", {}).get(identity, {})
         can_answer = incoming_call_can_answer(details)
+        is_video = bool(details.get("is_video"))
         dialog = IncomingCallDialog(
             self,
             message,
@@ -6026,6 +6063,10 @@ class MainWindow(wx.Frame):
             on_stop=lambda: self.stop_incoming_call_alert(identity),
             on_closed=lambda: self._forget_incoming_call_dialog(identity),
             can_answer=can_answer,
+            is_video=is_video,
+            on_answer_without_video=(
+                lambda: self.accept_incoming_call(identity, with_video=False)
+            ),
         )
         self._incoming_call_dialogs[identity] = dialog
         dialog.show_accessibly()
@@ -6189,6 +6230,7 @@ class MainWindow(wx.Frame):
         audio_settings = self.settings.get("call_audio_devices", {})
         input_name = audio_settings.get("input_device_name", "")
         output_name = audio_settings.get("output_device_name", "")
+        exclusive_mode = bool(audio_settings.get("exclusive_mode", False))
         session_name = str(getattr(ws, "instance_name", "") or self.token).split(":", 1)[0]
         audio = CallAudioSession(
             sio,
@@ -6196,6 +6238,7 @@ class MainWindow(wx.Frame):
                 session=session_name,
                 input_device_name=input_name,
                 output_device_name=output_name,
+                exclusive_mode=exclusive_mode,
             ),
         )
         return audio, session_name
@@ -6439,6 +6482,16 @@ class MainWindow(wx.Frame):
 
     def on_call_remote_video(self, jpeg: bytes):
         if not (getattr(self, "_active_voice_call", None) or {}).get("is_video"):
+            self._call_remote_video_gate_blocked += 1
+            if (
+                self._call_remote_video_gate_blocked == 1
+                or self._call_remote_video_gate_blocked % 100 == 0
+            ):
+                logging.info(
+                    "[call_video] remote frame reached on_call_remote_video but "
+                    "is_video gate blocked it (count=%s)",
+                    self._call_remote_video_gate_blocked,
+                )
             return
         wx.CallAfter(self._show_call_remote_video, jpeg)
 
@@ -6452,15 +6505,41 @@ class MainWindow(wx.Frame):
                 image.Rescale(640, 360, wx.IMAGE_QUALITY_HIGH)
                 self.call_video_image.SetBitmap(wx.Bitmap(image))
                 self.voice_call_window.Layout()
+                if not self._call_remote_video_rendered:
+                    self._call_remote_video_rendered = True
+                    logging.info(
+                        "[call_video] remote-video-rendered first frame decoded "
+                        "and drawn successfully"
+                    )
+            else:
+                logging.warning(
+                    "[call_video] remote-video-render failed: wx.Image not ok"
+                )
         except Exception:
-            logging.exception("[call_video] failed to display remote frame")
+            logging.exception(
+                "[call_video] remote-video-render failed to display remote frame"
+            )
 
-    def _start_call_camera(self):
+    def _start_call_camera(self, *, announce_failure: bool = True, transmit: bool = True):
         """Start local camera capture without making video calls depend on it.
 
         A video call is still useful on a PC with no camera: audio continues and
         remote JPEG frames can still be displayed. Camera discovery/opening is
         therefore a local capability, not a prerequisite for the call itself.
+
+        ``announce_failure`` is off only for the "answer without video" probe
+        (accept_incoming_call(with_video=False)): the user deliberately chose
+        no video there, so a spoken camera error would be about a device they
+        never asked for. Every other call site — an outgoing video call, a
+        normal "answer with video", and toggle_call_video()'s own "turn camera
+        back on" — asked for the camera, so a failure is worth announcing.
+
+        ``transmit`` is off for that same probe: the camera is opened only to
+        prove it works and set ``_call_camera_available``, and must never send
+        a single real frame to the peer. Stopping the capture right after
+        starting it is not enough on its own — CameraCapture._run() sets its
+        ready event before its first send_frame() call, so a caller relying
+        on stop-right-after-start alone would be racing an in-flight send.
         """
         from core.call_video import CameraCapture
 
@@ -6472,11 +6551,14 @@ class MainWindow(wx.Frame):
             logging.warning("[call_video] local camera transport is unavailable")
             if hasattr(self, "voice_call_window"):
                 wx.CallAfter(self._sync_voice_call_bar)
+            if announce_failure:
+                wx.CallAfter(self.output, self.i18n.t("call_video_no_camera_error"), True)
             return False
 
-        capture = CameraCapture(self._find_api_ffmpeg(), sender)
+        camera_name = self.settings.get("call_video_devices", {}).get("camera_name", "")
+        capture = CameraCapture(self._find_api_ffmpeg(), sender, transmit=transmit)
         try:
-            capture.start()
+            capture.start(camera_name)
         except Exception:
             try:
                 capture.stop()
@@ -6488,6 +6570,8 @@ class MainWindow(wx.Frame):
             )
             if hasattr(self, "voice_call_window"):
                 wx.CallAfter(self._sync_voice_call_bar)
+            if announce_failure:
+                wx.CallAfter(self.output, self.i18n.t("call_video_no_camera_error"), True)
             return False
 
         if not getattr(self, "_active_voice_call", None):
@@ -6519,7 +6603,12 @@ class MainWindow(wx.Frame):
     def toggle_call_video(self, _event=None):
         """Enable/disable local camera video without changing the call itself."""
         active = getattr(self, "_active_voice_call", None) or {}
-        if not active.get("is_video") or getattr(self, "_call_camera_available", None) is not True:
+        if not active.get("is_video"):
+            return
+        if getattr(self, "_call_camera_available", None) is not True:
+            # This runs on the UI thread (a button/menu handler), so speaking
+            # directly is safe — no wx.CallAfter needed here.
+            self.output(self.i18n.t("call_video_no_camera_error"), interrupt=True)
             return
         if getattr(self, "_call_camera_capture", None) is not None:
             self._stop_call_camera()
@@ -6530,15 +6619,24 @@ class MainWindow(wx.Frame):
         # button when capture is ready (or hides it if the device disappeared).
         threading.Thread(target=self._start_call_camera, daemon=True).start()
 
-    def accept_incoming_call(self, identity: str):
-        if getattr(self, "offline_mode", False):
-            self.stop_incoming_call_alert(identity)
-            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
-            return
+    def accept_incoming_call(self, identity: str, *, with_video: bool | None = None):
         if getattr(self, "_active_voice_call", None) is not None:
             self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
             return
         details = dict(getattr(self, "_incoming_call_details", {}).get(identity, {}))
+        # The call TYPE never changes with `with_video` — a video offer stays
+        # a video call (remote video keeps arriving, the video window still
+        # opens) whether or not the local camera happens to be on. Only the
+        # local camera's starting state is a WinZapp-side choice.
+        is_video = bool(details.get("is_video"))
+        # `with_video=None` (the default, used by the ordinary answer button)
+        # keeps today's behaviour: the camera starts and is left sending.
+        # "Answer without video" passes False explicitly so the camera is
+        # probed (so _call_camera_available becomes True and the manual
+        # video-toggle button works for the rest of the call) but never
+        # transmits — see _start_call_camera()'s ``transmit`` docstring for
+        # why probe-then-stop alone cannot guarantee that on its own.
+        start_camera_enabled = True if with_video is None else bool(with_video)
         payload = self._call_control_payload(identity)
         # Keep the receive-only monitor alive so accepting can promote the
         # same CallAudioSession to full duplex without reopening the speaker.
@@ -6549,15 +6647,26 @@ class MainWindow(wx.Frame):
             "peer_jid": details.get("peer_jid") or "",
             "name": details.get("name") or "",
             "outgoing": False,
-            "is_video": bool(details.get("is_video")),
+            "is_video": is_video,
         }
         wx.CallAfter(self._sync_voice_call_bar)
 
         def _worker():
             with self._call_action_lock:
                 try:
-                    if details.get("is_video"):
-                        self._start_call_camera()
+                    if is_video:
+                        # "Answer without video" asked for no camera, so a
+                        # camera failure here is not an error worth speaking,
+                        # and transmit=False means the probe never sends a
+                        # real frame to the peer while proving the camera
+                        # works. _stop_call_camera() below is then just
+                        # cleanup, not a race against an in-flight frame.
+                        self._start_call_camera(
+                            announce_failure=start_camera_enabled,
+                            transmit=start_camera_enabled,
+                        )
+                        if not start_camera_enabled:
+                            self._stop_call_camera()
                     self._start_voice_call_audio(identity, details)
                     self._raise_for_call_response(
                         self._post_call_control("accept", payload), "accept"
@@ -6627,35 +6736,27 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def open_call_audio_settings(self, _event=None, parent=None):
-        """Choose call devices; speaker changes apply live through BASS.
+    def open_call_audio_settings(self, _event=None, parent=None, *,
+                                 include_audio: bool = True, include_camera: bool = False):
+        """Choose call devices without changing the global audio/camera settings.
 
-        ``parent`` is passed by whoever opened this so the chooser remains
-        correctly modal above Settings as well as above the active-call window.
+        ``parent`` is passed by whoever opened this. It matters: parented to the
+        main window while the Settings dialog is what opened it, the chooser has
+        an enabled sibling that can sit on top of it.
+
+        ``include_audio``/``include_camera`` pick which rows the dialog shows —
+        this one method backs three call sites: the Settings dialog's audio-only
+        button, its camera-only button, and the in-call window's own settings
+        button (audio always, camera only while the current call is video).
         """
+        import sounddevice as sd
+        from core.call_video import list_camera_devices
         if parent is None:
             call_window = getattr(self, "voice_call_window", None)
             parent = call_window if (call_window is not None and call_window.IsShown()) else self
-        dialog = wx.Dialog(parent,
-                           title=self.i18n.t("voice_call_settings_title"), size=(560, 390))
+        title_key = "voice_call_video_settings_title" if (include_camera and not include_audio) else "voice_call_settings_title"
+        dialog = wx.Dialog(parent, title=self.i18n.t(title_key), size=(560, 390))
         root = wx.BoxSizer(wx.VERTICAL)
-        cfg = self.settings.setdefault("call_audio_devices", {})
-        try:
-            output_names = [name for _, name in enumerate_output_devices()]
-        except Exception:
-            logging.exception("[call_audio] could not enumerate BASS output devices")
-            output_names = []
-        input_names = [name for _, name in enumerate_input_devices()]
-
-        # Keep a disconnected saved device visible rather than silently
-        # replacing its setting just because it is temporarily unavailable.
-        saved_input = cfg.get("input_device_name", "")
-        saved_output = cfg.get("output_device_name", "")
-        if saved_input and saved_input not in input_names:
-            input_names.append(saved_input)
-        if saved_output and saved_output not in output_names:
-            output_names.append(saved_output)
-
         default_name = self.i18n.t("audio_device_default")
 
         def add_combo(label_key, names, selected):
@@ -6667,10 +6768,26 @@ class MainWindow(wx.Frame):
             root.Add(combo, 0, wx.EXPAND | wx.ALL, 8)
             return combo
 
-        input_combo = add_combo("voice_call_recording_devices",
-                                input_names, saved_input)
-        output_combo = add_combo("voice_call_playback_devices",
-                                 output_names, saved_output)
+        input_combo = output_combo = None
+        if include_audio:
+            audio_cfg = self.settings.setdefault("call_audio_devices", {})
+            try:
+                output_names = [str(d.get("name", "")).strip() for d in sd.query_devices()
+                                if d.get("max_output_channels", 0) > 0]
+            except Exception:
+                output_names = []
+            input_names = [name for _, name in enumerate_input_devices()]
+            input_combo = add_combo("voice_call_recording_devices",
+                                    input_names, audio_cfg.get("input_device_name", ""))
+            output_combo = add_combo("voice_call_playback_devices",
+                                     output_names, audio_cfg.get("output_device_name", ""))
+
+        camera_combo = None
+        if include_camera:
+            video_cfg = self.settings.setdefault("call_video_devices", {})
+            camera_combo = add_combo("voice_call_camera_devices",
+                                     list_camera_devices(self._find_api_ffmpeg()),
+                                     video_cfg.get("camera_name", ""))
 
         buttons = wx.StdDialogButtonSizer()
         cancel_button = wx.Button(dialog, wx.ID_CANCEL, self.i18n.t("cancel"))
@@ -6678,33 +6795,35 @@ class MainWindow(wx.Frame):
         ok_button = wx.Button(dialog, wx.ID_OK, self.i18n.t("ok"))
         buttons.AddButton(cancel_button); buttons.AddButton(apply_button); buttons.AddButton(ok_button); buttons.Realize()
         root.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        first_combo = input_combo if input_combo is not None else camera_combo
 
         def apply(_evt=None):
-            old_input = cfg.get("input_device_name", "")
-            old_output = cfg.get("output_device_name", "")
-            new_input = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
-            new_output = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
-            cfg["input_device_name"] = new_input
-            cfg["output_device_name"] = new_output
+            if include_audio:
+                audio_cfg["input_device_name"] = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
+                audio_cfg["output_device_name"] = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
+            if include_camera:
+                video_cfg["camera_name"] = "" if camera_combo.GetStringSelection() == default_name else camera_combo.GetStringSelection()
             self.save_settings()
-
-            active_audio = getattr(self, "_call_audio_session", None)
-            ringing_audio = getattr(self, "_call_ring_audio_session", None)
-            if active_audio is not None or ringing_audio is not None:
-                if new_input != old_input:
-                    self._switch_active_call_input_device(new_input)
-                if new_output != old_output:
-                    self._switch_active_call_output_device(new_output)
-
-            wx.CallAfter(input_combo.SetFocus)
-
+            if include_audio and getattr(self, "_call_audio_session", None) is not None:
+                self._restart_active_voice_call_audio()
+            if include_camera and getattr(self, "_call_camera_capture", None) is not None:
+                self._stop_call_camera()
+                threading.Thread(target=self._start_call_camera, daemon=True).start()
+            if first_combo is not None:
+                wx.CallAfter(first_combo.SetFocus)
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
         cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
         dialog.SetSizer(root)
-        input_combo.SetFocus()
+        if first_combo is not None:
+            first_combo.SetFocus()
         dialog.ShowModal()
         dialog.Destroy()
+
+    def _open_active_call_settings(self, _event=None):
+        """In-call settings button/menu: camera only while the call is video."""
+        active = getattr(self, "_active_voice_call", None) or {}
+        self.open_call_audio_settings(include_camera=bool(active.get("is_video")))
 
     def _on_voice_call_window_close(self, event):
         if getattr(self, "_active_voice_call", None):
@@ -6720,9 +6839,6 @@ class MainWindow(wx.Frame):
 
     def _start_individual_call(self, peer_jid: str, name: str, *, is_video: bool):
         """Start a one-to-one WhatsApp voice/video call using Python-owned media."""
-        if getattr(self, "offline_mode", False):
-            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
-            return
         peer_jid = self._normalize_jid(str(peer_jid or ""))
         if not peer_jid or peer_jid.endswith(("@g.us", "@newsletter", "@broadcast")):
             self.output(self.i18n.t("voice_call_individual_only"), interrupt=True)
@@ -6856,10 +6972,6 @@ class MainWindow(wx.Frame):
         state = str(event.get("state") or "").upper()
         call_id = str(event.get("id") or "")
         peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
-        if getattr(self, "offline_mode", False):
-            if getattr(self, "_active_voice_call", None) is not None:
-                self._stop_voice_call_audio()
-            return
         if (
             event.get("isGroup")
             or peer_jid.endswith("@g.us")

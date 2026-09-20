@@ -38,7 +38,11 @@ class _FakeMainWindow:
         self.delete_for_me_calls = []
         self.delete_for_everyone_calls = []
         self.applied_revokes = []
+        self.output_calls = []
         self.i18n = _FakeI18n()
+
+    def output(self, message, interrupt=False):
+        self.output_calls.append((message, interrupt))
 
     def _is_self_jid(self, jid):
         return self._is_self_chat
@@ -63,6 +67,7 @@ class _Stub:
     _delete_message_for_me_only  = ConversationsPanel._delete_message_for_me_only
     _delete_message_for_everyone_keep_row = ConversationsPanel._delete_message_for_everyone_keep_row
     _apply_confirmed_revoke       = ConversationsPanel._apply_confirmed_revoke
+    _on_bulk_delete_for_everyone_done = ConversationsPanel._on_bulk_delete_for_everyone_done
     _confirm_local_only_delete   = ConversationsPanel._confirm_local_only_delete
     _delete_target_jid           = ConversationsPanel._delete_target_jid
     _is_separator                = ConversationsPanel._is_separator
@@ -259,3 +264,54 @@ class TestDeleteForEveryoneKeepsTheRow:
         assert "self.remove_messages_by_id(set(self.selected_messages)" not in source
         assert "ok = self.main_window.delete_message_for_everyone" in source
         assert "wx.CallAfter(self._apply_confirmed_revoke, msg, jid)" in source
+
+    def test_bulk_delete_counts_failures_and_reports_them_not_a_flat_success(self):
+        """The scope-choice dialog for a mixed selection is a real modal
+        wx.Dialog (untested here, same as the test above) so this exercises
+        the worker's bookkeeping by source inspection: a message that fails
+        delete_message_for_everyone must be counted and handed to the
+        reporting callback instead of vanishing under an unconditional
+        "success_delete" announcement."""
+        import inspect
+
+        source = inspect.getsource(ConversationsPanel._on_mass_delete_messages)
+        assert "failed = 0" in source
+        assert "failed += 1" in source
+        assert "wx.CallAfter(self._on_bulk_delete_for_everyone_done, failed)" in source
+        # The old unconditional announcement must be gone from this method;
+        # _on_bulk_delete_for_everyone_done is the only place left that
+        # speaks success, and only once failures are known to be zero.
+        assert 'i18n.t("success_delete")' not in source
+
+
+class TestBulkDeleteForEveryoneReportsFailures:
+    """_on_bulk_delete_for_everyone_done() is the callback _delete_bg()
+    hands the final failure count to, once every message in the batch has
+    been attempted — it decides what the user is actually told."""
+
+    def test_no_failures_speaks_the_success_message(self, monkeypatch):
+        boxes = []
+        monkeypatch.setattr("ui.conversations.wx.MessageBox",
+                             lambda *a, **kw: boxes.append((a, kw)))
+        stub = _Stub("5511888888888@s.whatsapp.net", is_self_chat=False)
+
+        stub._on_bulk_delete_for_everyone_done(0)
+
+        assert boxes == []
+        assert stub.main_window.output_calls == [("success_delete", True)]
+
+    def test_one_failure_out_of_a_batch_shows_a_message_box_not_success(self, monkeypatch):
+        boxes = []
+        monkeypatch.setattr("ui.conversations.wx.MessageBox",
+                             lambda *a, **kw: boxes.append((a, kw)))
+        stub = _Stub("5511888888888@s.whatsapp.net", is_self_chat=False)
+
+        stub._on_bulk_delete_for_everyone_done(1)
+
+        assert len(boxes) == 1
+        (message, caption, style), _kw = boxes[0]
+        assert message == "delete_for_everyone_bulk_failed"
+        assert caption == "delete_message"
+        assert style & wx.ICON_WARNING
+        # The failure must not also be reported as a success.
+        assert stub.main_window.output_calls == []

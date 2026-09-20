@@ -165,7 +165,7 @@ class _NormalizeStub:
 
 def _raw_wpp_revoke(protocol_key):
     return {
-        "id": "true_5511999999999@c.us_REVOKE_EVENT_ID",
+        "id": "true_5511999999999@c.us_REVOKEEVENTID",
         "from": "5511999999999@c.us",
         "to": "5511999999999@c.us",
         "fromMe": True,
@@ -176,33 +176,39 @@ def _raw_wpp_revoke(protocol_key):
 
 
 class TestRevokeNormalization:
+    # Real WhatsApp message ids are a single alphanumeric token — never
+    # underscore-separated — because clean_message_id() (core/message_edit.py)
+    # takes a fixed field position (index 2, or the last field for a group's
+    # trailing participant suffix) out of the serialized `true_<jid>_<id>`/
+    # `true_<jid>_<id>_<participant>` key; an id with its own underscores
+    # would collide with that positional split.
     def test_revoke_event_reuses_the_deleted_messages_id(self):
         raw = _raw_wpp_revoke(
-            "true_5511999999999@c.us_ORIGINAL_MESSAGE_ID"
+            "true_5511999999999@c.us_ORIGINALMESSAGEID"
         )
 
         result = _NormalizeStub()._normalize_wpp_message(raw)
 
-        assert result["key"]["id"] == "ORIGINAL_MESSAGE_ID"
+        assert result["key"]["id"] == "ORIGINALMESSAGEID"
         assert result["messageType"] == "protocolMessage"
         assert result["message"]["protocolMessage"] == {
             "type": 3,
-            "key": "ORIGINAL_MESSAGE_ID",
+            "key": "ORIGINALMESSAGEID",
         }
 
     def test_revoke_target_accepts_msgkey_shaped_protocol_key(self):
         raw = _raw_wpp_revoke({
-            "_serialized": "true_5511999999999@c.us_ORIGINAL_MESSAGE_ID"
+            "_serialized": "true_5511999999999@c.us_ORIGINALMESSAGEID"
         })
 
         result = _NormalizeStub()._normalize_wpp_message(raw)
 
-        assert result["key"]["id"] == "ORIGINAL_MESSAGE_ID"
+        assert result["key"]["id"] == "ORIGINALMESSAGEID"
 
     def test_revoke_without_target_keeps_its_event_id_as_fallback(self):
         result = _NormalizeStub()._normalize_wpp_message(
             _raw_wpp_revoke(None)
         )
 
-        assert result["key"]["id"] == "REVOKE_EVENT_ID"
+        assert result["key"]["id"] == "REVOKEEVENTID"
         assert result["message"]["protocolMessage"]["type"] == 3

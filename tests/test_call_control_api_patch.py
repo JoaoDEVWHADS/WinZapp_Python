@@ -69,8 +69,8 @@ def test_call_media_bridge_advertises_virtual_camera_on_headless_hosts():
     assert "cameraTrackRequests" in bridge
     assert "cameraFramesReceived" in bridge
     assert "call camera frames received from desktop=" in bridge
-    assert "version === 9" in bridge
-    assert "version: 9" in bridge
+    assert "version === 7" in bridge
+    assert "version: 7" in bridge
 
 def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     start_js = _source("client/api_patches/start.js")
@@ -257,24 +257,24 @@ def test_page_native_audio_mutes_message_ping_but_preserves_call_end_chime():
     assert "silencePageAudio(el);" in bridge
     assert "return !(el.srcObject instanceof MediaStream) && el.loop === true;" in bridge
 
-    # A live/ringing -> terminal transition opens the only short-audio
-    # exception, and local reject/end arms it before resetting the call bridge.
-    assert "if (callWasActive && !active) allowCallEndChime();" in bridge
-    assert "if (callWasActive || state.enabled) allowCallEndChime();" in bridge
+    # A live/ringing -> terminal transition opens the short-audio exception,
+    # but only for a call that was actually answered (state.enabled at some
+    # point) — a merely-ringing call being cancelled/rejected must not open it,
+    # or a coincident missed-call message ping slips through unmuted.
+    assert "let callWasAnswered = false;" in bridge
+    assert "if (state.enabled) callWasAnswered = true;" in bridge
+    assert "if (callWasAnswered) allowCallEndChime();" in bridge
+    assert "if (state.enabled) allowCallEndChime();" in bridge
     assert "pageAudioNow() + 2500" in bridge
     assert "if (pageAudioNow() <= allowCallEndChimeUntil)" in bridge
     assert "restorePageAudio(el);" in bridge
-    assert "bridgeAllowedPageAudio(el)" in bridge
-    assert "context.createMediaElementSource(el)" in bridge
 
-    # Local RTC playback is muted only at the HTML element boundary while the
-    # live MediaStreamTrack remains available to the Python/BASS bridge. Remote
-    # Linux mode keeps the element audible into its private PulseAudio sink.
-    assert "if (el.srcObject instanceof MediaStream) {" in bridge
-    rtc_policy = bridge[bridge.index("if (el.srcObject instanceof MediaStream) {"):]
-    rtc_policy = rtc_policy[: rtc_policy.index("    } catch (_) {}")]
-    assert "if (linuxAudio) {" in rtc_policy
-    assert "silencePageAudio(el);" in rtc_policy
+    # An element carrying the call's own live MediaStream is muted like any
+    # other page-native media (fix(calls) 810acca5): WinZapp's separate PCM
+    # tap reads the raw MediaStreamTrack directly, so this cannot affect what
+    # Python receives, and skipping it here let WhatsApp Web's own native
+    # playback double up with WinZapp's relayed copy.
+    assert "if (el.srcObject instanceof MediaStream) {" not in bridge
 
     # HTMLMediaElement.play is checked synchronously; periodic scanning covers
     # autoplay/property changes and refreshes call lifecycle even with no media.
@@ -319,45 +319,3 @@ def test_call_media_bridge_bounds_microphone_backlog_to_live_audio():
     assert "const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;" in bridge
     assert "state.micFramesDroppedForLatency" in bridge
     assert "const dropIndex = state.micOffset > 0 ? 1 : 0;" in bridge
-
-
-def test_local_api_routes_page_audio_through_python_bass_speaker_bridge():
-    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
-
-    assert "bridgeAllowedPageAudio = (el: HTMLMediaElement)" in bridge
-    assert "context.createMediaElementSource(el)" in bridge
-    assert "page-speaker-bridge" in bridge
-    assert "__winzappOnCallRemoteAudio" in bridge
-    assert "local call speaker bridge uses Python/BASS output" in bridge
-
-    # Local Chromium is a transport/processing engine only: every AudioContext,
-    # including ones created by WhatsApp itself, is forced onto the no-hardware
-    # sink. Unsupported Chromium builds fail closed instead of using default.
-    assert "const SILENT_AUDIO_SINK = { type: 'none' } as const;" in bridge
-    assert "sinkId: SILENT_AUDIO_SINK" in bridge
-    assert "installHardwareIsolatedAudioContext('AudioContext')" in bridge
-    assert "installHardwareIsolatedAudioContext('webkitAudioContext')" in bridge
-    assert "Chromium does not support hardware-isolated AudioContext output" in bridge
-    assert "): AudioContext => {" in bridge
-    assert "if (linuxAudio) return Reflect.construct(Ctor, args) as AudioContext;" in bridge
-    assert "Reflect.construct(Ctor, [options]) as AudioContext" in bridge
-
-    # RTC HTML playback is muted locally; the page-native terminal chime is
-    # diverted through MediaElementSource and its graph is cleaned after grace.
-    assert "const pageAudioBridgePipelines = new Map<HTMLMediaElement, any>();" in bridge
-    assert "pageAudioCleanupTimer" in bridge
-    assert "cleanupPageAudioBridges" in bridge
-    assert "win.setTimeout(cleanupPageAudioBridges, 2750)" in bridge
-
-    # Physical speaker selection belongs exclusively to Python/BASS.
-    assert "setSinkId.call(" not in bridge
-    assert "setLocalBrowserOutputDevice(" not in bridge
-    assert "call:audio:output-device" not in bridge
-    assert "if (linuxAudio) return false;" in bridge
-    assert "const micTrack = ensureMicTrack().clone();" in bridge
-
-
-def test_call_end_keeps_bass_alive_for_page_speaker_bridge():
-    main = _source("client/main.py")
-
-    assert main.count("self._stop_voice_call_audio(grace_seconds=2.5)") == 2

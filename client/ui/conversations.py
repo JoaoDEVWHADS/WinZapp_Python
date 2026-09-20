@@ -46,6 +46,8 @@ from ui.accessible import (
     AccessibleSaveAs,
     AccessibleShowInFolder,
     AccessibleConversationDataButton,
+    AccessibleVoiceCallButton,
+    AccessibleVideoCallButton,
     AccessibleAddAttachmentButton,
     AccessibleEmojiButton,
     AccessibleDiscardVoiceMessage,
@@ -800,9 +802,18 @@ class ConversationsPanel(wx.Panel):
         self._conv_data_btn.Bind(wx.EVT_BUTTON, self._show_conversation_data)
         conv_sizer.Add(self._conv_data_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
+        self._video_call_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("video_call_button")
+        )
+        self._video_call_btn.SetAccessible(AccessibleVideoCallButton())
+        self._video_call_btn.Bind(wx.EVT_BUTTON, self._on_video_call)
+        conv_sizer.Add(self._video_call_btn, 0, wx.LEFT | wx.TOP, 5)
+        self._video_call_btn.Hide()
+
         self._voice_call_btn = wx.Button(
             self.conversation_panel, label=i18n.t("voice_call_button")
         )
+        self._voice_call_btn.SetAccessible(AccessibleVoiceCallButton())
         self._voice_call_btn.Bind(wx.EVT_BUTTON, self._on_voice_call)
         conv_sizer.Add(self._voice_call_btn, 0, wx.LEFT | wx.TOP, 5)
         self._voice_call_btn.Hide()
@@ -1477,6 +1488,8 @@ class ConversationsPanel(wx.Panel):
         self.ID_ALT_SHIFT_M     = wx.NewIdRef()  # mentions                (Alt+Shift+M)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
         self.ID_ALT_SHIFT_V     = wx.NewIdRef()  # converse with           (Alt+Shift+V)
+        self.ID_CTRL_SHIFT_V    = wx.NewIdRef()  # voice call              (Ctrl+Shift+V)
+        self.ID_CTRL_ALT_SHIFT_V = wx.NewIdRef() # video call              (Ctrl+Alt+Shift+V)
         self.ID_ALT_SHIFT_Q     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+Q)
         self.ID_ALT_SHIFT_S     = wx.NewIdRef()  # mute / unmute           (Alt+Shift+S)
         # ── Message star ─────────────────────────────────────────────────────
@@ -1575,6 +1588,8 @@ class ConversationsPanel(wx.Panel):
             (AS,               ord("M"),          self.ID_ALT_SHIFT_M),
             (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
+            (CS,               ord("V"),          self.ID_CTRL_SHIFT_V),
+            (CAS,              ord("V"),          self.ID_CTRL_ALT_SHIFT_V),
             (AS,               ord("Q"),          self.ID_ALT_SHIFT_Q),
             (AS,               ord("S"),          self.ID_ALT_SHIFT_S),
             (CS,               ord("O"),           self.ID_CTRL_SHIFT_O),
@@ -1635,6 +1650,8 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_mentions,            id=self.ID_ALT_SHIFT_M)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_number_speak,   id=self.ID_ALT_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
+        self.Bind(wx.EVT_MENU, self._on_voice_call,                id=self.ID_CTRL_SHIFT_V)
+        self.Bind(wx.EVT_MENU, self._on_video_call,                id=self.ID_CTRL_ALT_SHIFT_V)
         self.Bind(wx.EVT_MENU, self._on_accel_goto_quoted,         id=self.ID_ALT_SHIFT_Q)
         self.Bind(wx.EVT_MENU, self._on_accel_mute,                id=self.ID_ALT_SHIFT_S)
         self.Bind(wx.EVT_MENU, self._on_accel_star,                 id=self.ID_CTRL_SHIFT_O)
@@ -2379,7 +2396,8 @@ class ConversationsPanel(wx.Panel):
 
     def _sync_voice_call_button(self, jid: str):
         jid = str(jid or "")
-        unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast"))
+        is_self_chat = bool(jid) and self.main_window._is_self_jid(jid)
+        unavailable = jid.endswith(("@g.us", "@newsletter", "@broadcast")) or is_self_chat
         self._voice_call_btn.Show(bool(jid) and not unavailable)
         self._video_call_btn.Show(bool(jid) and not unavailable)
         self.conversation_panel.Layout()
@@ -17143,6 +17161,7 @@ class ConversationsPanel(wx.Panel):
         local_delete_ids.discard("")
 
         def _delete_bg():
+            failed = 0
             for msg in msgs_to_delete:
                 msg_key = dict(msg.get("key", {}))
                 jid = self._delete_target_jid(msg_key)
@@ -17155,15 +17174,34 @@ class ConversationsPanel(wx.Panel):
                     ok = self.main_window.delete_message_for_everyone(jid, msg_key)
                     if ok:
                         wx.CallAfter(self._apply_confirmed_revoke, msg, jid)
+                    else:
+                        failed += 1
                 else:
                     self.main_window.delete_message_for_me(jid, msg_key)
+            wx.CallAfter(self._on_bulk_delete_for_everyone_done, failed)
 
         threading.Thread(target=_delete_bg, daemon=True).start()
 
         if local_delete_ids:
             self.remove_messages_by_id(local_delete_ids, focus_previous=True)
         self.selected_messages.clear()
-        self.main_window.output(i18n.t("success_delete"), interrupt=True)
+
+    def _on_bulk_delete_for_everyone_done(self, failed_count: int):
+        """Report the batch's real outcome instead of an unconditional
+        "success" (issue: a screen-reader user was told a delete succeeded
+        while one or more messages silently stayed on everyone else's copy).
+        Rows removed locally ("delete for me") already reflect their own
+        outcome; this only covers "delete for everyone" revokes.
+        """
+        i18n = self.main_window.i18n
+        if failed_count:
+            wx.MessageBox(
+                i18n.t("delete_for_everyone_bulk_failed").format(count=failed_count),
+                i18n.t("delete_message"),
+                wx.OK | wx.ICON_WARNING,
+            )
+        else:
+            self.main_window.output(i18n.t("success_delete"), interrupt=True)
 
     def _on_accel_recent_reactions(self, event):
         if not self.conversation:

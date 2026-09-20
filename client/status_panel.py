@@ -19,7 +19,7 @@ from core.save_location import resolve_save_dialog_folder
 from core.save_dialog_selection import schedule_deselect_extension
 from core.utils import format_number, normalize_line_separators, is_voice_message
 from core.video_player import VideoPlayer
-from core.focus_cloak import cloak_focus_announcement, cloak_panel_focus_fallback
+from core.focus_cloak import cloak_panel_focus_fallback
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
@@ -2645,19 +2645,14 @@ class StatusPanel(wx.Panel):
         return bool(silence_recording or not extended_enabled)
 
     def _focus_recording_button_silently(self, button):
-        """Move focus to the recording action without exposing its announcement.
+        """Apply recording focus without creating a suppressed focus event.
 
-        Status cannot safely leave focus on the Start button: that button is
-        hidden as recording begins, and Windows then focuses the parent panel
-        ("Painel"). Cloak the real destination first, focus it, and cancel any
-        delayed UIA/MSAA speech while keeping keyboard navigation correct.
+        See ConversationsPanel._focus_recording_button_silently: when silence
+        is requested, the reliable cross-API solution is not to move focus to
+        Send at all.  The status recording shortcuts remain available.
         """
         if self._voice_recording_focus_suppression_enabled():
-            cloak_focus_announcement(button, duration_ms=1200)
-            self._silence_send_voice_focus_if_enabled()
-            button.SetFocus()
-            self._silence_send_voice_focus_if_enabled()
-            return True
+            return False
         button.SetFocus()
         return True
 

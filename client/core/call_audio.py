@@ -42,6 +42,7 @@ class CallAudioConfig:
     session: str
     input_device_name: str = ""
     output_device_name: str = ""
+    exclusive_mode: bool = False
 
 
 class CallAudioUnavailable(RuntimeError):
@@ -513,26 +514,48 @@ class CallAudioSession:
             yield index
 
     def _candidate_rates(self, device_index: Optional[int]):
-        # Opening the Windows mixer at its own rate avoids needless device
-        # reconfiguration/resampling in the driver. The call transport stays
-        # 48 kHz; Python already resamples at the boundary.
-        rates = []
+        # Try the call transport's own rate (48 kHz) first. Most non-HFP
+        # devices open at 48 kHz directly, which needs no resampling in
+        # either direction for the life of the call. A previous revision put
+        # the device's native rate first instead — reasoned the same way
+        # core/audio_devices.py's recording_configs_for() does for voice
+        # messages, where it's the right call — but for calls specifically,
+        # unlike a one-shot recording, that meant a device whose native rate
+        # merely *differs* from 48 kHz (44100, common on plenty of ordinary
+        # hardware, not just Bluetooth) got resampled on every single 20 ms
+        # frame for the whole call. Delivery stayed smooth (no underflow, no
+        # rebuffering — the queue/output-write plumbing was never the issue),
+        # but the resampled audio itself was audibly choppy. Native rate
+        # stays second, ahead of the fixed tail, so a genuine HFP-only
+        # Bluetooth microphone (8000/16000 Hz, the reason native is tried at
+        # all) is still reached before giving up.
+        rates = [CALL_SAMPLE_RATE]
         try:
             info = self._sd.query_devices(device_index)
             native = int(round(float(info.get("default_samplerate") or 0)))
-            if native > 0:
+            if native > 0 and native not in rates:
                 rates.append(native)
         except Exception:
             pass
-        for rate in (CALL_SAMPLE_RATE, 44_100, 32_000, 16_000):
+        for rate in (44_100, 32_000, 16_000):
             if rate not in rates:
                 rates.append(rate)
         return rates
 
-    def _stream_extra_settings(
-        self, device_index: Optional[int], *, input_device: bool
-    ):
-        """Keep WASAPI in shared mode so a call cannot take over the device."""
+    # A previous revision forced every WASAPI stream into shared mode via
+    # sd.WasapiSettings(exclusive=False, auto_convert=True) here, meant to
+    # stop a call from taking the device away from other applications. That
+    # is what PortAudio already does by default on WASAPI — exclusive mode is
+    # opt-in, never the fallback — so the extra settings changed nothing about
+    # exclusivity and only routed every call through WASAPI's own format
+    # converter (auto_convert), which measurably added the choppy, high-
+    # latency playback reported after this landed. Now that exclusive mode is
+    # a real, deliberate feature (settings["call_audio_devices"]["exclusive_mode"]),
+    # auto_convert is kept in BOTH modes as a resilience fallback — it only
+    # engages if the exact requested rate/format cannot be opened as-is, so it
+    # does not reintroduce the earlier regression, which came from forcing
+    # shared mode with no exclusive option, not from auto_convert itself.
+    def _stream_extra_settings(self, device_index, *, input_device, exclusive):
         if sys.platform != "win32":
             return None
         actual_index = device_index
@@ -548,13 +571,10 @@ class CallAudioSession:
             settings_type = getattr(self._sd, "WasapiSettings", None)
             if settings_type is None:
                 return None
-            # Explicitly shared; auto_convert is only a fallback for a device
-            # whose native rate cannot be opened for some reason.
-            return settings_type(exclusive=False, auto_convert=True)
+            return settings_type(exclusive=exclusive, auto_convert=True)
         except Exception:
             logging.debug(
-                "[call_audio] could not apply shared WASAPI settings",
-                exc_info=True,
+                "[call_audio] could not apply WASAPI settings (exclusive=%s)", exclusive, exc_info=True,
             )
             return None
 
@@ -579,66 +599,85 @@ class CallAudioSession:
         else:
             candidates = self._candidate_devices(selected_name, input_device=True)
 
+        candidates = list(candidates)
         last_error = None
-        for device in candidates:
-            for rate in self._candidate_rates(device):
-                try:
-                    stream = self._sd.InputStream(
-                        samplerate=rate,
-                        blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
-                        device=device,
-                        channels=1,
-                        dtype="float32",
-                        latency=CALL_DEVICE_LATENCY_SECONDS,
-                        extra_settings=self._stream_extra_settings(
-                            device, input_device=True
-                        ),
-                        callback=self._on_microphone_frame(rate, generation),
-                    )
-                    logging.info(
-                        "[call_audio] input opened device=%r rate=%s latency=%r",
-                        device,
-                        rate,
-                        getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
-                    )
-                    return stream, rate
-                except Exception as exc:
-                    last_error = exc
+        exclusive_attempts = [True, False] if self._config.exclusive_mode else [False]
+        for attempt_index, exclusive in enumerate(exclusive_attempts):
+            for device in candidates:
+                for rate in self._candidate_rates(device):
+                    try:
+                        extra_settings = self._stream_extra_settings(
+                            device, input_device=True, exclusive=exclusive
+                        )
+                        stream = self._sd.InputStream(
+                            samplerate=rate,
+                            blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
+                            device=device,
+                            channels=1,
+                            dtype="float32",
+                            latency="low",
+                            extra_settings=extra_settings,
+                            callback=self._on_microphone_frame(rate, generation),
+                        )
+                        if attempt_index > 0:
+                            logging.info(
+                                "[call_audio] exclusive mode unavailable, fell back to shared mode for input"
+                            )
+                        logging.info(
+                            "[call_audio] input opened device=%r rate=%s latency=%r exclusive=%s",
+                            device,
+                            rate,
+                            getattr(stream, "latency", "low"),
+                            exclusive,
+                        )
+                        return stream, rate
+                    except Exception as exc:
+                        last_error = exc
         raise CallAudioUnavailable(f"No microphone could be opened for the call: {last_error}")
 
     def _open_output_stream(self):
-        # Production call playback uses BASS, exactly like the program/effect
-        # output device selectors. Explicitly injected sounddevice modules are
-        # retained for the existing platform-neutral transport tests.
+        # Production call playback uses BASS so call output stays isolated from
+        # Chromium and can switch devices independently. Tests inject
+        # sounddevice explicitly and exercise the PortAudio/WASAPI path below.
         if self._output_factory is not None:
             return self._output_factory(self._config.output_device_name), CALL_SAMPLE_RATE
         if not self._sounddevice_injected:
             return _BassCallOutput(self._config.output_device_name), CALL_SAMPLE_RATE
 
         last_error = None
-        for device in self._candidate_devices(self._config.output_device_name, input_device=False):
-            for rate in self._candidate_rates(device):
-                try:
-                    stream = self._sd.OutputStream(
-                        samplerate=rate,
-                        blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
-                        device=device,
-                        channels=1,
-                        dtype="float32",
-                        latency=CALL_DEVICE_LATENCY_SECONDS,
-                        extra_settings=self._stream_extra_settings(
-                            device, input_device=False
-                        ),
-                    )
-                    logging.info(
-                        "[call_audio] injected test output opened device=%r rate=%s latency=%r",
-                        device,
-                        rate,
-                        getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
-                    )
-                    return stream, rate
-                except Exception as exc:
-                    last_error = exc
+        exclusive_attempts = [True, False] if self._config.exclusive_mode else [False]
+        for attempt_index, exclusive in enumerate(exclusive_attempts):
+            for device in self._candidate_devices(
+                self._config.output_device_name, input_device=False
+            ):
+                for rate in self._candidate_rates(device):
+                    try:
+                        extra_settings = self._stream_extra_settings(
+                            device, input_device=False, exclusive=exclusive
+                        )
+                        stream = self._sd.OutputStream(
+                            samplerate=rate,
+                            blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
+                            device=device,
+                            channels=1,
+                            dtype="float32",
+                            latency="low",
+                            extra_settings=extra_settings,
+                        )
+                        if attempt_index > 0:
+                            logging.info(
+                                "[call_audio] exclusive mode unavailable, fell back to shared mode for output"
+                            )
+                        logging.info(
+                            "[call_audio] injected test output opened device=%r rate=%s latency=%r exclusive=%s",
+                            device,
+                            rate,
+                            getattr(stream, "latency", "low"),
+                            exclusive,
+                        )
+                        return stream, rate
+                    except Exception as exc:
+                        last_error = exc
         raise CallAudioUnavailable(f"No speaker could be opened for the call: {last_error}")
 
     def _on_microphone_frame(self, source_rate: int, generation: int):
@@ -714,99 +753,35 @@ class CallAudioSession:
                 time.sleep(0.05)
 
     def _play_remote_loop(self) -> None:
-        """Play fixed 20 ms blocks behind a small jitter reservoir.
+        """Write each remote packet to the device as soon as it arrives.
 
-        Remote PCM reaches Python over Socket.IO and therefore does not arrive
-        at perfectly even intervals. Writing every packet immediately made the
-        Windows output device run dry between otherwise healthy packets, which
-        sounded like short cuts. Keep only a small reservoir, re-prime after a
-        real starvation, and discard old receive audio if a long stall ever
-        builds an excessive backlog.
+        Diagnostic bisection (2026-09-20): a prebuffer/reservoir rewrite of
+        this loop, plus every other change made to this file for video
+        calls, was suspected of causing severe choppy/high-latency call
+        audio on a real Bluetooth headset. Reverting this whole file to
+        main's original version (this exact loop included) while keeping
+        every other file from the branch fixed it; reintroducing sample-rate
+        priority, "low" latency, exclusive mode and a wall-clock write-pacing
+        layer on top of the reservoir version individually did not. That
+        isolates the defect to the reservoir/prebuffer mechanism itself, not
+        yet root-caused further — so this loop stays exactly as simple as it
+        was before any of that, one packet in, one write out, relying on the
+        network's own arrival rate to pace playback the same way it always
+        did for voice calls before this file changed.
         """
-        pending = np.empty(0, dtype=np.float32)
-        primed = False
-        priming_started_at: Optional[float] = None
-
         while not self._stop_event.is_set():
-            frame_samples = max(1, int(self._output_rate * CALL_FRAME_MS / 1000))
-            prebuffer_samples = max(
-                frame_samples,
-                int(self._output_rate * CALL_OUTPUT_PREBUFFER_MS / 1000),
-            )
-            max_buffer_samples = max(
-                prebuffer_samples,
-                int(self._output_rate * CALL_OUTPUT_MAX_BUFFER_MS / 1000),
-            )
-
-            if primed and pending.size >= frame_samples:
-                if pending.size > max_buffer_samples:
-                    dropped = int(pending.size - prebuffer_samples)
-                    pending = pending[-prebuffer_samples:].copy()
-                    self._output_samples_dropped += dropped
-                    logging.info(
-                        "[call_audio] remote backlog trimmed dropped_ms=%.1f total_dropped_ms=%.1f",
-                        dropped * 1000.0 / self._output_rate,
-                        self._output_samples_dropped * 1000.0 / self._output_rate,
-                    )
-
-                frame = pending[:frame_samples]
-                pending = pending[frame_samples:]
-                try:
-                    if self._output_stream is not None:
-                        underflowed = self._output_stream.write(frame.reshape(-1, 1))
-                        if underflowed:
-                            logging.debug("[call_audio] output stream reported underflow")
-                except Exception:
-                    logging.exception("[call_audio] failed to play remote call audio")
-                    time.sleep(0.01)
-                continue
-
-            timeout = (
-                CALL_OUTPUT_REBUFFER_WAIT_MS / 1000.0
-                if primed
-                else CALL_OUTPUT_PREBUFFER_MS / 1000.0
-            )
             try:
-                pcm, source_rate = self._output_queue.get(timeout=timeout)
+                pcm, source_rate = self._output_queue.get(timeout=0.1)
             except queue.Empty:
-                now = time.monotonic()
-                if primed:
-                    primed = False
-                    priming_started_at = now if pending.size else None
-                    self._output_rebuffer_count += 1
-                    if self._output_rebuffer_count == 1 or self._output_rebuffer_count % 10 == 0:
-                        logging.info(
-                            "[call_audio] remote audio rebuffering count=%s buffered_ms=%.1f",
-                            self._output_rebuffer_count,
-                            pending.size * 1000.0 / self._output_rate,
-                        )
-                elif (
-                    pending.size >= frame_samples
-                    and priming_started_at is not None
-                    and now - priming_started_at >= CALL_OUTPUT_PREBUFFER_MS / 1000.0
-                ):
-                    # Do not strand a short final packet forever just because
-                    # it never reached the normal prebuffer target.
-                    primed = True
                 continue
-
             try:
                 samples = _pcm16_float32(pcm)
                 samples = _resample_mono(samples, source_rate, self._output_rate)
+                if samples.size and self._output_stream is not None:
+                    self._output_stream.write(samples.reshape(-1, 1))
             except Exception:
-                logging.exception("[call_audio] failed to decode remote call audio")
-                continue
-
-            if not samples.size:
-                continue
-            if pending.size:
-                pending = np.concatenate((pending, samples))
-            else:
-                pending = samples.copy()
-            if priming_started_at is None:
-                priming_started_at = time.monotonic()
-            if not primed and pending.size >= prebuffer_samples:
-                primed = True
+                logging.exception("[call_audio] failed to play remote call audio")
+                time.sleep(0.05)
 
     def _emit_start(self) -> None:
         try:

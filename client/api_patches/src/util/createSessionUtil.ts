@@ -2159,18 +2159,6 @@ export default class CreateSessionUtil {
                     'HANDLED_REMOTELY', 'REMOTE_CALL_IN_PROGRESS',
                   ].includes(state);
 
-                  console.log(
-                    '[browser-evaluate] activeCall change ' +
-                    JSON.stringify({
-                      id: callId,
-                      state,
-                      outgoing: definitelyOutgoing,
-                      isGroup: isGroupCall(activeCall),
-                      hasPeer: !!peerJidOf(activeCall),
-                      hasGroup: !!groupJidOf(activeCall),
-                    })
-                  );
-
                   // An incoming activeCall may arrive one tick before its state
                   // and peer fields.  The id plus a non-outgoing active slot is
                   // sufficient to retain it and let emitIncomingOffer wait for

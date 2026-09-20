@@ -1098,10 +1098,21 @@ class SettingsDialog(wx.Dialog):
             self._calls_page, label=i18n.t("calls_popup_enabled_label")
         )
         calls_sizer.Add(self._call_popup_check, 0, wx.ALL, 8)
+
+        self._call_exclusive_mode_check = wx.CheckBox(
+            self._calls_page, label=i18n.t("calls_exclusive_mode_label")
+        )
+        calls_sizer.Add(self._call_exclusive_mode_check, 0, wx.ALL, 8)
+
         self._call_audio_settings_button = wx.Button(
             self._calls_page, label=i18n.t("calls_audio_settings_button")
         )
         calls_sizer.Add(self._call_audio_settings_button, 0, wx.ALL, 8)
+
+        self._call_video_settings_button = wx.Button(
+            self._calls_page, label=i18n.t("calls_video_settings_button")
+        )
+        calls_sizer.Add(self._call_video_settings_button, 0, wx.ALL, 8)
 
         self._calls_page.SetSizer(calls_sizer)
         self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
@@ -1116,6 +1127,9 @@ class SettingsDialog(wx.Dialog):
         # the real cause is buried a thousand log lines up.
         self._call_audio_settings_button.Bind(
             wx.EVT_BUTTON, self._on_call_audio_settings
+        )
+        self._call_video_settings_button.Bind(
+            wx.EVT_BUTTON, self._on_call_video_settings
         )
 
         # ── Profile backup tab ───────────────────────────────────────────────
@@ -1211,6 +1225,9 @@ class SettingsDialog(wx.Dialog):
         call_settings = self.main_window.settings.get("calls", {})
         self._call_alerts_check.SetValue(call_settings.get("alerts_enabled", True))
         self._call_popup_check.SetValue(call_settings.get("popup_enabled", True))
+        self._call_exclusive_mode_check.SetValue(
+            bool(self.main_window.settings.get("call_audio_devices", {}).get("exclusive_mode", False))
+        )
         self._update_call_fields_state()
 
         profile_backup = self.main_window.settings.get("profile_backup", {})
@@ -1934,6 +1951,16 @@ class SettingsDialog(wx.Dialog):
         # Parented to this dialog, so the chooser cannot end up underneath it.
         opener(event, parent=self)
 
+    def _on_call_video_settings(self, event):
+        """Open the call camera chooser, if the app can.
+
+        Same lookup-at-press-time reasoning as _on_call_audio_settings above.
+        """
+        opener = getattr(self.main_window, "open_call_audio_settings", None)
+        if opener is None:
+            return
+        opener(event, parent=self, include_audio=False, include_camera=True)
+
     def _on_call_alerts_toggle(self, event):
         self._update_call_fields_state()
         event.Skip()
@@ -2524,6 +2551,12 @@ class SettingsDialog(wx.Dialog):
         calls = self.main_window.settings.setdefault("calls", {})
         calls["alerts_enabled"] = self._call_alerts_check.GetValue()
         calls["popup_enabled"] = self._call_popup_check.GetValue()
+        # Device/transport-level, not an alert setting, so it belongs in
+        # call_audio_devices alongside the input/output device choices even
+        # though its checkbox lives on this same Calls tab.
+        self.main_window.settings.setdefault("call_audio_devices", {})[
+            "exclusive_mode"
+        ] = self._call_exclusive_mode_check.GetValue()
 
         profile_backup = self.main_window.settings.setdefault("profile_backup", {})
         profile_backup["close_snapshot_min_hours"] = parse_hours_field(
@@ -2748,7 +2781,9 @@ class SettingsDialog(wx.Dialog):
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._call_alerts_check.SetLabel(i18n.t("calls_alerts_enabled_label"))
         self._call_popup_check.SetLabel(i18n.t("calls_popup_enabled_label"))
+        self._call_exclusive_mode_check.SetLabel(i18n.t("calls_exclusive_mode_label"))
         self._call_audio_settings_button.SetLabel(i18n.t("calls_audio_settings_button"))
+        self._call_video_settings_button.SetLabel(i18n.t("calls_video_settings_button"))
         self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._spell_check_radio.SetLabel(i18n.t("spell_check_label"))

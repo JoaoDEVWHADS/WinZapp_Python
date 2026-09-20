@@ -93,7 +93,6 @@ class _FakeMainWindow:
         self.marked_unread = []
         self.deleted_messages = []
         self.deleted_for_everyone = []
-        self.remote_revokes = []
         self.saves = 0
         self.pin_calls = []
         self.pin_results = None
@@ -130,8 +129,9 @@ class _FakeMainWindow:
         self.deleted_for_everyone.append((jid, key))
         return True
 
-    def _apply_remote_revoke(self, original, incoming, jid):
-        self.remote_revokes.append((original, incoming, jid))
+    def _apply_remote_revoke(self, existing, incoming, jid):
+        existing["messageType"] = incoming["messageType"]
+        existing["message"] = incoming["message"]
 
     def _schedule_save(self, *a, **kw):
         self.saves += 1
@@ -189,9 +189,10 @@ class _Panel:
     _on_mass_forward_messages = ConversationsPanel._on_mass_forward_messages
     _on_mass_save_messages = ConversationsPanel._on_mass_save_messages
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
+    _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
+    _on_bulk_delete_for_everyone_done = ConversationsPanel._on_bulk_delete_for_everyone_done
     _confirm_local_only_delete = ConversationsPanel._confirm_local_only_delete
     _delete_target_jid = ConversationsPanel._delete_target_jid
-    _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
     _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
     _on_mass_star_messages = ConversationsPanel._on_mass_star_messages
     _on_mass_pin_messages = ConversationsPanel._on_mass_pin_messages
@@ -692,7 +693,9 @@ def choose_folder(monkeypatch, tmp_path):
 @pytest.fixture
 def run_threads_inline(monkeypatch):
     """_on_mass_delete_messages hands the server calls to a background thread;
-    run it inline so the test observes the result deterministically."""
+    run it inline so the test observes the result deterministically. The
+    worker also reports back through wx.CallAfter (no running wx.App here),
+    so that is routed straight through too."""
     class _Inline:
         def __init__(self, target=None, args=(), kwargs=None, daemon=None, **kw):
             self._target = target
@@ -703,6 +706,8 @@ def run_threads_inline(monkeypatch):
             self._target(*self._args, **self._kwargs)
 
     monkeypatch.setattr(threading, "Thread", _Inline)
+    monkeypatch.setattr("ui.conversations.wx.CallAfter",
+                         lambda fn, *a, **kw: fn(*a, **kw))
 
 
 @pytest.fixture
@@ -1093,9 +1098,12 @@ class TestMassMessageActions:
         self, fake_delete_dialog, run_threads_inline
     ):
         """A mixed selection with "delete for everyone" chosen: only the
-        eligible (fromMe) message gets a real revoke and stays in the list as
-        a "message deleted" tombstone. The other member's message cannot be
-        revoked, so it is deleted for me and is the only row removed."""
+        eligible (fromMe) messages get a real revoke — the other member's
+        message the user has no right to revoke is still removed from the
+        user's own view, just without calling delete_message_for_everyone
+        for it. A successful revoke keeps its own row (tombstoned in place by
+        the live/confirmed-revoke path) rather than being removed locally —
+        see test_bulk_delete_only_removes_effective_local_only_ids."""
         fake_delete_dialog["everyone"] = True
         panel = _Panel(messages=[_msg("m1", from_me=True), _msg("m2", from_me=False)])
         panel.selected_messages = {"m1", "m2"}
@@ -1104,12 +1112,6 @@ class TestMassMessageActions:
         assert [k["id"] for _jid, k in panel.main_window.deleted_messages] == ["m2"]
         (removed, _focus), = panel.removed_locally
         assert removed == {"m2"}
-        assert len(panel.main_window.remote_revokes) == 1
-        original, incoming, jid = panel.main_window.remote_revokes[0]
-        assert original["key"]["id"] == "m1"
-        assert incoming["messageType"] == "protocolMessage"
-        assert incoming["message"]["protocolMessage"]["key"] == "m1"
-        assert jid == "grupo@g.us"
 
     def test_a_group_admin_can_delete_for_everyone_even_a_message_not_their_own(
         self, fake_delete_dialog, run_threads_inline

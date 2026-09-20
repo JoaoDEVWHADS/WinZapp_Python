@@ -190,7 +190,7 @@ function ensureLinuxCallAudio(
 
 function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 9) return true;
+  if (win.__winzappCallMediaBridge?.version === 7) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const NativeAudioContextCtor = win.AudioContext || win.webkitAudioContext;
@@ -256,7 +256,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
 
   const state: any = {
-    version: 9,
+    version: 7,
     enabled: false,
     context: null,
     micDestination: null,
@@ -267,6 +267,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     remoteTrackIds: new Set<string>(),
     remoteVideoIds: new Set<string>(),
     remoteVideoTimers: new Map<string, number>(),
+    remoteVideoFramesSent: 0,
     cameraCanvas: null,
     cameraTrack: null,
     cameraPending: false,
@@ -302,21 +303,20 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     { muted: boolean; volume: number }
   >();
   const mutedPageElements = new Set<HTMLMediaElement>();
-  const pageAudioBridgePipelines = new Map<HTMLMediaElement, any>();
-  let pageAudioCleanupTimer: number | null = null;
-  let bridgeAllowedPageAudio = (_el: HTMLMediaElement): boolean => false;
   let callWasActive = false;
+  // A merely-ringing call (INCOMING_RING/CALLING/etc, counted "active" by
+  // isLivePageCall below) that is cancelled or rejected before anyone answers
+  // has no real terminal chime to protect. state.enabled only becomes true
+  // when the audio bridge is actually attached after answer, so it is the
+  // signal for "this call was ever really connected" — remembered here
+  // because refreshCallAudioPolicy's own poll can observe the ENDED
+  // transition after state.reset() has already cleared state.enabled back to
+  // false for the same call. Without this, cancelling a call before answer
+  // opened the same 2500ms exemption window as a genuine hangup, and the
+  // coincident missed-call message-notification ping slipped through it
+  // unmuted (measured 2026-09-20).
+  let callWasAnswered = false;
   let allowCallEndChimeUntil = 0;
-
-  const cleanupPageAudioBridges = () => {
-    for (const pipeline of pageAudioBridgePipelines.values()) {
-      try { pipeline.source.disconnect(); } catch (_) {}
-      try { pipeline.processor.disconnect(); } catch (_) {}
-      try { pipeline.sink.disconnect(); } catch (_) {}
-    }
-    pageAudioBridgePipelines.clear();
-    pageAudioCleanupTimer = null;
-  };
 
   const pageAudioNow = () => {
     try {
@@ -396,20 +396,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     // flips. Restore those objects immediately so the terminal chime is not
     // clipped while waiting for the next media scan.
     for (const element of Array.from(mutedPageElements)) {
-      // Local RTC media stays muted at the HTMLMediaElement boundary. Its
-      // MediaStreamTrack remains live and is captured separately into Python,
-      // so unmuting it here would briefly leak the call to Chrome's speaker.
-      try {
-        if (!linuxAudio && element.srcObject instanceof MediaStream) continue;
-      } catch (_) {}
       restorePageAudio(element);
-      if (!linuxAudio) bridgeAllowedPageAudio(element);
     }
   };
 
   const refreshCallAudioPolicy = () => {
     const active = isLivePageCall(currentPageCall());
-    if (callWasActive && !active) allowCallEndChime();
+    if (!callWasActive && active) callWasAnswered = false; // a new call just started ringing
+    if (state.enabled) callWasAnswered = true; // remember it was actually answered
+    if (callWasActive && !active) {
+      if (callWasAnswered) allowCallEndChime();
+      callWasAnswered = false;
+    }
     callWasActive = active;
   };
 
@@ -438,21 +436,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   };
 
   const applyPageAudioPolicy = (el: HTMLMediaElement) => {
-    try {
-      if (el.srcObject instanceof MediaStream) {
-        if (linuxAudio) {
-          // Remote API mode intentionally lets Chromium play into its private
-          // PulseAudio virtual sink; parec then relays that sink back to Python.
-          restorePageAudio(el);
-          return false;
-        }
-        // Local API mode captures this same live track through attachRemoteTrack.
-        // Mute only the HTML playback surface, never the MediaStreamTrack itself.
-        silencePageAudio(el);
-        return true;
-      }
-    } catch (_) {}
-
     refreshCallAudioPolicy();
 
     // The ringtone is always suppressed, even if a previous call just ended
@@ -464,18 +447,21 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
     if (pageAudioNow() <= allowCallEndChimeUntil) {
       restorePageAudio(el);
-      if (!linuxAudio && !bridgeAllowedPageAudio(el)) {
-        // Never fall back to Chromium's physical/default speaker: if this
-        // local PCM bridge cannot be built, keep the element silent instead.
-        silencePageAudio(el);
-        return true;
-      }
       return false;
     }
 
-    // Non-looping page audio outside a call-end transition is the WhatsApp
-    // Web UI/notification path (not the RTC stream). This catches the
-    // incoming-message ping that the loop-only policy accidentally restored.
+    // Everything else is muted here, including an element whose srcObject is
+    // the call's own live MediaStream. WinZapp's own audio/video extraction
+    // (attachRemoteTrack/attachRemoteVideo above) taps the raw
+    // MediaStreamTrack directly through the Web Audio/RTCPeerConnection
+    // APIs, never this element's rendered output, so muting it cannot affect
+    // what Python receives — it only stops WhatsApp Web's own native
+    // playback from doubling up with WinZapp's separately decoded copy. An
+    // earlier rewrite carved out an exemption for srcObject streams here,
+    // which silently reintroduced the exact duplicate/choppy call audio that
+    // fix(calls) 810acca5 had already fixed once (measured on a real call:
+    // clean native audio followed by a delayed, jittery Python-relayed
+    // copy).
     silencePageAudio(el);
     return true;
   };
@@ -533,6 +519,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const attachRemoteVideo = (track: MediaStreamTrack) => {
     if (!track || track.kind !== 'video' || state.remoteVideoIds.has(track.id)) return;
     state.remoteVideoIds.add(track.id);
+    // One-shot: proves attachPeerConnection/the track event/the receiver scan
+    // actually delivered a remote video track at all. If this never appears
+    // in a real call's log, the bug is upstream of everything below.
+    report('remote-video-track', `track=${track.id} kind=${track.kind}`);
     const video = document.createElement('video');
     video.muted = true;
     video.autoplay = true;
@@ -542,11 +532,36 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     const canvas = document.createElement('canvas');
     canvas.width = 640;
     canvas.height = 360;
+    let stalledTicks = 0;
     const timer = win.setInterval(() => {
-      if (track.readyState !== 'live' || !video.videoWidth) return;
+      if (track.readyState !== 'live' || !video.videoWidth) {
+        stalledTicks += 1;
+        // Every ~5s (40 ticks * 125ms) while blocked, not every tick: tells a
+        // log reviewer "track attached but never got real pixels" apart from
+        // the other stages below.
+        if (stalledTicks % 40 === 0) {
+          report(
+            'remote-video-stalled',
+            `readyState=${track.readyState} videoWidth=${video.videoWidth}`
+          );
+        }
+        return;
+      }
       canvas.getContext('2d')?.drawImage(video, 0, 0, 640, 360);
       const jpeg = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-      if (jpeg) win.__winzappOnCallRemoteVideo?.(jpeg).catch?.(() => undefined);
+      if (jpeg) {
+        state.remoteVideoFramesSent += 1;
+        if (
+          state.remoteVideoFramesSent === 1 ||
+          state.remoteVideoFramesSent % 100 === 0
+        ) {
+          report(
+            'remote-video-frame',
+            `sent=${state.remoteVideoFramesSent} track=${track.id}`
+          );
+        }
+        win.__winzappOnCallRemoteVideo?.(jpeg).catch?.(() => undefined);
+      }
     }, 125);
     state.remoteVideoTimers.set(track.id, timer);
     track.addEventListener('ended', () => {
@@ -559,10 +574,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   const ensureContext = () => {
     if (!state.context || state.context.state === 'closed') {
-      state.context = createHardwareIsolatedAudioContext(AudioContextCtor, [{
+      state.context = new AudioContextCtor({
         latencyHint: 'interactive',
         sampleRate: 48000,
-      }]);
+      });
     }
     if (state.context.state === 'suspended') {
       state.context.resume().catch(() => undefined);
@@ -600,45 +615,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     return btoa(binary);
   };
 
-  bridgeAllowedPageAudio = (el: HTMLMediaElement): boolean => {
-    if (linuxAudio) return false;
-    try {
-      if (el.srcObject instanceof MediaStream) return false;
-    } catch (_) {}
-    if (pageAudioBridgePipelines.has(el)) return true;
-
-    try {
-      const context = ensureContext();
-      // MediaElementSource diverts the element from Chromium's hardware
-      // output. Its PCM goes only to the callback below; the connected sink
-      // is zero-gain and exists solely to keep WebAudio scheduling alive.
-      const source = context.createMediaElementSource(el);
-      const processor = context.createScriptProcessor(1024, 1, 1);
-      const sink = context.createGain();
-      sink.gain.value = 0;
-
-      processor.onaudioprocess = (event: AudioProcessingEvent) => {
-        event.outputBuffer.getChannelData(0).fill(0);
-        if (pageAudioNow() > allowCallEndChimeUntil) return;
-        const input = event.inputBuffer.getChannelData(0);
-        const callback = win.__winzappOnCallRemoteAudio;
-        if (typeof callback !== 'function' || !input.length) return;
-        callback(encodePcm16(input), context.sampleRate).catch?.(() => undefined);
-      };
-
-      source.connect(processor);
-      processor.connect(sink);
-      sink.connect(context.destination);
-      pageAudioBridgePipelines.set(el, { source, processor, sink });
-      report('page-speaker-bridge',
-        'src=' + String(el.currentSrc || (el as any).src || '').slice(0, 120));
-      return true;
-    } catch (error: any) {
-      report('page-speaker-bridge-failed',
-        'error=' + String(error?.message || error));
-      return false;
-    }
-  };
   const ensureMicTrack = () => {
     const context = ensureContext();
     if (state.micDestination?.stream?.getAudioTracks?.()[0]?.readyState === 'live') {
@@ -684,10 +660,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   state.enable = () => {
     state.enabled = true;
-    if (pageAudioCleanupTimer !== null) {
-      win.clearTimeout(pageAudioCleanupTimer);
-      pageAudioCleanupTimer = null;
-    }
     ensureMicTrack();
     ensureContext().resume().catch(() => undefined);
     return true;
@@ -726,9 +698,19 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   state.reset = () => {
     // Local reject/end stops the bridge immediately before WhatsApp performs
     // the native action. Arm the terminal-chime exception first so that sound
-    // stays audible even if it starts before the CallStore poll observes ENDED.
-    if (callWasActive || state.enabled) allowCallEndChime();
+    // stays audible even if it starts before the CallStore poll observes
+    // ENDED — but only for a call that was actually answered. A ringing-only
+    // call being rejected/cancelled has no real terminal chime to protect,
+    // and opening this window for it let a coincident missed-call message
+    // ping slip through unmuted (measured 2026-09-20).
+    if (state.enabled) allowCallEndChime();
     state.enabled = false;
+    // Otherwise this survives into the next call: if it starts ringing
+    // before refreshCallAudioPolicy()'s own poll ever observes the idle gap
+    // between the two (a near-immediate redial), callWasAnswered would still
+    // read true from the call this reset() just tore down, wrongly opening
+    // the chime exemption if the NEW call is itself cancelled unanswered.
+    callWasAnswered = false;
     state.micQueue.length = 0;
     state.micOffset = 0;
     for (const pipeline of state.remotePipelines.values()) {
@@ -742,16 +724,6 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     state.remoteVideoTimers.clear();
     state.remoteVideoIds.clear();
     state.localTrackIds.clear();
-
-    // Keep the terminal-call chime bridge alive through its 2.5 s exception
-    // window, then tear down every MediaElementSource/processor graph. A new
-    // call cancels this timer in state.enable().
-    if (!linuxAudio) {
-      if (pageAudioCleanupTimer !== null) {
-        win.clearTimeout(pageAudioCleanupTimer);
-      }
-      pageAudioCleanupTimer = win.setTimeout(cleanupPageAudioBridges, 2750);
-    }
   };
 
   const attachRemoteTrack = (track: MediaStreamTrack) => {
@@ -965,8 +937,13 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   // independently. The only exception is the short terminal-call chime,
   // opened by the lifecycle-aware policy above; ordinary message pings remain
   // muted. Even a WhatsApp Web build that surfaces the remote track through
-  // <audio srcObject=...> is unaffected because srcObject streams bypass this
-  // page-sound mute policy and are read directly from the MediaStreamTrack.
+  // <audio srcObject=...> is muted by this same policy like everything else —
+  // an earlier version exempted srcObject streams here, which let that
+  // element's own native playback run audibly alongside WinZapp's separately
+  // decoded copy (heard on a real call as a clean track followed by a
+  // delayed, jittery duplicate). Muting it is safe because the PCM tap reads
+  // the raw MediaStreamTrack independently of the element's playback/mute
+  // state.
   //
   // --mute-audio cannot be used at the Chromium launch level to get the same
   // effect (see start.js: that flag starves the Chromium audio SERVICE
@@ -1111,6 +1088,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   } catch (_) {}
 
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
+    // Instrumentation only: confirms from wppconnect.log whether the native
+    // VoIP stack (getNativeVoipStack/runNativeVoipAction/warmCallVoipRuntime
+    // — see createSessionUtil.ts) ever actually asks the page for a camera
+    // through this override, or acquires it some other way that would leave
+    // the whole camera bridge below unused. Not a fix by itself.
+    report('get-user-media', `video=${!!constraints.video} audio=${!!constraints.audio}`);
     if (constraints.video) {
       const stream = new MediaStream([cameraTrack()]);
       if (constraints.audio) {
@@ -1436,8 +1419,6 @@ export function registerCallAudioSocket(
     const linuxAudio = ensureLinuxCallAudio(session, socket, logger);
     if (linuxAudio) {
       logger?.info?.(`[${session}] Linux call speaker monitor started before answer`);
-    } else {
-      logger?.info?.(`[${session}] local call speaker bridge uses Python/BASS output`);
     }
   });
 

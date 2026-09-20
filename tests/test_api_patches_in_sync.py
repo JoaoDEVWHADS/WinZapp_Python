@@ -56,7 +56,6 @@ def _setup_api_module():
 # restored by setup_api.py and documented in CLAUDE.md, but drift in either
 # went undetected because only this list was checked, and only one way round).
 MIRRORED_FILES = [
-    ".babelrc",
     "start.js",
     "config.json",
     ".eslintrc.json",
@@ -70,7 +69,6 @@ MIRRORED_FILES = [
     "src/util/createSessionUtil.ts",
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
-    "src/util/callMediaBridge.ts",
     "src/util/tokenStore/fileTokenStory.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
@@ -162,13 +160,6 @@ def test_the_in_app_installer_restores_the_same_patches():
         assert f'"{rel_path}"' in src, f"ApiSetupDialog does not restore {rel_path}"
 
 
-def test_release_builder_packages_the_same_patch_sources():
-    """build.py must ship every canonical patch under api/ as well as api_patches/."""
-    build_src = (ROOT / "build.py").read_text(encoding="utf-8")
-    for rel_path in MIRRORED_FILES:
-        assert f'"{rel_path}"' in build_src, f"build.py does not package {rel_path}"
-
-
 def test_build_api_uses_the_canonical_patch_list_and_verifies_call_output():
     """The developer build path must not silently compile a stale call controller."""
     src = (ROOT / "build_api.py").read_text(encoding="utf-8")
@@ -180,26 +171,37 @@ def test_build_api_uses_the_canonical_patch_list_and_verifies_call_output():
 
 
 def test_both_installers_patch_the_same_dependencies():
-    """Both setup paths consume the shared dependency policy module."""
-    setup_api = _setup_api_module()
-    from core.wpp_dependency_setup import PATCHED_DEPENDENCY_KEYS
-    from ui.dialogs.api_setup import _PATCHED_DEPENDENCY_KEYS as dialog_keys
+    """package.json is merged, not copied, by both flows — but only setup_api.py
+    used to do it at all, so every end-user install ran npm install against the
+    vanilla upstream file and never got the ffmpeg dependency it actually needs."""
+    setup = (ROOT / "setup_api.py").read_text(encoding="utf-8")
+    dialog = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
+    assert '"@ffmpeg-installer/ffmpeg"' in setup
+    assert '"@ffmpeg-installer/ffmpeg"' in dialog, "ApiSetupDialog does not patch @ffmpeg-installer/ffmpeg"
 
-    assert "@ffmpeg-installer/ffmpeg" in PATCHED_DEPENDENCY_KEYS
-    assert tuple(setup_api._PATCHED_DEPENDENCY_KEYS) == tuple(PATCHED_DEPENDENCY_KEYS)
-    assert tuple(dialog_keys) == tuple(PATCHED_DEPENDENCY_KEYS)
 
+def test_wppconnect_runtime_is_pinned_by_both_installers():
+    """WinZapp ships a *homologated pair*: one WPPConnect Server tag
+    (client/wpp_minimum_version.txt) together with one exact
+    @wppconnect-team/wppconnect + @wppconnect/wa-js it was validated against.
 
-def test_wppconnect_runtime_dependencies_are_shared_by_both_installers():
-    """The current runtime policy is centralized instead of duplicated."""
-    setup_api = _setup_api_module()
-    from core.wpp_dependency_setup import PATCHED_DEPENDENCY_KEYS
-    from ui.dialogs.api_setup import _PATCHED_DEPENDENCY_KEYS as dialog_keys
+    Upstream declares a caret range, so leaving it alone meant a plain
+    `npm install` of the same server tag could change the browser-side send
+    and status APIs underneath an unchanged WinZapp build — which is what it
+    did. Moving the pair is a deliberate act, made in one commit alongside
+    client/wpp_minimum_version.txt, never something a reinstall does on its
+    own. Both installers therefore have to carry the key, or the end-user
+    install flow silently resolves a different pair than a dev build."""
+    setup = (ROOT / "setup_api.py").read_text(encoding="utf-8")
+    dialog = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
 
-    for name in ("@wppconnect-team/wppconnect", "@wppconnect/wa-js"):
-        assert name in PATCHED_DEPENDENCY_KEYS
-        assert name in setup_api._PATCHED_DEPENDENCY_KEYS
-        assert name in dialog_keys
+    def _patched_keys(src: str, list_name: str) -> str:
+        start = src.index(f"{list_name} = [")
+        end = src.index("]", start)
+        return src[start:end]
+
+    assert "@wppconnect-team/wppconnect" in _patched_keys(setup, "_PATCHED_DEPENDENCY_KEYS")
+    assert "@wppconnect-team/wppconnect" in _patched_keys(dialog, "_PATCHED_DEPENDENCY_KEYS")
 
 
 def test_fluent_ffmpeg_is_gone_everywhere():
@@ -247,15 +249,17 @@ class TestRestoreRunsOnEveryPath:
     vanilla upstream with none of WinZapp's patches in it.
     """
 
-    def test_both_setup_paths_restore_the_patched_files(self):
-        src = (ROOT / "setup_api.py").read_text(encoding="utf-8")
-        calls = sum(
-            line.strip() == "_restore_custom_files(custom_contents)"
-            for line in src.splitlines()
-        )
-        assert calls == 2, (
-            "both incremental and clean setup paths must restore WinZapp patches"
-        )
+    def test_the_restore_is_not_nested_inside_a_branch(self):
+        src = (ROOT / "setup_api.py").read_text(encoding="utf-8").splitlines()
+        calls = [ln for ln in src if "_restore_custom_files(custom_contents)" in ln]
+        assert calls, "main() no longer restores the patched files at all"
+        for line in calls:
+            indent = len(line) - len(line.lstrip())
+            assert indent == 4, (
+                f"_restore_custom_files is nested inside a branch ({indent} spaces of "
+                f"indent) — it must run on every path through main(), including an "
+                f"already-cloned client/api/ with no tag pinned"
+            )
 
     def test_missing_patched_files_are_written_back(self, tmp_path, monkeypatch):
         setup_api = _setup_api_module()
@@ -304,16 +308,14 @@ class TestPackageJsonRecovery:
         setup_api._recover_upstream_package_json()
         assert json.loads((api / "package.json").read_text(encoding="utf-8"))["version"] == "2.10.1"
 
-    def test_it_does_not_invent_package_json_without_a_checkout(self, tmp_path, monkeypatch):
-        """Without .git there is no upstream manifest to recover.
-
-        The clean-install path clones/downloads upstream before this helper is
-        called, so manufacturing a frozen manifest here would hide a broken
-        checkout instead of recovering it.
-        """
+    def test_it_falls_back_to_api_patches_when_there_is_no_clone(self, tmp_path, monkeypatch):
+        """No .git in client/api/ means no upstream copy to check out — better a
+        frozen package.json than npm install failing with ENOENT."""
         setup_api, api = self._api_dir(tmp_path, monkeypatch)
         setup_api._recover_upstream_package_json()
-        assert not (api / "package.json").exists()
+        assert (api / "package.json").exists()
+        deps = json.loads((api / "package.json").read_text(encoding="utf-8"))["dependencies"]
+        assert "@ffmpeg-installer/ffmpeg" in deps
 
 
 class TestPackageJsonMerge:

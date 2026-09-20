@@ -49,13 +49,18 @@ class _Bar:
 class _Label:
     def __init__(self):
         self.text = ""
-        self.enabled = True
 
     def SetLabel(self, text):
         self.text = text
 
-    def Enable(self, enabled=True):
-        self.enabled = bool(enabled)
+
+class _Button(_Label):
+    def __init__(self):
+        super().__init__()
+        self.enabled = True
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
 
 
 class _I18n:
@@ -132,10 +137,9 @@ class _MainStub:
         self.popups = []
         self.incoming_call_bar = _Bar()
         self.incoming_call_label = _Label()
-        self.incoming_call_answer_button = _Label()
-        self.incoming_call_reject_button = _Label()
-        self.incoming_call_silence_button = _Label()
-        self.incoming_call_stop_button = _Label()
+        self.incoming_call_answer_button = _Button()
+        self.incoming_call_reject_button = _Button()
+        self.incoming_call_stop_button = _Button()
         self.voice_call_bar = _Bar()
         self.voice_call_label = _Label()
         self.layout_calls = 0
@@ -480,6 +484,9 @@ def test_websocket_normalizes_call_state_payload(monkeypatch):
         },
     })
 
+    # peer_jid is folded into the one canonical peerJid key, not kept
+    # alongside it — see on_wpp_call_state()'s own comment on why a second
+    # place to read the peer from is worse than none.
     assert delivered == [{
         "event": "state",
         "state": "ACTIVE",
@@ -531,6 +538,24 @@ def test_websocket_forwards_remote_call_audio_to_main_window():
     })
 
     assert delivered == [(b"\x01\x02\x03", 48000)]
+
+
+def test_websocket_forwards_remote_call_video_and_counts_received_frames():
+    delivered = []
+    stub = SimpleNamespace(
+        instance_name="session-a",
+        _call_remote_video_frames_received=0,
+        main_window=SimpleNamespace(on_call_remote_video=delivered.append),
+    )
+    stub._belongs_to_this_session = WebSocketClient._belongs_to_this_session.__get__(stub)
+
+    WebSocketClient.on_call_video_remote(stub, {
+        "session": "session-a",
+        "jpeg": {"type": "Buffer", "data": [1, 2, 3]},
+    })
+
+    assert delivered == [b"\x01\x02\x03"]
+    assert stub._call_remote_video_frames_received == 1
 
 
 def test_remote_call_audio_uses_ringing_monitor_before_answer():

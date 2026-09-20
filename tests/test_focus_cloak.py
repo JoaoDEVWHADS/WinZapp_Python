@@ -282,13 +282,9 @@ def test_recording_focus_is_not_synthesized_when_suppression_is_requested(
     stub._voice_recording_focus_suppression_enabled = (
         panel_cls._voice_recording_focus_suppression_enabled.__get__(stub)
     )
-    stub._silence_send_voice_focus_if_enabled = (
-        panel_cls._silence_send_voice_focus_if_enabled.__get__(stub)
-    )
 
     btn = _FakeButton()
     moved = panel_cls._focus_recording_button_silently(stub, btn)
 
-    expected_focus = True if panel_module == "status_panel" else should_focus
-    assert btn.focused is expected_focus
-    assert moved is expected_focus
+    assert btn.focused is should_focus
+    assert moved is should_focus

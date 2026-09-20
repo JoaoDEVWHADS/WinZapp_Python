@@ -58,9 +58,11 @@ def test_native_active_call_change_event_promotes_incoming_calls_immediately():
     assert "args.find(" not in source
     assert "const incomingCandidate =" in source
     assert "!!callId" in source
-    assert "!state || isGroupCall(activeCall)" in source
+    # isGroupCall() covers more shapes than a raw `.isGroup` read (isGroupCall,
+    # get('isGroup'), peerJid.isGroupCall()) and isIncomingRingingCall() adds a
+    # dedicated ringing check ahead of the "no state yet" fallback.
+    assert "(isIncomingRingingCall(activeCall) || !state || isGroupCall(activeCall))" in source
     assert "emitIncomingOffer(activeCall, 0, 'activeCallChange')" in source
-    assert "[browser-evaluate] activeCall change" in source
 
 
 def test_incoming_call_emitters_keep_peerless_group_models_by_call_id():
