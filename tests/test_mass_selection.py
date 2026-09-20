@@ -1093,10 +1093,9 @@ class TestMassMessageActions:
         self, fake_delete_dialog, run_threads_inline
     ):
         """A mixed selection with "delete for everyone" chosen: only the
-        eligible (fromMe) messages get a real revoke — the other member's
-        message the user has no right to revoke is still removed from the
-        user's own view, just without calling delete_message_for_everyone
-        for it."""
+        eligible (fromMe) message gets a real revoke and stays in the list as
+        a "message deleted" tombstone. The other member's message cannot be
+        revoked, so it is deleted for me and is the only row removed."""
         fake_delete_dialog["everyone"] = True
         panel = _Panel(messages=[_msg("m1", from_me=True), _msg("m2", from_me=False)])
         panel.selected_messages = {"m1", "m2"}
@@ -1104,7 +1103,13 @@ class TestMassMessageActions:
         assert [k["id"] for _jid, k in panel.main_window.deleted_for_everyone] == ["m1"]
         assert [k["id"] for _jid, k in panel.main_window.deleted_messages] == ["m2"]
         (removed, _focus), = panel.removed_locally
-        assert removed == {"m1", "m2"}
+        assert removed == {"m2"}
+        assert len(panel.main_window.remote_revokes) == 1
+        original, incoming, jid = panel.main_window.remote_revokes[0]
+        assert original["key"]["id"] == "m1"
+        assert incoming["messageType"] == "protocolMessage"
+        assert incoming["message"]["protocolMessage"]["key"] == "m1"
+        assert jid == "grupo@g.us"
 
     def test_a_group_admin_can_delete_for_everyone_even_a_message_not_their_own(
         self, fake_delete_dialog, run_threads_inline
