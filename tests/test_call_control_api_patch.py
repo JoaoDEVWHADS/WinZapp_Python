@@ -338,7 +338,9 @@ def test_local_api_routes_page_audio_through_python_bass_speaker_bridge():
     assert "installHardwareIsolatedAudioContext('AudioContext')" in bridge
     assert "installHardwareIsolatedAudioContext('webkitAudioContext')" in bridge
     assert "Chromium does not support hardware-isolated AudioContext output" in bridge
-    assert "if (linuxAudio) return Reflect.construct(Ctor, args);" in bridge
+    assert "): AudioContext => {" in bridge
+    assert "if (linuxAudio) return Reflect.construct(Ctor, args) as AudioContext;" in bridge
+    assert "Reflect.construct(Ctor, [options]) as AudioContext" in bridge
 
     # RTC HTML playback is muted locally; the page-native terminal chime is
     # diverted through MediaElementSource and its graph is cleaned after grace.

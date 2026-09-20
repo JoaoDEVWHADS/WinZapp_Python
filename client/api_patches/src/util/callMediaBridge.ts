@@ -203,15 +203,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   // controlled Chromium build cannot provide that isolation instead of
   // silently falling back to the Windows default output device.
   const SILENT_AUDIO_SINK = { type: 'none' } as const;
-  const createHardwareIsolatedAudioContext = (Ctor: any, args: any[] = []) => {
-    if (linuxAudio) return Reflect.construct(Ctor, args);
+  const createHardwareIsolatedAudioContext = (
+    Ctor: any,
+    args: any[] = []
+  ): AudioContext => {
+    if (linuxAudio) return Reflect.construct(Ctor, args) as AudioContext;
 
     const first = args[0];
     const options =
       first && typeof first === 'object'
         ? { ...first, sinkId: SILENT_AUDIO_SINK }
         : { sinkId: SILENT_AUDIO_SINK };
-    const context = Reflect.construct(Ctor, [options]);
+    const context = Reflect.construct(Ctor, [options]) as AudioContext;
     const sink = (context as any)?.sinkId;
     if (!sink || typeof sink !== 'object' || sink.type !== 'none') {
       try { context?.close?.(); } catch (_) {}
