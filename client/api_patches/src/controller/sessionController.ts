@@ -1306,6 +1306,67 @@ export async function subscribePresence(req: Request, res: Response) {
       await req.client.subscribePresence(contato);
     };
 
+    const resolvePresenceAliases = async (
+      participantIds: string[]
+    ): Promise<string[]> => {
+      const aliases = new Set<string>(participantIds);
+      const page = (req.client as any).page;
+      if (!page || participantIds.length === 0) {
+        return Array.from(aliases);
+      }
+
+      try {
+        const resolvedAliases: string[] = await page.evaluate(
+          async (ids: string[]) => {
+            const wpp = (window as any).WPP;
+            if (
+              !wpp ||
+              !wpp.contact ||
+              typeof wpp.contact.getPnLidEntry !== 'function'
+            ) {
+              return [];
+            }
+
+            const resolved = new Set<string>();
+            for (const id of ids) {
+              if (!id.endsWith('@lid') && !id.endsWith('@c.us')) {
+                continue;
+              }
+              try {
+                const entry = await wpp.contact.getPnLidEntry(id);
+                const lid = entry?.lid?._serialized;
+                const phoneNumber = entry?.phoneNumber?._serialized;
+                if (typeof lid === 'string' && lid.length > 0) {
+                  resolved.add(lid);
+                }
+                if (
+                  typeof phoneNumber === 'string' &&
+                  phoneNumber.length > 0
+                ) {
+                  resolved.add(phoneNumber);
+                }
+              } catch {
+                // A missing LID/PN mapping for one member must not prevent the
+                // rest of the group's presence subscriptions.
+              }
+            }
+            return Array.from(resolved);
+          },
+          participantIds
+        );
+
+        for (const alias of resolvedAliases) {
+          aliases.add(alias);
+        }
+      } catch (aliasErr) {
+        req.logger.warn(
+          `[subscribePresence] failed to resolve group LID/PN aliases: ${aliasErr}`
+        );
+      }
+
+      return Array.from(aliases);
+    };
+
     const subscribeGroupParticipants = async (groupId: string) => {
       try {
         const chat: any = await req.client.getChatById(groupId);
@@ -1333,12 +1394,13 @@ export async function subscribePresence(req: Request, res: Response) {
           )
         );
 
-        for (const participantId of participantIds) {
-          await subscribeOne(participantId);
+        const presenceIds = await resolvePresenceAliases(participantIds);
+        for (const presenceId of presenceIds) {
+          await subscribeOne(presenceId);
         }
 
         req.logger.info(
-          `[subscribePresence] group participants subscribed: ${groupId} (${participantIds.length})`
+          `[subscribePresence] group participants subscribed: ${groupId} (${participantIds.length} members, ${presenceIds.length} presence ids)`
         );
       } catch (groupErr) {
         req.logger.warn(
