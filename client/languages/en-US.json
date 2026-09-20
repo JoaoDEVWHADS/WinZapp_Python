@@ -1141,5 +1141,13 @@
     "contact_no_number": "This contact card carries no phone number.",
     "profile_restored_from_snapshot": "The browser profile was damaged and has been restored from the last saved copy. Reconnecting to WhatsApp.",
     "profile_corrupted_repair_needed": "The browser profile used to connect to WhatsApp is damaged and there is no saved copy to restore. You will need to disconnect the session and pair again.",
-    "browser_install_broken": "The built-in browser WinZapp uses to connect to WhatsApp is incomplete and cannot start. Open Settings and reinstall the API. If it happens again, add the WinZapp folder to your antivirus exclusions before reinstalling."
+    "browser_install_broken": "The built-in browser WinZapp uses to connect to WhatsApp is incomplete and cannot start. Open Settings and reinstall the API. If it happens again, add the WinZapp folder to your antivirus exclusions before reinstalling.",
+    "group_voice_call_title": "Group voice call",
+    "group_voice_call_participants_label": "Participants",
+    "group_voice_call_participants_column": "Participant",
+    "group_voice_call_toggle_hint": "Press Space to select or deselect a participant.",
+    "group_voice_call_selected_count": "{count} selected",
+    "group_voice_call_start_button": "&Start voice call",
+    "incoming_call_video_not_supported": "Video calls cannot be answered by WinZapp yet.",
+    "incoming_group_call_announcement": "Incoming group call in {name}."
 }
