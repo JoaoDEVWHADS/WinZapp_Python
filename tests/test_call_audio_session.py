@@ -74,9 +74,14 @@ class _SoundDevice:
     default = _Defaults()
     WasapiSettings = _WasapiSettings
 
-    def __init__(self):
+    def __init__(self, *, refuse_exclusive=False, is_windows=True):
         self.input_streams = []
         self.output_streams = []
+        # Simulates a device that refuses exclusive access (e.g. already held
+        # exclusively by another application): opening fails only when the
+        # caller asked for exclusive=True.
+        self.refuse_exclusive = refuse_exclusive
+        self.is_windows = is_windows
         self.devices = [
             {
                 "name": "Mic",
@@ -103,14 +108,20 @@ class _SoundDevice:
         return {"name": "Windows WASAPI"}
 
     def InputStream(self, **kwargs):
+        self._maybe_refuse(kwargs.get("extra_settings"))
         stream = _InputStream(kwargs["callback"])
         self.input_streams.append((kwargs, stream))
         return stream
 
     def OutputStream(self, **kwargs):
+        self._maybe_refuse(kwargs.get("extra_settings"))
         stream = _OutputStream()
         self.output_streams.append((kwargs, stream))
         return stream
+
+    def _maybe_refuse(self, extra_settings):
+        if self.refuse_exclusive and extra_settings is not None and extra_settings.exclusive:
+            raise RuntimeError("device refused exclusive access")
 
 
 def _wait_for(predicate, timeout=1.0):
@@ -306,3 +317,65 @@ def test_output_underflow_is_counted_and_logged(caplog):
     assert any(
         "output stream reported underflow" in record.message for record in caplog.records
     )
+
+
+def test_exclusive_mode_default_is_attempted_first():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+
+    kwargs = sounddevice.output_streams[0][0]
+    assert kwargs["extra_settings"] is not None
+    assert kwargs["extra_settings"].exclusive is True
+    assert kwargs["extra_settings"].auto_convert is True
+
+    session.stop()
+
+
+def test_exclusive_mode_falls_back_to_shared_when_device_refuses(caplog):
+    sio = _Socket()
+    sounddevice = _SoundDevice(refuse_exclusive=True)
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    with caplog.at_level("INFO"):
+        session.start_output_only()
+
+    assert len(sounddevice.output_streams) == 1
+    kwargs = sounddevice.output_streams[0][0]
+    assert kwargs["extra_settings"].exclusive is False
+    assert any(
+        "exclusive mode unavailable, fell back to shared mode for output" in record.message
+        for record in caplog.records
+    )
+
+    session.stop()
+
+
+def test_exclusive_mode_disabled_never_attempts_exclusive():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(
+            session="winzapp", output_device_name="Speaker", exclusive_mode=False
+        ),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+
+    assert len(sounddevice.output_streams) == 1
+    kwargs = sounddevice.output_streams[0][0]
+    assert kwargs["extra_settings"].exclusive is False
+
+    session.stop()

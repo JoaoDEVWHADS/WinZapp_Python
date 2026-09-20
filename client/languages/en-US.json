@@ -832,6 +832,7 @@
     "tab_calls": "Calls",
     "calls_alerts_enabled_label": "Allow incoming call alerts",
     "calls_popup_enabled_label": "Open a window when a call comes in",
+    "calls_exclusive_mode_label": "Use exclusive mode during calls",
     "tab_profile_backup": "Profile backup",
     "profile_backup_close_hours_label": "Minimum time between profile backups taken when closing WinZapp (hours, 0 = on every close)",
     "profile_backup_live_label": "Also back up the profile while WinZapp is open (WhatsApp is disconnected while the backup runs)",

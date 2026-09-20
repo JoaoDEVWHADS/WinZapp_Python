@@ -832,6 +832,7 @@
     "tab_calls": "Llamadas",
     "calls_alerts_enabled_label": "Permitir alertas de llamadas entrantes",
     "calls_popup_enabled_label": "Abrir una ventana al recibir una llamada",
+    "calls_exclusive_mode_label": "Usar modo exclusivo durante las llamadas",
     "tab_profile_backup": "Copia de seguridad",
     "profile_backup_close_hours_label": "Tiempo mínimo entre las copias de seguridad del perfil hechas al cerrar WinZapp (horas, 0 = cada vez que se cierra)",
     "profile_backup_live_label": "Hacer la copia de seguridad también con WinZapp abierto (WhatsApp queda desconectado mientras se hace)",

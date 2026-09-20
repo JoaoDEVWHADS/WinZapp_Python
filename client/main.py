@@ -6211,6 +6211,7 @@ class MainWindow(wx.Frame):
         audio_settings = self.settings.get("call_audio_devices", {})
         input_name = audio_settings.get("input_device_name", "")
         output_name = audio_settings.get("output_device_name", "")
+        exclusive_mode = bool(audio_settings.get("exclusive_mode", True))
         session_name = str(getattr(ws, "instance_name", "") or self.token).split(":", 1)[0]
         audio = CallAudioSession(
             sio,
@@ -6218,6 +6219,7 @@ class MainWindow(wx.Frame):
                 session=session_name,
                 input_device_name=input_name,
                 output_device_name=output_name,
+                exclusive_mode=exclusive_mode,
             ),
         )
         return audio, session_name

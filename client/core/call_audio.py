@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import logging
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ class CallAudioConfig:
     session: str
     input_device_name: str = ""
     output_device_name: str = ""
+    exclusive_mode: bool = True
 
 
 class CallAudioUnavailable(RuntimeError):
@@ -263,61 +265,109 @@ class CallAudioSession:
     # opt-in, never the fallback — so the extra settings changed nothing about
     # exclusivity and only routed every call through WASAPI's own format
     # converter (auto_convert), which measurably added the choppy, high-
-    # latency playback reported after this landed. Removed together with the
-    # fixed device latency below, restoring the "low" latency + no
-    # extra_settings pairing calls used before either regressed. If device
-    # exclusivity is ever observed for real, revisit here — the hostapi/
-    # WasapiSettings lookup this used to do is still the right shape, just
-    # apply it deliberately (e.g. only exclusive=True detection) rather than
-    # unconditionally on every stream.
+    # latency playback reported after this landed. Now that exclusive mode is
+    # a real, deliberate feature (settings["call_audio_devices"]["exclusive_mode"]),
+    # auto_convert is kept in BOTH modes as a resilience fallback — it only
+    # engages if the exact requested rate/format cannot be opened as-is, so it
+    # does not reintroduce the earlier regression, which came from forcing
+    # shared mode with no exclusive option, not from auto_convert itself.
+    def _stream_extra_settings(self, device_index, *, input_device, exclusive):
+        if sys.platform != "win32":
+            return None
+        actual_index = device_index
+        if actual_index is None:
+            actual_index = self._default_device_index(input_device=input_device)
+        if actual_index is None:
+            return None
+        try:
+            info = self._sd.query_devices(actual_index)
+            hostapi = self._sd.query_hostapis(int(info.get("hostapi", -1)))
+            if "wasapi" not in str(hostapi.get("name", "")).lower():
+                return None
+            settings_type = getattr(self._sd, "WasapiSettings", None)
+            if settings_type is None:
+                return None
+            return settings_type(exclusive=exclusive, auto_convert=True)
+        except Exception:
+            logging.debug(
+                "[call_audio] could not apply WASAPI settings (exclusive=%s)", exclusive, exc_info=True,
+            )
+            return None
 
     def _open_input_stream(self):
         last_error = None
-        for device in self._candidate_devices(self._config.input_device_name, input_device=True):
-            for rate in self._candidate_rates(device):
-                try:
-                    stream = self._sd.InputStream(
-                        samplerate=rate,
-                        blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
-                        device=device,
-                        channels=1,
-                        dtype="float32",
-                        latency="low",
-                        callback=self._on_microphone_frame(rate),
-                    )
-                    logging.info(
-                        "[call_audio] input opened device=%r rate=%s latency=%r",
-                        device,
-                        rate,
-                        getattr(stream, "latency", "low"),
-                    )
-                    return stream, rate
-                except Exception as exc:
-                    last_error = exc
+        # Exclusive mode is attempted first (unless the user opted out), across
+        # the whole device/rate matrix; only once that entire space is
+        # exhausted does the same matrix get retried in shared mode. A single
+        # device refusing exclusive access must not fall back to a worse
+        # device — it should fall back to the same device in shared mode.
+        exclusive_attempts = [True, False] if self._config.exclusive_mode else [False]
+        for attempt_index, exclusive in enumerate(exclusive_attempts):
+            for device in self._candidate_devices(self._config.input_device_name, input_device=True):
+                for rate in self._candidate_rates(device):
+                    try:
+                        extra_settings = self._stream_extra_settings(
+                            device, input_device=True, exclusive=exclusive
+                        )
+                        stream = self._sd.InputStream(
+                            samplerate=rate,
+                            blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
+                            device=device,
+                            channels=1,
+                            dtype="float32",
+                            latency="low",
+                            extra_settings=extra_settings,
+                            callback=self._on_microphone_frame(rate),
+                        )
+                        if attempt_index > 0:
+                            logging.info(
+                                "[call_audio] exclusive mode unavailable, fell back to shared mode for input"
+                            )
+                        logging.info(
+                            "[call_audio] input opened device=%r rate=%s latency=%r exclusive=%s",
+                            device,
+                            rate,
+                            getattr(stream, "latency", "low"),
+                            exclusive,
+                        )
+                        return stream, rate
+                    except Exception as exc:
+                        last_error = exc
         raise CallAudioUnavailable(f"No microphone could be opened for the call: {last_error}")
 
     def _open_output_stream(self):
         last_error = None
-        for device in self._candidate_devices(self._config.output_device_name, input_device=False):
-            for rate in self._candidate_rates(device):
-                try:
-                    stream = self._sd.OutputStream(
-                        samplerate=rate,
-                        blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
-                        device=device,
-                        channels=1,
-                        dtype="float32",
-                        latency="low",
-                    )
-                    logging.info(
-                        "[call_audio] output opened device=%r rate=%s latency=%r",
-                        device,
-                        rate,
-                        getattr(stream, "latency", "low"),
-                    )
-                    return stream, rate
-                except Exception as exc:
-                    last_error = exc
+        exclusive_attempts = [True, False] if self._config.exclusive_mode else [False]
+        for attempt_index, exclusive in enumerate(exclusive_attempts):
+            for device in self._candidate_devices(self._config.output_device_name, input_device=False):
+                for rate in self._candidate_rates(device):
+                    try:
+                        extra_settings = self._stream_extra_settings(
+                            device, input_device=False, exclusive=exclusive
+                        )
+                        stream = self._sd.OutputStream(
+                            samplerate=rate,
+                            blocksize=max(1, int(rate * CALL_FRAME_MS / 1000)),
+                            device=device,
+                            channels=1,
+                            dtype="float32",
+                            latency="low",
+                            extra_settings=extra_settings,
+                        )
+                        if attempt_index > 0:
+                            logging.info(
+                                "[call_audio] exclusive mode unavailable, fell back to shared mode for output"
+                            )
+                        logging.info(
+                            "[call_audio] output opened device=%r rate=%s latency=%r exclusive=%s",
+                            device,
+                            rate,
+                            getattr(stream, "latency", "low"),
+                            exclusive,
+                        )
+                        return stream, rate
+                    except Exception as exc:
+                        last_error = exc
         raise CallAudioUnavailable(f"No speaker could be opened for the call: {last_error}")
 
     def _on_microphone_frame(self, source_rate: int):

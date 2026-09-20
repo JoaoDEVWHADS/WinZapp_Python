@@ -916,7 +916,8 @@ DEFAULT_SETTINGS = {
     # silently become the microphone used to record voice messages.
     "call_audio_devices": {
         "output_device_name": "",
-        "input_device_name": ""
+        "input_device_name": "",
+        "exclusive_mode": True
     },
     "accessibility": {
         "extended_sr_compat_enabled": True,

@@ -832,6 +832,7 @@
     "tab_calls": "Połączenia",
     "calls_alerts_enabled_label": "Zezwalaj na alerty o połączeniach przychodzących",
     "calls_popup_enabled_label": "Otwieraj okno przy połączeniu przychodzącym",
+    "calls_exclusive_mode_label": "Używaj trybu wyłącznego urządzenia audio podczas połączenia",
     "tab_profile_backup": "Kopia zapasowa",
     "profile_backup_close_hours_label": "Minimalny odstęp między kopiami zapasowymi profilu tworzonymi przy zamykaniu WinZapp (godziny, 0 = przy każdym zamknięciu)",
     "profile_backup_live_label": "Twórz kopię zapasową także przy otwartym WinZapp (WhatsApp jest rozłączony podczas jej tworzenia)",
