@@ -53,7 +53,11 @@ def test_audio_graph_hook_never_routes_the_synthetic_microphone_to_speakers():
     source = (ROOT / "client/api_patches/src/util/callMediaBridge.ts").read_text(encoding="utf-8")
     assert "localTrackIds: new Set<string>()" in source
     assert "if (state.localTrackIds.has(id)) return;" in source
-    assert source.count("state.localTrackIds.add(micTrack.id)") == 1
+    # Two legitimate call sites since video calls were added: the
+    # video+audio branch of bridgedGetUserMedia() clones its own mic track
+    # ahead of the audio-only branch below it, and each has to tag its own
+    # clone or that branch's synthetic microphone would leak into speakers.
+    assert source.count("state.localTrackIds.add(micTrack.id)") == 2
 
 
 def test_microphone_bridge_does_not_replace_webrtc_tracks_after_call_setup():

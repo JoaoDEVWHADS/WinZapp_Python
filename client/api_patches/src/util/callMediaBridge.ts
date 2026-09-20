@@ -968,6 +968,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   } catch (_) {}
 
   const bridgedGetUserMedia = async (constraints: MediaStreamConstraints = {}) => {
+    // Instrumentation only: confirms from evolution.log whether the native
+    // VoIP stack (getNativeVoipStack/runNativeVoipAction/warmCallVoipRuntime
+    // — see createSessionUtil.ts) ever actually asks the page for a camera
+    // through this override, or acquires it some other way that would leave
+    // the whole camera bridge below unused. Not a fix by itself.
+    report('get-user-media', `video=${!!constraints.video} audio=${!!constraints.audio}`);
     if (constraints.video) {
       const stream = new MediaStream([cameraTrack()]);
       if (constraints.audio) {
