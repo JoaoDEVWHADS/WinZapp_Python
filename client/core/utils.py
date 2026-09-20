@@ -1078,9 +1078,16 @@ def looks_like_binary_blob(value) -> bool:
     # Common base64 image/data signatures (JPEG, PNG, GIF, SVG, data URIs).
     if s.startswith(("/9j/", "iVBORw0", "R0lGOD", "data:image", "PHN2Zy", "JVBER")):
         return True
-    # A long, spaceless string drawn entirely from the base64 alphabet is
-    # overwhelmingly binary data rather than a human name.
+    # A long, spaceless string drawn entirely from the base64 alphabet can
+    # still be legitimate chat text.  In particular, a long run of letters
+    # (reported live as an ordinary message such as "fflsdjlfjsdklf...") also
+    # matches the base64 alphabet and used to be rendered as
+    # "unsupported/incompatible message".  Real base64 binary blobs of this
+    # size almost always contain at least one digit or base64 punctuation;
+    # common image/data signatures above remain authoritative regardless.
     if len(s) > 64 and " " not in s and re.fullmatch(r"[A-Za-z0-9+/=_-]+", s):
+        if s.isalpha():
+            return False
         return True
     return False
 
