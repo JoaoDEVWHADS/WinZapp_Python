@@ -124,6 +124,12 @@ from ui.conversations import (
     ConversationsPanel, ArchivedConversationsPanel, probe_media_duration,
 )
 from status_panel import StatusPanel
+from ui.accessible import (
+    AccessibleCallEndButton,
+    AccessibleCallMuteButton,
+    AccessibleCallSettingsButton,
+    AccessibleCallVideoToggleButton,
+)
 from version import __version__
 from window_title import format_window_title
 import json
@@ -2727,6 +2733,10 @@ class MainWindow(wx.Frame):
         self.voice_call_window_mute_button = wx.Button(call_panel, label=self.i18n.t("voice_call_mute_button"))
         self.voice_call_window_video_button = wx.Button(call_panel, label=self.i18n.t("voice_call_video_off_button"))
         self.voice_call_window_video_button.Hide()
+        self.voice_call_window_end_button.SetAccessible(AccessibleCallEndButton())
+        self.voice_call_window_settings_button.SetAccessible(AccessibleCallSettingsButton())
+        self.voice_call_window_mute_button.SetAccessible(AccessibleCallMuteButton())
+        self.voice_call_window_video_button.SetAccessible(AccessibleCallVideoToggleButton())
         self.voice_call_window_end_button.Bind(wx.EVT_BUTTON, self.end_active_call)
         self.voice_call_window_settings_button.Bind(wx.EVT_BUTTON, self.open_call_audio_settings)
         self.voice_call_window_mute_button.Bind(wx.EVT_BUTTON, self.toggle_call_microphone)
@@ -2739,6 +2749,27 @@ class MainWindow(wx.Frame):
         call_sizer.Add(controls, 0, wx.EXPAND)
         call_panel.SetSizer(call_sizer)
         self.voice_call_window.Bind(wx.EVT_CLOSE, self._on_voice_call_window_close)
+
+        # Dedicated Ctrl-based shortcuts for the four call controls, reported
+        # to screen readers by the AccessibleCall* classes above — this is a
+        # standalone top-level window (see the note on parenting above), so
+        # its own accelerator table can't collide with MainWindow's or
+        # ConversationsPanel's.
+        self.ID_CALL_END      = wx.NewIdRef()  # end call            (Ctrl+Shift+Q)
+        self.ID_CALL_MUTE     = wx.NewIdRef()  # mute/unmute mic     (Ctrl+M)
+        self.ID_CALL_SETTINGS = wx.NewIdRef()  # call settings       (Ctrl+C)
+        self.ID_CALL_VIDEO    = wx.NewIdRef()  # toggle video        (Ctrl+V)
+        call_accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("Q"), self.ID_CALL_END),
+            (wx.ACCEL_CTRL,                  ord("M"), self.ID_CALL_MUTE),
+            (wx.ACCEL_CTRL,                  ord("C"), self.ID_CALL_SETTINGS),
+            (wx.ACCEL_CTRL,                  ord("V"), self.ID_CALL_VIDEO),
+        ])
+        self.voice_call_window.SetAcceleratorTable(call_accel_tbl)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.end_active_call,          id=self.ID_CALL_END)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.toggle_call_microphone,   id=self.ID_CALL_MUTE)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.open_call_audio_settings, id=self.ID_CALL_SETTINGS)
+        self.voice_call_window.Bind(wx.EVT_MENU, self.toggle_call_video,        id=self.ID_CALL_VIDEO)
         self.voice_call_window.Hide()
 
         self.main_panel = wx.Panel(self)

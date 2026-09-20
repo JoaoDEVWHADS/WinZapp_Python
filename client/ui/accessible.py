@@ -123,6 +123,41 @@ class AccessibleVideoCallButton(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Alt+Shift+V")
 
 
+class AccessibleCallEndButton(wx.Accessible):
+    """Reports Ctrl+Shift+Q as the keyboard shortcut for the active-call
+    window's end-call button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+Q")
+
+
+class AccessibleCallMuteButton(wx.Accessible):
+    """Reports Ctrl+M as the keyboard shortcut for the active-call window's
+    mute/unmute microphone button — same shortcut whether the button is
+    currently offering to mute or unmute, so it stays accurate across the
+    label swap."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+M")
+
+
+class AccessibleCallSettingsButton(wx.Accessible):
+    """Reports Ctrl+C as the keyboard shortcut for the active-call window's
+    settings button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+C")
+
+
+class AccessibleCallVideoToggleButton(wx.Accessible):
+    """Reports Ctrl+V as the keyboard shortcut for the active-call window's
+    video on/off toggle button — same shortcut regardless of which state
+    it's in."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+V")
+
+
 class AccessibleAddAttachmentButton(wx.Accessible):
     """Reports Ctrl+Shift+A as the keyboard shortcut for the Add Attachment button."""
 
