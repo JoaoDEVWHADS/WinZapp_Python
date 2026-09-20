@@ -177,6 +177,37 @@ def test_call_audio_session_plays_remote_pcm_on_python_output_device():
     session.stop()
 
 
+def test_call_audio_session_paces_output_writes_instead_of_bursting():
+    """A multi-frame backlog must drain one 20 ms frame at a time, not all at
+    once. Bursting relies on stream.write() blocking for the right amount of
+    time, which only holds if the device's own buffer is close to one frame
+    deep — a Bluetooth headset settling PortAudio's "low" latency preset at
+    100 ms (five frames) has room to accept a whole burst without blocking at
+    all, which real hardware plays back as choppy even though nothing ever
+    underflows or rebuffers (see _play_remote_loop)."""
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+    session.start()
+
+    samples = np.full(CALL_FRAME_SAMPLES * 5, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
+    session.enqueue_remote_audio(pcm, 48000)
+
+    output_stream = sounddevice.output_streams[0][1]
+    assert _wait_for(lambda: bool(output_stream.writes))
+    time.sleep(0.01)
+    assert len(output_stream.writes) < 5
+
+    assert _wait_for(lambda: len(output_stream.writes) >= 5, timeout=1.0)
+
+    session.stop()
+
+
 def test_call_audio_session_prebuffers_remote_pcm_before_playback():
     sio = _Socket()
     sounddevice = _SoundDevice()

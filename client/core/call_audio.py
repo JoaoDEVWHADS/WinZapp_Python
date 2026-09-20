@@ -459,10 +459,51 @@ class CallAudioSession:
         sounded like short cuts. Keep only a small reservoir, re-prime after a
         real starvation, and discard old receive audio if a long stall ever
         builds an excessive backlog.
+
+        The reservoir alone is not enough: once primed, draining it as fast as
+        `stream.write()` allows relies entirely on that call blocking for the
+        right amount of time, which only holds if the device's own buffer is
+        close to one frame deep. A device whose driver reports a much larger
+        buffer (measured: a Bluetooth headset settling PortAudio's "low"
+        latency preset at 100 ms, five times a 20 ms frame) has room to accept
+        several queued frames without blocking at all — every one lands in a
+        burst instead of one every 20 ms, which real audio hardware (Bluetooth
+        especially) plays back as glitchy/choppy even though nothing ever
+        underflows or rebuffers. Pace every write against a wall-clock
+        deadline instead of trusting the device to do it.
         """
         pending = np.empty(0, dtype=np.float32)
         primed = False
         priming_started_at: Optional[float] = None
+        frame_interval = CALL_FRAME_MS / 1000.0
+        next_write_at: Optional[float] = None
+
+        def _pace_and_write(frame: np.ndarray) -> None:
+            nonlocal next_write_at
+            now = time.monotonic()
+            if next_write_at is None:
+                next_write_at = now
+            elif next_write_at > now:
+                time.sleep(next_write_at - now)
+            elif now - next_write_at > frame_interval * 4:
+                # Fell far behind — a genuine stall, not just scheduler
+                # jitter. Resync to now instead of bursting several frames
+                # back to back to "catch up", which is the exact pattern
+                # this pacing exists to avoid.
+                next_write_at = now
+            next_write_at += frame_interval
+            if self._output_stream is not None:
+                underflowed = self._output_stream.write(frame.reshape(-1, 1))
+                if underflowed:
+                    self._output_underflow_count += 1
+                    if (
+                        self._output_underflow_count == 1
+                        or self._output_underflow_count % 50 == 0
+                    ):
+                        logging.info(
+                            "[call_audio] output stream reported underflow count=%s",
+                            self._output_underflow_count,
+                        )
 
         while not self._stop_event.is_set():
             frame_samples = max(1, int(self._output_rate * CALL_FRAME_MS / 1000))
@@ -489,18 +530,7 @@ class CallAudioSession:
                 frame = pending[:frame_samples]
                 pending = pending[frame_samples:]
                 try:
-                    if self._output_stream is not None:
-                        underflowed = self._output_stream.write(frame.reshape(-1, 1))
-                        if underflowed:
-                            self._output_underflow_count += 1
-                            if (
-                                self._output_underflow_count == 1
-                                or self._output_underflow_count % 50 == 0
-                            ):
-                                logging.info(
-                                    "[call_audio] output stream reported underflow count=%s",
-                                    self._output_underflow_count,
-                                )
+                    _pace_and_write(frame)
                 except Exception:
                     logging.exception("[call_audio] failed to play remote call audio")
                     time.sleep(0.01)
@@ -517,18 +547,7 @@ class CallAudioSession:
                 )
                 pending = np.empty(0, dtype=np.float32)
                 try:
-                    if self._output_stream is not None:
-                        underflowed = self._output_stream.write(frame.reshape(-1, 1))
-                        if underflowed:
-                            self._output_underflow_count += 1
-                            if (
-                                self._output_underflow_count == 1
-                                or self._output_underflow_count % 50 == 0
-                            ):
-                                logging.info(
-                                    "[call_audio] output stream reported underflow count=%s",
-                                    self._output_underflow_count,
-                                )
+                    _pace_and_write(frame)
                 except Exception:
                     logging.exception("[call_audio] failed to play remote call audio")
                     time.sleep(0.01)
@@ -546,6 +565,7 @@ class CallAudioSession:
                 if primed:
                     primed = False
                     priming_started_at = now if pending.size else None
+                    next_write_at = None
                     self._output_rebuffer_count += 1
                     if self._output_rebuffer_count == 1 or self._output_rebuffer_count % 10 == 0:
                         logging.info(
