@@ -23,9 +23,13 @@ class _Sound:
 class _Dialog:
     def __init__(self):
         self.closed = False
+        self.refreshed_messages = []
 
     def close_from_call_lifecycle(self):
         self.closed = True
+
+    def refresh_labels(self, message=None):
+        self.refreshed_messages.append(message)
 
 
 class _Bar:
@@ -50,10 +54,20 @@ class _Label:
         self.text = text
 
 
+class _Button(_Label):
+    def __init__(self):
+        super().__init__()
+        self.enabled = True
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+
 class _I18n:
     def t(self, key):
         return {
             "incoming_call_announcement": "{name} está te ligando.",
+            "incoming_video_call_announcement": "{name} está te ligando por vídeo.",
             "incoming_group_call_announcement": "Chamada em grupo recebida no grupo {name}.",
             "unknown_contact": "Contato desconhecido",
             "unknown_group": "Grupo sem nome",
@@ -87,11 +101,13 @@ class _MainStub:
     stop_all_incoming_call_alerts = MainWindow.stop_all_incoming_call_alerts
     _close_incoming_call_dialog = MainWindow._close_incoming_call_dialog
     _sync_incoming_call_bar = MainWindow._sync_incoming_call_bar
+    _refresh_call_language_surfaces = MainWindow._refresh_call_language_surfaces
     _first_incoming_call_identity = MainWindow._first_incoming_call_identity
     _call_control_payload = MainWindow._call_control_payload
     _stop_active_voice_call_if_matches = MainWindow._stop_active_voice_call_if_matches
     on_call_remote_audio = MainWindow.on_call_remote_audio
     on_voice_call_state_event = MainWindow.on_voice_call_state_event
+    _stop_incoming_call_audio_monitor = MainWindow._stop_incoming_call_audio_monitor
     # The real bridged comparison, not string equality: the whole point of
     # core/call_matching.py is that one call's events do not agree on whether
     # the peer is an @lid or a phone JID.
@@ -105,6 +121,9 @@ class _MainStub:
         self._incoming_call_dialogs = {}
         self._active_voice_call = None
         self._call_audio_session = None
+        self._call_ring_audio_session = None
+        self.ring_monitor_starts = []
+        self.ring_monitor_stops = 0
         self.call_incoming_sound = _Sound()
         self.settings = {"calls": {"alerts_enabled": True, "popup_enabled": True}}
         self.i18n = _I18n()
@@ -118,6 +137,9 @@ class _MainStub:
         self.popups = []
         self.incoming_call_bar = _Bar()
         self.incoming_call_label = _Label()
+        self.incoming_call_answer_button = _Button()
+        self.incoming_call_reject_button = _Button()
+        self.incoming_call_stop_button = _Button()
         self.voice_call_bar = _Bar()
         self.voice_call_label = _Label()
         self.layout_calls = 0
@@ -145,6 +167,14 @@ class _MainStub:
     def Layout(self):
         self.layout_calls += 1
 
+    def _start_incoming_call_audio_monitor(self, identity):
+        self.ring_monitor_starts.append(identity)
+        return True
+
+    def _stop_incoming_call_audio_monitor(self):
+        self.ring_monitor_stops += 1
+        self._call_ring_audio_session = None
+
 
 def _offer(call_id="call-1", peer="5511999999999@s.whatsapp.net"):
     return {
@@ -168,6 +198,7 @@ def test_offer_announces_and_starts_loop_only_once():
         "call-1": "5511999999999@s.whatsapp.net"
     }
     assert stub.popups == [("call-1", "Fulano está te ligando.")]
+    assert stub.ring_monitor_starts == ["call-1"]
 
 
 def test_disabled_call_alerts_ignore_new_offer():
@@ -212,9 +243,7 @@ def test_offer_stores_call_details_for_real_answer_or_reject():
     assert stub._incoming_call_details["call-1"] == {
         "call_id": "call-1",
         "peer_jid": "5511999999999@s.whatsapp.net",
-        "group_jid": "",
         "is_video": False,
-        "is_group": False,
         "name": "Fulano",
         "message": "Fulano está te ligando.",
     }
@@ -276,7 +305,7 @@ def test_in_window_stop_button_clears_non_popup_call_surface():
     assert stub.call_incoming_sound.stop_calls == 1
 
 
-def test_group_offer_announces_group_name_without_changing_personal_resolution():
+def test_group_offer_is_ignored():
     stub = _MainStub()
     group_jid = "120363427511142886@g.us"
     stub.chats[group_jid] = {
@@ -288,9 +317,19 @@ def test_group_offer_announces_group_name_without_changing_personal_resolution()
     event.update({"isGroup": True, "groupJid": group_jid})
     stub.on_incoming_call_event(event)
 
-    assert stub.announcements == [
-        ("Chamada em grupo recebida no grupo Família.", True)
-    ]
+    assert stub.announcements == []
+    assert stub._active_incoming_calls == {}
+
+
+def test_video_offer_announces_and_can_be_answered():
+    stub = _MainStub()
+    event = _offer()
+    event["isVideo"] = True
+
+    stub.on_incoming_call_event(event)
+
+    assert stub.announcements == [("Fulano está te ligando por vídeo.", True)]
+    assert stub._incoming_call_details["call-1"]["is_video"] is True
 
 
 def test_answered_or_ended_state_stops_the_tone():
@@ -306,6 +345,7 @@ def test_answered_or_ended_state_stops_the_tone():
     assert stub.cancelled_watchdogs == ["call-1"]
     assert dialog.closed is True
     assert stub._incoming_call_dialogs == {}
+    assert stub.ring_monitor_stops == 1
 
 
 def test_ringing_state_update_does_not_stop_the_tone():
@@ -444,6 +484,9 @@ def test_websocket_normalizes_call_state_payload(monkeypatch):
         },
     })
 
+    # peer_jid is folded into the one canonical peerJid key, not kept
+    # alongside it — see on_wpp_call_state()'s own comment on why a second
+    # place to read the peer from is worse than none.
     assert delivered == [{
         "event": "state",
         "state": "ACTIVE",
@@ -495,3 +538,53 @@ def test_websocket_forwards_remote_call_audio_to_main_window():
     })
 
     assert delivered == [(b"\x01\x02\x03", 48000)]
+
+
+def test_websocket_forwards_remote_call_video_and_counts_received_frames():
+    delivered = []
+    stub = SimpleNamespace(
+        instance_name="session-a",
+        _call_remote_video_frames_received=0,
+        main_window=SimpleNamespace(on_call_remote_video=delivered.append),
+    )
+    stub._belongs_to_this_session = WebSocketClient._belongs_to_this_session.__get__(stub)
+
+    WebSocketClient.on_call_video_remote(stub, {
+        "session": "session-a",
+        "jpeg": {"type": "Buffer", "data": [1, 2, 3]},
+    })
+
+    assert delivered == [b"\x01\x02\x03"]
+    assert stub._call_remote_video_frames_received == 1
+
+
+def test_remote_call_audio_uses_ringing_monitor_before_answer():
+    stub = _MainStub()
+    received = []
+    stub._call_ring_audio_session = SimpleNamespace(
+        enqueue_remote_audio=lambda pcm, sample_rate: received.append((pcm, sample_rate))
+    )
+
+    stub.on_call_remote_audio(b"\x03\x04", 48000)
+
+    assert received == [(b"\x03\x04", 48000)]
+
+
+def test_language_change_retranslates_an_already_ringing_call():
+    stub = _MainStub()
+    stub._active_incoming_calls["call-1"] = "5511999999999@s.whatsapp.net"
+    stub._incoming_call_details["call-1"] = {
+        "call_id": "call-1",
+        "peer_jid": "5511999999999@s.whatsapp.net",
+        "is_video": True,
+        "name": "Fulano",
+        "message": "OLD LANGUAGE",
+    }
+    dialog = _Dialog()
+    stub._incoming_call_dialogs["call-1"] = dialog
+
+    stub._refresh_call_language_surfaces()
+
+    expected = "Fulano está te ligando por vídeo."
+    assert stub._incoming_call_details["call-1"]["message"] == expected
+    assert dialog.refreshed_messages == [expected]

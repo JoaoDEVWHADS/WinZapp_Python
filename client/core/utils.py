@@ -916,7 +916,14 @@ DEFAULT_SETTINGS = {
     # silently become the microphone used to record voice messages.
     "call_audio_devices": {
         "output_device_name": "",
-        "input_device_name": ""
+        "input_device_name": "",
+        "exclusive_mode": False
+    },
+    # Camera choice for video calls, deliberately its own section for the
+    # same reason as call_audio_devices above: swap devices per-call without
+    # touching any other camera-using feature.
+    "call_video_devices": {
+        "camera_name": ""
     },
     "accessibility": {
         "extended_sr_compat_enabled": True,

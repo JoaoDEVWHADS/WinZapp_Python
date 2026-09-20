@@ -3,7 +3,12 @@ import time
 
 import numpy as np
 
-from core.call_audio import CallAudioConfig, CallAudioSession
+from core.call_audio import (
+    CALL_FRAME_SAMPLES,
+    CALL_MIC_TARGET_BACKLOG_FRAMES,
+    CallAudioConfig,
+    CallAudioSession,
+)
 
 
 class _Socket:
@@ -37,12 +42,16 @@ class _OutputStream:
         self.started = False
         self.closed = False
         self.writes = []
+        # PortAudio's OutputStream.write() returns a bool signalling an
+        # underrun on that call; tests flip this to exercise the counter.
+        self.report_underflow = False
 
     def start(self):
         self.started = True
 
     def write(self, samples):
         self.writes.append(np.asarray(samples).copy())
+        return self.report_underflow
 
     def stop(self):
         self.started = False
@@ -51,13 +60,43 @@ class _OutputStream:
         self.closed = True
 
 
+class _Defaults:
+    device = (0, 1)
+
+
+class _WasapiSettings:
+    def __init__(self, *, exclusive=False, auto_convert=False):
+        self.exclusive = exclusive
+        self.auto_convert = auto_convert
+
+
 class _SoundDevice:
-    def __init__(self):
+    default = _Defaults()
+    WasapiSettings = _WasapiSettings
+
+    def __init__(self, *, refuse_exclusive=False, is_windows=True):
         self.input_streams = []
         self.output_streams = []
+        # Simulates a device that refuses exclusive access (e.g. already held
+        # exclusively by another application): opening fails only when the
+        # caller asked for exclusive=True.
+        self.refuse_exclusive = refuse_exclusive
+        self.is_windows = is_windows
         self.devices = [
-            {"name": "Mic", "max_input_channels": 1, "max_output_channels": 0, "default_samplerate": 48000},
-            {"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2, "default_samplerate": 48000},
+            {
+                "name": "Mic",
+                "max_input_channels": 1,
+                "max_output_channels": 0,
+                "default_samplerate": 48000,
+                "hostapi": 0,
+            },
+            {
+                "name": "Speaker",
+                "max_input_channels": 0,
+                "max_output_channels": 2,
+                "default_samplerate": 48000,
+                "hostapi": 0,
+            },
         ]
 
     def query_devices(self, device=None):
@@ -65,15 +104,24 @@ class _SoundDevice:
             return self.devices
         return self.devices[int(device)]
 
+    def query_hostapis(self, index=None):
+        return {"name": "Windows WASAPI"}
+
     def InputStream(self, **kwargs):
+        self._maybe_refuse(kwargs.get("extra_settings"))
         stream = _InputStream(kwargs["callback"])
         self.input_streams.append((kwargs, stream))
         return stream
 
     def OutputStream(self, **kwargs):
+        self._maybe_refuse(kwargs.get("extra_settings"))
         stream = _OutputStream()
         self.output_streams.append((kwargs, stream))
         return stream
+
+    def _maybe_refuse(self, extra_settings):
+        if self.refuse_exclusive and extra_settings is not None and extra_settings.exclusive:
+            raise RuntimeError("device refused exclusive access")
 
 
 def _wait_for(predicate, timeout=1.0):
@@ -118,11 +166,237 @@ def test_call_audio_session_plays_remote_pcm_on_python_output_device():
     )
     session.start()
 
-    pcm = (np.array([0.1, -0.1, 0.0], dtype=np.float32) * 32767).astype("<i2").tobytes()
+    samples = np.full(CALL_FRAME_SAMPLES * 3, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
     session.enqueue_remote_audio(pcm, 48000)
 
     output_stream = sounddevice.output_streams[0][1]
     assert _wait_for(lambda: bool(output_stream.writes))
-    assert output_stream.writes[0].shape == (3, 1)
+    assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES * 3, 1)
+
+    session.stop()
+
+
+def test_call_audio_session_writes_remote_pcm_immediately_without_prebuffering():
+    """Diagnostic bisection (2026-09-20): a prebuffer/reservoir rewrite of
+    _play_remote_loop was suspected of causing severe choppy/high-latency
+    call audio on a real Bluetooth headset (draining several queued frames
+    in a burst once "primed", relying on stream.write() to block for the
+    right amount of time between them — which only holds if the device's own
+    buffer is close to one frame deep). Reverting the whole file to main's
+    original version fixed it; reintroducing sample-rate priority, "low"
+    latency, exclusive mode and a wall-clock write-pacing layer on top of the
+    reservoir version individually did not. So this loop stays exactly as
+    simple as it was before any of that: one packet in, one write out,
+    immediately, no reservoir to drain."""
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+    session.start_output_only()
+    output_stream = sounddevice.output_streams[0][1]
+
+    samples = np.full(CALL_FRAME_SAMPLES, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
+    session.enqueue_remote_audio(pcm, 48000)
+
+    assert _wait_for(lambda: bool(output_stream.writes))
+    assert output_stream.writes[0].shape == (CALL_FRAME_SAMPLES, 1)
+
+    session.stop()
+
+
+def test_call_audio_session_can_start_receive_only_without_opening_microphone():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", input_device_name="Mic", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+
+    assert session.output_running is True
+    assert session.running is False
+    assert sounddevice.output_streams[0][1].started is True
+    assert sounddevice.input_streams == []
+    assert ("call:audio:start", {"session": "winzapp"}) in sio.events
+    assert not any(name == "call:audio:mic" for name, _ in sio.events)
+
+    pcm = (np.array([0.1, -0.1, 0.0], dtype=np.float32) * 32767).astype("<i2").tobytes()
+    session.enqueue_remote_audio(pcm, 48000)
+    assert _wait_for(lambda: bool(sounddevice.output_streams[0][1].writes))
+
+    session.stop()
+
+
+def test_receive_only_session_promotes_to_full_duplex_on_answer():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", input_device_name="Mic", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+    output_stream = sounddevice.output_streams[0][1]
+    session.start()
+
+    assert session.running is True
+    assert sounddevice.output_streams[0][1] is output_stream
+    assert len(sounddevice.output_streams) == 1
+    assert len(sounddevice.input_streams) == 1
+    assert _wait_for(lambda: any(name == "call:audio:mic" for name, _ in sio.events))
+
+    session.stop()
+
+
+def test_microphone_backlog_skips_old_audio_instead_of_adding_delay():
+    session = CallAudioSession(
+        _Socket(),
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=_SoundDevice(),
+    )
+    frames = [bytes([marker]) * 8 for marker in range(8)]
+    for frame in frames:
+        session._mic_queue.put_nowait(frame)
+
+    pcm, dropped = session._dequeue_fresh_microphone_frame()
+
+    assert pcm == frames[5]
+    assert dropped == 5
+    assert session._mic_queue.qsize() == CALL_MIC_TARGET_BACKLOG_FRAMES
+
+
+
+def test_call_audio_prefers_the_call_transport_rate_when_the_device_supports_it():
+    """A device that can open at 48 kHz directly must not be forced through
+    resampling just because its OS-reported default happens to be 44100 —
+    that reintroduced audibly choppy call audio despite healthy delivery
+    (see _candidate_rates)."""
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    sounddevice.devices[0]["default_samplerate"] = 44100
+    sounddevice.devices[1]["default_samplerate"] = 44100
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start()
+
+    input_kwargs = sounddevice.input_streams[0][0]
+    output_kwargs = sounddevice.output_streams[0][0]
+    assert input_kwargs["device"] == 0
+    assert output_kwargs["device"] == 1
+    assert input_kwargs["samplerate"] == 48000
+    assert output_kwargs["samplerate"] == 48000
+    assert input_kwargs["latency"] == "low"
+    assert output_kwargs["latency"] == "low"
+
+    session.stop()
+
+
+def test_call_audio_falls_back_to_native_rate_when_48k_is_refused():
+    """An HFP-only Bluetooth microphone that cannot open at 48 kHz must still
+    reach its own native rate (e.g. 8000/16000 Hz) rather than failing the
+    call outright."""
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    sounddevice.devices[0]["default_samplerate"] = 16000
+
+    class _RefusingSoundDevice(_SoundDevice):
+        def InputStream(self, **kwargs):
+            if kwargs["samplerate"] == 48000:
+                raise RuntimeError("device refuses 48000 Hz")
+            return super().InputStream(**kwargs)
+
+    sounddevice = _RefusingSoundDevice()
+    sounddevice.devices[0]["default_samplerate"] = 16000
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start()
+
+    input_kwargs = sounddevice.input_streams[0][0]
+    assert input_kwargs["samplerate"] == 16000
+
+    session.stop()
+
+
+def test_exclusive_mode_default_is_disabled():
+    """Exclusive mode defaults off: it was suspected, then ruled out, as the
+    cause of the choppy-audio regression, but forcing every call onto a
+    device WASAPI exclusively still risks locking other applications out of
+    it — a real cost for users on a single physical microphone/speaker who
+    don't need exclusive mode. It stays available as an opt-in for whoever
+    genuinely benefits from it (see settings_dialog.py's checkbox)."""
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+
+    kwargs = sounddevice.output_streams[0][0]
+    assert kwargs["extra_settings"] is not None
+    assert kwargs["extra_settings"].exclusive is False
+
+    session.stop()
+
+
+def test_exclusive_mode_falls_back_to_shared_when_device_refuses(caplog):
+    sio = _Socket()
+    sounddevice = _SoundDevice(refuse_exclusive=True)
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(
+            session="winzapp", output_device_name="Speaker", exclusive_mode=True
+        ),
+        sounddevice_module=sounddevice,
+    )
+
+    with caplog.at_level("INFO"):
+        session.start_output_only()
+
+    assert len(sounddevice.output_streams) == 1
+    kwargs = sounddevice.output_streams[0][0]
+    assert kwargs["extra_settings"].exclusive is False
+    assert any(
+        "exclusive mode unavailable, fell back to shared mode for output" in record.message
+        for record in caplog.records
+    )
+
+    session.stop()
+
+
+def test_exclusive_mode_disabled_never_attempts_exclusive():
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(
+            session="winzapp", output_device_name="Speaker", exclusive_mode=False
+        ),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start_output_only()
+
+    assert len(sounddevice.output_streams) == 1
+    kwargs = sounddevice.output_streams[0][0]
+    assert kwargs["extra_settings"].exclusive is False
 
     session.stop()

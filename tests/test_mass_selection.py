@@ -129,6 +129,10 @@ class _FakeMainWindow:
         self.deleted_for_everyone.append((jid, key))
         return True
 
+    def _apply_remote_revoke(self, existing, incoming, jid):
+        existing["messageType"] = incoming["messageType"]
+        existing["message"] = incoming["message"]
+
     def _schedule_save(self, *a, **kw):
         self.saves += 1
 
@@ -185,6 +189,8 @@ class _Panel:
     _on_mass_forward_messages = ConversationsPanel._on_mass_forward_messages
     _on_mass_save_messages = ConversationsPanel._on_mass_save_messages
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
+    _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
+    _on_bulk_delete_for_everyone_done = ConversationsPanel._on_bulk_delete_for_everyone_done
     _confirm_local_only_delete = ConversationsPanel._confirm_local_only_delete
     _delete_target_jid = ConversationsPanel._delete_target_jid
     _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
@@ -687,7 +693,9 @@ def choose_folder(monkeypatch, tmp_path):
 @pytest.fixture
 def run_threads_inline(monkeypatch):
     """_on_mass_delete_messages hands the server calls to a background thread;
-    run it inline so the test observes the result deterministically."""
+    run it inline so the test observes the result deterministically. The
+    worker also reports back through wx.CallAfter (no running wx.App here),
+    so that is routed straight through too."""
     class _Inline:
         def __init__(self, target=None, args=(), kwargs=None, daemon=None, **kw):
             self._target = target
@@ -698,6 +706,8 @@ def run_threads_inline(monkeypatch):
             self._target(*self._args, **self._kwargs)
 
     monkeypatch.setattr(threading, "Thread", _Inline)
+    monkeypatch.setattr("ui.conversations.wx.CallAfter",
+                         lambda fn, *a, **kw: fn(*a, **kw))
 
 
 @pytest.fixture
@@ -1091,7 +1101,9 @@ class TestMassMessageActions:
         eligible (fromMe) messages get a real revoke — the other member's
         message the user has no right to revoke is still removed from the
         user's own view, just without calling delete_message_for_everyone
-        for it."""
+        for it. A successful revoke keeps its own row (tombstoned in place by
+        the live/confirmed-revoke path) rather than being removed locally —
+        see test_bulk_delete_only_removes_effective_local_only_ids."""
         fake_delete_dialog["everyone"] = True
         panel = _Panel(messages=[_msg("m1", from_me=True), _msg("m2", from_me=False)])
         panel.selected_messages = {"m1", "m2"}
@@ -1099,7 +1111,7 @@ class TestMassMessageActions:
         assert [k["id"] for _jid, k in panel.main_window.deleted_for_everyone] == ["m1"]
         assert [k["id"] for _jid, k in panel.main_window.deleted_messages] == ["m2"]
         (removed, _focus), = panel.removed_locally
-        assert removed == {"m1", "m2"}
+        assert removed == {"m2"}
 
     def test_a_group_admin_can_delete_for_everyone_even_a_message_not_their_own(
         self, fake_delete_dialog, run_threads_inline

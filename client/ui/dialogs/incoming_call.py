@@ -20,6 +20,8 @@ class IncomingCallDialog(wx.Dialog):
         on_closed,
         *,
         can_answer: bool = True,
+        is_video: bool = False,
+        on_answer_without_video=None,
     ):
         i18n = parent.i18n
         super().__init__(
@@ -31,7 +33,10 @@ class IncomingCallDialog(wx.Dialog):
         self._on_reject_callback = on_reject
         self._on_stop_callback = on_stop
         self._on_closed_callback = on_closed
+        self._on_answer_without_video_callback = on_answer_without_video
+        self._is_video = is_video
         self._closing = False
+        self._i18n = i18n
 
         panel = wx.Panel(self)
         content = wx.BoxSizer(wx.VERTICAL)
@@ -41,9 +46,18 @@ class IncomingCallDialog(wx.Dialog):
         content.Add(self._message, 0, wx.EXPAND | wx.ALL, 12)
 
         buttons = wx.StdDialogButtonSizer()
-        self._answer_button = wx.Button(
-            panel, wx.ID_OK, label=i18n.t("incoming_call_answer_button")
+        answer_key = (
+            "incoming_call_answer_with_video_button"
+            if is_video
+            else "incoming_call_answer_button"
         )
+        self._answer_button = wx.Button(panel, wx.ID_OK, label=i18n.t(answer_key))
+        if is_video:
+            self._answer_without_video_button = wx.Button(
+                panel,
+                wx.ID_ANY,
+                label=i18n.t("incoming_call_answer_without_video_button"),
+            )
         self._reject_button = wx.Button(
             panel, wx.ID_ANY, label=i18n.t("incoming_call_reject_button")
         )
@@ -53,12 +67,11 @@ class IncomingCallDialog(wx.Dialog):
         self._close_button = wx.Button(
             panel, wx.ID_CANCEL, label=i18n.t("incoming_call_close_button")
         )
-        for button in (
-            self._answer_button,
-            self._reject_button,
-            self._silence_button,
-            self._close_button,
-        ):
+        button_order = [self._answer_button]
+        if is_video:
+            button_order.append(self._answer_without_video_button)
+        button_order += [self._reject_button, self._silence_button, self._close_button]
+        for button in button_order:
             buttons.AddButton(button)
         buttons.Realize()
         content.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -71,14 +84,41 @@ class IncomingCallDialog(wx.Dialog):
         self.CentreOnParent()
 
         self._answer_button.Enable(bool(can_answer))
+        if is_video:
+            self._answer_without_video_button.Enable(bool(can_answer))
         default_button = self._answer_button if can_answer else self._reject_button
         default_button.SetDefault()
         self._default_focus = default_button
         self._answer_button.Bind(wx.EVT_BUTTON, self._on_answer)
+        if is_video:
+            self._answer_without_video_button.Bind(
+                wx.EVT_BUTTON, self._on_answer_without_video
+            )
         self._reject_button.Bind(wx.EVT_BUTTON, self._on_reject)
         self._silence_button.Bind(wx.EVT_BUTTON, self._on_stop)
         self._close_button.Bind(wx.EVT_BUTTON, self._on_close)
         self.Bind(wx.EVT_CLOSE, self._on_close)
+
+    def refresh_labels(self, message: str | None = None):
+        """Re-translate this modeless popup without closing the ringing call."""
+        i18n = self._i18n
+        self.SetTitle(i18n.t("incoming_call_popup_title"))
+        if message is not None:
+            self._message.SetLabel(message)
+            self._message.SetName(message)
+        self._answer_button.SetLabel(i18n.t("incoming_call_answer_button"))
+        if self._is_video:
+            self._answer_button.SetLabel(i18n.t("incoming_call_answer_with_video_button"))
+        if self._is_video and hasattr(self, "_answer_without_video_button"):
+            self._answer_without_video_button.SetLabel(
+                i18n.t("incoming_call_answer_without_video_button")
+            )
+        self._reject_button.SetLabel(i18n.t("incoming_call_reject_button"))
+        self._silence_button.SetLabel(i18n.t("incoming_call_silence_button"))
+        self._close_button.SetLabel(i18n.t("incoming_call_close_button"))
+        self.Layout()
+        self.Fit()
+        self.SetMinSize((440, -1))
 
     def show_accessibly(self):
         """Display over the current app and focus the primary call action."""
@@ -161,6 +201,9 @@ class IncomingCallDialog(wx.Dialog):
 
     def _on_answer(self, _event):
         self._finish_with(self._on_answer_callback)
+
+    def _on_answer_without_video(self, _event):
+        self._finish_with(self._on_answer_without_video_callback)
 
     def _on_reject(self, _event):
         self._finish_with(self._on_reject_callback)
