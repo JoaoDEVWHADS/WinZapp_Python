@@ -54,6 +54,7 @@ import zipfile
 
 import requests
 from core.api_patch_manifest import server_patch_files
+from core.wppconnect_dependency_patch import sync_wppconnect_source_patches
 from core.wpp_dependency_setup import (
     PATCHED_DEPENDENCY_KEYS as _PATCHED_DEPENDENCY_KEYS,
     check_github_dependencies_updates,
@@ -366,43 +367,55 @@ class ApiSetupDialog(wx.Dialog):
 
     @staticmethod
     def _apply_node_modules_patches(api_dir: str) -> None:
-        """Apply WinZapp's patches to files INSIDE node_modules (a vendored
-        dependency of WPPConnect Server, not WPPConnect Server itself), which
-        `npm install` just rebuilt from scratch a few lines above this call.
+        """Apply WinZapp patches inside the installed WPPConnect dependency.
 
-        Port of setup_api.py's post-`npm install` patch block (decrypt.js
-        copy + _patch_wppconnect_host_layer() + _patch_wppconnect_status_layer())
-        — until this existed, ONLY a developer running setup_api.py directly
-        ever got these patches; every real end-user install goes through
-        this dialog instead, which restored the patched decrypt.js/*.ts
-        files into client/api/ itself (see the ZIP-extract step above) but
-        never copied/patched anything inside node_modules, so the
-        decrypt.js RangeError/memory-leak fix, the host.layer.js
-        pairing-code-rotation fix (#8), and the status.layer.js
-        posting-result fix all silently never applied for any shipped
-        install.
-
-        Best-effort and never fatal: node_modules is deleted/rebuilt by npm
-        on every install, but a failure to patch it should not block the
-        rest of setup — the app still works, just without these fixes,
-        exactly like the pre-existing decrypt.js situation this replaces.
+        decrypt.ts is the canonical source patch. It is copied into the
+        dependency's src/ tree and build:client regenerates decrypt.js only when
+        that source actually changed. The old api_patches/decrypt.js file is
+        reference-only. Other layer patches still operate on compiled JS and
+        therefore run after the TypeScript build.
         """
-        node_modules_wppconnect = os.path.join(
-            api_dir, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api",
+        patches_dir = resource_path("api_patches")
+        package_dir, changed_source_patches = sync_wppconnect_source_patches(
+            api_dir, patches_dir
         )
+        if changed_source_patches:
+            logging.info(
+                "[api_setup] Synced WPPConnect source patch(es): %s",
+                ", ".join(changed_source_patches),
+            )
 
-        # decrypt.js — RangeError/memory-leak patch.
-        try:
-            custom_decrypt = os.path.join(api_dir, "decrypt.js")
-            decrypt_dest = os.path.join(node_modules_wppconnect, "helpers", "decrypt.js")
-            if os.path.isfile(custom_decrypt):
-                os.makedirs(os.path.dirname(decrypt_dest), exist_ok=True)
-                shutil.copy2(custom_decrypt, decrypt_dest)
-                logging.info("[api_setup] Copied decrypt.js patch into node_modules.")
+            env = dict(os.environ)
+            if sys.platform == "win32":
+                node_exe = resource_path("node", "node.exe")
+                npm_cli = resource_path(
+                    "node", "node_modules", "npm", "bin", "npm-cli.js"
+                )
+                if os.path.isfile(node_exe) and os.path.isfile(npm_cli):
+                    cmd = [node_exe, npm_cli, "run", "build:client"]
+                    env["PATH"] = os.path.dirname(node_exe) + os.pathsep + env.get("PATH", "")
+                else:
+                    cmd = ["npm.cmd", "run", "build:client"]
             else:
-                logging.warning("[api_setup] decrypt.js not found in api_dir — skipping node_modules patch.")
-        except Exception as exc:
-            logging.warning("[api_setup] Failed to copy decrypt.js patch into node_modules: %s", exc)
+                cmd = ["npm", "run", "build:client"]
+
+            result = subprocess.run(
+                cmd,
+                cwd=package_dir,
+                env=env,
+                shell=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    "Failed to compile patched @wppconnect-team/wppconnect source"
+                    + (f": {detail}" if detail else "")
+                )
+            logging.info("[api_setup] WPPConnect dependency source patches compiled.")
+
+        node_modules_wppconnect = os.path.join(package_dir, "dist", "api")
 
         # host.layer.js — pairing-code rotation fix (issue #8).
         try:

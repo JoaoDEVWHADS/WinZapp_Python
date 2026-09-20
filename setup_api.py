@@ -40,12 +40,13 @@ if _CLIENT_DIR not in sys.path:
     sys.path.insert(0, _CLIENT_DIR)
 
 from core.api_patch_manifest import server_patch_files
+from core.wppconnect_dependency_patch import sync_wppconnect_source_patches
 
 _DISCOVERED_SERVER_PATCHES = server_patch_files(API_PATCHES_DIR)
 CUSTOM_ROOT_FILES = [
     path
     for path in _DISCOVERED_SERVER_PATCHES
-    if "/" not in path and path != "decrypt.js"
+    if "/" not in path
 ]
 CUSTOM_SRC_FILES = [
     path for path in _DISCOVERED_SERVER_PATCHES if path not in CUSTOM_ROOT_FILES
@@ -568,19 +569,29 @@ def main():
 
     # Aplicação de Patches das camadas e Compilação
     try:
-        # Apply the RangeError/memory-leak patch to decrypt.js
+        # decrypt.ts is the canonical WPPConnect dependency patch. Copy it into
+        # the installed package source and let that package's own TypeScript
+        # build generate dist/api/helpers/decrypt.js. The old api_patches/
+        # decrypt.js remains reference-only and is never copied to node_modules.
         try:
-            custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
-            decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
-            if os.path.isfile(custom_decrypt):
-                print("[INFO] Copying custom decrypt.js patch to node_modules...")
-                os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
-                shutil.copy2(custom_decrypt, decrypt_js_path)
-                print("[OK] Copied decrypt.js patch successfully.")
+            wppconnect_dir, changed_source_patches = sync_wppconnect_source_patches(
+                CLIENT_API_DIR, API_PATCHES_DIR
+            )
+            if changed_source_patches:
+                print(
+                    "[INFO] Synced WPPConnect source patch(es): "
+                    + ", ".join(changed_source_patches)
+                )
+                print("[INFO] Compiling patched @wppconnect-team/wppconnect sources...")
+                if npm_bin.endswith("npm-cli.js"):
+                    _run([node_bin, npm_bin, "run", "build:client"], cwd=wppconnect_dir)
+                else:
+                    _run([npm_bin, "run", "build:client"], cwd=wppconnect_dir)
+                print("[OK] WPPConnect dependency source patches compiled successfully.")
             else:
-                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
+                print("[INFO] WPPConnect dependency source patches already up to date.")
         except Exception as e:
-            print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
+            raise RuntimeError(f"Failed to compile WPPConnect source patch: {e}") from e
 
         # Patch layers
         try:

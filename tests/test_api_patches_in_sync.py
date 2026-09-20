@@ -189,7 +189,7 @@ def test_the_in_app_installer_refreshes_root_files_rather_than_only_preserving_t
 
 
 def test_wppconnect_decrypt_ts_patch_matches_the_runtime_js_intent():
-    """Keep a source-level WPPConnect patch alongside the compiled decrypt.js."""
+    """decrypt.ts is canonical; decrypt.js is retained only as a reference."""
     source = (
         PATCHES / "wppconnect" / "src" / "api" / "helpers" / "decrypt.ts"
     ).read_text(encoding="utf-8")
@@ -205,6 +205,22 @@ def test_wppconnect_decrypt_ts_patch_matches_the_runtime_js_intent():
     ):
         assert marker in source
     assert "fileData.toString('hex')" not in source
+
+
+def test_decrypt_js_is_reference_only_not_a_server_overlay():
+    assert (PATCHES / "decrypt.js").is_file()
+    assert "decrypt.js" not in MIRRORED_FILES
+
+    setup = (ROOT / "setup_api.py").read_text(encoding="utf-8")
+    build_api = (ROOT / "build_api.py").read_text(encoding="utf-8")
+    dialog = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
+
+    assert "custom_decrypt" not in setup
+    assert "custom_decrypt" not in build_api
+    assert "custom_decrypt" not in dialog
+    assert '"build:client"' in setup
+    assert '"build:client"' in build_api
+    assert '"build:client"' in dialog
 
 
 class TestRestoreRunsOnEveryPath:

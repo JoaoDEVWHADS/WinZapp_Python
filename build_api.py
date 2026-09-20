@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import setup_api as canonical_setup
+from core.wppconnect_dependency_patch import sync_wppconnect_source_patches
 
 
 def _sync_canonical_patches(api_dir: str, api_patches_dir: str) -> int:
@@ -59,21 +60,7 @@ def _verify_critical_call_patch(api_dir: str) -> None:
 
 
 def _apply_node_modules_patches(api_dir: str) -> None:
-    custom_decrypt = os.path.join(api_dir, "decrypt.js")
-    decrypt_target = os.path.join(
-        api_dir,
-        "node_modules",
-        "@wppconnect-team",
-        "wppconnect",
-        "dist",
-        "api",
-        "helpers",
-        "decrypt.js",
-    )
-    if os.path.isfile(custom_decrypt) and os.path.isdir(os.path.dirname(decrypt_target)):
-        shutil.copy2(custom_decrypt, decrypt_target)
-        print("[OK] Copied decrypt.js patch to node_modules.")
-
+    """Apply compiled-runtime patches after WPPConnect's source build."""
     for patcher in (
         canonical_setup._patch_wppconnect_host_layer,
         canonical_setup._patch_wppconnect_status_layer,
@@ -84,6 +71,39 @@ def _apply_node_modules_patches(api_dir: str) -> None:
             patcher(api_dir)
         except Exception as exc:
             print(f"[WARNING] Runtime node_modules patch failed: {exc}")
+
+
+def _compile_wppconnect_source_patches(
+    api_dir: str,
+    api_patches_dir: str,
+    node_exe: str | None,
+    npm_cli: str | None,
+) -> None:
+    package_dir, changed = sync_wppconnect_source_patches(api_dir, api_patches_dir)
+    if not changed:
+        print("[INFO] WPPConnect dependency source patches already up to date.")
+        return
+
+    print("[INFO] Synced WPPConnect source patch(es): " + ", ".join(changed))
+    print("[INFO] Compiling @wppconnect-team/wppconnect patched TypeScript...")
+    if node_exe and npm_cli:
+        env = dict(os.environ)
+        env["PATH"] = os.path.dirname(node_exe) + os.pathsep + env.get("PATH", "")
+        subprocess.run(
+            [node_exe, npm_cli, "run", "build:client"],
+            cwd=package_dir,
+            env=env,
+            check=True,
+        )
+    else:
+        npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+        subprocess.run(
+            [npm_cmd, "run", "build:client"],
+            cwd=package_dir,
+            shell=sys.platform == "win32",
+            check=True,
+        )
+    print("[OK] WPPConnect dependency source patches compiled.")
 
 
 def main():
@@ -106,8 +126,6 @@ def main():
     # WinZapp deliberately owns.
     canonical_setup._recover_upstream_package_json()
     canonical_setup._merge_package_json_dependencies()
-    _apply_node_modules_patches(api_dir)
-
     node_exe = None
     npm_cli = None
     if sys.platform == "win32":
@@ -119,6 +137,17 @@ def main():
             node_exe = portable_node
             npm_cli = portable_npm
             print(f"[INFO] Using portable Node: {node_exe}")
+
+    try:
+        _compile_wppconnect_source_patches(
+            api_dir, api_patches_dir, node_exe, npm_cli
+        )
+        # These patches target other compiled files in the dependency, so they
+        # must run after build:client or that build could overwrite them.
+        _apply_node_modules_patches(api_dir)
+    except Exception as exc:
+        print(f"[ERROR] Failed to prepare patched WPPConnect dependency: {exc}")
+        sys.exit(1)
 
     print("[INFO] Running build inside client/api...")
     try:

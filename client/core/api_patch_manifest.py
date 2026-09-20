@@ -2,7 +2,7 @@
 
 client/api_patches/ is the source of truth. Files belonging to the
 wppconnect-server overlay are discovered automatically. package.json is
-handled separately because WinZapp merges only its owned dependencies, and
+handled separately because WinZapp merges only its owned dependencies; decrypt.js is kept only as a reference artifact; and
 subdirectories named after dependencies (currently wppconnect/) hold patches
 for those packages rather than for wppconnect-server itself.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 
-SPECIAL_SERVER_FILES = {"package.json"}
+SPECIAL_SERVER_FILES = {"package.json", "decrypt.js"}
 DEPENDENCY_PATCH_ROOTS = {"wppconnect"}
 
 
