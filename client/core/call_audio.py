@@ -242,18 +242,30 @@ class CallAudioSession:
             yield index
 
     def _candidate_rates(self, device_index: Optional[int]):
-        # Opening the Windows mixer at its own rate avoids needless device
-        # reconfiguration/resampling in the driver. The call transport stays
-        # 48 kHz; Python already resamples at the boundary.
-        rates = []
+        # Try the call transport's own rate (48 kHz) first. Most non-HFP
+        # devices open at 48 kHz directly, which needs no resampling in
+        # either direction for the life of the call. A previous revision put
+        # the device's native rate first instead — reasoned the same way
+        # core/audio_devices.py's recording_configs_for() does for voice
+        # messages, where it's the right call — but for calls specifically,
+        # unlike a one-shot recording, that meant a device whose native rate
+        # merely *differs* from 48 kHz (44100, common on plenty of ordinary
+        # hardware, not just Bluetooth) got resampled on every single 20 ms
+        # frame for the whole call. Delivery stayed smooth (no underflow, no
+        # rebuffering — the queue/output-write plumbing was never the issue),
+        # but the resampled audio itself was audibly choppy. Native rate
+        # stays second, ahead of the fixed tail, so a genuine HFP-only
+        # Bluetooth microphone (8000/16000 Hz, the reason native is tried at
+        # all) is still reached before giving up.
+        rates = [CALL_SAMPLE_RATE]
         try:
             info = self._sd.query_devices(device_index)
             native = int(round(float(info.get("default_samplerate") or 0)))
-            if native > 0:
+            if native > 0 and native not in rates:
                 rates.append(native)
         except Exception:
             pass
-        for rate in (CALL_SAMPLE_RATE, 44_100, 32_000, 16_000):
+        for rate in (44_100, 32_000, 16_000):
             if rate not in rates:
                 rates.append(rate)
         return rates

@@ -268,7 +268,11 @@ def test_microphone_backlog_skips_old_audio_instead_of_adding_delay():
 
 
 
-def test_call_audio_prefers_native_device_rate_and_safe_driver_latency():
+def test_call_audio_prefers_the_call_transport_rate_when_the_device_supports_it():
+    """A device that can open at 48 kHz directly must not be forced through
+    resampling just because its OS-reported default happens to be 44100 —
+    that reintroduced audibly choppy call audio despite healthy delivery
+    (see _candidate_rates)."""
     sio = _Socket()
     sounddevice = _SoundDevice()
     sounddevice.devices[0]["default_samplerate"] = 44100
@@ -285,10 +289,40 @@ def test_call_audio_prefers_native_device_rate_and_safe_driver_latency():
     output_kwargs = sounddevice.output_streams[0][0]
     assert input_kwargs["device"] == 0
     assert output_kwargs["device"] == 1
-    assert input_kwargs["samplerate"] == 44100
-    assert output_kwargs["samplerate"] == 44100
+    assert input_kwargs["samplerate"] == 48000
+    assert output_kwargs["samplerate"] == 48000
     assert input_kwargs["latency"] == "low"
     assert output_kwargs["latency"] == "low"
+
+    session.stop()
+
+
+def test_call_audio_falls_back_to_native_rate_when_48k_is_refused():
+    """An HFP-only Bluetooth microphone that cannot open at 48 kHz must still
+    reach its own native rate (e.g. 8000/16000 Hz) rather than failing the
+    call outright."""
+    sio = _Socket()
+    sounddevice = _SoundDevice()
+    sounddevice.devices[0]["default_samplerate"] = 16000
+
+    class _RefusingSoundDevice(_SoundDevice):
+        def InputStream(self, **kwargs):
+            if kwargs["samplerate"] == 48000:
+                raise RuntimeError("device refuses 48000 Hz")
+            return super().InputStream(**kwargs)
+
+    sounddevice = _RefusingSoundDevice()
+    sounddevice.devices[0]["default_samplerate"] = 16000
+    session = CallAudioSession(
+        sio,
+        CallAudioConfig(session="winzapp"),
+        sounddevice_module=sounddevice,
+    )
+
+    session.start()
+
+    input_kwargs = sounddevice.input_streams[0][0]
+    assert input_kwargs["samplerate"] == 16000
 
     session.stop()
 
