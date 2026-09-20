@@ -187,6 +187,7 @@ class _Panel:
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
     _confirm_local_only_delete = ConversationsPanel._confirm_local_only_delete
     _delete_target_jid = ConversationsPanel._delete_target_jid
+    _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
     _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
     _on_mass_star_messages = ConversationsPanel._on_mass_star_messages
     _on_mass_pin_messages = ConversationsPanel._on_mass_pin_messages
