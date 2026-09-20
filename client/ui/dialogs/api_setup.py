@@ -121,7 +121,7 @@ def fetch_latest_wpp_tag(timeout: float = 15) -> str:
 _PRESERVE = {"start.js", ".env", "config.json"}
 
 # Runtime state dirs/files that should survive a re-download.
-_KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
+_KEEP_RUNTIME = {"tokens", "wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
 # WinZapp's patches on top of upstream wppconnect-server — same list as
 # setup_api.py's custom_files and build.py's API_CUSTOM_SRC_FILES. Unlike
@@ -764,7 +764,7 @@ class ApiSetupDialog(wx.Dialog):
 
         api_dir  = resource_path("api")
         patches_dir = resource_path("api_patches")
-        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        puppeteer_cache = resource_path("api", ".cache")
         npm_env  = {
             **os.environ,
             "PATH": path_env,

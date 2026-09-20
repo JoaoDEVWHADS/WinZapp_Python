@@ -22,7 +22,7 @@ def _assets(*names):
 
 def test_zip_asset_prefers_full_package():
     url = updater.find_zip_asset(
-        _assets("extras.zip", "WinZapp.zip", "WinZapp-Client.zip"),
+        _assets("extras.zip", "WinZapp.zip", "WinZappClient.zip"),
         client_only=False,
     )
     assert url.endswith("/WinZapp.zip")
@@ -30,10 +30,10 @@ def test_zip_asset_prefers_full_package():
 
 def test_zip_asset_prefers_client_only_package_when_requested():
     url = updater.find_zip_asset(
-        _assets("WinZapp.zip", "WinZapp-Client.zip"),
+        _assets("WinZapp.zip", "WinZappClient.zip"),
         client_only=True,
     )
-    assert url.endswith("/WinZapp-Client.zip")
+    assert url.endswith("/WinZappClient.zip")
 
 
 def test_zip_asset_falls_back_to_a_zip_when_named_asset_is_absent():

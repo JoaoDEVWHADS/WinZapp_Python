@@ -215,7 +215,9 @@ def test_call_audio_session_can_start_receive_only_without_opening_microphone():
     assert not any("outputDeviceName" in payload for _, payload in sio.events)
     assert not any(name == "call:audio:mic" for name, _ in sio.events)
 
-    pcm = (np.array([0.1, -0.1, 0.0], dtype=np.float32) * 32767).astype("<i2").tobytes()
+    # Playback deliberately prebuffers 60 ms to avoid audible packet jitter.
+    samples = np.full(CALL_FRAME_SAMPLES * 3, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
     session.enqueue_remote_audio(pcm, 48000)
     assert _wait_for(lambda: bool(sounddevice.output_streams[0][1].writes))
 
@@ -266,7 +268,7 @@ def test_call_audio_prefers_native_device_rate_and_safe_driver_latency():
     sio = _Socket()
     sounddevice = _SoundDevice()
     sounddevice.devices[0]["default_samplerate"] = 44100
-    sounddevice.devices[1]["default_samplerate"] = 44100
+    sounddevice.devices[2]["default_samplerate"] = 44100
     session = CallAudioSession(
         sio,
         CallAudioConfig(session="winzapp"),

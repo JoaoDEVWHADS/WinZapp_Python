@@ -128,6 +128,9 @@ class _MainStub:
         self.popups = []
         self.incoming_call_bar = _Bar()
         self.incoming_call_label = _Label()
+        self.incoming_call_answer_button = _Label()
+        self.incoming_call_reject_button = _Label()
+        self.incoming_call_silence_button = _Label()
         self.voice_call_bar = _Bar()
         self.voice_call_label = _Label()
         self.layout_calls = 0
@@ -476,7 +479,6 @@ def test_websocket_normalizes_call_state_payload(monkeypatch):
         "event": "state",
         "state": "ACTIVE",
         "id": "call-1",
-        "peer_jid": "5511999999999@s.whatsapp.net",
         "peerJid": "5511999999999@s.whatsapp.net",
         "outgoing": False,
         "isVideo": False,

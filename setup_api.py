@@ -378,6 +378,16 @@ def _merge_package_json_dependencies():
     print(f"[INFO] Applied {applied} WinZapp dependency patches to package.json")
 
 
+def _restore_custom_files(custom_contents):
+    """Restore WinZapp's tracked API patches into the live WPPConnect tree."""
+    for rel_path, content in custom_contents.items():
+        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        print(f"[INFO] Synced custom patch: {rel_path}")
+
+
 def _reset_dependency_state():
     """Discard generated locks and modules before resolving Git dependencies."""
     try:
@@ -471,12 +481,7 @@ def main():
                 print(f"[WARNING] Could not update wppconnect-server via git: {e}")
 
         # Sincronizar patches
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Synced custom patch: {rel_path}")
+        _restore_custom_files(custom_contents)
 
         _recover_upstream_package_json()
         _merge_package_json_dependencies()
@@ -559,12 +564,7 @@ def main():
                     print(f"[WARNING] Failed to restore node_modules: {e}")
 
         # Always restore every patched file from client/api_patches/ on every run
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Synced custom patch: {rel_path}")
+        _restore_custom_files(custom_contents)
 
         _recover_upstream_package_json()
         _merge_package_json_dependencies()
