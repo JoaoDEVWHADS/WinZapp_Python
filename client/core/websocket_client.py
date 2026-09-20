@@ -2546,7 +2546,7 @@ class WebSocketClient:
                     self._call_remote_video_frames_received == 1
                     or self._call_remote_video_frames_received % 100 == 0
                 ):
-                    logging.debug(
+                    logging.info(
                         "[WebSocketClient] remote-video-received count=%s",
                         self._call_remote_video_frames_received,
                     )

@@ -6408,7 +6408,7 @@ class MainWindow(wx.Frame):
                 self._call_remote_video_gate_blocked == 1
                 or self._call_remote_video_gate_blocked % 100 == 0
             ):
-                logging.debug(
+                logging.info(
                     "[call_video] remote frame reached on_call_remote_video but "
                     "is_video gate blocked it (count=%s)",
                     self._call_remote_video_gate_blocked,
@@ -6428,7 +6428,7 @@ class MainWindow(wx.Frame):
                 self.voice_call_window.Layout()
                 if not self._call_remote_video_rendered:
                     self._call_remote_video_rendered = True
-                    logging.debug(
+                    logging.info(
                         "[call_video] remote-video-rendered first frame decoded "
                         "and drawn successfully"
                     )
