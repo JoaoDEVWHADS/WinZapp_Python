@@ -58,7 +58,7 @@ def test_native_active_call_change_event_promotes_incoming_calls_immediately():
     assert "args.find(" not in source
     assert "const incomingCandidate =" in source
     assert "!!callId" in source
-    assert "!state || !!activeCall?.isGroup" in source
+    assert "!state || isGroupCall(activeCall)" in source
     assert "emitIncomingOffer(activeCall, 0, 'activeCallChange')" in source
     assert "[browser-evaluate] activeCall change" in source
 

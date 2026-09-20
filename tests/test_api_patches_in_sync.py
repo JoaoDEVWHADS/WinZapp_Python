@@ -249,7 +249,11 @@ class TestRestoreRunsOnEveryPath:
 
     def test_both_setup_paths_restore_the_patched_files(self):
         src = (ROOT / "setup_api.py").read_text(encoding="utf-8")
-        assert src.count("_restore_custom_files(custom_contents)") == 2, (
+        calls = re.findall(
+            r"(?m)^\\s*_restore_custom_files\\(custom_contents\\)\\s*$",
+            src,
+        )
+        assert len(calls) == 2, (
             "both incremental and clean setup paths must restore WinZapp patches"
         )
 

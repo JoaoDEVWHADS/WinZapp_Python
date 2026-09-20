@@ -93,6 +93,7 @@ class _FakeMainWindow:
         self.marked_unread = []
         self.deleted_messages = []
         self.deleted_for_everyone = []
+        self.remote_revokes = []
         self.saves = 0
         self.pin_calls = []
         self.pin_results = None
@@ -128,6 +129,9 @@ class _FakeMainWindow:
     def delete_message_for_everyone(self, jid, key):
         self.deleted_for_everyone.append((jid, key))
         return True
+
+    def _apply_remote_revoke(self, original, incoming, jid):
+        self.remote_revokes.append((original, incoming, jid))
 
     def _schedule_save(self, *a, **kw):
         self.saves += 1

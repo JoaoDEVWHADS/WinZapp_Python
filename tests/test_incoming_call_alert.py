@@ -49,9 +49,13 @@ class _Bar:
 class _Label:
     def __init__(self):
         self.text = ""
+        self.enabled = True
 
     def SetLabel(self, text):
         self.text = text
+
+    def Enable(self, enabled=True):
+        self.enabled = bool(enabled)
 
 
 class _I18n:
@@ -131,6 +135,7 @@ class _MainStub:
         self.incoming_call_answer_button = _Label()
         self.incoming_call_reject_button = _Label()
         self.incoming_call_silence_button = _Label()
+        self.incoming_call_stop_button = _Label()
         self.voice_call_bar = _Bar()
         self.voice_call_label = _Label()
         self.layout_calls = 0
