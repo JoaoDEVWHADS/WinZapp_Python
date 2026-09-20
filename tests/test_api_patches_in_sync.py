@@ -36,6 +36,8 @@ import pathlib
 
 import pytest
 
+from core.api_patch_manifest import server_patch_files
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 API = ROOT / "client" / "api"
 PATCHES = ROOT / "client" / "api_patches"
