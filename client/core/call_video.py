@@ -28,6 +28,21 @@ def camera_names(ffmpeg_output: str) -> list[str]:
     return names
 
 
+def list_camera_devices(ffmpeg: str) -> list[str]:
+    """Enumerate DirectShow camera names via the same probe CameraCapture.start() uses."""
+    if sys.platform != 'win32' or not ffmpeg:
+        return []
+    try:
+        listed = subprocess.run(
+            [ffmpeg, '-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+            capture_output=True, text=True, errors='replace', timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return []
+    return camera_names(listed.stderr)
+
+
 def jpeg_frames(stream, stop_event):
     """Yield complete JPEG images from FFmpeg's image2pipe output."""
     buffer = bytearray()
@@ -62,23 +77,22 @@ class CameraCapture:
         self.process = None
         self.thread = None
 
-    def start(self):
+    def start(self, preferred_name: str = ""):
         if sys.platform != 'win32':
             raise RuntimeError('Camera capture requires Windows')
         if not self.ffmpeg:
             raise RuntimeError('FFmpeg is required for camera capture')
-        listed = subprocess.run(
-            [self.ffmpeg, '-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
-            capture_output=True, text=True, errors='replace', timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        devices = camera_names(listed.stderr)
+        devices = list_camera_devices(self.ffmpeg)
         if not devices:
             raise RuntimeError('No camera found')
-        logging.info('[call_video] camera selected: %s (detected=%d)', devices[0], len(devices))
+        # An empty/blank preference, or one that no longer matches a detected
+        # device, means "system default" — the first camera ffmpeg lists,
+        # exactly today's unconditional behaviour.
+        device = preferred_name if preferred_name in devices else devices[0]
+        logging.info('[call_video] camera selected: %s (detected=%d)', device, len(devices))
         self.process = subprocess.Popen(
             [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 'dshow',
-             '-i', f'video={devices[0]}', '-an', '-vf', 'fps=10,scale=640:360:force_original_aspect_ratio=decrease',
+             '-i', f'video={device}', '-an', '-vf', 'fps=10,scale=640:360:force_original_aspect_ratio=decrease',
              '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '7', '-'],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW,

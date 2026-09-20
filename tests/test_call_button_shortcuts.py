@@ -127,7 +127,7 @@ def test_active_call_window_accelerators_bind_to_the_right_handlers():
     )
     assert '(wx.ACCEL_CTRL,                  ord("C"), self.ID_CALL_SETTINGS),' in _MAIN_SRC
     assert (
-        "self.voice_call_window.Bind(wx.EVT_MENU, self.open_call_audio_settings, id=self.ID_CALL_SETTINGS)"
+        "self.voice_call_window.Bind(wx.EVT_MENU, self._open_active_call_settings, id=self.ID_CALL_SETTINGS)"
         in _MAIN_SRC
     )
     assert '(wx.ACCEL_CTRL,                  ord("V"), self.ID_CALL_VIDEO),' in _MAIN_SRC

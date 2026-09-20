@@ -1109,6 +1109,11 @@ class SettingsDialog(wx.Dialog):
         )
         calls_sizer.Add(self._call_audio_settings_button, 0, wx.ALL, 8)
 
+        self._call_video_settings_button = wx.Button(
+            self._calls_page, label=i18n.t("calls_video_settings_button")
+        )
+        calls_sizer.Add(self._call_video_settings_button, 0, wx.ALL, 8)
+
         self._calls_page.SetSizer(calls_sizer)
         self._notebook.AddPage(self._calls_page, i18n.t("tab_calls"))
         self._call_alerts_check.Bind(wx.EVT_CHECKBOX, self._on_call_alerts_toggle)
@@ -1122,6 +1127,9 @@ class SettingsDialog(wx.Dialog):
         # the real cause is buried a thousand log lines up.
         self._call_audio_settings_button.Bind(
             wx.EVT_BUTTON, self._on_call_audio_settings
+        )
+        self._call_video_settings_button.Bind(
+            wx.EVT_BUTTON, self._on_call_video_settings
         )
 
         # ── Profile backup tab ───────────────────────────────────────────────
@@ -1942,6 +1950,16 @@ class SettingsDialog(wx.Dialog):
             return
         # Parented to this dialog, so the chooser cannot end up underneath it.
         opener(event, parent=self)
+
+    def _on_call_video_settings(self, event):
+        """Open the call camera chooser, if the app can.
+
+        Same lookup-at-press-time reasoning as _on_call_audio_settings above.
+        """
+        opener = getattr(self.main_window, "open_call_audio_settings", None)
+        if opener is None:
+            return
+        opener(event, parent=self, include_audio=False, include_camera=True)
 
     def _on_call_alerts_toggle(self, event):
         self._update_call_fields_state()
@@ -2765,6 +2783,7 @@ class SettingsDialog(wx.Dialog):
         self._call_popup_check.SetLabel(i18n.t("calls_popup_enabled_label"))
         self._call_exclusive_mode_check.SetLabel(i18n.t("calls_exclusive_mode_label"))
         self._call_audio_settings_button.SetLabel(i18n.t("calls_audio_settings_button"))
+        self._call_video_settings_button.SetLabel(i18n.t("calls_video_settings_button"))
         self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._spell_check_radio.SetLabel(i18n.t("spell_check_label"))

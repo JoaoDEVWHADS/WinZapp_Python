@@ -4,7 +4,7 @@ from pathlib import Path
 from threading import Event
 
 from core.call_logic import active_call_label_key, incoming_call_can_answer
-from core.call_video import camera_names, jpeg_frames
+from core.call_video import CameraCapture, camera_names, jpeg_frames, list_camera_devices
 from main import MainWindow
 
 
@@ -28,6 +28,106 @@ def test_camera_names_accepts_current_ffmpeg_directshow_suffix_and_spacing():
 [dshow @ 000]  "Microphone" (audio)
 '''
     assert camera_names(listing) == ["Integrated Camera", "USB Camera"]
+
+
+class _FakeCompletedProcess:
+    def __init__(self, stderr):
+        self.stderr = stderr
+
+
+class _FakeCameraProcess:
+    """Fake subprocess.Popen result: a fixed JPEG frame on stdout."""
+
+    def __init__(self, frame=b'\xff\xd8frame\xff\xd9'):
+        self.stdout = BytesIO(frame)
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+
+
+_CAMERA_LISTING = '''[dshow @ 000] DirectShow video devices (some may be both video and audio devices)
+[dshow @ 000] "Integrated Camera"
+[dshow @ 000] "USB Camera"
+[dshow @ 000] DirectShow audio devices
+[dshow @ 000] "Microphone"
+'''
+
+
+def test_list_camera_devices_parses_the_same_listing_as_camera_names(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr(call_video.sys, "platform", "win32")
+    monkeypatch.setattr(call_video.subprocess, "run",
+                         lambda *a, **kw: _FakeCompletedProcess(_CAMERA_LISTING))
+
+    assert list_camera_devices("ffmpeg.exe") == ["Integrated Camera", "USB Camera"]
+
+
+def test_list_camera_devices_returns_empty_when_ffmpeg_fails(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr(call_video.sys, "platform", "win32")
+
+    def boom(*a, **kw):
+        raise OSError("ffmpeg not found")
+
+    monkeypatch.setattr(call_video.subprocess, "run", boom)
+    assert list_camera_devices("ffmpeg.exe") == []
+
+
+def test_list_camera_devices_returns_empty_without_ffmpeg():
+    assert list_camera_devices("") == []
+
+
+def test_camera_capture_start_opens_the_preferred_device_when_detected(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr(call_video.sys, "platform", "win32")
+    monkeypatch.setattr(call_video.subprocess, "run",
+                         lambda *a, **kw: _FakeCompletedProcess(_CAMERA_LISTING))
+    popen_calls = []
+
+    def fake_popen(cmd, **kw):
+        popen_calls.append(cmd)
+        return _FakeCameraProcess()
+
+    monkeypatch.setattr(call_video.subprocess, "Popen", fake_popen)
+
+    capture = CameraCapture("ffmpeg.exe", lambda frame: None)
+    try:
+        capture.start(preferred_name="USB Camera")
+        cmd = popen_calls[0]
+        assert cmd[cmd.index("-i") + 1] == "video=USB Camera"
+    finally:
+        capture.stop()
+
+
+def test_camera_capture_start_falls_back_to_first_device_when_preference_is_missing(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr(call_video.sys, "platform", "win32")
+    monkeypatch.setattr(call_video.subprocess, "run",
+                         lambda *a, **kw: _FakeCompletedProcess(_CAMERA_LISTING))
+    popen_calls = []
+
+    def fake_popen(cmd, **kw):
+        popen_calls.append(cmd)
+        return _FakeCameraProcess()
+
+    monkeypatch.setattr(call_video.subprocess, "Popen", fake_popen)
+
+    capture = CameraCapture("ffmpeg.exe", lambda frame: None)
+    try:
+        capture.start(preferred_name="Nonexistent Camera")
+        cmd = popen_calls[0]
+        assert cmd[cmd.index("-i") + 1] == "video=Integrated Camera"
+    finally:
+        capture.stop()
+
+    capture = CameraCapture("ffmpeg.exe", lambda frame: None)
+    try:
+        capture.start()  # blank preference -> same "system default" fallback
+        cmd = popen_calls[1]
+        assert cmd[cmd.index("-i") + 1] == "video=Integrated Camera"
+    finally:
+        capture.stop()
 
 
 def test_jpeg_pipe_discards_noise_and_yields_complete_frames():
@@ -76,19 +176,31 @@ class _NoCameraMainWindow:
         self.ws = _NoCameraWs()
         self._active_voice_call = {"identity": "call-1", "is_video": True}
         self._call_camera_capture = None
+        self.settings = {}
+        self.i18n = _NoOpI18n()
+        self.announcements = []
 
     def _find_api_ffmpeg(self):
         return "ffmpeg.exe"
 
+    def output(self, text, interrupt=False):
+        self.announcements.append((text, interrupt))
+
+
+class _NoOpI18n:
+    def t(self, key):
+        return key
+
 
 def test_missing_camera_does_not_end_or_clear_video_call(monkeypatch):
     import core.call_video as call_video
+    monkeypatch.setattr("main.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
     class MissingCameraCapture:
         def __init__(self, _ffmpeg, _send_frame):
             self.stopped = False
 
-        def start(self):
+        def start(self, _preferred_name=""):
             raise RuntimeError("No camera found")
 
         def stop(self):
@@ -104,6 +216,32 @@ def test_missing_camera_does_not_end_or_clear_video_call(monkeypatch):
     assert stub._call_camera_capture is None
     assert stub._call_camera_available is False
     assert stub._call_camera_enabled is False
+    # Default announce_failure=True: the caller asked for video, so a camera
+    # failure is worth speaking.
+    assert stub.announcements == [("call_video_no_camera_error", True)]
+
+
+def test_missing_camera_stays_silent_when_announce_failure_is_false(monkeypatch):
+    import core.call_video as call_video
+    monkeypatch.setattr("main.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+    class MissingCameraCapture:
+        def __init__(self, _ffmpeg, _send_frame):
+            pass
+
+        def start(self, _preferred_name=""):
+            raise RuntimeError("No camera found")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(call_video, "CameraCapture", MissingCameraCapture)
+    stub = _NoCameraMainWindow()
+
+    assert stub._start_call_camera(announce_failure=False) is False
+    # The "answer without video" probe deliberately suppresses this: the user
+    # never asked for the camera, so there is nothing to complain about.
+    assert stub.announcements == []
 
 
 class _RemoteVideoMainWindow:
@@ -145,3 +283,39 @@ def test_call_window_video_toggle_is_hidden_without_camera():
     assert 'video_button.Show(is_video and local_camera_available)' in source
     assert 'self.voice_call_window_video_button.Bind(wx.EVT_BUTTON, self.toggle_call_video)' in source
     assert 'def _stop_call_camera(self, *, reset_availability: bool = False):' in source
+
+
+class _ToggleVideoMainWindow:
+    toggle_call_video = MainWindow.toggle_call_video
+
+    def __init__(self, *, is_video, camera_available):
+        self._active_voice_call = {"is_video": is_video}
+        self._call_camera_available = camera_available
+        self._call_camera_capture = None
+        self.i18n = _NoOpI18n()
+        self.announcements = []
+        self.started_threads = 0
+
+    def output(self, text, interrupt=False):
+        self.announcements.append((text, interrupt))
+
+
+def test_toggle_call_video_announces_error_when_no_camera_is_available():
+    stub = _ToggleVideoMainWindow(is_video=True, camera_available=None)
+
+    stub.toggle_call_video()
+
+    # Runs on the UI thread already (a button/menu handler), so this is
+    # spoken directly, no wx.CallAfter needed.
+    assert stub.announcements == [("call_video_no_camera_error", True)]
+
+
+def test_toggle_call_video_does_nothing_silently_on_a_voice_only_call():
+    stub = _ToggleVideoMainWindow(is_video=False, camera_available=None)
+
+    stub.toggle_call_video()
+
+    # The toggle button is hidden for a voice-only call, so this path
+    # shouldn't normally be reached — and if it is, there is still nothing
+    # camera-related to complain about.
+    assert stub.announcements == []
