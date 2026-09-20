@@ -2613,12 +2613,174 @@ export default class CreateSessionUtil {
   }
 
   async onPresenceChanged(client: WhatsAppServer, req: Request) {
-    await client.onPresenceChanged(async (presenceChangedEvent) => {
+    await client.onPresenceChanged(async (presenceChangedEvent: any) => {
+      let forwardedEvent: any = presenceChangedEvent;
+
+      try {
+        const rawId = presenceChangedEvent?.id;
+        const eventId =
+          typeof rawId === 'string'
+            ? rawId
+            : typeof rawId?._serialized === 'string'
+              ? rawId._serialized
+              : rawId?.user && rawId?.server
+                ? `${String(rawId.user)}@${String(rawId.server)}`
+                : '';
+
+        const isGroupId = eventId.endsWith('@g.us');
+        const hasParticipants =
+          Array.isArray(presenceChangedEvent?.participants) &&
+          presenceChangedEvent.participants.length > 0;
+
+        // WA-JS 4.x can emit a real group presence event with id=@g.us while
+        // its derived isGroup flag is false. registerPresenceChange.ts only
+        // serializes `participants` when presence.isGroup is true, so that
+        // malformed event reaches Socket.IO without the member whose
+        // chatstate actually changed. Rehydrate the group snapshot directly
+        // from the live Chat/Presence store before forwarding it.
+        if (isGroupId && !hasParticipants) {
+          const page = (client as any).page;
+          if (page) {
+            const participants: any[] = await page.evaluate(
+              (groupId: string) => {
+                const wpp = (window as any).WPP;
+                const whatsapp = wpp?.whatsapp;
+                if (!whatsapp) {
+                  return [];
+                }
+
+                let wid: any = groupId;
+                try {
+                  if (typeof whatsapp.WidFactory?.createWid === 'function') {
+                    wid = whatsapp.WidFactory.createWid(groupId);
+                  }
+                } catch {
+                  wid = groupId;
+                }
+
+                let presence: any = null;
+                try {
+                  const chat =
+                    whatsapp.ChatStore?.get?.(wid) ||
+                    whatsapp.ChatStore?.get?.(groupId);
+                  presence = chat?.presence || null;
+                } catch {
+                  presence = null;
+                }
+
+                if (!presence) {
+                  try {
+                    presence =
+                      whatsapp.PresenceStore?.get?.(wid) ||
+                      whatsapp.PresenceStore?.get?.(groupId) ||
+                      null;
+                  } catch {
+                    presence = null;
+                  }
+                }
+
+                if (
+                  !presence &&
+                  typeof whatsapp.PresenceStore?.getModelsArray === 'function'
+                ) {
+                  try {
+                    presence = whatsapp.PresenceStore
+                      .getModelsArray()
+                      .find((candidate: any) => {
+                        const candidateId = candidate?.id;
+                        const serialized =
+                          typeof candidateId === 'string'
+                            ? candidateId
+                            : typeof candidateId?._serialized === 'string'
+                              ? candidateId._serialized
+                              : typeof candidateId?.toString === 'function'
+                                ? candidateId.toString()
+                                : candidateId?.user && candidateId?.server
+                                  ? `${String(candidateId.user)}@${String(candidateId.server)}`
+                                  : '';
+                        return serialized === groupId;
+                      });
+                  } catch {
+                    presence = null;
+                  }
+                }
+
+                const states =
+                  typeof presence?.chatstates?.getModelsArray === 'function'
+                    ? presence.chatstates.getModelsArray()
+                    : [];
+                if (!Array.isArray(states)) {
+                  return [];
+                }
+
+                return states
+                  .filter((state: any) => Boolean(state?.type))
+                  .map((state: any) => {
+                    const stateId = state?.id;
+                    const id =
+                      typeof stateId === 'string'
+                        ? stateId
+                        : typeof stateId?._serialized === 'string'
+                          ? stateId._serialized
+                          : typeof stateId?.toString === 'function'
+                            ? stateId.toString()
+                            : stateId?.user && stateId?.server
+                              ? `${String(stateId.user)}@${String(stateId.server)}`
+                              : '';
+                    if (!id) {
+                      return null;
+                    }
+
+                    let shortName = '';
+                    try {
+                      const contact = whatsapp.ContactStore?.get?.(stateId);
+                      shortName =
+                        contact?.formattedShortName ||
+                        contact?.shortName ||
+                        contact?.pushname ||
+                        '';
+                    } catch {
+                      shortName = '';
+                    }
+
+                    return {
+                      id,
+                      state: String(state.type),
+                      shortName,
+                    };
+                  })
+                  .filter(Boolean);
+              },
+              eventId
+            );
+
+            if (participants.length > 0) {
+              forwardedEvent = {
+                ...presenceChangedEvent,
+                isGroup: true,
+                participants,
+              };
+              req.logger.info(
+                `[${client.session}] Rehydrated group presence event for ${eventId} with ${participants.length} participant state(s)`
+              );
+            } else {
+              req.logger.warn(
+                `[${client.session}] Group presence event for ${eventId} arrived without participants and the live PresenceStore snapshot was empty`
+              );
+            }
+          }
+        }
+      } catch (presenceRepairError) {
+        req.logger.warn(
+          `[${client.session}] Failed to repair group presence event: ${presenceRepairError}`
+        );
+      }
+
       req.io.emit('onpresencechanged', {
-        ...presenceChangedEvent,
+        ...forwardedEvent,
         session: client.session,
       });
-      callWebHook(client, req, 'onpresencechanged', presenceChangedEvent);
+      callWebHook(client, req, 'onpresencechanged', forwardedEvent);
     });
   }
 
