@@ -4,7 +4,6 @@ import time
 import numpy as np
 
 from core.call_audio import (
-    CALL_DEVICE_LATENCY_SECONDS,
     CALL_FRAME_SAMPLES,
     CALL_MIC_TARGET_BACKLOG_FRAMES,
     CallAudioConfig,
@@ -43,12 +42,16 @@ class _OutputStream:
         self.started = False
         self.closed = False
         self.writes = []
+        # PortAudio's OutputStream.write() returns a bool signalling an
+        # underrun on that call; tests flip this to exercise the counter.
+        self.report_underflow = False
 
     def start(self):
         self.started = True
 
     def write(self, samples):
         self.writes.append(np.asarray(samples).copy())
+        return self.report_underflow
 
     def stop(self):
         self.started = False
@@ -273,27 +276,33 @@ def test_call_audio_prefers_native_device_rate_and_safe_driver_latency():
     assert output_kwargs["device"] == 1
     assert input_kwargs["samplerate"] == 44100
     assert output_kwargs["samplerate"] == 44100
-    assert input_kwargs["latency"] == CALL_DEVICE_LATENCY_SECONDS
-    assert output_kwargs["latency"] == CALL_DEVICE_LATENCY_SECONDS
+    assert input_kwargs["latency"] == "low"
+    assert output_kwargs["latency"] == "low"
 
     session.stop()
 
 
-def test_windows_wasapi_settings_are_explicitly_shared(monkeypatch):
-    import core.call_audio as call_audio
-
-    monkeypatch.setattr(call_audio.sys, "platform", "win32")
+def test_output_underflow_is_counted_and_logged(caplog):
+    sio = _Socket()
     sounddevice = _SoundDevice()
     session = CallAudioSession(
-        _Socket(),
-        CallAudioConfig(session="winzapp"),
+        sio,
+        CallAudioConfig(session="winzapp", output_device_name="Speaker"),
         sounddevice_module=sounddevice,
     )
+    session.start_output_only()
+    output_stream = sounddevice.output_streams[0][1]
+    output_stream.report_underflow = True
 
-    input_settings = session._stream_extra_settings(0, input_device=True)
-    output_settings = session._stream_extra_settings(1, input_device=False)
+    samples = np.full(CALL_FRAME_SAMPLES * 3, 0.1, dtype=np.float32)
+    pcm = (samples * 32767).astype("<i2").tobytes()
+    with caplog.at_level("INFO"):
+        session.enqueue_remote_audio(pcm, 48000)
+        assert _wait_for(lambda: session._output_underflow_count >= 1)
 
-    assert input_settings.exclusive is False
-    assert input_settings.auto_convert is True
-    assert output_settings.exclusive is False
-    assert output_settings.auto_convert is True
+    session.stop()
+
+    assert session._output_underflow_count >= 1
+    assert any(
+        "output stream reported underflow" in record.message for record in caplog.records
+    )

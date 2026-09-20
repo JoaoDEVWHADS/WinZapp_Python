@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import logging
 import queue
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -26,9 +25,6 @@ except ImportError:  # pragma: no cover - packaging always installs it
 CALL_SAMPLE_RATE = 48_000
 CALL_FRAME_MS = 20
 CALL_FRAME_SAMPLES = CALL_SAMPLE_RATE * CALL_FRAME_MS // 1000
-# 40 ms leaves two 20 ms hardware periods for ordinary Windows driver jitter
-# without adding the large latency of PortAudio's generic "high" preset.
-CALL_DEVICE_LATENCY_SECONDS = 0.040
 CALL_MIC_QUEUE_LIMIT = 12
 CALL_MIC_TARGET_BACKLOG_FRAMES = 2
 CALL_OUTPUT_QUEUE_LIMIT = 40
@@ -97,6 +93,7 @@ class CallAudioSession:
         self._microphone_muted = False
         self._output_rebuffer_count = 0
         self._output_samples_dropped = 0
+        self._output_underflow_count = 0
 
     @property
     def microphone_muted(self) -> bool:
@@ -259,34 +256,20 @@ class CallAudioSession:
                 rates.append(rate)
         return rates
 
-    def _stream_extra_settings(
-        self, device_index: Optional[int], *, input_device: bool
-    ):
-        """Keep WASAPI in shared mode so a call cannot take over the device."""
-        if sys.platform != "win32":
-            return None
-        actual_index = device_index
-        if actual_index is None:
-            actual_index = self._default_device_index(input_device=input_device)
-        if actual_index is None:
-            return None
-        try:
-            info = self._sd.query_devices(actual_index)
-            hostapi = self._sd.query_hostapis(int(info.get("hostapi", -1)))
-            if "wasapi" not in str(hostapi.get("name", "")).lower():
-                return None
-            settings_type = getattr(self._sd, "WasapiSettings", None)
-            if settings_type is None:
-                return None
-            # Explicitly shared; auto_convert is only a fallback for a device
-            # whose native rate cannot be opened for some reason.
-            return settings_type(exclusive=False, auto_convert=True)
-        except Exception:
-            logging.debug(
-                "[call_audio] could not apply shared WASAPI settings",
-                exc_info=True,
-            )
-            return None
+    # A previous revision forced every WASAPI stream into shared mode via
+    # sd.WasapiSettings(exclusive=False, auto_convert=True) here, meant to
+    # stop a call from taking the device away from other applications. That
+    # is what PortAudio already does by default on WASAPI — exclusive mode is
+    # opt-in, never the fallback — so the extra settings changed nothing about
+    # exclusivity and only routed every call through WASAPI's own format
+    # converter (auto_convert), which measurably added the choppy, high-
+    # latency playback reported after this landed. Removed together with the
+    # fixed device latency below, restoring the "low" latency + no
+    # extra_settings pairing calls used before either regressed. If device
+    # exclusivity is ever observed for real, revisit here — the hostapi/
+    # WasapiSettings lookup this used to do is still the right shape, just
+    # apply it deliberately (e.g. only exclusive=True detection) rather than
+    # unconditionally on every stream.
 
     def _open_input_stream(self):
         last_error = None
@@ -299,17 +282,14 @@ class CallAudioSession:
                         device=device,
                         channels=1,
                         dtype="float32",
-                        latency=CALL_DEVICE_LATENCY_SECONDS,
-                        extra_settings=self._stream_extra_settings(
-                            device, input_device=True
-                        ),
+                        latency="low",
                         callback=self._on_microphone_frame(rate),
                     )
                     logging.info(
                         "[call_audio] input opened device=%r rate=%s latency=%r",
                         device,
                         rate,
-                        getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
+                        getattr(stream, "latency", "low"),
                     )
                     return stream, rate
                 except Exception as exc:
@@ -327,16 +307,13 @@ class CallAudioSession:
                         device=device,
                         channels=1,
                         dtype="float32",
-                        latency=CALL_DEVICE_LATENCY_SECONDS,
-                        extra_settings=self._stream_extra_settings(
-                            device, input_device=False
-                        ),
+                        latency="low",
                     )
                     logging.info(
                         "[call_audio] output opened device=%r rate=%s latency=%r",
                         device,
                         rate,
-                        getattr(stream, "latency", CALL_DEVICE_LATENCY_SECONDS),
+                        getattr(stream, "latency", "low"),
                     )
                     return stream, rate
                 except Exception as exc:
@@ -453,7 +430,15 @@ class CallAudioSession:
                     if self._output_stream is not None:
                         underflowed = self._output_stream.write(frame.reshape(-1, 1))
                         if underflowed:
-                            logging.debug("[call_audio] output stream reported underflow")
+                            self._output_underflow_count += 1
+                            if (
+                                self._output_underflow_count == 1
+                                or self._output_underflow_count % 50 == 0
+                            ):
+                                logging.info(
+                                    "[call_audio] output stream reported underflow count=%s",
+                                    self._output_underflow_count,
+                                )
                 except Exception:
                     logging.exception("[call_audio] failed to play remote call audio")
                     time.sleep(0.01)
@@ -473,7 +458,15 @@ class CallAudioSession:
                     if self._output_stream is not None:
                         underflowed = self._output_stream.write(frame.reshape(-1, 1))
                         if underflowed:
-                            logging.debug("[call_audio] output stream reported underflow")
+                            self._output_underflow_count += 1
+                            if (
+                                self._output_underflow_count == 1
+                                or self._output_underflow_count % 50 == 0
+                            ):
+                                logging.info(
+                                    "[call_audio] output stream reported underflow count=%s",
+                                    self._output_underflow_count,
+                                )
                 except Exception:
                     logging.exception("[call_audio] failed to play remote call audio")
                     time.sleep(0.01)
