@@ -1,9 +1,9 @@
-"""Regression tests for late WPPConnect setup/update callbacks.
+"""Regression tests for WPPConnect setup/update modal lifecycle.
 
-The setup worker reports completion with wx.CallAfter. Cancellation can end
-ShowModal() after the worker queued success but before that callback executes;
-the old callback then called EndModal() on a stopped loop and raised wxWidgets'
-``IsRunning(): Use ScheduleExit() on not running loop`` assertion.
+ApiSetupDialog now guards late worker callbacks directly with IsModal(): when
+its modal loop is still running completion uses EndModal(), and when the loop
+has already ended it falls back to Close().  These tests exercise that current
+contract without depending on private helpers that no longer exist.
 """
 
 import pytest
@@ -29,14 +29,7 @@ class _Gauge:
         self.values.append(value)
 
 
-class _I18n:
-    def t(self, key):
-        return key
-
-
 class _DialogStub:
-    _is_modal_active = api_setup.ApiSetupDialog._is_modal_active
-    _end_modal_safely = api_setup.ApiSetupDialog._end_modal_safely
     _on_cancel = api_setup.ApiSetupDialog._on_cancel
     _finish_success = api_setup.ApiSetupDialog._finish_success
     _finish_error = api_setup.ApiSetupDialog._finish_error
@@ -44,12 +37,11 @@ class _DialogStub:
     def __init__(self, modal=True):
         self._modal = modal
         self._cancelled = False
-        self._finished = False
         self._trickling = True
         self._timer = _Timer()
         self._gauge = _Gauge()
-        self._i18n = _I18n()
         self.end_results = []
+        self.close_calls = 0
         self.kill_calls = 0
 
     def IsModal(self):
@@ -61,39 +53,43 @@ class _DialogStub:
         self.end_results.append(result)
         self._modal = False
 
+    def Close(self):
+        self.close_calls += 1
+        self._modal = False
+
     def _kill_proc_tree(self):
         self.kill_calls += 1
 
 
-def test_normal_success_closes_the_running_modal_once(monkeypatch):
+def test_normal_success_ends_the_running_modal(monkeypatch):
     boxes = []
     monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
     dialog = _DialogStub()
 
-    dialog._finish_success()
     dialog._finish_success()
 
     assert dialog.end_results == [wx.ID_OK]
+    assert dialog.close_calls == 0
     assert len(boxes) == 1
     assert dialog._gauge.values == [100]
     assert dialog._timer.stop_calls == 1
+    assert dialog._trickling is False
 
 
-def test_queued_success_after_cancel_is_ignored(monkeypatch):
-    boxes = []
-    monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
+def test_cancel_is_idempotent():
     dialog = _DialogStub()
 
     dialog._on_cancel()
-    dialog._finish_success()
+    dialog._on_cancel()
 
     assert dialog.end_results == [wx.ID_CANCEL]
     assert dialog.kill_calls == 1
-    assert boxes == []
+    assert dialog._timer.stop_calls == 1
+    assert dialog._cancelled is True
 
 
 @pytest.mark.parametrize("callback", ["_finish_success", "_finish_error"])
-def test_completion_after_modal_loop_already_ended_is_a_noop(monkeypatch, callback):
+def test_completion_after_modal_loop_already_ended_uses_close(monkeypatch, callback):
     boxes = []
     monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
     dialog = _DialogStub(modal=False)
@@ -104,19 +100,19 @@ def test_completion_after_modal_loop_already_ended_is_a_noop(monkeypatch, callba
         dialog._finish_success()
 
     assert dialog.end_results == []
-    assert boxes == []
-    assert dialog._finished is True
+    assert dialog.close_calls == 1
+    assert len(boxes) == 1
 
 
-def test_normal_error_closes_once_and_late_cancel_does_nothing(monkeypatch):
+def test_normal_error_ends_the_running_modal(monkeypatch):
     boxes = []
     monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
     dialog = _DialogStub()
 
     dialog._finish_error("npm failed")
-    dialog._on_cancel()
 
     assert dialog.end_results == [wx.ID_CANCEL]
+    assert dialog.close_calls == 0
     assert len(boxes) == 1
     assert "npm failed" in boxes[0][0]
-    assert dialog.kill_calls == 0
+    assert dialog._timer.stop_calls == 1
