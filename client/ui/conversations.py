@@ -3431,7 +3431,7 @@ class ConversationsPanel(wx.Panel):
         """Restore composer focus without announcing it after voice recording."""
         suppress_focus = self._voice_recording_focus_suppression_enabled()
         if self._voice_recording_silence_enabled():
-            getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
+            self._arm_voice_recording_silence_transition()
 
         try:
             already_focused = bool(self.message_field.HasFocus())
@@ -3527,7 +3527,7 @@ class ConversationsPanel(wx.Panel):
         # Native focus speech may start only a few milliseconds after wx
         # changes focus. Dense early cancellations prevent the first syllable
         # from leaking before the older 40 ms retry ("Di..." from "Digite").
-        for delay_ms in (40, 90, 160, 260, 400):
+        for delay_ms in (5, 15, 30, 50, 90, 160, 260, 400, 650):
             wx.CallLater(delay_ms, _silence_now)
 
     def _start_voice_recording(self):
@@ -3590,7 +3590,7 @@ class ConversationsPanel(wx.Panel):
                         self._recording_frames.append(indata.tobytes())
                 self._recording_actual_rate = 48000
                 self._recording_actual_ch = 1
-                getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
+                self._arm_voice_recording_silence_transition()
                 self._is_recording = True
                 
                 # UI updates INSTANTLY (0.01s)
@@ -3783,7 +3783,7 @@ class ConversationsPanel(wx.Panel):
             self._recording_actual_rate = rate
             self._recording_actual_ch   = ch
 
-            getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
+            self._arm_voice_recording_silence_transition()
             self._is_recording = True
 
             # UI: play sound, swap buttons, focus the configured recording action.
@@ -3891,7 +3891,7 @@ class ConversationsPanel(wx.Panel):
         """Discard the current recording without sending."""
         if not self._is_recording:
             return
-        getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
+        self._arm_voice_recording_silence_transition()
         self.main_window.voicemsg_discard_sound.play()
         threading.Thread(target=self._stop_recording_stream, daemon=True).start()
         self._is_recording     = False
@@ -4015,7 +4015,7 @@ class ConversationsPanel(wx.Panel):
         # Keep speech muted across the state flip and focus restoration. The
         # old predicate ended exactly at _is_recording=False, which exposed
         # native focus speech from the message field.
-        getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
+        self._arm_voice_recording_silence_transition()
         # Stop the recording stream in background FIRST so the audio device is fully released
         # without blocking the UI thread before BASS plays the send sound.
         threading.Thread(target=self._stop_recording_stream, daemon=True).start()

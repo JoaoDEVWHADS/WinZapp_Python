@@ -6744,16 +6744,12 @@ class MainWindow(wx.Frame):
                                  include_audio: bool = True, include_camera: bool = False):
         """Choose call devices without changing the global audio/camera settings.
 
-        ``parent`` is passed by whoever opened this. It matters: parented to the
-        main window while the Settings dialog is what opened it, the chooser has
-        an enabled sibling that can sit on top of it.
+        Audio device changes are applied live to the existing call session:
+        microphone capture and BASS playback switch independently, without
+        restarting the WhatsApp call or the other side of the audio path.
 
-        ``include_audio``/``include_camera`` pick which rows the dialog shows —
-        this one method backs three call sites: the Settings dialog's audio-only
-        button, its camera-only button, and the in-call window's own settings
-        button (audio always, camera only while the current call is video).
+        The include_audio/include_camera flags pick which rows the dialog shows.
         """
-        import sounddevice as sd
         from core.call_video import list_camera_devices
         if parent is None:
             call_window = getattr(self, "voice_call_window", None)
@@ -6773,25 +6769,39 @@ class MainWindow(wx.Frame):
             return combo
 
         input_combo = output_combo = None
+        audio_cfg = None
         if include_audio:
             audio_cfg = self.settings.setdefault("call_audio_devices", {})
             try:
-                output_names = [str(d.get("name", "")).strip() for d in sd.query_devices()
-                                if d.get("max_output_channels", 0) > 0]
+                output_names = [name for _, name in enumerate_output_devices()]
             except Exception:
+                logging.exception("[call_audio] could not enumerate BASS output devices")
                 output_names = []
             input_names = [name for _, name in enumerate_input_devices()]
+
+            # Keep a disconnected saved device visible instead of silently
+            # replacing the preference while that device is temporarily absent.
+            saved_input = audio_cfg.get("input_device_name", "")
+            saved_output = audio_cfg.get("output_device_name", "")
+            if saved_input and saved_input not in input_names:
+                input_names.append(saved_input)
+            if saved_output and saved_output not in output_names:
+                output_names.append(saved_output)
+
             input_combo = add_combo("voice_call_recording_devices",
-                                    input_names, audio_cfg.get("input_device_name", ""))
+                                    input_names, saved_input)
             output_combo = add_combo("voice_call_playback_devices",
-                                     output_names, audio_cfg.get("output_device_name", ""))
+                                     output_names, saved_output)
 
         camera_combo = None
         if include_camera:
             video_cfg = self.settings.setdefault("call_video_devices", {})
+            camera_names = list_camera_devices(self._find_api_ffmpeg())
+            saved_camera = video_cfg.get("camera_name", "")
+            if saved_camera and saved_camera not in camera_names:
+                camera_names.append(saved_camera)
             camera_combo = add_combo("voice_call_camera_devices",
-                                     list_camera_devices(self._find_api_ffmpeg()),
-                                     video_cfg.get("camera_name", ""))
+                                     camera_names, saved_camera)
 
         buttons = wx.StdDialogButtonSizer()
         cancel_button = wx.Button(dialog, wx.ID_CANCEL, self.i18n.t("cancel"))
@@ -6802,19 +6812,43 @@ class MainWindow(wx.Frame):
         first_combo = input_combo if input_combo is not None else camera_combo
 
         def apply(_evt=None):
+            old_input = old_output = new_input = new_output = ""
             if include_audio:
-                audio_cfg["input_device_name"] = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
-                audio_cfg["output_device_name"] = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
+                old_input = audio_cfg.get("input_device_name", "")
+                old_output = audio_cfg.get("output_device_name", "")
+                new_input = "" if input_combo.GetStringSelection() == default_name else input_combo.GetStringSelection()
+                new_output = "" if output_combo.GetStringSelection() == default_name else output_combo.GetStringSelection()
+                audio_cfg["input_device_name"] = new_input
+                audio_cfg["output_device_name"] = new_output
+
+            old_camera = new_camera = ""
             if include_camera:
-                video_cfg["camera_name"] = "" if camera_combo.GetStringSelection() == default_name else camera_combo.GetStringSelection()
+                old_camera = video_cfg.get("camera_name", "")
+                new_camera = "" if camera_combo.GetStringSelection() == default_name else camera_combo.GetStringSelection()
+                video_cfg["camera_name"] = new_camera
+
             self.save_settings()
-            if include_audio and getattr(self, "_call_audio_session", None) is not None:
-                self._restart_active_voice_call_audio()
-            if include_camera and getattr(self, "_call_camera_capture", None) is not None:
+
+            if include_audio:
+                active_audio = getattr(self, "_call_audio_session", None)
+                ringing_audio = getattr(self, "_call_ring_audio_session", None)
+                if active_audio is not None or ringing_audio is not None:
+                    if new_input != old_input:
+                        self._switch_active_call_input_device(new_input)
+                    if new_output != old_output:
+                        self._switch_active_call_output_device(new_output)
+
+            if (
+                include_camera
+                and new_camera != old_camera
+                and getattr(self, "_call_camera_capture", None) is not None
+            ):
                 self._stop_call_camera()
                 threading.Thread(target=self._start_call_camera, daemon=True).start()
+
             if first_combo is not None:
                 wx.CallAfter(first_combo.SetFocus)
+
         apply_button.Bind(wx.EVT_BUTTON, apply)
         ok_button.Bind(wx.EVT_BUTTON, lambda evt: (apply(), dialog.EndModal(wx.ID_OK)))
         cancel_button.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
