@@ -17083,6 +17083,7 @@ class ConversationsPanel(wx.Panel):
         local_delete_ids.discard("")
 
         def _delete_bg():
+            failed = 0
             for msg in msgs_to_delete:
                 msg_key = dict(msg.get("key", {}))
                 jid = self._delete_target_jid(msg_key)
@@ -17095,15 +17096,34 @@ class ConversationsPanel(wx.Panel):
                     ok = self.main_window.delete_message_for_everyone(jid, msg_key)
                     if ok:
                         wx.CallAfter(self._apply_confirmed_revoke, msg, jid)
+                    else:
+                        failed += 1
                 else:
                     self.main_window.delete_message_for_me(jid, msg_key)
+            wx.CallAfter(self._on_bulk_delete_for_everyone_done, failed)
 
         threading.Thread(target=_delete_bg, daemon=True).start()
 
         if local_delete_ids:
             self.remove_messages_by_id(local_delete_ids, focus_previous=True)
         self.selected_messages.clear()
-        self.main_window.output(i18n.t("success_delete"), interrupt=True)
+
+    def _on_bulk_delete_for_everyone_done(self, failed_count: int):
+        """Report the batch's real outcome instead of an unconditional
+        "success" (issue: a screen-reader user was told a delete succeeded
+        while one or more messages silently stayed on everyone else's copy).
+        Rows removed locally ("delete for me") already reflect their own
+        outcome; this only covers "delete for everyone" revokes.
+        """
+        i18n = self.main_window.i18n
+        if failed_count:
+            wx.MessageBox(
+                i18n.t("delete_for_everyone_bulk_failed").format(count=failed_count),
+                i18n.t("delete_message"),
+                wx.OK | wx.ICON_WARNING,
+            )
+        else:
+            self.main_window.output(i18n.t("success_delete"), interrupt=True)
 
     def _on_accel_recent_reactions(self, event):
         if not self.conversation:

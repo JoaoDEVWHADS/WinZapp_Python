@@ -276,6 +276,7 @@
     "delete_for_me": "Eliminar para mim",
     "delete_for_everyone": "Eliminar para todos",
     "delete_for_everyone_failed": "Não foi possível eliminar a mensagem para todos. Pode ser demasiado antiga ou não tem permissão.",
+    "delete_for_everyone_bulk_failed": "Mensagens que não foi possível eliminar para todos: {count}. Podem ser demasiado antigas ou não tem permissão.",
     "edit_message": "Editar",
     "resend_message": "Reenviar",
     "cancel_edit": "Cancelar edição",

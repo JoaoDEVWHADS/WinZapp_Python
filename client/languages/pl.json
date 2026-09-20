@@ -276,6 +276,7 @@
     "delete_for_me": "Usuń u mnie",
     "delete_for_everyone": "Usuń u wszystkich",
     "delete_for_everyone_failed": "Nie udało się usunąć wiadomości u wszystkich. Może być zbyt stara lub możesz nie mieć uprawnień.",
+    "delete_for_everyone_bulk_failed": "Wiadomości, których nie udało się usunąć u wszystkich: {count}. Mogą być zbyt stare lub możesz nie mieć uprawnień.",
     "edit_message": "Edytuj",
     "resend_message": "Wyślij ponownie",
     "cancel_edit": "Anuluj edycję",
