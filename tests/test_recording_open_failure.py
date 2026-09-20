@@ -109,6 +109,9 @@ class _Stub:
     _focus_recording_button_silently = (
         ConversationsPanel._focus_recording_button_silently
     )
+    _arm_voice_recording_silence_transition = (
+        ConversationsPanel._arm_voice_recording_silence_transition
+    )
 
     def __init__(self):
         self.conversation = {"remoteJid": "5511999999999@s.whatsapp.net"}
