@@ -2374,7 +2374,7 @@ class StatusPanel(wx.Panel):
         if voice_composer:
             if suppress_voice_focus:
                 if self._voice_recording_silence_enabled():
-                    self._arm_voice_recording_silence_transition()
+                    getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
                 cloak_focus_announcement(self._status_list, duration_ms=1200)
                 self._silence_send_voice_focus_if_enabled()
             self._status_list.SetFocus()
@@ -2577,7 +2577,7 @@ class StatusPanel(wx.Panel):
             self._recording_stream   = stream
             self._recording_rate     = rate
             self._recording_channels = ch
-            self._arm_voice_recording_silence_transition()
+            getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
             self._is_recording       = True
 
             if hasattr(self.main_window, "voicemsg_startrecording_sound"):
@@ -2677,7 +2677,7 @@ class StatusPanel(wx.Panel):
 
         _silence_now()
         wx.CallAfter(_silence_now)
-        for delay_ms in (5, 15, 30, 50, 90, 160, 260, 400, 650):
+        for delay_ms in (40, 90, 160, 260, 400):
             wx.CallLater(delay_ms, _silence_now)
 
     def _toggle_pause_voice_recording(self, event):
@@ -2779,7 +2779,7 @@ class StatusPanel(wx.Panel):
         self._recording_open_token += 1
         self._recording_starting = False
         if self._is_recording:
-            self._arm_voice_recording_silence_transition()
+            getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
         if self._is_recording and hasattr(self.main_window, "voicemsg_discard_sound"):
             try:
                 self.main_window.voicemsg_discard_sound.play()
@@ -2795,7 +2795,7 @@ class StatusPanel(wx.Panel):
     def _on_send_voice_status(self, event):
         if not self._is_recording:
             return
-        self._arm_voice_recording_silence_transition()
+        getattr(self, "_arm_voice_recording_silence_transition", lambda: False)()
         if hasattr(self.main_window, "voicemsg_send_sound"):
             try:
                 self.main_window.voicemsg_send_sound.play()

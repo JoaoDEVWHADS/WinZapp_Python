@@ -6620,6 +6620,10 @@ class MainWindow(wx.Frame):
         threading.Thread(target=self._start_call_camera, daemon=True).start()
 
     def accept_incoming_call(self, identity: str, *, with_video: bool | None = None):
+        if getattr(self, "offline_mode", False):
+            self.stop_incoming_call_alert(identity)
+            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
+            return
         if getattr(self, "_active_voice_call", None) is not None:
             self.output(self.i18n.t("voice_call_already_active"), interrupt=True)
             return
@@ -6839,6 +6843,9 @@ class MainWindow(wx.Frame):
 
     def _start_individual_call(self, peer_jid: str, name: str, *, is_video: bool):
         """Start a one-to-one WhatsApp voice/video call using Python-owned media."""
+        if getattr(self, "offline_mode", False):
+            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
+            return
         peer_jid = self._normalize_jid(str(peer_jid or ""))
         if not peer_jid or peer_jid.endswith(("@g.us", "@newsletter", "@broadcast")):
             self.output(self.i18n.t("voice_call_individual_only"), interrupt=True)
@@ -6972,6 +6979,10 @@ class MainWindow(wx.Frame):
         state = str(event.get("state") or "").upper()
         call_id = str(event.get("id") or "")
         peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
+        if getattr(self, "offline_mode", False):
+            if getattr(self, "_active_voice_call", None) is not None:
+                self._stop_voice_call_audio()
+            return
         if (
             event.get("isGroup")
             or peer_jid.endswith("@g.us")
