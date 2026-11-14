@@ -71,6 +71,8 @@ VENV_DIR      = os.environ.get("WINZAPP_VENV") or os.path.join(ROOT_DIR, "venv")
 NODE_DIR         = os.path.join(CLIENT_DIR, "node")
 API_DIR          = os.path.join(CLIENT_DIR, "api")
 API_PATCHES_DIR  = os.path.join(CLIENT_DIR, "api_patches")
+# Where bridge_build freezes neonize_bridge.exe + _internal/ (onedir build).
+BRIDGE_OUTDIR    = os.path.join(BUILD_DIR, "neonize_bridge")
 
 if CLIENT_DIR not in sys.path:
     sys.path.insert(0, CLIENT_DIR)
@@ -474,6 +476,30 @@ def pyinstaller_compile():
 
 # -- Step 3: Assemble staging dir (onedir only) -----------------------------
 
+def freeze_neonize_bridge():
+    """Freeze the Neonize bridge so a compiled build ships neonize_bridge.exe.
+
+    The client offers the Neonize engine in the first-run question only when
+    the bridge is present (core.connection_engine.first_run_engines), so a
+    build without it silently hides Neonize. bridge_build.build() prepares the
+    bridge virtualenv (neonize_bridge/prepare.py) when it is missing.
+    """
+    step("2b/8  Freezing the Neonize bridge")
+    from pathlib import Path
+    from winzapp_tools import bridge_build
+
+    frozen = bridge_build.build(Path(ROOT_DIR), Path(BRIDGE_OUTDIR),
+                                base_python=PYTHON_CMD)
+    print(f"  -> {frozen}")
+
+
+def _frozen_bridge_dir() -> str:
+    from pathlib import Path
+    from winzapp_tools import bridge_build
+
+    return str(bridge_build.frozen_dir(Path(BRIDGE_OUTDIR)))
+
+
 def assemble_staging():
     step("3/8  Assembling staging distribution")
 
@@ -491,6 +517,19 @@ def assemble_staging():
 
     shutil.copy2(PYINST_EXE, os.path.join(STAGING_DIR, "WinZapp.exe"))
     print(f"  -> WinZapp.exe")
+
+    # Ship the frozen Neonize bridge so the first-run engine question offers
+    # Neonize (core.connection_engine.first_run_engines needs the bridge).
+    frozen_bridge = _frozen_bridge_dir()
+    if os.path.isdir(frozen_bridge):
+        from pathlib import Path
+        from winzapp_tools import bridge_build
+
+        bridge_count = bridge_build.stage(Path(frozen_bridge), Path(STAGING_DIR))
+        print(f"  -> neonize_bridge/  ({bridge_count} files)")
+    else:
+        print("  [ERROR] The frozen Neonize bridge is missing from the build output.")
+        sys.exit(1)
 
     if os.path.isdir(PYINST_INTERNAL):
         dst_internal = os.path.join(STAGING_DIR, "_internal")
@@ -833,6 +872,7 @@ if __name__ == "__main__":
     else:
         check_tools()
         pyinstaller_compile()
+        freeze_neonize_bridge()
         assemble_staging()
         compile_uninstaller()
         create_payload_zip()
