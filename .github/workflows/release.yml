@@ -93,7 +93,9 @@ jobs:
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
-          python build.py
+          # builder.py installed requirements (polib included) into ./venv,
+          # so build.py must run with that interpreter, not the system Python.
+          .\venv\Scripts\python.exe build.py
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
