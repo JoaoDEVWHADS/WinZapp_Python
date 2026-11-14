@@ -352,6 +352,23 @@ def check_tools():
 
     print("  All tools and assets found.")
 
+# -- Step 1b: Compile gettext catalogs --------------------------------------
+
+def prepare_languages():
+    """Compile translations/*.po into client/languages/ (winzapp.keys + MO).
+
+    The frozen client reads languages/winzapp.keys and
+    languages/<locale>/LC_MESSAGES/winzapp.mo (see core/translation_catalog.py);
+    development reads translations/*.po directly. Running this before packaging
+    keeps the two in sync so the built app is not shipped without translations.
+    """
+    step("1b/8  Compiling gettext catalogs into client/languages/")
+    from pathlib import Path
+    from winzapp_tools.translation_build import prepare_runtime
+
+    prepare_runtime(Path(ROOT_DIR))
+    print("  -> languages/  (winzapp.keys + <locale>/LC_MESSAGES/winzapp.mo)")
+
 # -- Step 2: PyInstaller compile --------------------------------------------
 
 def pyinstaller_compile():
@@ -801,6 +818,8 @@ if __name__ == "__main__":
     mode_str = "onefile" if ONEFILE else "onedir"
     print(f"\nWinZapp Build Script — PyInstaller ({mode_str})")
     print("=" * 60)
+
+    prepare_languages()
 
     if ONEFILE:
         check_tools()
