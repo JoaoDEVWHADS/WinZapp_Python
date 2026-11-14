@@ -2,11 +2,14 @@
 
 import ast
 from pathlib import Path
+from tests.god_modules import conversations_method_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _method_source(path: Path, class_name: str, method_name: str) -> str:
+    if class_name == "ConversationsPanel":
+        return conversations_method_source(method_name)
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     lines = source.splitlines()
@@ -39,9 +42,10 @@ def test_attachment_http_progress_is_scoped_to_its_upload_id():
     src = _method_source(
         ROOT / "client" / "ui" / "conversations.py",
         "ConversationsPanel",
-        "_on_send_attachment",
+        "_send_attachment_file",
     )
-    assert "wx.CallAfter(self.update_media_upload_progress, local_id, progress)" in src
+    assert "CoalescedCallback(wx.CallAfter, self.update_media_upload_progress)" in src
+    assert "notify(local_id, progress)" in src
     assert "wx.CallAfter(self._update_media_transfer_gauge, progress)" not in src
 
 

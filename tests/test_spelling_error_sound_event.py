@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from tests.locales import load_strings, registered_locale_codes
 
 from core.sound_system import SOUND_EVENTS
 
@@ -21,9 +22,5 @@ def test_spelling_error_event_has_a_bundled_default_sound():
 
 
 def test_every_supported_language_names_the_spelling_error_event():
-    languages_dir = ROOT / "client" / "languages"
-    for language_path in languages_dir.glob("*.json"):
-        if language_path.name == "language_map.json":
-            continue
-        translations = json.loads(language_path.read_text(encoding="utf-8"))
-        assert translations.get("sound_event_spelling_error"), language_path.name
+    for locale in registered_locale_codes():
+        assert load_strings(locale).get("sound_event_spelling_error"), locale

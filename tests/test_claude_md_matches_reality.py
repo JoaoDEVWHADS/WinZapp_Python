@@ -92,9 +92,10 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 # through.
 LINE_COUNT_TOLERANCE = 0.20
 
-# 42 client/ paths are backticked today. 30 leaves room to legitimately drop a
+# 27 client/ and docs/ paths are backticked today (42 before the file-list
+# sections moved out to .claude/rules/). 20 leaves room to legitimately drop a
 # few while still failing if a whole section stops being parsed.
-PATH_FLOOR = 30
+PATH_FLOOR = 20
 
 # "`client/main.py` (~22,300 lines)" and
 # "`client/ui/conversations.py` (`ConversationsPanel`, ~13,500 lines)" — the

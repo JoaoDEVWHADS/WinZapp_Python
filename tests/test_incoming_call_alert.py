@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import wx
 
+from core.call_logic import incoming_call_can_answer
 from core.websocket_client import WebSocketClient
 from main import MainWindow
 
@@ -74,8 +75,6 @@ class _I18n:
             "incoming_call_answer_button": "Atender",
             "incoming_call_reject_button": "Recusar",
             "incoming_call_silence_button": "Silenciar alerta",
-            "incoming_call_video_not_supported": "Vídeo não suportado",
-            "incoming_call_group_not_supported": "Grupo não suportado",
             "incoming_call_answered": "Ligação atendida.",
             "incoming_call_answer_failed": "Falha ao atender: {error}",
             "incoming_call_reject_failed": "Falha ao recusar: {error}",
@@ -95,11 +94,13 @@ class _MainStub:
     _CALL_EVENT_START_GRACE_SECONDS = MainWindow._CALL_EVENT_START_GRACE_SECONDS
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _group_name_from_chat_dict = staticmethod(MainWindow._group_name_from_chat_dict)
+    _group_display_name = MainWindow._group_display_name
     on_incoming_call_event = MainWindow.on_incoming_call_event
     _expire_incoming_call_alert = MainWindow._expire_incoming_call_alert
     stop_incoming_call_alert = MainWindow.stop_incoming_call_alert
     stop_all_incoming_call_alerts = MainWindow.stop_all_incoming_call_alerts
     _close_incoming_call_dialog = MainWindow._close_incoming_call_dialog
+    _retry_pending_language_switch = MainWindow._retry_pending_language_switch
     _sync_incoming_call_bar = MainWindow._sync_incoming_call_bar
     _refresh_call_language_surfaces = MainWindow._refresh_call_language_surfaces
     _first_incoming_call_identity = MainWindow._first_incoming_call_identity
@@ -108,11 +109,25 @@ class _MainStub:
     on_call_remote_audio = MainWindow.on_call_remote_audio
     on_voice_call_state_event = MainWindow.on_voice_call_state_event
     _stop_incoming_call_audio_monitor = MainWindow._stop_incoming_call_audio_monitor
+    _has_answerable_incoming_call = MainWindow._has_answerable_incoming_call
     # The real bridged comparison, not string equality: the whole point of
     # core/call_matching.py is that one call's events do not agree on whether
     # the peer is an @lid or a phone JID.
     _chat_jids_equivalent = MainWindow._chat_jids_equivalent
     _jid_address_forms = MainWindow._jid_address_forms
+
+    _end_active_call_locally = MainWindow._end_active_call_locally
+
+    def _watch_ended_call_log(self, call_id, peer_jid, outgoing):
+        self.watched_call_logs.append((call_id, peer_jid, outgoing))
+
+    def _confirm_call_ended(self, active, call_id, peer_jid, *, upgraded_to_video=False):
+        # The page is asked first in production (tests/test_call_video_upgrade.py);
+        # here it has already answered "gone".
+        self._end_active_call_locally(active, call_id, peer_jid)
+
+    def _ensure_page_call_ended(self, call_id):
+        self.ensured_ended = getattr(self, "ensured_ended", []) + [call_id]
 
     def __init__(self):
         self._active_incoming_calls = {}
@@ -128,6 +143,7 @@ class _MainStub:
         self.settings = {"calls": {"alerts_enabled": True, "popup_enabled": True}}
         self.i18n = _I18n()
         self.announcements = []
+        self.watched_call_logs = []
         self.armed_watchdogs = []
         self.cancelled_watchdogs = []
         self.chats = {}
@@ -243,7 +259,9 @@ def test_offer_stores_call_details_for_real_answer_or_reject():
     assert stub._incoming_call_details["call-1"] == {
         "call_id": "call-1",
         "peer_jid": "5511999999999@s.whatsapp.net",
+        "group_jid": "",
         "is_video": False,
+        "is_group": False,
         "name": "Fulano",
         "message": "Fulano está te ligando.",
     }
@@ -305,8 +323,45 @@ def test_in_window_stop_button_clears_non_popup_call_surface():
     assert stub.call_incoming_sound.stop_calls == 1
 
 
-def test_group_offer_is_ignored():
+def test_group_offer_is_announced_by_group_name_and_can_be_answered():
+    """REGRESSION: the group offer used to be dropped before the announcement,
+    the ring tone and even the log line. WhatsApp Web's own ringtone is muted
+    by callMediaBridge, so a blind user got NO signal at all that their phone
+    was ringing, and log.log had nothing to explain it afterwards.
+
+    A group offer is now answerable through the same native accept path as a
+    one-to-one call, so it is announced, shown and monitored like any other.
+    """
     stub = _MainStub()
+    group_jid = "120363427511142886@g.us"
+    stub.chats[group_jid] = {
+        "remoteJid": group_jid,
+        "groupMetadata": {"subject": "Família"},
+    }
+
+    event = _offer(peer="5511888888888@lid")
+    event.update({"isGroup": True, "groupJid": group_jid})
+    stub.on_incoming_call_event(event)
+
+    assert stub.announcements == [("Chamada em grupo recebida no grupo Família.", True)]
+    assert stub.call_incoming_sound.play_calls == 1
+    assert stub.popups == [("call-1", "Chamada em grupo recebida no grupo Família.")]
+    assert stub._active_incoming_calls != {}
+    details = stub._incoming_call_details["call-1"]
+    assert details["is_group"] is True
+    assert details["group_jid"] == group_jid
+    assert details["name"] == "Família"
+    assert incoming_call_can_answer(details) is True
+    # The receive-only monitor is what makes the caller audible while it rings
+    # and lets accepting promote the same session to full duplex.
+    assert stub.ring_monitor_starts == ["call-1"]
+
+
+def test_group_offer_still_obeys_the_calls_alert_setting():
+    """The group alert is an ordinary incoming-call alert, so "allow incoming
+    call alerts" turns it off exactly like a one-to-one one."""
+    stub = _MainStub()
+    stub.settings["calls"] = {"alerts_enabled": False}
     group_jid = "120363427511142886@g.us"
     stub.chats[group_jid] = {
         "remoteJid": group_jid,
@@ -521,6 +576,73 @@ def test_stale_terminal_event_for_same_peer_does_not_end_current_call(monkeypatc
     assert stub._active_voice_call["call_id"] == "current-call"
 
 
+def test_active_group_call_is_adopted_with_group_metadata(monkeypatch):
+    """A group call answered on the phone or from the page must become the
+    active call here too, keyed on the group -- never on the participant in
+    peerJid -- so the call window, audio and hang-up all follow it."""
+    monkeypatch.setattr(wx, "CallAfter", lambda *_args: None)
+    stub = _MainStub()
+    stub._sync_voice_call_bar = lambda: None
+    stub._call_audio_session = object()  # audio already attached
+    group_jid = "120363427511142886@g.us"
+    stub.chats[group_jid] = {
+        "remoteJid": group_jid,
+        "groupMetadata": {"subject": "Família"},
+    }
+
+    stub.on_voice_call_state_event({
+        "event": "state",
+        "state": "ACTIVE",
+        "id": "group-call",
+        "peerJid": "5511888888888@lid",
+        "groupJid": group_jid,
+        "isGroup": True,
+    })
+
+    active = stub._active_voice_call
+    assert active["call_id"] == "group-call"
+    assert active["peer_jid"] == group_jid
+    assert active["group_jid"] == group_jid
+    assert active["is_group"] is True
+    assert active["name"] == "Família"
+    assert stub.announcements == [("Ligação conectada.", True)]
+
+
+def test_group_state_event_matches_the_group_not_a_participant(monkeypatch):
+    """Once adopted, later events still carry a participant in peerJid. They
+    match on groupJid, so the call is not treated as a different call."""
+    monkeypatch.setattr(wx, "CallAfter", lambda *_args: None)
+    stub = _MainStub()
+    stub._sync_voice_call_bar = lambda: None
+    stub._call_audio_session = object()
+    group_jid = "120363427511142886@g.us"
+    stub.chats[group_jid] = {"remoteJid": group_jid, "groupMetadata": {"subject": "Família"}}
+    stub._active_voice_call = {
+        "identity": "group-call",
+        "call_id": "group-call",
+        "peer_jid": group_jid,
+        "group_jid": group_jid,
+        "is_group": True,
+        "name": "Família",
+        "outgoing": False,
+        "is_video": False,
+    }
+
+    stub.on_voice_call_state_event({
+        "event": "state",
+        "state": "ACTIVE",
+        "id": "group-call",
+        "peerJid": "5511888888888@lid",
+        "groupJid": group_jid,
+        "isGroup": True,
+    })
+
+    assert stub._active_voice_call["peer_jid"] == group_jid
+    assert stub._active_voice_call["group_jid"] == group_jid
+    assert stub._active_voice_call["name"] == "Família"
+    assert stub._voice_call_last_announced_state == "ACTIVE"
+
+
 def test_websocket_forwards_remote_call_audio_to_main_window():
     delivered = []
     stub = SimpleNamespace(
@@ -588,3 +710,240 @@ def test_language_change_retranslates_an_already_ringing_call():
     expected = "Fulano está te ligando por vídeo."
     assert stub._incoming_call_details["call-1"]["message"] == expected
     assert dialog.refreshed_messages == [expected]
+
+
+def test_isgroup_without_a_group_jid_is_treated_as_an_individual_call():
+    """REGRESSION: the Node side now infers isGroup from participant count
+    (groupParticipantCountOf(call) > 1), so the flag can be asserted for a
+    real one-to-one call. Trusting it alone announced "incoming group call in
+    Unnamed group" instead of the caller's name. CLAUDE.md's rule applies in
+    both directions: a @g.us is not trustworthy alone, and neither is a group
+    claim with no @g.us behind it.
+    """
+    stub = _MainStub()
+
+    event = _offer()
+    event["isGroup"] = True  # asserted, but no groupJid and a phone peerJid
+
+    stub.on_incoming_call_event(event)
+
+    assert stub.announcements == [("Fulano está te ligando.", True)]
+    details = stub._incoming_call_details["call-1"]
+    assert details["is_group"] is False
+    assert incoming_call_can_answer(details) is True
+    # It is treated as a real one-to-one call, monitor included.
+    assert stub.ring_monitor_starts == ["call-1"]
+
+
+def test_dismissing_a_group_offer_keeps_the_monitor_until_the_last_call():
+    """The shared monitor is released only once no answerable offer remains.
+    A still-ringing group offer counts, because it can be answered too."""
+    stub = _MainStub()
+    stub.on_incoming_call_event(_offer(call_id="one-to-one"))
+    _ringing_group_offer(stub)
+
+    assert stub.ring_monitor_starts == ["one-to-one", "group-call"]
+    assert stub.ring_monitor_stops == 0
+
+    stub.stop_incoming_call_alert("one-to-one")
+
+    # The group offer is still ringing and answerable, so the speaker stays.
+    assert stub._active_incoming_calls == {"group-call": "5511888888888@lid"}
+    assert stub.ring_monitor_stops == 0
+
+    stub.stop_incoming_call_alert("group-call")
+    assert stub._active_incoming_calls == {}
+    assert stub.ring_monitor_stops == 1
+
+
+def test_dismissing_one_of_two_answerable_calls_keeps_the_speaker():
+    """The other half: a second answerable call still needs the monitor."""
+    stub = _MainStub()
+    stub.on_incoming_call_event(_offer(call_id="first"))
+    stub.on_incoming_call_event(_offer(call_id="second", peer="5511777777777@s.whatsapp.net"))
+
+    stub.stop_incoming_call_alert("first")
+
+    assert stub.ring_monitor_stops == 0
+
+
+def _ringing_group_offer(stub, call_id="group-call"):
+    group_jid = "120363427511142886@g.us"
+    stub.chats[group_jid] = {"remoteJid": group_jid, "groupMetadata": {"subject": "Família"}}
+    event = _offer(call_id=call_id, peer="5511888888888@lid")
+    event.update({"isGroup": True, "groupJid": group_jid})
+    stub.on_incoming_call_event(event)
+    return group_jid
+
+
+def test_the_watchdog_timeout_keeps_the_speaker_for_a_ringing_group_offer():
+    """The shared monitor is released only when no answerable offer remains,
+    so a group offer still ringing holds it exactly like a second one-to-one."""
+    stub = _MainStub()
+    stub.on_incoming_call_event(_offer(call_id="one-to-one"))
+    _ringing_group_offer(stub)
+    assert stub.ring_monitor_starts == ["one-to-one", "group-call"]
+
+    stub._expire_incoming_call_alert("one-to-one")
+
+    assert "group-call" in stub._active_incoming_calls
+    assert stub.ring_monitor_stops == 0
+
+    stub._expire_incoming_call_alert("group-call")
+    assert stub._active_incoming_calls == {}
+    assert stub.ring_monitor_stops == 1
+
+
+def test_a_terminal_call_event_keeps_the_speaker_for_a_ringing_group_offer():
+    """Same shared-monitor rule in the non-ringing branch of the offer path."""
+    stub = _MainStub()
+    stub.on_incoming_call_event(_offer(call_id="one-to-one"))
+    group_jid = _ringing_group_offer(stub)
+
+    stub.on_incoming_call_event({
+        "event": "callstate",
+        "state": "ENDED",
+        "id": "one-to-one",
+        "peerJid": "5511999999999@s.whatsapp.net",
+    })
+
+    assert "group-call" in stub._active_incoming_calls
+    assert stub.ring_monitor_stops == 0
+
+    stub.on_incoming_call_event({
+        "event": "callstate",
+        "state": "ENDED",
+        "id": "group-call",
+        "peerJid": "5511888888888@lid",
+        "groupJid": group_jid,
+    })
+
+    assert stub._active_incoming_calls == {}
+    assert stub.ring_monitor_stops == 1
+
+
+class TestIncomingCallPopupDoesNotPinItselfOnTop:
+    """Reported live: while a call rang, Alt+Tab to WinZapp's main window
+    always landed back on the incoming-call popup -- the same defect fixed for
+    the call window in 7f50df41, from the same causes. Checked statically, as
+    that fix was: constructing a real wx.Dialog opens a window on whoever runs
+    the suite (CLAUDE.md rule 1)."""
+
+    SOURCE = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "client" / "ui" / "dialogs" / "incoming_call.py"
+    ).read_text(encoding="utf-8")
+
+    def _init_call(self):
+        start = self.SOURCE.index("super().__init__(")
+        return self.SOURCE[start:self.SOURCE.index(")", self.SOURCE.index("style=", start)) + 1]
+
+    def test_the_popup_is_not_an_owned_window(self):
+        """An owned window is kept above its owner by Windows itself, so no
+        focus code could ever put MainWindow in front of it."""
+        assert "super().__init__(\n            None," in self.SOURCE
+        # wxWidgets still makes the app's top-level window the owner of a
+        # NULL-parent dialog unless this style is set.
+        assert "wx.DIALOG_NO_PARENT" in self._init_call()
+
+    def test_the_popup_is_not_created_stay_on_top(self):
+        assert "wx.STAY_ON_TOP" not in self._init_call()
+
+    def test_raising_the_popup_drops_topmost_straight_after(self, monkeypatch):
+        """It must still appear over whatever app the user is in when the call
+        arrives -- that is how a blind user learns of it -- but only once:
+        HWND_TOPMOST (-1) followed by HWND_NOTOPMOST (-2), which the shared
+        helper does when asked for ``topmost`` (tested below)."""
+        import ui.dialogs.incoming_call as incoming_call
+
+        fronted = []
+        monkeypatch.setattr(incoming_call, "force_foreground",
+                            lambda hwnd, topmost=False: fronted.append((hwnd, topmost)))
+
+        class _Focus:
+            focused = False
+
+            def SetFocus(self):
+                self.focused = True
+
+        class _Popup:
+            _default_focus = _Focus()
+
+            def Raise(self):
+                pass
+
+            def GetHandle(self):
+                return 0x1234
+
+        popup = _Popup()
+        incoming_call.IncomingCallDialog._force_foreground(popup)
+        assert fronted == [(0x1234, True)]
+        assert popup._default_focus.focused
+
+    def test_topmost_is_dropped_straight_after_it_is_set(self, monkeypatch):
+        import ctypes
+        import sys
+
+        import core.dialog_foreground as front
+
+        calls = []
+
+        class _Func:
+            def __init__(self, name):
+                self.name = name
+
+            def __call__(self, *args):
+                calls.append((self.name, args))
+                return 0
+
+        class _Dll:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def __getattr__(self, name):
+                func = _Func(name)
+                setattr(self, name, func)
+                return func
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(front.ctypes, "WinDLL", _Dll)
+        front.force_foreground(0x1234, topmost=True)
+        inserts = [args[1].value for name, args in calls if name == "SetWindowPos"]
+        assert inserts == [ctypes.c_void_p(-1).value, ctypes.c_void_p(-2).value]
+
+        calls.clear()
+        front.force_foreground(0x1234)
+        assert not any(name == "SetWindowPos" for name, _a in calls)
+
+
+def test_an_offer_that_stops_ringing_has_its_call_record_looked_up():
+    """A missed or declined call shows in the conversation through the record
+    WhatsApp writes for it (core/call_log.py); the lookup starts here."""
+    stub = _MainStub()
+    stub.on_incoming_call_event(_offer(call_id="ABC"))
+    assert stub.watched_call_logs == []
+
+    stub.on_incoming_call_event({"event": "state", "state": "HANDLED_REMOTELY",
+                                 "id": "ABC", "peerJid": "5511999999999@s.whatsapp.net"})
+
+    assert stub.watched_call_logs == [("ABC", "5511999999999@s.whatsapp.net", False)]
+
+
+def test_an_ended_outgoing_call_has_its_call_record_looked_up():
+    stub = _MainStub()
+    stub._active_voice_call = {
+        "identity": "outgoing:5511999999999@s.whatsapp.net",
+        "call_id": "WA-CALL",
+        "peer_jid": "5511999999999@s.whatsapp.net",
+        "name": "Fulano",
+        "outgoing": True,
+    }
+    stub._stop_voice_call_audio = lambda grace_seconds=0: None
+    stub._sync_voice_call_bar = lambda: None
+
+    stub.on_voice_call_state_event({
+        "event": "state", "state": "ENDED", "id": "WA-CALL",
+        "peerJid": "5511999999999@s.whatsapp.net",
+    })
+
+    assert stub.watched_call_logs == [("WA-CALL", "5511999999999@s.whatsapp.net", True)]

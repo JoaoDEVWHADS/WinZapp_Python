@@ -212,27 +212,13 @@ class TestLocalesCarryTheReasonKey:
     hardcoded count: a new locale must not fail this test by merely existing."""
 
     def test_every_locale_has_both_placeholders(self):
-        import glob
-        import json
-        import os
-
-        languages_dir = os.path.join("client", "languages")
-        with open(os.path.join(languages_dir, "language_map.json"), encoding="utf-8") as fh:
-            registered = set(json.load(fh))
-        files = [
-            f
-            for f in glob.glob(os.path.join(languages_dir, "*.json"))
-            if os.path.basename(f) != "language_map.json"
-        ]
-        assert {os.path.splitext(os.path.basename(f))[0] for f in files} == registered
-
-        for path in files:
-            with open(path, encoding="utf-8") as fh:
-                table = json.load(fh)
+        from tests.locales import load_strings, registered_locale_codes
+        for locale in registered_locale_codes():
+            table = load_strings(locale)
             text = table.get("no_pairing_code_received_reason")
-            assert text, f"{path} is missing no_pairing_code_received_reason"
-            assert "{app_name}" in text, path
-            assert "{reason}" in text, path
+            assert text, f"{locale} is missing no_pairing_code_received_reason"
+            assert "{app_name}" in text, locale
+            assert "{reason}" in text, locale
 
 
 class TestBackoffMetadataIsCarried:

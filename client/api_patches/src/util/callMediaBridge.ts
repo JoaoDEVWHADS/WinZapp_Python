@@ -2,6 +2,7 @@ import { Socket } from 'socket.io';
 import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_process';
 
 import { clientsArray } from './sessionUtil';
+import { installVoipInitPolicyInPage } from './voipInitPolicy';
 
 const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
 // Call audio is live media: after a local/page stall, stale microphone frames
@@ -190,7 +191,7 @@ function ensureLinuxCallAudio(
 
 function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   const win = window as any;
-  if (win.__winzappCallMediaBridge?.version === 10) return true;
+  if (win.__winzappCallMediaBridge?.version === 12) return true;
   if (!navigator.mediaDevices?.getUserMedia || !win.RTCPeerConnection) return false;
 
   const NativeAudioContextCtor = win.AudioContext || win.webkitAudioContext;
@@ -254,13 +255,43 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
 
   const PAGE_MIC_QUEUE_FRAMES = 4;
   const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;
+  // The remote tap batches AudioWorklet quanta (128 samples) up to roughly the
+  // 1024-sample frame the ScriptProcessor used to deliver, so nothing
+  // downstream -- Socket.IO framing, the Python jitter buffer -- sees a
+  // different packet rate than it was tuned for. Batching happens INSIDE the
+  // worklet: batching on the main thread would put the main thread back on the
+  // audio path, which is the whole defect being fixed.
+  const REMOTE_TAP_BATCH_SAMPLES = 1024;
+  // Mirrors MAX_AUDIO_FRAME_BYTES on the Node side (this function is
+  // serialised into the page and cannot close over module constants). Node
+  // drops anything larger, so a frame over it would be silently lost.
+  const REMOTE_TAP_MAX_FRAME_BYTES = 64 * 1024;
+  // How often the microphone worklet reports its counters back to the main
+  // thread: 48 quanta of 128 samples is ~128 ms at 48 kHz, cheap enough to be
+  // invisible and fresh enough for the watchdog below and for diagnostics.
+  const PAGE_MIC_REPORT_QUANTA = 48;
+  // How long the microphone worklet gets to consume its first sample before
+  // it is declared unscheduled and swapped for the ScriptProcessor.
+  const MIC_WORKLET_WATCHDOG_MS = 1500;
 
   const state: any = {
-    version: 10,
+    version: 12,
     enabled: false,
     context: null,
     micDestination: null,
+    // The producer feeding micDestination: exactly one of these is live. Both
+    // feed the SAME MediaStreamDestination, so swapping between them never
+    // changes the track WhatsApp already holds and never renegotiates.
+    micNode: null,
     micProcessor: null,
+    micSchedulerSink: null,
+    micWorkletWatchdog: 0,
+    // The MICROPHONE's own verdict on the worklet, kept apart from
+    // audioWorkletStatus on purpose: that one answers "did addModule()
+    // register the module" and the remote tap reads it. See the watchdog.
+    micWorkletUnscheduled: false,
+    // Only the ScriptProcessor fallback reads these: when the worklet is live
+    // the queue lives inside it, on the audio thread. See ensureMicTrack.
     micQueue: [] as Float32Array[],
     micOffset: 0,
     remotePipelines: new Map<string, any>(),
@@ -271,6 +302,31 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     cameraCanvas: null,
     cameraTrack: null,
     cameraPending: false,
+    // Bumped by stopCamera(). An Image decode started before the stop can
+    // only land after it, and drawing it then would repaint the very frame
+    // the blank was meant to erase -- so the onload handler checks that the
+    // generation it captured is still current before touching the canvas.
+    cameraGeneration: 0,
+    // Highest capture epoch the desktop has declared STOPPED. Every desktop
+    // camera capture carries its own increasing epoch, so a frame that was
+    // already in flight when its capture was stopped (a send racing the
+    // stop, or a capture discarded because the call ended while the camera
+    // was opening) is recognised and dropped instead of repainting a live
+    // picture of the user after video was turned off. Keyed on the
+    // desktop's own epochs rather than on state.enabled on purpose: enable()
+    // never runs on the Linux/PulseAudio path, and reset() -- which clears
+    // enabled -- also runs mid-call on an audio device restart.
+    cameraStoppedEpoch: -1,
+    // The last real camera frame, redrawn by the steady pump below while video
+    // is on, and whether video is on at all (false paints black instead).
+    cameraLastPicture: null as HTMLImageElement | null,
+    cameraShowing: false,
+    cameraPump: 0,
+    cameraPumpIdleTicks: 0,
+    // Ids of every track that is OUR camera -- the canvas track, each clone
+    // handed to WhatsApp, and any clone WhatsApp makes of those. The remote
+    // video extraction must never pick one of these up: see attachRemoteVideo.
+    cameraCloneIds: new Set<string>(),
     cameraFramesReceived: 0,
     cameraFramesDropped: 0,
     cameraTrackRequests: 0,
@@ -281,6 +337,16 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     micFramesDroppedForLatency: 0,
     remoteFramesCaptured: 0,
     remoteTracksAttached: 0,
+    // 'unknown' until addModule() has been tried once, then 'ready' or
+    // 'unavailable'. Read by the CDP probes as well as by the tap: a build
+    // that silently fell back to the ScriptProcessor would look fixed and
+    // would not be, which costs another live call with a blind user to find.
+    audioWorkletStatus: 'unknown',
+    remoteTapMode: '',
+    // Which producer is feeding the synthetic microphone track. Same reason
+    // as remoteTapMode: the peer is the only one who can hear this side chop,
+    // so a silent fallback here is discovered by someone else's ears.
+    micTapMode: '',
   };
 
   const report = (event: string, details = '') => {
@@ -307,18 +373,29 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   let pageAudioCleanupTimer: number | null = null;
   let bridgeAllowedPageAudio = (_el: HTMLMediaElement): boolean => false;
   let callWasActive = false;
-  // A merely-ringing call (INCOMING_RING/CALLING/etc, counted "active" by
-  // isLivePageCall below) that is cancelled or rejected before anyone answers
-  // has no real terminal chime to protect. state.enabled only becomes true
-  // when the audio bridge is actually attached after answer, so it is the
-  // signal for "this call was ever really connected" — remembered here
-  // because refreshCallAudioPolicy's own poll can observe the ENDED
-  // transition after state.reset() has already cleared state.enabled back to
-  // false for the same call. Without this, cancelling a call before answer
-  // opened the same 2500ms exemption window as a genuine hangup, and the
-  // coincident missed-call message-notification ping slipped through it
-  // unmuted (measured 2026-09-20).
-  let callWasAnswered = false;
+  // Key of the page call last seen live, so a call replaced by another one
+  // with no idle poll in between (a near-immediate redial) still counts as
+  // having ended.
+  let lastPageCallKey = '';
+  // Key of the call that was actually CONNECTED, or null. A merely-ringing
+  // call (INCOMING_RING/CALLING/etc, counted "active" by isLivePageCall) that
+  // is cancelled or rejected before anyone answers has no real terminal chime
+  // to protect, and opening the 2500ms exemption for it let a coincident
+  // missed-call message ping slip through unmuted (measured 2026-09-20).
+  //
+  // "Connected" is read from the page's own CallStore state, NOT from
+  // state.enabled, which is what this used to be and was wrong three ways:
+  // - offerCall() enables the bridge BEFORE the offer is sent, so an OUTGOING
+  //   call counted as answered while still ringing, and an unanswered outgoing
+  //   call reopened exactly the leak the flag was introduced to close;
+  // - on the Linux/PulseAudio path setCallMediaBridgeActive() returns before
+  //   enable(), so no call was ever "answered" and the real terminal chime
+  //   was muted on every remote-API install;
+  // - reset() cleared the flag, yet the poll can observe ENDED after reset()
+  //   (a slow teardown), and then the genuine chime was not re-armed.
+  // Keyed by call id rather than a boolean, it survives reset() without
+  // leaking into the next call: a new call has a new key.
+  let answeredPageCallKey: string | null = null;
   let allowCallEndChimeUntil = 0;
 
   const cleanupPageAudioBridges = () => {
@@ -397,8 +474,56 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     return !['', '0', 'NONE', 'ENDED', 'HANDLED_REMOTELY'].includes(callState);
   };
 
+  // States a call only reaches once it has been answered, on either side.
+  // PREACCEPT_RECEIVED is deliberately absent: it arrives while still ringing.
+  const CONNECTED_PAGE_CALL_STATES = [
+    'ACCEPT_SENT',
+    'ACCEPT_RECEIVED',
+    'ACTIVE',
+    'CONNECTED_LONELY',
+    'REJOINING',
+  ];
+
+  const isConnectedPageCall = (call: any): boolean =>
+    !!call && CONNECTED_PAGE_CALL_STATES.includes(pageCallState(call));
+
+  const pageCallKey = (call: any): string => {
+    try {
+      const id = call?.id ?? call?.get?.('id') ?? '';
+      return String(id?._serialized ?? id ?? '');
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const lastCallWasAnswered = (): boolean =>
+    answeredPageCallKey !== null && answeredPageCallKey === lastPageCallKey;
+
+  // An element playing a MediaStream is the call itself (WhatsApp's native
+  // playback of the other person), never the call-ended chime, which is an
+  // ordinary audio file. It must stay silent no matter what: the chime window
+  // below used to unmute it too, and WhatsApp keeps these elements OUT of the
+  // DOM, where the 250 ms scan never reaches them again. So a terminal event
+  // for a call the page had not actually ended -- a voice call the other
+  // person upgraded to video -- left the other person playing straight out of
+  // the user's default speaker for the rest of the call, with WinZapp saying
+  // the call was over and no window left to hang up from.
+  const isLiveStreamElement = (el: HTMLMediaElement): boolean => {
+    try {
+      return el.srcObject instanceof MediaStream;
+    } catch (_) {
+      return false;
+    }
+  };
+
   const restorePageAudio = (el: HTMLMediaElement) => {
     try {
+      if (isLiveStreamElement(el)) {
+        // Stays muted; only dropped from the set, so the call's stream is
+        // not referenced for the life of the page.
+        mutedPageElements.delete(el);
+        return;
+      }
       const original = pageAudioState.get(el);
       if (!original) return;
       el.muted = original.muted;
@@ -423,14 +548,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
   };
 
   const refreshCallAudioPolicy = () => {
-    const active = isLivePageCall(currentPageCall());
-    if (!callWasActive && active) callWasAnswered = false; // a new call just started ringing
-    if (state.enabled) callWasAnswered = true; // remember it was actually answered
-    if (callWasActive && !active) {
-      if (callWasAnswered) allowCallEndChime();
-      callWasAnswered = false;
+    const call = currentPageCall();
+    const active = isLivePageCall(call);
+    const key = active ? pageCallKey(call) : '';
+    // The previous call ended -- or was replaced by a different one without
+    // an idle poll in between. Settle it BEFORE looking at the new one.
+    if (callWasActive && (!active || key !== lastPageCallKey)) {
+      if (lastCallWasAnswered()) allowCallEndChime();
+      answeredPageCallKey = null;
     }
+    if (active && isConnectedPageCall(call)) answeredPageCallKey = key;
     callWasActive = active;
+    lastPageCallKey = key;
   };
 
   const isPageRingtone = (el: HTMLMediaElement) => {
@@ -467,7 +596,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       return true;
     }
 
-    if (!linuxAudio && isLivePageMedia(el)) {
+    // Before the chime window, not inside it: a stream element that starts
+    // playing during those 2.5 s would otherwise be left audible, and one
+    // outside the DOM is only ever looked at again on its next play().
+    if (isLiveStreamElement(el)) {
       silencePageAudio(el);
       return true;
     }
@@ -499,8 +631,9 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     return true;
   };
 
-  state.pushCameraFrame = (jpeg: string) => {
+  state.pushCameraFrame = (jpeg: string, epoch?: number) => {
     if (typeof jpeg !== 'string' || jpeg.length > 350_000) return;
+    if (typeof epoch === 'number' && epoch <= state.cameraStoppedEpoch) return;
     state.cameraFramesReceived += 1;
     if (state.cameraFramesReceived === 1 || state.cameraFramesReceived % 100 === 0) {
       report(
@@ -521,15 +654,198 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       const context = canvas.getContext('2d');
       context?.fillRect(0, 0, canvas.width, canvas.height);
     }
+    const generation = state.cameraGeneration;
     const picture = new Image();
     picture.onload = () => {
-      try { canvas.getContext('2d')?.drawImage(picture, 0, 0, 640, 360); } finally {
+      try {
+        // Discard a decode that finished after the camera was turned off:
+        // drawing it would repaint exactly the frame stopCamera() blanked.
+        if (generation === state.cameraGeneration) {
+          canvas.getContext('2d')?.drawImage(picture, 0, 0, 640, 360);
+          state.cameraLastPicture = picture;
+          state.cameraShowing = true;
+          ensureCameraPump();
+        }
+      } finally {
         state.cameraPending = false;
       }
     };
     picture.onerror = () => { state.cameraPending = false; };
     picture.src = `data:image/jpeg;base64,${jpeg}`;
   };
+
+  const blankCameraCanvas = () => {
+    const canvas = state.cameraCanvas;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  };
+
+  // "Turn video off" mid-call. Deliberately does NOT stop the track: the peer
+  // connection holds a clone of it, so stopping it would end the video sender
+  // outright and leave nothing to resume when video is turned back on.
+  //
+  // Blanking is what actually closes the leak. captureStream(10) emits
+  // whatever the canvas currently holds, forever -- so stopping only the
+  // Python-side ffmpeg capture froze the user's last frame and went on
+  // transmitting that picture of them at 10 fps while WinZapp announced video
+  // was off. Painting black keeps the stream valid and shows the peer nothing.
+  state.stopCamera = (epoch?: number, native?: boolean) => {
+    if (typeof epoch === 'number' && epoch > state.cameraStoppedEpoch) {
+      state.cameraStoppedEpoch = epoch;
+    }
+    blankCamera();
+    report('camera-stop', `epoch=${state.cameraStoppedEpoch} native=${!!native}`);
+    // The user turned video off: tell WhatsApp's own call engine, exactly
+    // as its camera button does. The blank above stays regardless -- it is
+    // the privacy guarantee if this native call ever fails.
+    if (native) setNativeVideoMute(true);
+  };
+
+  // The user turned video back on and the desktop capture is running again.
+  state.resumeCamera = () => {
+    report('camera-resume', 'desktop capture restarted');
+    setNativeVideoMute(false);
+  };
+
+  // WhatsApp Web sends our camera through its own WASM call engine, not a
+  // page-visible RTCPeerConnection sender (a live sender report showed
+  // senders=0 on every connection). That engine decides what the peer sees,
+  // and after the canvas went black it treated the camera as off and never
+  // came back: re-enabled frames kept landing on the canvas while the peer
+  // stayed on black for the rest of the call. The engine's interface exposes
+  // setCallVideoMute -- the same toggle as the camera button in WhatsApp's
+  // own UI -- so video off/on now goes through it.
+  //
+  // Its arguments are undocumented (wa-js types the interface as `any`), so
+  // this dispatches on arity. The arity and the start of the function's
+  // source are logged once per page -- enough to pin the signature down if a
+  // WhatsApp update changes it (verified live 2026-09-21: arity 1, returns
+  // 0) -- and every toggle logs only its outcome.
+  let videoMuteSignatureReported = false;
+  const setNativeVideoMute = (muted: boolean) => {
+    const getter =
+      win.WPP?.whatsapp?.functions?.getVoipStackInterface ||
+      win.WPP?.whatsapp?.getVoipStackInterface;
+    if (typeof getter !== 'function') {
+      report('video-mute', `muted=${muted} getVoipStackInterface unavailable`);
+      return;
+    }
+    Promise.resolve(getter())
+      .then(async (stack: any) => {
+        const fn = stack?.setCallVideoMute;
+        if (typeof fn !== 'function') {
+          report('video-mute', `muted=${muted} setCallVideoMute unavailable`);
+          return;
+        }
+        const callId = pageCallKey(currentPageCall());
+        const args = fn.length >= 2 ? [callId, muted] : [muted];
+        if (!videoMuteSignatureReported) {
+          videoMuteSignatureReported = true;
+          const source = String(fn).replace(/\s+/g, ' ').slice(0, 160);
+          report(
+            'video-mute',
+            `signature arity=${fn.length} args=${fn.length >= 2 ? 'callId,muted' : 'muted'} src=${source}`
+          );
+        }
+        const result = await fn.apply(stack, args);
+        let shown = '';
+        try { shown = JSON.stringify(result); } catch (_) { shown = String(result); }
+        report('video-mute', `muted=${muted} ok result=${String(shown).slice(0, 120)}`);
+      })
+      .catch((error: any) =>
+        report('video-mute', `muted=${muted} error=${String(error?.message || error)}`)
+      );
+  };
+
+  // Blank without gating any epoch. This is what reset() uses, and it must
+  // NOT destroy the canvas or the track: reset() does not only mean "the call
+  // ended" -- an audio device change from the call window restarts the audio
+  // session, which emits call:audio:stop and lands here mid-call. WhatsApp
+  // keeps its clone of the ORIGINAL track and never asks for a new one, so
+  // replacing the canvas left the peer watching a black, orphaned canvas for
+  // the rest of the call while WinZapp said video was on. Blanking the same
+  // canvas instead lets the next frame from the still-running capture
+  // repaint it, and still means the next call starts black rather than on a
+  // still of the previous one -- including a call answered without video.
+  const blankCamera = () => {
+    state.cameraShowing = false;
+    state.cameraLastPicture = null;
+    if (!state.cameraCanvas) return;
+    state.cameraGeneration += 1;
+    state.cameraPending = false;
+    blankCameraCanvas();
+  };
+
+  // A canvas captureStream() only emits a frame when the canvas is PAINTED.
+  // Left to the desktop's frames alone, the track went idle whenever they
+  // stopped or stuttered: for the seconds between the offer and the first
+  // camera frame, across socket jitter, and for good after "turn video off"
+  // painted black once. WebRTC then reports the track as muted, and WhatsApp
+  // Web reacts on its own -- measured live 2026-09-21: 1 s after the blank it
+  // re-requested media with video=false, and after video was turned back on
+  // it asked for video=false AGAIN, never video=true. The peer saw the image
+  // flicker at the start of the call, and black for good after re-enabling.
+  //
+  // So the canvas is repainted at a steady 10 fps for as long as a page call
+  // is live: the last real frame while video is on, black while it is off.
+  // The track never goes idle, WhatsApp never pauses it, and turning video on
+  // again only changes what is painted. The pump stops itself once the page
+  // has had no live call for 5 s, so it costs nothing between calls.
+  const CAMERA_PUMP_MS = 100;
+  const CAMERA_PUMP_IDLE_STOP_TICKS = 50;
+
+  const stopCameraPump = () => {
+    if (state.cameraPump) win.clearInterval(state.cameraPump);
+    state.cameraPump = 0;
+    state.cameraPumpIdleTicks = 0;
+  };
+
+  const pumpCamera = () => {
+    const canvas = state.cameraCanvas;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+    if (!isLivePageCall(currentPageCall())) {
+      state.cameraPumpIdleTicks += 1;
+      if (state.cameraPumpIdleTicks >= CAMERA_PUMP_IDLE_STOP_TICKS) stopCameraPump();
+      return;
+    }
+    state.cameraPumpIdleTicks = 0;
+    if (state.cameraShowing && state.cameraLastPicture) {
+      context.drawImage(state.cameraLastPicture, 0, 0, 640, 360);
+    } else {
+      context.fillStyle = '#000';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+  };
+
+  const ensureCameraPump = () => {
+    state.cameraPumpIdleTicks = 0;
+    if (state.cameraPump) return;
+    state.cameraPump = win.setInterval(pumpCamera, CAMERA_PUMP_MS);
+  };
+
+  const isOurCameraTrack = (track: any): boolean =>
+    !!track && (track === state.cameraTrack || state.cameraCloneIds.has(track.id));
+
+  // WhatsApp may clone the track we hand it; a clone of our camera is still our
+  // camera, so it inherits the mark.
+  try {
+    const proto = win.MediaStreamTrack?.prototype;
+    const nativeClone = proto?.clone;
+    if (typeof nativeClone === 'function' && !nativeClone.__winzappCameraMark) {
+      const clone = function (this: any) {
+        const copy = nativeClone.call(this);
+        try {
+          if (copy?.id && isOurCameraTrack(this)) state.cameraCloneIds.add(copy.id);
+        } catch (_) {}
+        return copy;
+      };
+      (clone as any).__winzappCameraMark = true;
+      proto.clone = clone;
+    }
+  } catch (_) {}
 
   const cameraTrack = () => {
     state.cameraTrackRequests += 1;
@@ -546,11 +862,24 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     if (!state.cameraTrack || state.cameraTrack.readyState !== 'live') {
       state.cameraTrack = state.cameraCanvas.captureStream(10).getVideoTracks()[0];
     }
-    return state.cameraTrack.clone();
+    ensureCameraPump();
+    const clone = state.cameraTrack.clone();
+    if (clone?.id) state.cameraCloneIds.add(clone.id);
+    return clone;
   };
 
   const attachRemoteVideo = (track: MediaStreamTrack) => {
     if (!track || track.kind !== 'video' || state.remoteVideoIds.has(track.id)) return;
+    // Never our own camera. WhatsApp plays the track we hand it in hidden
+    // <video> elements to feed its encoder, and the media scan below picks up
+    // every <video> with a stream -- so without this, the "remote" picture
+    // WinZapp showed in the call window was the user's OWN camera (confirmed
+    // live on 2026-09-21 with a sighted-assistance description of the call
+    // window). Two WinZapp users calling each other each saw themselves, or
+    // black with the camera off, while the video they sent arrived intact.
+    // The microphone has had the same guard all along (localTrackIds in
+    // attachRemoteTrack); video never did.
+    if (isOurCameraTrack(track)) return;
     state.remoteVideoIds.add(track.id);
     // One-shot: proves attachPeerConnection/the track event/the receiver scan
     // actually delivered a remote video track at all. If this never appears
@@ -610,7 +939,12 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       state.context = createHardwareIsolatedAudioContext(AudioContextCtor, [{
         latencyHint: 'interactive',
         sampleRate: 48000,
-      }]);
+      });
+      // A worklet module is registered per AudioContext, so a brand-new one
+      // has none: the cached answer belongs to the context that is gone, and
+      // leaving it 'ready' here would only make the diagnostics lie about
+      // which tap ran.
+      state.audioWorkletStatus = 'unknown';
     }
     if (state.context.state === 'suspended') {
       state.context.resume().catch(() => undefined);
@@ -648,54 +982,251 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     return btoa(binary);
   };
 
-  bridgeAllowedPageAudio = (el: HTMLMediaElement): boolean => {
-    if (linuxAudio) return false;
-    if (pageAudioBridgePipelines.has(el)) return true;
-
-    try {
-      const context = ensureContext();
-      // Divert the terminal page sound away from Chromium's hardware output;
-      // forward its PCM to Python/BASS while the local graph sink stays silent.
-      const source = context.createMediaElementSource(el);
-      const processor = context.createScriptProcessor(1024, 1, 1);
-      const sink = context.createGain();
-      sink.gain.value = 0;
-
-      processor.onaudioprocess = (event: AudioProcessingEvent) => {
-        event.outputBuffer.getChannelData(0).fill(0);
-        if (pageAudioNow() > allowCallEndChimeUntil) return;
-        const input = event.inputBuffer.getChannelData(0);
-        const callback = win.__winzappOnCallRemoteAudio;
-        if (typeof callback !== 'function' || !input.length) return;
-        callback(encodePcm16(input), context.sampleRate).catch?.(() => undefined);
-      };
-
-      source.connect(processor);
-      processor.connect(sink);
-      sink.connect(context.destination);
-      pageAudioBridgePipelines.set(el, { source, processor, sink });
-      report(
-        'page-speaker-bridge',
-        'src=' + String(el.currentSrc || (el as any).src || '').slice(0, 120)
-      );
-      return true;
-    } catch (error: any) {
-      report(
-        'page-speaker-bridge-failed',
-        'error=' + String(error?.message || error)
-      );
-      return false;
+  // The worklet already did the float -> PCM16 conversion on the audio thread;
+  // the bytes are written out explicitly little-endian rather than reusing the
+  // Int16Array's own buffer, so the wire format does not depend on the host's
+  // endianness (exactly as encodePcm16 above does).
+  const encodeInt16 = (samples: Int16Array): string => {
+    const bytes = new Uint8Array(samples.length * 2);
+    for (let i = 0; i < samples.length; i += 1) {
+      const value = samples[i];
+      bytes[i * 2] = value & 0xff;
+      bytes[i * 2 + 1] = (value >> 8) & 0xff;
     }
+    let binary = '';
+    const step = 0x8000;
+    for (let i = 0; i < bytes.length; i += step) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + step));
+    }
+    return btoa(binary);
   };
 
-  const ensureMicTrack = () => {
-    const context = ensureContext();
-    if (state.micDestination?.stream?.getAudioTracks?.()[0]?.readyState === 'live') {
-      return state.micDestination.stream.getAudioTracks()[0];
+  // The remote tap used to be a createScriptProcessor(1024, 1, 1), and that is
+  // where the popping came from. Measured over CDP on a live, popping call
+  // (2026-09-23): the page's audio clock was exact (10.0000 s of ctx.
+  // currentTime over 10.0014 s of wall clock), but the ScriptProcessor fired
+  // 464 callbacks where 468.8 were due -- it dropped ~1% of its buffers
+  // outright, ~0.5 per second, 21.3 ms of audio gone each time, with
+  // longTaskCount 0. Net delivery to Python was 47,507 samples/s against the
+  // 48,000 it declares, and a source running under real time drains any fixed
+  // reservoir forever, so the Python jitter buffer starved ~2.8 times a second
+  // for 35 minutes. A worklet runs on the audio render thread and cannot be
+  // starved by main-thread scheduling, so delivery becomes exactly real time.
+  //
+  // It is deliberately a no-op on its outputs: the node is still connected
+  // through the muted gain to the destination, the same way the
+  // ScriptProcessor was, because that is what keeps the graph pulling.
+  //
+  // The MICROPHONE tap lives in the same module, registered by the same single
+  // addModule() call, because the one thing that can refuse it -- the page's
+  // CSP refusing a blob: script -- refuses both or neither, and one verdict is
+  // easier to read in diagnostics than two that can never disagree. The two
+  // processors are otherwise unrelated: this one consumes an input, the mic
+  // one has no input at all and produces.
+  const CALL_TAP_WORKLET_SOURCE = `
+class WinzappCallTapProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const size = (options && options.processorOptions && options.processorOptions.batchSamples) || 1024;
+    // Two batches used alternately, and postMessage is called WITHOUT a
+    // transfer list, so the batch is structured-cloned rather than neutered
+    // and these two buffers are the only ones process() ever writes into --
+    // no per-batch slice() to be collected ~47 times a second. The clone
+    // itself is still a copy taken on this thread; what is avoided is the JS
+    // allocation and the GC churn behind it, not the copy. The alternation is
+    // belt and braces: a structured clone is taken synchronously at post
+    // time, so reusing one buffer would also be safe.
+    this.batches = [new Int16Array(size), new Int16Array(size)];
+    this.active = 0;
+    this.filled = 0;
+  }
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    // No input yet (the track has not started, or it ended) is not a reason to
+    // let the node be collected: return true so it keeps running.
+    if (!channel || !channel.length) return true;
+    let batch = this.batches[this.active];
+    for (let i = 0; i < channel.length; i += 1) {
+      let sample = channel[i] || 0;
+      if (sample > 1) sample = 1;
+      else if (sample < -1) sample = -1;
+      batch[this.filled] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
+      this.filled += 1;
+      if (this.filled === batch.length) {
+        this.filled = 0;
+        this.port.postMessage(batch);
+        this.active = this.active === 0 ? 1 : 0;
+        batch = this.batches[this.active];
+      }
     }
+    return true;
+  }
+}
+registerProcessor('winzapp-call-tap', WinzappCallTapProcessor);
 
+// The microphone tap. It is NOT a mirror of the one above: it has zero inputs
+// and its whole job is to produce, so what has to leave the main thread is the
+// PULL, not a delivery. The frame QUEUE therefore lives here, on the audio
+// render thread, fed by postMessage from pushMicrophone(); process() drains it
+// without asking the main thread for anything. A queue left on the main thread
+// would have put main-thread scheduling straight back on the audio path, which
+// is the defect being fixed. The main thread still decodes base64 -> Float32
+// and posts, but a stall there now costs only the frames it failed to hand
+// over, not the frames already in hand.
+//
+// It has no view of state.enabled and does not need one: pushMicrophone()
+// refuses to hand over a frame while the bridge is disabled, and reset()
+// posts {type:'clear'}, so a disabled bridge simply starves this queue and
+// process() writes the silence it writes whenever the queue is empty.
+class WinzappCallMicProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opts = (options && options.processorOptions) || {};
+    this.queue = [];
+    this.offset = 0;
+    this.maxFrames = opts.maxFrames || 4;
+    this.targetFrames = opts.targetFrames || 2;
+    this.reportQuanta = opts.reportQuanta || 48;
+    this.consumed = 0;
+    this.dropped = 0;
+    this.quanta = 0;
+    this.port.onmessage = (event) => {
+      const data = event.data;
+      if (!data) return;
+      if (data.type === 'clear') {
+        this.queue.length = 0;
+        this.offset = 0;
+        return;
+      }
+      if (!data.length) return;
+      this.queue.push(data);
+      // The same latency policy pushMicrophone() used to apply on the main
+      // thread, moved to where the queue now is: keep a partially consumed
+      // head frame, then drop the oldest complete frames until only ~40 ms of
+      // microphone audio is queued.
+      while (this.queue.length > this.maxFrames) {
+        const dropIndex = this.offset > 0 ? 1 : 0;
+        if (dropIndex >= this.queue.length) break;
+        this.queue.splice(dropIndex, 1);
+        this.dropped += 1;
+      }
+      while (this.queue.length > this.targetFrames + (this.offset > 0 ? 1 : 0)) {
+        const dropIndex = this.offset > 0 ? 1 : 0;
+        if (dropIndex >= this.queue.length) break;
+        this.queue.splice(dropIndex, 1);
+        this.dropped += 1;
+      }
+    };
+  }
+  process(inputs, outputs) {
+    const output = outputs[0] && outputs[0][0];
+    if (!output) return true;
+    output.fill(0);
+    let written = 0;
+    while (written < output.length && this.queue.length) {
+      const head = this.queue[0];
+      const available = head.length - this.offset;
+      const take = Math.min(output.length - written, available);
+      output.set(head.subarray(this.offset, this.offset + take), written);
+      written += take;
+      this.offset += take;
+      if (this.offset >= head.length) {
+        this.queue.shift();
+        this.offset = 0;
+      }
+    }
+    this.consumed += written;
+    this.quanta += 1;
+    if (this.quanta >= this.reportQuanta) {
+      this.quanta = 0;
+      // DELTAS, never totals: the main thread adds them to the very counters
+      // the ScriptProcessor fallback increments, so a mid-call swap from one
+      // producer to the other cannot make micSamplesConsumed jump or go back.
+      this.port.postMessage({ type: 'counters', consumed: this.consumed, dropped: this.dropped });
+      this.consumed = 0;
+      this.dropped = 0;
+    }
+    // A node with no inputs has no active source, so returning false would let
+    // it be collected -- and the microphone would go silent for the rest of
+    // the call with nothing to show for it.
+    return true;
+  }
+}
+registerProcessor('winzapp-call-mic', WinzappCallMicProcessor);
+`;
+
+  // Resolves true once 'winzapp-call-tap' and 'winzapp-call-mic' are
+  // registered on this context.
+  // addModule() needs a URL and a Blob URL is the usual way to ship an inline
+  // worklet, but WhatsApp Web's CSP is entitled to refuse blob: scripts -- and
+  // a refusal must fall back to the old ScriptProcessor rather than leave the
+  // call with no remote audio at all. The promise is cached on the context
+  // because a worklet module is registered per AudioContext and ensureContext
+  // builds a new one whenever the old was closed.
+  const ensureCallTapWorklet = (context: any): Promise<boolean> => {
+    if (context.__winzappCallTapWorklet) return context.__winzappCallTapWorklet;
+    let pending: Promise<boolean>;
+    // Declared out here so the catch below can revoke it: a context with no
+    // audioWorklet at all throws between creating the URL and reaching the
+    // .finally that would have released it.
+    let url = '';
+    try {
+      url = URL.createObjectURL(
+        new Blob([CALL_TAP_WORKLET_SOURCE], { type: 'application/javascript' })
+      );
+      pending = context.audioWorklet
+        .addModule(url)
+        .then(() => {
+          state.audioWorkletStatus = 'ready';
+          report('call-tap-worklet', 'audio worklet module registered');
+          return true;
+        })
+        .catch((error: any) => {
+          state.audioWorkletStatus = 'unavailable';
+          report(
+            'call-tap-worklet',
+            `addModule refused: ${String(error?.message || error)}`
+          );
+          return false;
+        })
+        .finally(() => {
+          try { URL.revokeObjectURL(url); } catch (_) {}
+        });
+    } catch (error: any) {
+      if (url) {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+      }
+      state.audioWorkletStatus = 'unavailable';
+      report(
+        'call-tap-worklet',
+        `unavailable: ${String(error?.message || error)}`
+      );
+      pending = Promise.resolve(false);
+    }
+    context.__winzappCallTapWorklet = pending;
+    return pending;
+  };
+
+  // The microphone producer, and the swap between its two shapes.
+  //
+  // Exactly one of state.micNode (AudioWorklet) and state.micProcessor
+  // (ScriptProcessor) is ever connected, and both write into the SAME
+  // MediaStreamDestination. That matters: WhatsApp cloned the destination's
+  // track at getUserMedia time and never asks for another one, so swapping
+  // producers underneath it costs no renegotiation and the peer hears
+  // nothing beyond the audio still queued in the producer being dropped.
+  const disconnectMicProducer = () => {
+    try { state.micNode?.port?.postMessage({ type: 'clear' }); } catch (_) {}
+    try { state.micNode?.port?.close?.(); } catch (_) {}
+    try { state.micNode?.disconnect(); } catch (_) {}
+    state.micNode = null;
+    if (state.micProcessor) state.micProcessor.onaudioprocess = null;
+    try { state.micProcessor?.disconnect(); } catch (_) {}
+    state.micProcessor = null;
+  };
+
+  const startMicScriptProcessorTap = (context: any, destination: any, reason: string) => {
     const processor = context.createScriptProcessor(1024, 0, 1);
-    const destination = context.createMediaStreamDestination();
     processor.onaudioprocess = (event: AudioProcessingEvent) => {
       const output = event.outputBuffer.getChannelData(0);
       output.fill(0);
@@ -720,12 +1251,173 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     // A zero-input ScriptProcessor is not scheduled reliably by Chromium
     // unless it also has an audible graph sink. Keep that sink muted; the
     // MediaStreamDestination remains the only call track source.
+    processor.connect(state.micSchedulerSink);
+    state.micProcessor = processor;
+    state.micTapMode = 'script-processor';
+    report('mic-tap', `tap=script-processor reason=${reason}`);
+  };
+
+  const startMicWorkletTap = (context: any, destination: any) => {
+    const node = new win.AudioWorkletNode(context, 'winzapp-call-mic', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      processorOptions: {
+        maxFrames: PAGE_MIC_QUEUE_FRAMES,
+        targetFrames: PAGE_MIC_TARGET_BACKLOG_FRAMES,
+        reportQuanta: PAGE_MIC_REPORT_QUANTA,
+      },
+    });
+    // Recorded before either connect(), so that a throw from connect() leaves
+    // a node disconnectMicProducer() can still find -- the remote tap learned
+    // this one in review on #281.
+    state.micNode = node;
+    node.port.onmessage = (event: MessageEvent) => {
+      const data: any = event.data;
+      if (!data || data.type !== 'counters') return;
+      // Deltas, added to the same counters the ScriptProcessor increments, so
+      // a mid-call swap cannot make micSamplesConsumed jump or go backwards.
+      state.micSamplesConsumed += data.consumed || 0;
+      state.micFramesDroppedForLatency += data.dropped || 0;
+    };
+    node.connect(destination);
+    node.connect(state.micSchedulerSink);
+    state.micTapMode = 'audio-worklet';
+    report('mic-tap', 'tap=audio-worklet');
+    armMicWorkletWatchdog();
+  };
+
+  // The terminal fallback: hand the destination back to the ScriptProcessor
+  // and make sure SOMETHING is producing when this returns.
+  //
+  // The restart is wrapped because both callers are terminal -- there is no
+  // further fallback behind them -- and it can genuinely throw: a context
+  // closed between arming and firing, or a micSchedulerSink belonging to a
+  // context ensureContext() has since replaced. Unwrapped, the throw escapes
+  // into a setTimeout callback or an unhandled rejection, leaves micNode and
+  // micProcessor both null, and ensureMicTrack() will NOT rebuild, because
+  // the destination's track is still 'live' and it early-returns on that.
+  // The microphone would then be silent for the rest of the session -- the
+  // exact failure the watchdog exists to prevent. Dropping the destination
+  // makes the next ensureMicTrack() build a fresh one instead.
+  const swapMicProducerToScriptProcessor = (
+    context: any, destination: any, reason: string
+  ) => {
+    disconnectMicProducer();
+    try {
+      startMicScriptProcessorTap(context, destination, reason);
+    } catch (error: any) {
+      state.micDestination = null;
+      state.micTapMode = '';
+      report('mic-tap', `no producer: ${String(error?.message || error)}`);
+    }
+  };
+
+  // A silent microphone is discovered by the PEER, never by the user -- he
+  // cannot hear his own side, and the only symptom is other people saying
+  // "you cut out". So the worklet gets a deadline instead of trust: if frames
+  // were handed over and none were consumed by the time it expires, the
+  // ScriptProcessor takes the same destination back. Re-armed, not cancelled,
+  // while nothing has been pushed yet: before the call is answered there is
+  // no microphone audio to consume and silence proves nothing.
+  const armMicWorkletWatchdog = () => {
+    if (state.micWorkletWatchdog) win.clearTimeout(state.micWorkletWatchdog);
+    const pushedAtArm = state.micFramesPushed;
+    const consumedAtArm = state.micSamplesConsumed;
+    state.micWorkletWatchdog = win.setTimeout(() => {
+      state.micWorkletWatchdog = 0;
+      if (!state.micNode) return;
+      if (state.micFramesPushed === pushedAtArm) {
+        armMicWorkletWatchdog();
+        return;
+      }
+      if (state.micSamplesConsumed > consumedAtArm) return;
+      const context = state.context;
+      const destination = state.micDestination;
+      if (!context || !destination) return;
+      // NOT audioWorkletStatus: that one means "addModule() registered the
+      // module", and the REMOTE tap branches on it. A microphone starved for
+      // 1.5 s by a suspended context or a late render thread would otherwise
+      // condemn every remote track for the life of the page to the
+      // ScriptProcessor -- reintroducing, in the ear of the blind user, the
+      // 1% callback loss #281 exists to fix -- as a side effect of a
+      // microphone heuristic, with /call/diagnostics then reporting
+      // audioWorkletStatus=unavailable next to remoteTapMode=audio-worklet.
+      state.micWorkletUnscheduled = true;
+      swapMicProducerToScriptProcessor(
+        context, destination, 'worklet consumed nothing while frames were arriving'
+      );
+    }, MIC_WORKLET_WATCHDOG_MS);
+  };
+
+  const ensureMicTrack = () => {
+    const context = ensureContext();
+    if (state.micDestination?.stream?.getAudioTracks?.()[0]?.readyState === 'live') {
+      return state.micDestination.stream.getAudioTracks()[0];
+    }
+
+    const destination = context.createMediaStreamDestination();
+    // The previous sink is dropped here, not left wired to context.destination:
+    // it is silent, so an abandoned one is inaudible rather than harmless, and
+    // the graph would grow by one node per rebuild for the life of the page.
+    try { state.micSchedulerSink?.disconnect(); } catch (_) {}
     const schedulerSink = context.createGain();
     schedulerSink.gain.value = 0;
-    processor.connect(schedulerSink);
     schedulerSink.connect(context.destination);
-    state.micProcessor = processor;
+    state.micSchedulerSink = schedulerSink;
     state.micDestination = destination;
+    disconnectMicProducer();
+
+    // bridgedGetUserMedia needs a track back in this same turn, so the
+    // producer is built now from what is already known: the worklet when the
+    // module is registered (enable() warms it before any call arrives), the
+    // ScriptProcessor otherwise, upgraded in place when the module resolves.
+    if (state.audioWorkletStatus === 'ready' && !state.micWorkletUnscheduled) {
+      try {
+        startMicWorkletTap(context, destination);
+      } catch (error: any) {
+        // A node that will not construct is a microphone-side verdict, like
+        // the watchdog's: the module itself registered fine and the remote
+        // tap must keep using it.
+        state.micWorkletUnscheduled = true;
+        swapMicProducerToScriptProcessor(
+          context, destination, `worklet node failed: ${String(error?.message || error)}`
+        );
+      }
+    } else {
+      startMicScriptProcessorTap(
+        context,
+        destination,
+        state.micWorkletUnscheduled
+          ? 'worklet swapped out for this microphone'
+          : state.audioWorkletStatus === 'unavailable'
+            ? 'worklet unavailable'
+            : 'worklet still registering'
+      );
+      if (state.audioWorkletStatus !== 'unavailable' && !state.micWorkletUnscheduled) {
+        ensureCallTapWorklet(context).then((ready: boolean) => {
+          // Not "is there still a destination": it has to be THIS one. A
+          // second call built its own while the module was registering, and
+          // upgrading that one from here would swap a producer out from under
+          // a track nobody here owns any more.
+          if (!ready || state.micDestination !== destination || state.micNode) return;
+          try {
+            disconnectMicProducer();
+            // The handful of frames queued on the main thread (~40 ms, capped
+            // by the drop policy) go with the producer that held them.
+            state.micQueue.length = 0;
+            state.micOffset = 0;
+            startMicWorkletTap(context, destination);
+          } catch (error: any) {
+            state.micWorkletUnscheduled = true;
+            swapMicProducerToScriptProcessor(
+              context, destination, `worklet node failed: ${String(error?.message || error)}`
+            );
+          }
+        });
+      }
+    }
+
     const track = destination.stream.getAudioTracks()[0];
     if (track?.id) state.localTrackIds.add(track.id);
     return track;
@@ -738,7 +1430,18 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       pageAudioCleanupTimer = null;
     }
     ensureMicTrack();
-    ensureContext().resume().catch(() => undefined);
+    // The destination (and with it the worklet) survives between calls, so
+    // the watchdog is re-armed here rather than only where the producer is
+    // built: reset() stood it down at the end of the previous call, and
+    // without this the second and later calls of a session would run with no
+    // protection at all against a worklet that stopped being scheduled.
+    if (state.micNode) armMicWorkletWatchdog();
+    const context = ensureContext();
+    context.resume().catch(() => undefined);
+    // Registering the worklet module is asynchronous, so warm it up here
+    // rather than when the remote track arrives: by then the answer is
+    // cached and the tap is built in the same turn the track appears.
+    ensureCallTapWorklet(context);
     return true;
   };
 
@@ -747,9 +1450,26 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     ensureContext();
     const samples = decodePcm16(base64);
     if (!samples.length) return;
-    state.micQueue.push(samples);
     state.micFramesPushed += 1;
     state.micBytesPushed += Math.floor(base64.length * 3 / 4);
+
+    // With the worklet live the queue and the drop policy below live INSIDE
+    // it, on the audio render thread, and this side only hands frames over.
+    // Posted without a transfer list on purpose: a structured clone of 20 ms
+    // of mono audio is under 4 KB, while a transfer would neuter `samples`
+    // and, if postMessage then threw, leave an empty frame to fall through
+    // to the queue below.
+    if (state.micNode) {
+      try {
+        state.micNode.port.postMessage(samples);
+        return;
+      } catch (_) {
+        // A closed port is the one way this fails; keep the frame rather
+        // than drop it, and let the watchdog swap the producer.
+      }
+    }
+
+    state.micQueue.push(samples);
 
     // Keep the page-side WebAudio queue close to real time. If Chromium was
     // briefly busy, retain a partially-consumed head frame but skip old
@@ -772,6 +1492,16 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     for (const frame of frames || []) state.pushMicrophone(frame);
   };
 
+  // A remote pipeline carries either a worklet node or a ScriptProcessor,
+  // never both, so tearing one down has to cover the two shapes.
+  const disconnectRemotePipeline = (pipeline: any) => {
+    try { pipeline.source.disconnect(); } catch (_) {}
+    try { pipeline.processor?.disconnect(); } catch (_) {}
+    try { pipeline.node?.port?.close?.(); } catch (_) {}
+    try { pipeline.node?.disconnect(); } catch (_) {}
+    try { pipeline.sink.disconnect(); } catch (_) {}
+  };
+
   state.reset = () => {
     // Local reject/end stops the bridge immediately before WhatsApp performs
     // the native action. Arm the terminal-chime exception first so that sound
@@ -780,20 +1510,33 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     // call being rejected/cancelled has no real terminal chime to protect,
     // and opening this window for it let a coincident missed-call message
     // ping slip through unmuted (measured 2026-09-20).
-    if (state.enabled) allowCallEndChime();
+    //
+    // The "answered" record is NOT cleared here. The poll can observe ENDED
+    // after this reset() on a slow teardown, and must still be able to re-arm
+    // the genuine chime then. It cannot leak into the next call either: that
+    // call has a different key, and refreshCallAudioPolicy() settles the old
+    // one as soon as it sees the key change.
+    if (lastCallWasAnswered()) allowCallEndChime();
     state.enabled = false;
-    // Otherwise this survives into the next call: if it starts ringing
-    // before refreshCallAudioPolicy()'s own poll ever observes the idle gap
-    // between the two (a near-immediate redial), callWasAnswered would still
-    // read true from the call this reset() just tore down, wrongly opening
-    // the chime exemption if the NEW call is itself cancelled unanswered.
-    callWasAnswered = false;
     state.micQueue.length = 0;
     state.micOffset = 0;
+    // The worklet holds its own queue on the audio thread, so clearing the
+    // main-thread one is no longer enough to stop stale microphone audio
+    // being played out after a reset.
+    try { state.micNode?.port?.postMessage({ type: 'clear' }); } catch (_) {}
+    // And the watchdog is stood down rather than left looping: with the
+    // bridge disabled no frames are pushed, so it would take its re-arm
+    // branch every 1.5 s for the life of the page between calls. That was
+    // wasteful, not broken -- the re-arm recaptures both baselines, so the
+    // last one before the next call held current totals and would have
+    // fired correctly. Standing it down here and re-arming in enable()
+    // replaces a permanent timer with two explicit edges.
+    if (state.micWorkletWatchdog) {
+      win.clearTimeout(state.micWorkletWatchdog);
+      state.micWorkletWatchdog = 0;
+    }
     for (const pipeline of state.remotePipelines.values()) {
-      try { pipeline.source.disconnect(); } catch (_) {}
-      try { pipeline.processor.disconnect(); } catch (_) {}
-      try { pipeline.sink.disconnect(); } catch (_) {}
+      disconnectRemotePipeline(pipeline);
     }
     state.remotePipelines.clear();
     state.remoteTrackIds.clear();
@@ -801,15 +1544,7 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     state.remoteVideoTimers.clear();
     state.remoteVideoIds.clear();
     state.localTrackIds.clear();
-
-    // Keep the terminal-chime bridge alive through the exception window, then
-    // disconnect page MediaElementSource graphs. A new call cancels this timer.
-    if (!linuxAudio) {
-      if (pageAudioCleanupTimer !== null) {
-        win.clearTimeout(pageAudioCleanupTimer);
-      }
-      pageAudioCleanupTimer = win.setTimeout(cleanupPageAudioBridges, 2750);
-    }
+    blankCamera();
   };
 
   const attachRemoteTrack = (track: MediaStreamTrack) => {
@@ -827,34 +1562,115 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     const context = ensureContext();
     const stream = new MediaStream([track]);
     const source = context.createMediaStreamSource(stream);
-    const processor = context.createScriptProcessor(1024, 1, 1);
     const sink = context.createGain();
     sink.gain.value = 0;
-    processor.onaudioprocess = (event: AudioProcessingEvent) => {
-      if (!state.enabled) return;
-      const input = event.inputBuffer.getChannelData(0);
-      const callback = win.__winzappOnCallRemoteAudio;
-      if (typeof callback === 'function' && input.length) {
-        state.remoteFramesCaptured += 1;
-        if (state.remoteFramesCaptured === 1 || state.remoteFramesCaptured % 250 === 0) {
-          report('remote-frame', `track=${id} frames=${state.remoteFramesCaptured}`);
-        }
-        callback(encodePcm16(input), context.sampleRate).catch?.(() => undefined);
-      }
-      event.outputBuffer.getChannelData(0).fill(0);
-    };
-    source.connect(processor);
-    processor.connect(sink);
     sink.connect(context.destination);
-    state.remotePipelines.set(id, { source, processor, sink, track });
+    const pipeline: any = { source, sink, track, processor: null, node: null };
+
+    // Both taps hand Python the same thing: mono PCM16 plus the context's REAL
+    // sample rate (never a hardcoded 48000 -- only the Linux relay may assume
+    // a rate, because it created the device itself).
+    const deliver = (base64: string) => {
+      const callback = win.__winzappOnCallRemoteAudio;
+      if (typeof callback !== 'function' || !base64) return;
+      state.remoteFramesCaptured += 1;
+      if (state.remoteFramesCaptured === 1 || state.remoteFramesCaptured % 250 === 0) {
+        report(
+          'remote-frame',
+          `track=${id} frames=${state.remoteFramesCaptured} tap=${state.remoteTapMode}`
+        );
+      }
+      callback(base64, context.sampleRate).catch?.(() => undefined);
+    };
+
+    const startWorkletTap = () => {
+      const node = new win.AudioWorkletNode(context, 'winzapp-call-tap', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        processorOptions: { batchSamples: REMOTE_TAP_BATCH_SAMPLES },
+      });
+      // Registered on the pipeline before anything else can throw: a node
+      // connected but never recorded would survive disconnectRemotePipeline()
+      // and go on sending frames alongside the fallback tap.
+      pipeline.node = node;
+      node.port.onmessage = (event: MessageEvent) => {
+        if (!state.enabled) return;
+        const samples = event.data as Int16Array;
+        if (!samples?.length || samples.length * 2 > REMOTE_TAP_MAX_FRAME_BYTES) return;
+        deliver(encodeInt16(samples));
+      };
+      source.connect(node);
+      node.connect(sink);
+      state.remoteTapMode = 'audio-worklet';
+      report('remote-tap', `track=${id} tap=audio-worklet`);
+    };
+
+    const startScriptProcessorTap = (reason: string) => {
+      const processor = context.createScriptProcessor(1024, 1, 1);
+      processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        if (!state.enabled) return;
+        const input = event.inputBuffer.getChannelData(0);
+        if (input.length) deliver(encodePcm16(input));
+        event.outputBuffer.getChannelData(0).fill(0);
+      };
+      source.connect(processor);
+      processor.connect(sink);
+      pipeline.processor = processor;
+      state.remoteTapMode = 'script-processor';
+      report('remote-tap', `track=${id} tap=script-processor reason=${reason}`);
+    };
+
+    state.remotePipelines.set(id, pipeline);
     state.remoteTracksAttached += 1;
     report('remote-track', `track=${id} tracks=${state.remoteTracksAttached}`);
+
+    // Once the module's fate is known the tap is built synchronously, which is
+    // the normal case: enable() warms the module up before any track arrives.
+    // Only the very first call on a page can land here with it still pending,
+    // and then the pipeline is checked for still being the current one --
+    // a track that ended while addModule() was in flight must not be revived.
+    // The module registering is not quite a guarantee that the node can be
+    // built (an older Chromium, a context that closed underneath us), and a
+    // throw here would leave the track with no tap at all -- silence on the
+    // call, which is the one outcome worse than the popping.
+    const startTap = (ready: boolean) => {
+      if (ready) {
+        try {
+          startWorkletTap();
+          return;
+        } catch (error: any) {
+          // A half-built worklet tap can already be connected and delivering,
+          // so take it out before adding the fallback: two taps on one track
+          // send every frame to Python twice.
+          try { pipeline.node?.port?.close?.(); } catch (_) {}
+          try { pipeline.node?.disconnect(); } catch (_) {}
+          pipeline.node = null;
+          state.audioWorkletStatus = 'unavailable';
+          startScriptProcessorTap(`worklet node failed: ${String(error?.message || error)}`);
+          return;
+        }
+      }
+      startScriptProcessorTap('worklet unavailable');
+    };
+
+    if (state.audioWorkletStatus === 'ready') {
+      startTap(true);
+    } else if (state.audioWorkletStatus === 'unavailable') {
+      startTap(false);
+    } else {
+      ensureCallTapWorklet(context).then((ready: boolean) => {
+        if (state.remotePipelines.get(id) !== pipeline) return;
+        startTap(ready);
+      });
+    }
+
     track.addEventListener('ended', () => {
-      const pipeline = state.remotePipelines.get(id);
-      if (!pipeline) return;
-      try { pipeline.source.disconnect(); } catch (_) {}
-      try { pipeline.processor.disconnect(); } catch (_) {}
-      try { pipeline.sink.disconnect(); } catch (_) {}
+      const ended = state.remotePipelines.get(id);
+      if (!ended) return;
+      disconnectRemotePipeline(ended);
       state.remotePipelines.delete(id);
       state.remoteTrackIds.delete(id);
     }, { once: true });
@@ -867,7 +1683,129 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
     } catch (_) {}
   };
 
+  // The other person's video. WhatsApp Web never exposes it as a
+  // MediaStreamTrack or as a <video> the page can read -- the media scan and
+  // the RTCPeerConnection track event both come up empty for it. Its WASM
+  // engine decodes the peer's video itself (measured live on 2026-09-21:
+  // "Decoding 640x432 (H264) @ 19 fps") and draws frames only into canvases
+  // registered with WAWebVoipVideoRendererRegistry, which is what its own
+  // call UI does for the peer tile. So WinZapp registers a canvas of its own
+  // for the peer exactly the same way, and captures it at the same ~8 fps and
+  // through the same callback the call window already consumes. The registry
+  // keeps a set of canvases per source, so this coexists with WhatsApp's own.
+  //
+  // Everything before this was wrong in the same direction: the only "remote"
+  // video the bridge ever found was the user's own camera, played in hidden
+  // <video> elements to feed WhatsApp's encoder (see attachRemoteVideo).
+  const PEER_VIDEO_CAPTURE_MS = 125;
+  const peerVideo = {
+    key: '',
+    canvas: null as HTMLCanvasElement | null,
+    source: null as any,
+    timer: 0,
+    // The call key already reported as "renderer unavailable", so waiting for
+    // the lazily loaded VoIP bundle does not log every 250 ms scan.
+    unavailableReported: '',
+  };
+
+  const peerVideoRegistry = (): any => {
+    try {
+      return win.require?.('WAWebVoipVideoRendererRegistry')?.videoRendererRegistry || null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const stopPeerVideo = () => {
+    if (peerVideo.timer) win.clearInterval(peerVideo.timer);
+    const registry = peerVideoRegistry();
+    try {
+      if (registry && peerVideo.canvas) {
+        if (peerVideo.source) registry.unassignSourceFromCanvas?.(peerVideo.source, peerVideo.canvas);
+        registry.unregisterVideoCanvas?.(peerVideo.canvas);
+      }
+    } catch (_) {}
+    peerVideo.key = '';
+    peerVideo.canvas = null;
+    peerVideo.source = null;
+    peerVideo.timer = 0;
+  };
+
+  const syncPeerVideo = () => {
+    const call = currentPageCall();
+    const isVideo = !!(call?.isVideo ?? call?.attributes?.isVideo ?? call?.get?.('isVideo'));
+    const key = isLivePageCall(call) && isVideo ? pageCallKey(call) : '';
+    if (!key) {
+      if (peerVideo.key) stopPeerVideo();
+      return;
+    }
+    if (peerVideo.key === key) return;
+    if (peerVideo.key) stopPeerVideo();
+    // Claimed up front, so a registration that throws is not retried on every
+    // 250 ms scan for the rest of the call; the next call tries again.
+    peerVideo.key = key;
+    try {
+      const registry = peerVideoRegistry();
+      const renderSource = win.require?.('WAWebVoipVideoRenderSource');
+      const peer = call?.peerJid ?? call?.attributes?.peerJid ?? call?.get?.('peerJid');
+      if (!registry || !renderSource || !peer) {
+        // Not a failure yet: WhatsApp loads its VoIP bundle on demand, so the
+        // renderer modules (or the peer) can still be missing when the call
+        // starts ringing. Release the claim so a later scan tries again --
+        // keeping it made the peer's video never appear for that call.
+        peerVideo.key = '';
+        if (peerVideo.unavailableReported !== key) {
+          peerVideo.unavailableReported = key;
+          report('peer-video', `renderer unavailable registry=${!!registry} source=${!!renderSource} peer=${!!peer}`);
+        }
+        return;
+      }
+      const source = renderSource.WAWebVoipVideoRenderSource.peer(
+        peer,
+        renderSource.WAWebVoipVideoRenderStream.CAMERA
+      );
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 360;
+      registry.registerVideoCanvas(canvas, false);
+      registry.assignSourceToCanvas({ canvas, mirror: false, source });
+      peerVideo.canvas = canvas;
+      peerVideo.source = source;
+      // Which renderer WhatsApp picked matters: it depends on what the browser
+      // offers (WEBCODECS_H264 = 4 on Windows' headless Chrome), and a remote
+      // Linux chrome-headless-shell may pick another (WEBGL = 3, RASTER = 1).
+      // Logged so a remote-API report can be read without anyone looking at
+      // the screen.
+      let rendererType = '?';
+      try { rendererType = String(registry.getRendererType?.()); } catch (_) {}
+      report('peer-video', `renderer canvas registered for the peer renderer=${rendererType}`);
+
+      const capture = document.createElement('canvas');
+      capture.width = 640;
+      capture.height = 360;
+      peerVideo.timer = win.setInterval(() => {
+        // Nothing to send until the engine has actually painted a frame here.
+        if (registry.hasRenderedFirstFrameForCanvas?.(canvas) === false) return;
+        const context = capture.getContext('2d');
+        if (!context) return;
+        context.drawImage(canvas, 0, 0, 640, 360);
+        const jpeg = capture.toDataURL('image/jpeg', 0.6).split(',')[1];
+        if (!jpeg) return;
+        state.remoteVideoFramesSent += 1;
+        if (state.remoteVideoFramesSent === 1 || state.remoteVideoFramesSent % 100 === 0) {
+          report('remote-video-frame', `sent=${state.remoteVideoFramesSent} source=peer-renderer`);
+        }
+        win.__winzappOnCallRemoteVideo?.(jpeg)?.catch?.(() => undefined);
+      }, PEER_VIDEO_CAPTURE_MS);
+    } catch (error: any) {
+      report('peer-video', `could not register a renderer canvas: ${String(error?.message || error)}`);
+    }
+  };
+
   const scanMediaElements = () => {
+    try {
+      syncPeerVideo();
+    } catch (_) {}
     try {
       // Keep call lifecycle tracking alive even on pages with no media
       // elements. The HTMLMediaElement.play wrapper also refreshes this
@@ -972,7 +1910,10 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       mediaProto.__winzappCallMediaSrcObjectWrapped = true;
     }
     scanMediaElements();
-    new MutationObserver(scanMediaElements).observe(document.documentElement, {
+    // Installed at document start now (registerCallMediaBridgeBeforeLoad), where
+    // documentElement can still be null; observing the document itself with
+    // subtree sees the same insertions.
+    new MutationObserver(scanMediaElements).observe(document.documentElement || document, {
       childList: true,
       subtree: true,
     });
@@ -1001,6 +1942,61 @@ function installCallMediaBridgeInPage(linuxAudio = false): boolean {
       contextProto.__winzappCallMediaSourceWrapped = true;
     }
   } catch (_) {}
+
+  // ── Direct AudioContext playback ───────────────────────────────────────
+  // WhatsApp Web's shared-buffer playback (web_voip_audio_playback_impl=3)
+  // may play the call straight into its own AudioContext:
+  // `worklet.connect(context.destination)` with no MediaStream in between,
+  // when web_voip_audio_playback_use_media_element_output is off or the
+  // audio element's play() is refused. Measured 2026-11-12 on a real account
+  // (impl=3, media element output off): nothing above saw a remote track,
+  // WinZapp played silence for the whole call and nobody heard anybody. So a
+  // worklet of a page context reaching a destination is tapped through a
+  // MediaStreamDestination of that context, like any other remote stream.
+  //
+  // And it never reaches the speakers itself: WhatsApp Web points that
+  // context at the default output with setSinkId, so the call played twice,
+  // once straight from Chrome and once, later, from WinZapp -- heard as an
+  // echo on the other person's voice (same call, same day). The worklet is
+  // connected to a muted gain on the destination instead (the graph keeps
+  // running, WhatsApp keeps the connection it asked for) and to the tap.
+  // Our own nodes live in state.context and never connect a worklet to a
+  // destination; they are left alone.
+  const directPlaybackTaps = new WeakMap<any, any>();
+  const routeDirectPlayback = (node: any, target: any, nativeConnect: any): boolean => {
+    const Worklet = win.AudioWorkletNode;
+    const Destination = win.AudioDestinationNode;
+    if (!Worklet || !Destination || !(node instanceof Worklet) || !(target instanceof Destination)) return false;
+    if (node.context === state.context) return false;
+    let route = directPlaybackTaps.get(node);
+    if (!route) {
+      const muted = node.context.createGain();
+      muted.gain.value = 0;
+      nativeConnect.call(muted, target);
+      route = { muted, tap: node.context.createMediaStreamDestination() };
+      directPlaybackTaps.set(node, route);
+      report('remote-direct', `rate=${node.context.sampleRate}`);
+      attachRemoteStream(route.tap.stream);
+    }
+    // again after a device switch: WhatsApp disconnects and reconnects it
+    nativeConnect.call(node, route.muted);
+    nativeConnect.call(node, route.tap);
+    return true;
+  };
+  try {
+    const nodeProto = (win.AudioNode || {}).prototype as any;
+    if (nodeProto && !nodeProto.__winzappDirectPlaybackWrapped) {
+      const nativeConnect = nodeProto.connect;
+      nodeProto.connect = function (this: any, target: any, ...rest: any[]) {
+        try {
+          if (routeDirectPlayback(this, target, nativeConnect)) return target;
+        } catch (_) { /* never break WhatsApp's own graph */ }
+        return nativeConnect.call(this, target, ...rest);
+      };
+      nodeProto.__winzappDirectPlaybackWrapped = true;
+    }
+  } catch (_) {}
+  // ── end of direct AudioContext playback ────────────────────────────────
 
   // ── Silence WhatsApp Web notification audio, preserving call-end ────────
   // Reported live: the incoming-call ringtone played audibly through THIS
@@ -1238,8 +2234,39 @@ function toBuffer(value: any): Buffer | null {
   return null;
 }
 
+function linuxAudioRelayActive(): boolean {
+  return process.platform === 'linux' && process.env.PULSE_SERVER === LINUX_PULSE_SERVER;
+}
+
+/**
+ * Register the bridge as a new-document script BEFORE WhatsApp Web first loads.
+ *
+ * WhatsApp's VoIP bundle may cache getUserMedia and RTCPeerConnection when its
+ * modules evaluate, so the media hooks have to exist before that. This used to
+ * be done by registering the script once WPPConnect handed the page over (after
+ * WhatsApp had loaded) and then calling page.reload(). That reload wedged the
+ * page for good: measured 2026-09-24 on two consecutive starts, WhatsApp Web
+ * reloaded itself right after its first load, the priming reload landed on top
+ * of it, and the renderer stopped answering anything - not even a CDP
+ * Runtime.evaluate or the trace start - while idle, with no dialog, no freeze
+ * and no pending navigation to blame. The session stayed INITIALIZING forever
+ * and WinZapp went offline; skipping the reload alone brought it straight back.
+ *
+ * start.js calls this from its initWhatsapp wrapper, before the first goto(),
+ * so the hooks are in place without any reload. The flag lives on the page:
+ * no client object exists yet at that point, and the page is the same object
+ * WPPConnect later exposes as client.page.
+ */
+export async function registerCallMediaBridgeBeforeLoad(page: any): Promise<boolean> {
+  if (!page || typeof page.evaluateOnNewDocument !== 'function') return false;
+  if (page.__winzappCallMediaNewDocumentInstalled) return true;
+  await page.evaluateOnNewDocument(installCallMediaBridgeInPage, linuxAudioRelayActive());
+  page.__winzappCallMediaNewDocumentInstalled = true;
+  return true;
+}
+
 export async function ensureCallMediaBridge(client: any, io: any, logger: any): Promise<boolean> {
-  const linuxAudio = process.platform === 'linux' && process.env.PULSE_SERVER === LINUX_PULSE_SERVER;
+  const linuxAudio = linuxAudioRelayActive();
   const page = client?.waPage || client?.page;
   if (!page) return false;
 
@@ -1283,22 +2310,19 @@ export async function ensureCallMediaBridge(client: any, io: any, logger: any): 
   }
 
   try {
-    if (!(client as any).__winzappCallMediaNewDocumentInstalled) {
-      await page.evaluateOnNewDocument(installCallMediaBridgeInPage, linuxAudio);
-      (client as any).__winzappCallMediaNewDocumentInstalled = true;
-
-      // WPPConnect hands the page to us only after WhatsApp Web has loaded.
-      // Installing the bridge in that already-running document is too late:
-      // WhatsApp's VoIP bundle may already have cached getUserMedia and
-      // RTCPeerConnection. Reload exactly once after registering the
-      // new-document script, so the media hooks exist before any WhatsApp
-      // module evaluates. The authenticated profile lives in userDataDir, so
-      // this is a normal WhatsApp Web reload and does not re-pair the account.
-      if (!(client as any).__winzappCallMediaPrimed) {
-        (client as any).__winzappCallMediaPrimed = true;
-        logger?.info?.(`[${client.session}] priming call media bridge before WhatsApp load`);
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 120000 });
-      }
+    if (!page.__winzappCallMediaNewDocumentInstalled) {
+      // start.js registers the bridge before WhatsApp's first load. Reaching
+      // here without that means its initWhatsapp wrapper did not run: register
+      // for future documents and install into the running one below, but
+      // NEVER reload to make up for it - that reload is what wedged the page
+      // (see registerCallMediaBridgeBeforeLoad). Calls may lack audio until
+      // WhatsApp next loads a document; that is recoverable, a dead session
+      // is not.
+      await registerCallMediaBridgeBeforeLoad(page);
+      logger?.warn?.(
+        `[${client.session}] call media bridge registered after WhatsApp loaded ` +
+          '(not before the first load); installing into the running page without a reload'
+      );
     }
     const installed = await page.evaluate(installCallMediaBridgeInPage, linuxAudio);
     if (installed) logger?.info?.(`[${client.session}] WinZapp call media bridge ready`);
@@ -1320,6 +2344,7 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
 
   const warmup = (async (): Promise<boolean> => {
     try {
+      await page.evaluate(installVoipInitPolicyInPage);
       const result = await page.evaluate(async () => {
         const win = window as any;
         const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -1343,17 +2368,15 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
               const init = backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip;
               if (typeof init === 'function') {
                 const initModule = backend?.WAWebVoipInit || backend;
-                await init.call(initModule, 'winzapp_session_warmup');
-                const emitter = initModule?.VoipInitEventEmitter;
-                if (
-                  emitter?.getIsVoipInited?.() !== true &&
-                  emitter?.getDidVoipInitError?.() === true &&
-                  typeof initModule?.retryWAWebVoipInitAfterFailure === 'function'
-                ) {
-                  await initModule.retryWAWebVoipInitAfterFailure();
-                }
-                if (emitter?.getIsVoipInited?.() === false) {
-                  lastError = 'WhatsApp VoIP initializer did not become ready';
+                // The VoIP WebAssembly module loads once per page: never
+                // initialise again when it is ready or already in flight (a
+                // call action shares the same promise), or WhatsApp fails
+                // with "cannot load module more than once per process".
+                await win.__winzappInitializeVoip(initModule, 'winzapp_session_warmup', init);
+                const initState = win.__winzappReadVoipInitState(initModule);
+                if (initState.ready === false) {
+                  lastError = 'WhatsApp VoIP initializer did not become ready: '
+                    + JSON.stringify(initState);
                   await delay(250 * (attempt + 1));
                   continue;
                 }
@@ -1393,8 +2416,9 @@ export async function warmCallVoipRuntime(client: any, logger: any): Promise<boo
             lastError = 'VoIP stack interface returned no value';
           } catch (error: any) {
             lastError = String(error?.message || error || 'unknown error');
+            if (error?.winzappVoipFatal === true) return { ready: false, error: lastError };
           }
-          await delay(250 * (attempt + 1));
+          if (attempt < 9) await delay(250 * (attempt + 1));
         }
 
         return { ready: false, error: lastError };
@@ -1523,10 +2547,45 @@ export function registerCallAudioSocket(
       );
     }
     cameraBusy = true;
-    page.evaluate((frame: string) => {
-      (window as any).__winzappCallMediaBridge?.pushCameraFrame?.(frame);
-    }, jpeg).catch(() => undefined).finally(() => { cameraBusy = false; });
+    const epoch = typeof payload?.epoch === 'number' ? payload.epoch : undefined;
+    page.evaluate((frame: string, frameEpoch?: number) => {
+      (window as any).__winzappCallMediaBridge?.pushCameraFrame?.(frame, frameEpoch);
+    }, jpeg, epoch).catch(() => undefined).finally(() => { cameraBusy = false; });
   });
+  // Turning video off has to reach the page: the canvas keeps being captured
+  // at 10 fps regardless of whether the desktop is still sending frames, so
+  // without this the peer went on seeing the user's last frame, frozen, for
+  // the rest of the call.
+  socket.on('call:video:camera:stop', (payload: any) => {
+    const session = String(payload?.session || '');
+    if (session !== authenticatedSession) return;
+    const client: any = (clientsArray as any)[session];
+    const page = client?.waPage || client?.page;
+    if (!page) return;
+    const epoch = typeof payload?.epoch === 'number' ? payload.epoch : undefined;
+    const native = payload?.native === true;
+    logger?.info?.(`[${session}] call camera stopped by desktop epoch=${epoch} native=${native}`);
+    page.evaluate(
+      ({ stoppedEpoch, nativeMute }: { stoppedEpoch?: number; nativeMute: boolean }) => {
+        (window as any).__winzappCallMediaBridge?.stopCamera?.(stoppedEpoch, nativeMute);
+      },
+      { stoppedEpoch: epoch, nativeMute: native }
+    ).catch(() => undefined);
+  });
+
+  // The user turned video back on from the call window.
+  socket.on('call:video:camera:start', (payload: any) => {
+    const session = String(payload?.session || '');
+    if (session !== authenticatedSession) return;
+    const client: any = (clientsArray as any)[session];
+    const page = client?.waPage || client?.page;
+    if (!page) return;
+    logger?.info?.(`[${session}] call camera resumed by desktop`);
+    page.evaluate(() => {
+      (window as any).__winzappCallMediaBridge?.resumeCamera?.();
+    }).catch(() => undefined);
+  });
+
   socket.on('call:audio:mic', (payload: any) => {
     const session = String(payload?.session || '');
     const pcm =

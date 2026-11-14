@@ -49,7 +49,8 @@ def resolve_startup(argv, registry) -> dict:
     if explicit is not None:
         acc = registry.get(explicit)
         if acc is None or acc["state"] in ("archived", "deleting"):
-            return {"mode": "error", "reason": f"account {explicit} not runnable"}
+            return {"mode": "error", "reason": f"account {explicit} not runnable",
+                    "account_id": explicit}
         return {"mode": "account", "account_id": explicit,
                 "resume_pending": acc["state"] == "pending"}
 
@@ -63,6 +64,17 @@ def resolve_startup(argv, registry) -> dict:
                 "background": [a["id"] for a in autostart[1:]]}
 
     return _plain_start(registry)
+
+
+def accounts_to_connect(argv, registry, current_account_id, enabled) -> list:
+    """Ids of the paired accounts to open in the background next to this one
+    when "connect all accounts at startup" is on. Nothing for a process started
+    for one explicit account (--account: the switcher, or a sibling launched by
+    this very rule), so siblings never launch each other in a chain.
+    """
+    if not enabled or _arg_value(argv, "--account") is not None:
+        return []
+    return [a["id"] for a in registry.list_paired() if a["id"] != current_account_id]
 
 
 def _plain_start(registry) -> dict:

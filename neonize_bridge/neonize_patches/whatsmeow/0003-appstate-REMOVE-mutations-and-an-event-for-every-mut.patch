@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
+Date: Mon, 26 Oct 2026 09:15:32 -0300
+Subject: [PATCH] appstate: REMOVE mutations and an event for every mutation
+
+MutationInfo.Operation lets a client send a REMOVE (the zero value stays
+SET), which WhatsApp Web uses to delete a contact from the address book.
+events.AppStateMutation carries every mutation, set or remove, with its
+collection and version, also during a full sync, so a client can keep the
+entries whatsmeow has no event for (labels and lists, status privacy).
+---
+ appstate.go              | 14 ++++++++++++++
+ appstate/encode.go       |  8 ++++++--
+ types/events/appstate.go | 13 +++++++++++++
+ 3 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/appstate.go b/appstate.go
+index 3cb31ba..9a4011d 100644
+--- a/appstate.go
++++ b/appstate.go
+@@ -190,6 +190,20 @@ func (cli *Client) collectEventsToDispatch(
+ 		if eventsToDispatch != nil && mutation.Operation == waServerSync.SyncdMutation_SET {
+ 			*eventsToDispatch = append(*eventsToDispatch, &events.AppState{Index: mutation.Index, SyncActionValue: mutation.Action})
+ 		}
++		raw := &events.AppStateMutation{
++			Name:         name,
++			Index:        mutation.Index,
++			Version:      mutation.Version,
++			Remove:       mutation.Operation == waServerSync.SyncdMutation_REMOVE,
++			Action:       mutation.Action,
++			FromFullSync: fullSync,
++		}
++		if eventsToDispatch != nil {
++			*eventsToDispatch = append(*eventsToDispatch, raw)
++		} else {
++			// A full sync without EmitAppStateEventsOnFullSync dispatches nothing else.
++			cli.dispatchEvent(raw)
++		}
+ 		evt := cli.dispatchAppState(ctx, name, mutation, fullSync)
+ 		if eventsToDispatch != nil && evt != nil {
+ 			*eventsToDispatch = append(*eventsToDispatch, evt)
+diff --git a/appstate/encode.go b/appstate/encode.go
+index c101a55..a09d4b2 100644
+--- a/appstate/encode.go
++++ b/appstate/encode.go
+@@ -24,6 +24,9 @@ type MutationInfo struct {
+ 	Version int32
+ 	// Value contains the data for the mutation.
+ 	Value *waSyncAction.SyncActionValue
++	// Operation is SET (the zero value) or REMOVE. A REMOVE deletes the entry at Index;
++	// it still carries an encrypted value, and the entry must have been SET before.
++	Operation waServerSync.SyncdMutation_SyncdOperation
+ }
+ 
+ // PatchInfo contains information about a patch to the app state.
+@@ -296,11 +299,12 @@ func (proc *Processor) EncodePatch(ctx context.Context, keyID []byte, state Hash
+ 			return nil, fmt.Errorf("failed to encrypt mutation: %w", err)
+ 		}
+ 
+-		valueMac := generateContentMAC(waServerSync.SyncdMutation_SET, encryptedContent, keyID, keys.ValueMAC)
++		operation := mutationInfo.Operation
++		valueMac := generateContentMAC(operation, encryptedContent, keyID, keys.ValueMAC)
+ 		indexMac := concatAndHMAC(sha256.New, keys.Index, indexBytes)
+ 
+ 		mutations = append(mutations, &waServerSync.SyncdMutation{
+-			Operation: waServerSync.SyncdMutation_SET.Enum(),
++			Operation: operation.Enum(),
+ 			Record: &waServerSync.SyncdRecord{
+ 				Index: &waServerSync.SyncdIndex{Blob: indexMac},
+ 				Value: &waServerSync.SyncdValue{Blob: append(encryptedContent, valueMac...)},
+diff --git a/types/events/appstate.go b/types/events/appstate.go
+index 2b58517..3c0b83b 100644
+--- a/types/events/appstate.go
++++ b/types/events/appstate.go
+@@ -191,6 +191,19 @@ type AppState struct {
+ 	*waSyncAction.SyncActionValue
+ }
+ 
++// AppStateMutation is emitted for every app state mutation, set or remove, with the
++// collection it came from and its version. Unlike AppState it is also emitted during a
++// full sync (except for the contacts a full sync stores in bulk), so a client can keep
++// its own copy of the entries whatsmeow has no event for (labels, status privacy...).
++type AppStateMutation struct {
++	Name         appstate.WAPatchName
++	Index        []string
++	Version      int32
++	Remove       bool
++	Action       *waSyncAction.SyncActionValue
++	FromFullSync bool
++}
++
+ // AppStateSyncComplete is emitted when app state is resynced.
+ type AppStateSyncComplete struct {
+ 	Name     appstate.WAPatchName

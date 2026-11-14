@@ -4,6 +4,7 @@ paths:
   - "client/core/websocket_client.py"
   - "client/core/wppconnect_host_layer_patch.py"
   - "client/api_patches/src/config.ts"
+  - "client/main_window/account_link.py"
 ---
 
 # Pairing flow

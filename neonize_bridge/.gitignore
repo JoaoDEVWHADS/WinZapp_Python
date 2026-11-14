@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.db
+server.log
+data/
+test-data/
+simulated-data/
+path_extra.txt
+run/
+# folders written before the file names were in English
+dados/
+dados-teste/
+dados-simulado/
+dados-real/
+execucao/

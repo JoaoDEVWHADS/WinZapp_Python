@@ -1,0 +1,524 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
+Date: Wed, 28 Oct 2026 13:21:11 -0300
+Subject: [PATCH] api/ongoing-group-join: join group calls already going on
+
+The lobby query (<lobby query="1"/> to <id>@call) and the join <accept>
+(Opus 16 kHz, net, encopt, capability; no preaccept), as WhatsApp Web sends
+them. Validated: signaling/ongoing_group_test.go against the capture in
+datasheets/voip-ongoing-group-join.md, engine_ongoing_group_test.go for the
+lobby roster and the join sequence. Not yet run against a live call.
+
+Source of truth: datasheets/voip-ongoing-group-join.md
+---
+ CHANGELOG.md                          |   9 ++
+ datasheets/voip-ongoing-group-join.md |  59 ++++++++++
+ engine_ongoing_group.go               | 156 ++++++++++++++++++++++++++
+ engine_ongoing_group_test.go          | 111 ++++++++++++++++++
+ signaling/ongoing_group.go            |  44 ++++++++
+ signaling/ongoing_group_test.go       |  78 +++++++++++++
+ 6 files changed, 457 insertions(+)
+ create mode 100644 datasheets/voip-ongoing-group-join.md
+ create mode 100644 engine_ongoing_group.go
+ create mode 100644 engine_ongoing_group_test.go
+ create mode 100644 signaling/ongoing_group.go
+ create mode 100644 signaling/ongoing_group_test.go
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4986024..d341079 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,15 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
+ 
+ ## [Unreleased]
+ 
++### api/ongoing-group-join — `implemented`
++
++- Asks the server where a group call stands while the account is not in it
++  (the lobby query) and joins a group call already going on with the plain
++  `<accept>` WhatsApp Web sends, after checking someone is still connected
++  and the media did not change. Built from a WhatsApp Web capture
++  (`datasheets/voip-ongoing-group-join.md`); the stanzas and the join
++  sequence are KAT-checked against it, the live join is not yet validated.
++
+ ### media/group-runtime — `KAT-verified`
+ 
+ - Hardened live group-call teardown by closing and detaching audio endpoints,
+diff --git a/datasheets/voip-ongoing-group-join.md b/datasheets/voip-ongoing-group-join.md
+new file mode 100644
+index 0000000..03c51cf
+--- /dev/null
++++ b/datasheets/voip-ongoing-group-join.md
+@@ -0,0 +1,59 @@
++# Datasheet: `api/ongoing-group-join`
++
++Asking the server where a group call stands while this account is not in it,
++and joining that call by its id once it already goes on — WhatsApp Web's
++Calls-tab and group-chat Join, which never sends an offer.
++
++**Validation vectors:** focused Go KATs in `signaling/ongoing_group_test.go`
++(both stanzas, field for field against the capture) and
++`engine_ongoing_group_test.go` (the lobby ACK roster, and the join sequence:
++lobby query, roster installed, one `<accept>`, no preaccept).
++
++**Reference pinned at:** UNMAPPED — no Rust reference implements this. The
++ground truth is a WhatsApp Web capture (2026-10-28, WinZapp's WPPConnect
++engine, stanza recorder on `WAWebVoipSendSignalingXmpp`'s send and
++`WAWebHandleVoipCall.handleCall`; tags and attributes only, digits masked),
++capture SHA-256 `ac1a7327bfce746f1b1cfa77141cfe5f07fe19766cd8d1d83d4c83e8685ed96a`.
++
++## Reference source (verbatim — authoritative)
++
++The account created a group call, left it while another member stayed
++connected, waited, and joined again from the group chat's Join button:
++
++```text
++out <call to="<id>@call"><terminate call-id call-creator duration audio_duration/></call>
++out <call to="call"><group_call_duration call-id call-creator type="group" audio_duration/></call>
++out <call to="<id>@call" id><lobby call-id call-creator query="1"/></call>      (every 10 s while out)
++ack <ack from="<id>@call" class="call" type="lobby" id>
++      <group_info group-jid call-creator call-id transaction-id media="audio" connected-limit="32">
++        <user jid state="invited|connected|..." user_pn><device jid [platform]><capability ver="1"/>…</device></user>…
++      </group_info>
++    </ack>
++out <call to="<id>@call" id><accept call-id call-creator>
++      <audio enc="opus" rate="16000"/><net medium="2"/><encopt/><capability ver="1">7 bytes</capability>
++    </accept></call>
++in  <group_update> with the relay, <enc_rekey>, <transport> — as for any group call
++```
++
++Inside the call, `checkOngoingCalls` sends nothing; the lobby query only goes
++out for a call the account is not in. Participant states seen: `connected`,
++`outgoing` (ringing), `receipt` (the ring reached the phone), `invited`.
++
++## Go target
++
++```go
++func BuildLobbyQuery(callID string, callCreator types.JID, requestID string) (waBinary.Node, error)
++func BuildOngoingGroupJoin(callID string, callCreator types.JID, requestID string, video bool) (waBinary.Node, error)
++func (c *Client) QueryOngoingGroupCall(ctx context.Context, callID string, creator types.JID) (*OngoingGroupCall, error)
++func (c *Client) JoinOngoingGroupCall(ctx context.Context, callID string, creator types.JID, video bool) (*Call, error)
++```
++
++## Implementation notes
++
++- The lobby ACK is the same `<ack><group_info>` shape `ParseInitialGroupCallAck`
++  reads; no `group_info` means the server no longer has the call.
++- Join only when the lobby lists someone `connected` and the media type the
++  caller expects still matches; a call already held is not joined again.
++- The call entry is built like a call-link join (direction incoming, camera
++  off); a failed `<accept>` finishes the entry so no call is left behind.
++  Media starts with the `group_update` that carries the relay.
+diff --git a/engine_ongoing_group.go b/engine_ongoing_group.go
+new file mode 100644
+index 0000000..bf7029d
+--- /dev/null
++++ b/engine_ongoing_group.go
+@@ -0,0 +1,156 @@
++package meowcaller
++
++import (
++	"context"
++	"errors"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/types"
++
++	"github.com/purpshell/meowcaller/signaling"
++)
++
++// OngoingGroupCall is what the server says of a group call this account can
++// join: who is in it and in which state.
++type OngoingGroupCall struct {
++	CallID   string
++	Creator  types.JID
++	GroupJID types.JID
++	Video    bool
++	State    GroupCallState
++}
++
++// Connected is how many people are in the call right now.
++func (o *OngoingGroupCall) Connected() int {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (participant states)
++	if o == nil {
++		return 0
++	}
++	n := 0
++	for _, p := range o.State.Participants {
++		if p.State == "connected" {
++			n++
++		}
++	}
++	return n
++}
++
++// ErrGroupCallOver is returned when the server no longer has anyone in the call.
++var ErrGroupCallOver = errors.New("meowcaller: the group call is no longer going on")
++
++// ErrGroupCallMediaChanged is returned when the call's media is not the one the caller expects.
++var ErrGroupCallMediaChanged = errors.New("meowcaller: the group call's media changed")
++
++// QueryOngoingGroupCall asks the server where a group call stands; nil, nil
++// when the server no longer has it.
++func (c *Client) QueryOngoingGroupCall(ctx context.Context, callID string, creator types.JID) (*OngoingGroupCall, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (lobby query)
++	if c == nil || c.eng == nil {
++		return nil, errors.New("meowcaller: group call signaling is unavailable")
++	}
++	ongoing, _, err := c.eng.queryOngoingGroupCall(ctx, callID, creator)
++	return ongoing, err
++}
++
++// JoinOngoingGroupCall joins a group call that is already going on.
++func (c *Client) JoinOngoingGroupCall(ctx context.Context, callID string, creator types.JID, video bool) (*Call, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (join accept)
++	if c == nil || c.eng == nil {
++		return nil, errors.New("meowcaller: group call signaling is unavailable")
++	}
++	return c.eng.joinOngoingGroupCall(ctx, callID, creator, video)
++}
++
++func (e *engine) queryOngoingGroupCall(
++	ctx context.Context,
++	callID string,
++	creator types.JID,
++) (*OngoingGroupCall, *groupCallUpdate, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (lobby query and ACK)
++	if err := e.requireRawCallAdapter(); err != nil {
++		return nil, nil, err
++	}
++	requestID := e.nextCallNodeID()
++	node, err := signaling.BuildLobbyQuery(callID, creator, requestID)
++	if err != nil {
++		return nil, nil, err
++	}
++	response, err := e.requestCall(ctx, node, requestID)
++	if err != nil {
++		return nil, nil, err
++	}
++	return ongoingFromLobbyAck(response)
++}
++
++func ongoingFromLobbyAck(response *waBinary.Node) (*OngoingGroupCall, *groupCallUpdate, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (lobby ACK)
++	parsed, ok, err := signaling.ParseInitialGroupCallAck(response)
++	if err != nil {
++		return nil, nil, err
++	}
++	if !ok {
++		return nil, nil, nil
++	}
++	update := groupCallUpdateFromSignaling(*parsed)
++	return &OngoingGroupCall{
++		CallID: update.CallID, Creator: update.CallCreator, GroupJID: update.GroupJID,
++		Video: update.Media == "video", State: groupCallStateFromUpdate(update),
++	}, &update, nil
++}
++
++func (e *engine) ownLID() types.JID {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (call entry like a call-link join)
++	if e.c == nil || e.c.wa == nil || e.c.wa.Store == nil {
++		return types.EmptyJID
++	}
++	return e.c.wa.Store.GetLID()
++}
++
++func (e *engine) joinOngoingGroupCall(ctx context.Context, callID string, creator types.JID, video bool) (*Call, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (join sequence)
++	ongoing, update, err := e.queryOngoingGroupCall(ctx, callID, creator)
++	if err != nil {
++		return nil, err
++	}
++	if update == nil || ongoing.Connected() == 0 {
++		return nil, ErrGroupCallOver
++	}
++	if ongoing.Video != video {
++		return nil, ErrGroupCallMediaChanged
++	}
++	if existing := e.lookup(callID); existing != nil && existing.call != nil {
++		return nil, errors.New("meowcaller: already in this call")
++	}
++	call := &Call{eng: e, id: callID, peer: creator, phase: CallPhaseConnecting}
++	self := e.ownLID()
++	e.mu.Lock()
++	m := e.entry(callID)
++	m.call = call
++	m.group = true
++	m.selfLID = self.String()
++	m.peerLID = creator.String()
++	m.creator = creator
++	m.from = types.NewJID(callID, "call")
++	m.direction = CallDirectionIncoming
++	m.remoteVideo = video
++	m.inviteSelfDevice = groupCallDevice{
++		JID: self, CapabilityVersion: 1,
++		Capability: append([]byte(nil), signaling.CapabilityOffer...),
++	}
++	e.mu.Unlock()
++	e.applyGroupUpdate(*update)
++
++	accept, err := signaling.BuildOngoingGroupJoin(callID, creator, e.nextCallNodeID(), video)
++	if err == nil {
++		err = e.transmitCallNode(ctx, accept)
++	}
++	if err != nil {
++		e.c.log.Warn().Err(err).Str("call_id", callID).Msg("ongoing group call join failed")
++		e.finishCall(callID, "join_failed")
++		return nil, err
++	}
++	e.c.log.Info().Str("call_id", callID).Bool("video", video).
++		Int("connected", ongoing.Connected()).Msg("joined an ongoing group call")
++	e.maybeStartMedia(callID)
++	return call, nil
++}
+diff --git a/engine_ongoing_group_test.go b/engine_ongoing_group_test.go
+new file mode 100644
+index 0000000..570993d
+--- /dev/null
++++ b/engine_ongoing_group_test.go
+@@ -0,0 +1,111 @@
++package meowcaller
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/rs/zerolog"
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/types"
++)
++
++func lobbyUser(user, state string) waBinary.Node {
++	jid := types.NewJID(user, types.HiddenUserServer)
++	return waBinary.Node{Tag: "user", Attrs: waBinary.Attrs{"jid": jid, "state": state}, Content: []waBinary.Node{
++		{Tag: "device", Attrs: waBinary.Attrs{"jid": jid}},
++	}}
++}
++
++func lobbyAck(media string, users ...waBinary.Node) *waBinary.Node {
++	return &waBinary.Node{Tag: "ack", Attrs: waBinary.Attrs{"class": "call", "type": "lobby"}, Content: []waBinary.Node{{
++		Tag: "group_info",
++		Attrs: waBinary.Attrs{
++			"group-jid": types.NewJID("120363000000000001", types.GroupServer), "call-creator": creatorJID(),
++			"call-id": "GCID", "transaction-id": "111", "media": media, "connected-limit": "32",
++		},
++		Content: users,
++	}}}
++}
++
++func TestTheLobbyAckGivesTheRosterAndItsConnectedPeople(t *testing.T) {
++	ongoing, update, err := ongoingFromLobbyAck(lobbyAck("audio",
++		lobbyUser("1001", "invited"), lobbyUser("1002", "connected"), lobbyUser("1003", "receipt")))
++	if err != nil || ongoing == nil || update == nil {
++		t.Fatalf("ongoing %v update %v err %v", ongoing, update, err)
++	}
++	if ongoing.CallID != "GCID" || ongoing.Video || ongoing.Connected() != 1 || len(ongoing.State.Participants) != 3 {
++		t.Fatalf("ongoing %+v", ongoing)
++	}
++	if ongoing.GroupJID.Server != types.GroupServer || update.TransactionID != 111 {
++		t.Fatalf("group %v transaction %d", ongoing.GroupJID, update.TransactionID)
++	}
++	video, _, _ := ongoingFromLobbyAck(lobbyAck("video", lobbyUser("1002", "connected")))
++	if !video.Video {
++		t.Fatal("a video call's lobby says video")
++	}
++	over, update, err := ongoingFromLobbyAck(&waBinary.Node{Tag: "ack", Attrs: waBinary.Attrs{"type": "lobby"}})
++	if over != nil || update != nil || err != nil {
++		t.Fatalf("a call the server no longer has: %v %v %v", over, update, err)
++	}
++}
++
++func ongoingTestEngine(ack *waBinary.Node, sendErr error) (*engine, *[]waBinary.Node) {
++	c := &Client{log: zerolog.Nop()}
++	c.eng = newEngine(c)
++	var sent []waBinary.Node
++	c.eng.requestCallNode = func(_ context.Context, node waBinary.Node, _ string) (*waBinary.Node, error) {
++		sent = append(sent, node)
++		return ack, nil
++	}
++	c.eng.sendCallNode = func(_ context.Context, node waBinary.Node) error {
++		sent = append(sent, node)
++		return sendErr
++	}
++	return c.eng, &sent
++}
++
++func TestJoiningAnOngoingCallAsksTheLobbyThenAcceptsOnce(t *testing.T) {
++	eng, sent := ongoingTestEngine(lobbyAck("audio", lobbyUser("1002", "connected")), nil)
++	call, err := eng.joinOngoingGroupCall(context.Background(), "GCID", creatorJID(), false)
++	if err != nil || call == nil {
++		t.Fatalf("join: %v", err)
++	}
++	if len(*sent) != 2 || (*sent)[0].GetChildren()[0].Tag != "lobby" || (*sent)[1].GetChildren()[0].Tag != "accept" {
++		t.Fatalf("sent %v", *sent)
++	}
++	m := eng.lookup("GCID")
++	if m == nil || !m.group || m.groupUpdate == nil || m.groupUpdate.TransactionID != 111 || m.localVideo {
++		t.Fatalf("call entry %+v", m)
++	}
++	if call.State() != CallPhaseConnecting {
++		t.Fatalf("phase %v", call.State())
++	}
++	if _, err := eng.joinOngoingGroupCall(context.Background(), "GCID", creatorJID(), false); err == nil {
++		t.Fatal("a call already held is not joined again")
++	}
++}
++
++func TestAJoinIsRefusedWhenNobodyIsLeftOrTheMediaChanged(t *testing.T) {
++	eng, sent := ongoingTestEngine(lobbyAck("audio", lobbyUser("1001", "invited")), nil)
++	if _, err := eng.joinOngoingGroupCall(context.Background(), "GCID", creatorJID(), false); !errors.Is(err, ErrGroupCallOver) {
++		t.Fatalf("err %v", err)
++	}
++	if len(*sent) != 1 || eng.lookup("GCID") != nil {
++		t.Fatalf("only the lobby query goes out, nothing is kept: %v", *sent)
++	}
++	eng, _ = ongoingTestEngine(lobbyAck("video", lobbyUser("1002", "connected")), nil)
++	if _, err := eng.joinOngoingGroupCall(context.Background(), "GCID", creatorJID(), false); !errors.Is(err, ErrGroupCallMediaChanged) {
++		t.Fatalf("err %v", err)
++	}
++}
++
++func TestAFailedAcceptLeavesNoCallBehind(t *testing.T) {
++	eng, _ := ongoingTestEngine(lobbyAck("audio", lobbyUser("1002", "connected")), errors.New("socket closed"))
++	if _, err := eng.joinOngoingGroupCall(context.Background(), "GCID", creatorJID(), false); err == nil {
++		t.Fatal("the accept failed")
++	}
++	if eng.lookup("GCID") != nil {
++		t.Fatal("the call entry must be finished")
++	}
++}
+diff --git a/signaling/ongoing_group.go b/signaling/ongoing_group.go
+new file mode 100644
+index 0000000..53d756b
+--- /dev/null
++++ b/signaling/ongoing_group.go
+@@ -0,0 +1,44 @@
++package signaling
++
++import (
++	"fmt"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/types"
++)
++
++// BuildLobbyQuery asks the server where a group call stands while this
++// account is not in it.
++func BuildLobbyQuery(callID string, callCreator types.JID, requestID string) (waBinary.Node, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (WhatsApp Web capture, lobby query)
++	if callID == "" || callCreator.IsEmpty() || requestID == "" {
++		return waBinary.Node{}, fmt.Errorf("signaling: build lobby query: incomplete identity")
++	}
++	return callWrap(types.NewJID(callID, "call"), &requestID, waBinary.Node{
++		Tag: "lobby",
++		Attrs: waBinary.Attrs{
++			"call-id":      callID,
++			"call-creator": callCreator,
++			"query":        "1",
++		},
++	}), nil
++}
++
++// BuildOngoingGroupJoin builds the <accept> that joins a group call already
++// going on.
++func BuildOngoingGroupJoin(callID string, callCreator types.JID, requestID string, video bool) (waBinary.Node, error) {
++	// Source of truth: datasheets/voip-ongoing-group-join.md (WhatsApp Web capture, join accept)
++	if callID == "" || callCreator.IsEmpty() || requestID == "" {
++		return waBinary.Node{}, fmt.Errorf("signaling: build ongoing group join: incomplete identity")
++	}
++	accept := BuildAccept(&AcceptParams{
++		CallID:      callID,
++		To:          types.NewJID(callID, "call"),
++		CallCreator: callCreator,
++		AudioRates:  []string{"16000"},
++		Capability:  append([]byte(nil), CapabilityOffer...),
++		Video:       video,
++	})
++	accept.Attrs["id"] = requestID
++	return accept, nil
++}
+diff --git a/signaling/ongoing_group_test.go b/signaling/ongoing_group_test.go
+new file mode 100644
+index 0000000..8e23d1c
+--- /dev/null
++++ b/signaling/ongoing_group_test.go
+@@ -0,0 +1,78 @@
++package signaling
++
++import (
++	"bytes"
++	"testing"
++
++	"go.mau.fi/whatsmeow/types"
++)
++
++func ongoingCreator() types.JID {
++	return types.JID{User: "100001", Server: types.HiddenUserServer, Device: 27}
++}
++
++func TestLobbyQueryMatchesTheCapture(t *testing.T) {
++	node, err := BuildLobbyQuery("CALLID", ongoingCreator(), "REQ1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if node.Tag != "call" || node.Attrs["to"] != types.NewJID("CALLID", "call") || node.Attrs["id"] != "REQ1" {
++		t.Fatalf("envelope %v", node.Attrs)
++	}
++	lobby := node.GetChildren()
++	if len(lobby) != 1 || lobby[0].Tag != "lobby" || lobby[0].Content != nil {
++		t.Fatalf("children %v", lobby)
++	}
++	attrs := lobby[0].Attrs
++	if len(attrs) != 3 || attrs["call-id"] != "CALLID" || attrs["call-creator"] != ongoingCreator() || attrs["query"] != "1" {
++		t.Fatalf("lobby attrs %v", attrs)
++	}
++	if _, err := BuildLobbyQuery("", ongoingCreator(), "REQ1"); err == nil {
++		t.Fatal("a lobby query needs the call id")
++	}
++}
++
++func TestOngoingJoinIsTheCapturedAccept(t *testing.T) {
++	node, err := BuildOngoingGroupJoin("CALLID", ongoingCreator(), "REQ2", false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if node.Attrs["to"] != types.NewJID("CALLID", "call") || node.Attrs["id"] != "REQ2" {
++		t.Fatalf("envelope %v", node.Attrs)
++	}
++	accept := node.GetChildren()[0]
++	if accept.Tag != "accept" || accept.Attrs["call-id"] != "CALLID" || accept.Attrs["call-creator"] != ongoingCreator() {
++		t.Fatalf("accept %v", accept)
++	}
++	var tags []string
++	for _, child := range accept.GetChildren() {
++		tags = append(tags, child.Tag)
++	}
++	want := []string{"audio", "net", "encopt", "capability"}
++	if len(tags) != len(want) {
++		t.Fatalf("children %v, want %v", tags, want)
++	}
++	for i := range want {
++		if tags[i] != want[i] {
++			t.Fatalf("children %v, want %v", tags, want)
++		}
++	}
++	audio := accept.GetChildren()[0]
++	if audio.Attrs["enc"] != "opus" || audio.Attrs["rate"] != "16000" {
++		t.Fatalf("audio %v", audio.Attrs)
++	}
++	capability := accept.GetChildren()[3]
++	if capability.Attrs["ver"] != "1" || !bytes.Equal(capability.Content.([]byte), CapabilityOffer) {
++		t.Fatalf("capability %v", capability)
++	}
++	video, err := BuildOngoingGroupJoin("CALLID", ongoingCreator(), "REQ3", true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if child := video.GetChildren()[0].GetChildren()[1]; child.Tag != "video" {
++		t.Fatalf("a video join advertises video, got %s", child.Tag)
++	}
++	if _, err := BuildOngoingGroupJoin("CALLID", types.EmptyJID, "REQ1", false); err == nil {
++		t.Fatal("a join needs the creator")
++	}
++}

@@ -120,7 +120,14 @@ const magix = (fileData, mediaKeyBase64, mediaType, expectedSize) => {
 exports.magix = magix;
 const fixPadding = (data, expectedSize) => {
     let padding = (16 - (expectedSize % 16)) & 0xf;
-    if (padding > 0) {
+    // WinZapp: update() leaves the PKCS#7 padding in place. When the size is a
+    // multiple of 16 that padding is a whole extra block of 0x10, which the
+    // padding check below (0 for such sizes) never removed: a downloaded APK
+    // then had 16 trailing bytes and Android refused to parse it.
+    if (data.length > expectedSize) {
+        data = data.slice(0, expectedSize);
+    }
+    else if (padding > 0) {
         if (expectedSize + padding == data.length) {
             //  console.log(`trimmed: ${padding} bytes`);
             data = data.slice(0, data.length - padding);
@@ -164,14 +171,16 @@ const newMagix = (mediaKeyBase64, mediaType, expectedSize) => {
     const cipherKey = mediaKeyExpanded.slice(16, 48);
     const decipher = crypto.createDecipheriv('aes-256-cbc', cipherKey, iv);
     let processedBytes = 0;
-    let buffer = Buffer.alloc(0);
     const transformStream = new stream_1.Transform({
         transform(chunk, encoding, callback) {
             try {
                 const decryptedChunk = decipher.update(chunk);
                 processedBytes += decryptedChunk.length;
                 if (processedBytes > expectedSize) {
-                    const paddedChunk = Buffer.from(decryptedChunk).slice(0, buffer.length - (processedBytes - expectedSize));
+                    // WinZapp: keep only the bytes up to expectedSize (the old
+                    // code sliced against an always-empty buffer's length).
+                    const keep = Math.max(0, decryptedChunk.length - (processedBytes - expectedSize));
+                    const paddedChunk = Buffer.from(decryptedChunk).subarray(0, keep);
                     callback(null, paddedChunk);
                 }
                 else {

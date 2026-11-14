@@ -31,6 +31,8 @@ making the imported settings take effect.
 import copy
 from urllib.parse import urlsplit
 
+from core.connection_engine import CUSTOM, engine_from_connection
+from core.call_logic import CALL_HOTKEY_DEFAULTS, call_hotkey_is_valid, saved_call_hotkey
 from core.utils import DEFAULT_SETTINGS
 
 #: What the first line of an exported file says it is. Checked on import so a
@@ -50,13 +52,17 @@ EXCLUDED_SECTIONS = frozenset({
     "cleared_chats",          # per-JID clear cutoffs
     "cleared_starred_chats",
     "conversation_sounds",    # per-JID sound overrides
+    "conversation_auto_ai",   # per-JID automatic transcription/description
+    "quick_chats",            # per-account contact JIDs in numbered slots
 })
 
 #: Keys inside a section that is otherwise worth carrying.
 EXCLUDED_KEYS = frozenset({
     ("general", "autostart"),          # a Windows registry entry of that machine
+    ("advanced", "local_api_port"),    # a port free on that machine, not this one
     ("general", "first_run"),          # the one-shot questions this install
     ("general", "api_type_first_run_asked"),   # has already answered
+    ("general", "neonize_offer_asked"),
     ("general", "hotkey_first_run_asked"),
     ("general", "terms_alert_displayed"),
     ("general", "quick_tip_shown"),
@@ -93,6 +99,14 @@ _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT = 0x0001, 0x0002, 0x0004
 CUSTOM_API_KEYS = ("wpp_server", "wpp_ws_server", "wpp_port", "wpp_api_key")
 
 _CONNECTION_KEYS = ("wpp_custom_api",) + CUSTOM_API_KEYS
+
+#: Install-wide keys that say WHICH engine this install runs on. They travel
+#: only with a custom server, the one engine whose address is the person's own:
+#: WPPConnect and Neonize are this install's (the engine is chosen in Settings
+#: > Connection and needs a restart), so a file from either must not move
+#: another install's engine. Without this a WPPConnect export imported on a
+#: Neonize install switched it back to WPPConnect, live and without asking.
+ENGINE_KEYS = ("wpp_custom_api", "wpp_engine")
 
 
 #: One-shot migration flags (core/utils.py). Carrying one would stop the
@@ -137,12 +151,16 @@ def connection_runtime(settings, fallback=None):
 
 
 def uses_custom_api(settings) -> bool:
-    """Whether these settings describe a WPPConnect the user runs themselves."""
+    """Whether these settings describe a WPPConnect the user runs themselves
+    (not the bundled one, and not the Neonize bridge, which is also a
+    "custom API" at a fixed local address)."""
     section = (settings or {}).get("connection") if isinstance(settings, dict) else None
     # `is True`, not truthiness: merge_settings() only ever saves a real bool
     # here, so a file saying "yes" must not be asked about (api_change) as if
     # it moved the API and then be saved with the flag still False.
-    return section.get("wpp_custom_api") is True if isinstance(section, dict) else False
+    if not isinstance(section, dict) or section.get("wpp_custom_api") is not True:
+        return False
+    return engine_from_connection(section) == CUSTOM
 
 
 def is_excluded(section, key, settings=None) -> bool:
@@ -156,7 +174,7 @@ def is_excluded(section, key, settings=None) -> bool:
         return False
     if (section, key) in EXCLUDED_KEYS:
         return True
-    if section == "connection" and key in CUSTOM_API_KEYS:
+    if section == "connection" and (key in CUSTOM_API_KEYS or key in ENGINE_KEYS):
         return not uses_custom_api(settings)
     return str(key).endswith(_MIGRATION_FLAG_SUFFIX)
 
@@ -268,6 +286,10 @@ def exportable_settings(settings) -> dict:
             continue
         if section == "sound_events":
             out[section], _ignored = _sound_events_without_paths(value)
+        elif section == "keyboard_shortcuts":
+            from core.keyboard_shortcuts import sanitize_overrides
+            from core.shortcut_catalog import SHORTCUTS
+            out[section] = sanitize_overrides(value, SHORTCUTS)
         elif isinstance(value, dict):
             kept = {k: copy.deepcopy(v) for k, v in value.items()
                     if not is_excluded(section, k, settings)}
@@ -384,7 +406,11 @@ def api_change(current, incoming):
     if not uses_custom_api(incoming) or not custom_api_is_valid(current, incoming):
         return None
     after, here = _connection_after_import(current, incoming)
-    if all(after[key] == here.get(key) for key in _CONNECTION_KEYS):
+    # Moving to a custom server from the bundled API or Neonize is a change
+    # even when the address is the one already stored (a WPPConnect typed in
+    # at 127.0.0.1:6300 while the install runs the bridge there).
+    if engine_from_connection(here) == CUSTOM and all(
+            after[key] == here.get(key) for key in _CONNECTION_KEYS):
         return None
     return {
         "server": api_endpoint(after["wpp_server"], after["wpp_port"], _REST_SCHEMES),
@@ -432,6 +458,17 @@ def merge_settings(current, incoming, include_connection=True):
                 ignored.append(str(section))
             continue
         if _is_free_form(section):
+            if section == "keyboard_shortcuts":
+                from core.keyboard_shortcuts import sanitize_overrides
+                from core.shortcut_catalog import SHORTCUTS
+                clean = sanitize_overrides(value, SHORTCUTS)
+                merged[section] = clean
+                applied += 1
+                if isinstance(value, dict):
+                    ignored.extend(f'{section}.{key}' for key in value if key not in clean)
+                else:
+                    ignored.append(section)
+                continue
             # Free-form in its KEYS (a sound event name, a JID), never in its
             # values: a `sound_events` holding a number instead of a dict is
             # saved happily here and then crashes load_sounds() on the next
@@ -473,6 +510,10 @@ def merge_settings(current, incoming, include_connection=True):
             if section == "general" and key == "global_hotkey" and not global_hotkey_is_valid(item):
                 ignored.append(f"{section}.{key}")
                 continue
+            if (section == "general" and key in CALL_HOTKEY_DEFAULTS
+                    and not call_hotkey_is_valid(item)):
+                ignored.append(f"{section}.{key}")
+                continue
             if section == "general" and key == "language" and not _language_is_usable(
                     item, languages):
                 # A locale this build does not ship turns every label and every
@@ -482,6 +523,41 @@ def merge_settings(current, incoming, include_connection=True):
                 # install really can name one.
                 ignored.append(f"{section}.{key}")
                 continue
+            if section == "connection" and key == "wpp_engine" and item != CUSTOM:
+                ignored.append(f"{section}.{key}")
+                continue
             target[key] = copy.deepcopy(item)
             applied += 1
+        if section == "connection" and uses_custom_api(incoming):
+            # A file from before wpp_engine existed: the server it describes
+            # is a custom one, whatever engine this install had stored.
+            target["wpp_engine"] = CUSTOM
+    _undo_clashing_call_hotkeys(current, merged, incoming, ignored)
     return merged, applied, ignored
+
+
+def _undo_clashing_call_hotkeys(current, merged, incoming, ignored):
+    """Keep this install's call key when the imported one is the "show
+    WinZapp" key or the other call key: Windows gives a combination to one
+    registration only, so it would never work and be retried all through every
+    call. Settings' own capture refuses the same clash."""
+    imported = (incoming or {}).get("general")
+    general = merged.get("general")
+    if not isinstance(imported, dict) or not isinstance(general, dict):
+        return
+    taken = set()
+    show_key = general.get("global_hotkey")
+    if isinstance(show_key, dict) and show_key.get("vk") and global_hotkey_is_valid(show_key):
+        taken.add((show_key["vk"], show_key["mod"]))
+    previous = (current or {}).get("general") or {}
+    for key in CALL_HOTKEY_DEFAULTS:
+        pair = saved_call_hotkey(general, key)
+        if pair in taken and key in imported and f"general.{key}" not in ignored:
+            if key in previous:
+                general[key] = copy.deepcopy(previous[key])
+            else:
+                general.pop(key, None)
+            ignored.append(f"general.{key}")
+            pair = saved_call_hotkey(general, key)
+        if pair:
+            taken.add(pair)

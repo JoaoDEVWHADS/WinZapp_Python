@@ -1,9 +1,9 @@
 """client/api_patches/ and client/api/ must never drift apart.
 
-client/api/ is almost entirely git-ignored, but .gitignore deliberately
-un-ignores exactly WinZapp's patched files, because a fresh checkout (including
-the CI release build) otherwise has nothing to restore and silently ships
-vanilla, unpatched WPPConnect Server.
+client/api/ is generated and git-ignored. The tracked source of WinZapp's
+customizations is client/api_patches/; setup and build paths restore it into
+the generated API tree. A fresh CI test checkout has no live API and skips
+the comparisons, while a developer checkout can expose stale generated files.
 
 That leaves two copies of every patch on disk, and setup_api.py restores
 client/api/ *from* client/api_patches/. So editing only the client/api/ copy
@@ -18,13 +18,8 @@ here instead of in a user's install.
 package.json is deliberately NOT compared: setup_api.py merges only
 _PATCHED_DEPENDENCY_KEYS into whatever the clone produced (so WPPConnect's own
 "version" field keeps reflecting the tag actually built) and re-serializes the
-file, so the two copies legitimately differ. Its one patched dependency
-(@ffmpeg-installer/ffmpeg) is checked instead — and, separately,
-@wppconnect-team/wppconnect is checked to confirm it is deliberately NOT
-patched: that pin used to be forced to an exact version ("2.2.4") that went
-stale within days, because this dependency releases multiple times a week —
-wppconnect-server's own package.json had already moved on to requiring a newer
-one than what WinZapp had frozen, silently running an incompatible pairing.
+file, so the two copies legitimately differ. Dependency tests separately
+check the ffmpeg dependency and the exact homologated wppconnect/wa-js pair.
 fluent-ffmpeg used to be patched too, and was never imported anywhere by
 anything — it is checked to confirm it stays gone from every file.
 """
@@ -51,11 +46,108 @@ def _setup_api_module():
     spec.loader.exec_module(module)
     return module
 
-# Patch membership is discovered from client/api_patches/ itself. This keeps
-# the tests in lockstep with setup/build/install without another hand-maintained
-# filename list. package.json and dependency-specific subtrees are excluded by
-# the same shared policy the runtime uses.
-MIRRORED_FILES = server_patch_files(str(PATCHES))
+# Mirrors setup_api.py's CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES exactly — the
+# test below asserts that equality against the real constants, in both
+# directions, so a file added to setup_api.py can no longer stay uncompared
+# here (which is what happened to auth.ts and statusController.ts: both were
+# restored by setup_api.py and documented in CLAUDE.md, but drift in either
+# went undetected because only this list was checked, and only one way round).
+MIRRORED_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+    "decrypt.js",
+    "src/config.ts",
+    "src/index.ts",
+    "src/util/callMediaBridge.ts",
+    "src/util/voipInitPolicy.ts",
+    "src/util/groupCallRuntime.ts",
+    "src/util/chatListsRuntime.ts",
+    "src/util/pinnedMessagesRuntime.ts",
+    "src/util/pollRuntime.ts",
+    "src/controller/pollController.ts",
+    "src/util/communityCommentsRuntime.ts",
+    "src/util/announcementReplyBridge.ts",
+    "src/util/channelsWatchBridge.ts",
+    "src/tests/util/channelsWatchBridge.test.ts",
+    "src/util/chatClearedBridge.ts",
+    "src/tests/util/chatClearedBridge.test.ts",
+    "src/util/eventsRuntime.ts",
+    "src/util/eventsWatchBridge.ts",
+    "src/controller/eventController.ts",
+    "src/tests/util/eventsRuntime.test.ts",
+    "src/tests/util/eventsWatchBridge.test.ts",
+    "src/util/callParticipantsBridge.ts",
+    "src/tests/util/callParticipantsBridge.test.ts",
+    "src/controller/communityCommentsController.ts",
+    "src/tests/controller/communityCommentsController.test.ts",
+    "src/controller/channelsPanelController.ts",
+    "src/tests/controller/channelsPanelController.test.ts",
+    "src/controller/communityOverviewController.ts",
+    "src/tests/controller/communityOverviewController.test.ts",
+    "src/controller/communityJoinController.ts",
+    "src/tests/controller/communityJoinController.test.ts",
+    "src/controller/statusDeleteController.ts",
+    "src/tests/controller/statusDeleteController.test.ts",
+    "src/controller/pageHeapController.ts",
+    "src/tests/controller/pageHeapController.test.ts",
+    "src/controller/orderConfirmController.ts",
+    "src/tests/controller/orderConfirmController.test.ts",
+    "src/controller/buttonReplyController.ts",
+    "src/tests/controller/buttonReplyController.test.ts",
+    "src/controller/communityAdminController.ts",
+    "src/tests/controller/communityAdminController.test.ts",
+    "src/controller/groupMembershipRequestsController.ts",
+    "src/tests/controller/groupMembershipRequestsController.test.ts",
+    "src/controller/commerceController.ts",
+    "src/tests/controller/commerceController.test.ts",
+    "src/controller/pinnedMessagesController.ts",
+    "src/util/privacyRuntime.ts",
+    "src/util/profileRuntime.ts",
+    "src/controller/privacyController.ts",
+    "src/tests/controller/privacyController.test.ts",
+    "src/controller/groupOperationsController.ts",
+    "src/tests/controller/groupOperationsController.test.ts",
+    "src/tests/controller/pinnedMessagesController.test.ts",
+    "src/util/forwardRuntime.ts",
+    "src/util/statusReactionRuntime.ts",
+    "src/util/quotedMessagePreflight.ts",
+    "src/util/contactPresenceRuntime.ts",
+    "src/util/contactPresenceBridge.ts",
+    "src/util/groupPresenceBridge.ts",
+    "src/util/onlinePresenceDiagnostics.ts",
+    "src/util/listChatsDiag.ts",
+    "src/util/createSessionUtil.ts",
+    "src/util/sessionUtil.ts",
+    "src/util/functions.ts",
+    "src/util/logger.ts",
+    "src/util/tokenStore/fileTokenStory.ts",
+    "src/middleware/statusConnection.ts",
+    "src/middleware/auth.ts",
+    "src/middleware/socketAuth.ts",
+    "src/dto/sync.ts",
+    "src/middleware/instrumentation.ts",
+    "src/errors/domain.ts",
+    "src/middleware/errorHandler.ts",
+    "src/services/messageResolver.ts",
+    "src/types/express/index.d.ts",
+    "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
+    "src/tests/middleware/errorHandler.test.ts",
+    "src/tests/controller/contactSaveController.test.ts",
+    "src/tests/util/logger.test.ts",
+    "src/controller/callController.ts",
+    "src/controller/chatListsController.ts",
+    "src/controller/contactSaveController.ts",
+    "src/controller/deviceController.ts",
+    "src/controller/messageController.ts",
+    "src/controller/sessionController.ts",
+    "src/controller/statusController.ts",
+    "src/routes/index.ts",
+]
 
 
 @pytest.mark.parametrize("rel_path", MIRRORED_FILES)
@@ -83,12 +175,16 @@ def test_the_two_copies_of_each_patch_are_identical(rel_path):
     # api_patches/ edit is the only place this assertion is ever reachable.
     patch_bytes = patch.read_bytes().replace(b"\r\n", b"\n")
     live_bytes = live.read_bytes().replace(b"\r\n", b"\n")
-    assert patch_bytes == live_bytes, (
-        f"client/api/{rel_path} and client/api_patches/{rel_path} have drifted. "
-        f"api_patches/ is the source of truth setup_api.py restores from — edit "
-        f"that copy (and mirror it into client/api/), or the next setup_api.py "
-        f"run will silently revert this file."
-    )
+    if patch_bytes != live_bytes:
+        # Assertion rewriting diffs the complete byte strings through
+        # difflib. Large controllers with repeated lines can spend minutes
+        # formatting that failure; the file names identify the repair instead.
+        pytest.fail(
+            f"client/api/{rel_path} and client/api_patches/{rel_path} have drifted. "
+            "api_patches/ is the source of truth; regenerate the API through "
+            "the setup/build path when the installed runtime can be replaced.",
+            pytrace=False,
+        )
 
 
 def test_setup_api_patch_list_matches_this_one():
@@ -126,8 +222,27 @@ def test_build_api_uses_the_canonical_patch_list_and_verifies_call_output():
     assert "canonical_setup.CUSTOM_ROOT_FILES + canonical_setup.CUSTOM_SRC_FILES" in src
     assert "canonical_setup._merge_package_json_dependencies()" in src
     assert "_verify_critical_call_patch(api_dir)" in src
-    assert '"native-group-chat"' in src
-    assert '"native-group-wids"' in src
+
+    # REGRESSION: this used to assert only that the marker literals appeared
+    # somewhere in build_api.py -- which is trivially true of any string
+    # written there, and stayed true after the markers stopped existing in
+    # callController.ts. With `marker in source` gating the check, that made
+    # `missing` unconditionally empty: a stale dist/controller/callController.js
+    # passed "verification" and the test reported green. Assert instead that
+    # every marker the guard relies on is actually present in the patched
+    # controller, which is the only thing that makes the guard able to fire.
+    markers = re.search(
+        r"markers = \(\s*(.*?)\s*\)", src, re.S
+    )
+    assert markers, "could not locate the markers tuple in build_api.py"
+    marker_values = re.findall(r'"([^"]+)"', markers.group(1))
+    assert marker_values, "the markers tuple is empty"
+
+    controller = (
+        ROOT / "client" / "api_patches" / "src" / "controller" / "callController.ts"
+    ).read_text(encoding="utf-8")
+    for marker in marker_values:
+        assert marker in controller, marker
 
 
 def test_both_installers_patch_the_same_dependencies():

@@ -1,0 +1,290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muhammet Enes Senovali <mesenovali@gmail.com>
+Date: Fri, 30 Oct 2026 13:01:10 +0300
+Subject: [PATCH] Apply late negotiated codecs at serialized packet boundaries
+
+---
+ audio_codec_runtime.go      | 64 ++++++++++++++++++++++++++++++++
+ audio_codec_runtime_test.go | 73 +++++++++++++++++++++++++++++++++++++
+ audio_receive_runtime.go    |  2 +-
+ engine_media.go             | 42 ++++++++++++---------
+ group_media_receive.go      |  1 +
+ rtp/rtp.go                  |  8 ++++
+ 6 files changed, 171 insertions(+), 19 deletions(-)
+ create mode 100644 audio_codec_runtime.go
+ create mode 100644 audio_codec_runtime_test.go
+
+diff --git a/audio_codec_runtime.go b/audio_codec_runtime.go
+new file mode 100644
+index 0000000..82781d2
+--- /dev/null
++++ b/audio_codec_runtime.go
+@@ -0,0 +1,64 @@
++package meowcaller
++
++import (
++	"sync"
++	"time"
++)
++
++// Settings can arrive in accept AFTER relay media has started. Both directions
++// reconcile the authoritative setting at packet boundaries, under one mutex.
++// No publication hook can miss an update between startup and peer acceptance.
++// SRTP pipes and sequence/ROC state survive; only codec/order state is replaced.
++type callAudioRuntime struct {
++	mu        sync.Mutex
++	codec     AudioCodec
++	encoder   callAudioEncoder
++	current   func() AudioCodec
++	receivers *participantReceiveRegistry
++	sender    *MediaPipeline
++}
++
++func (a *callAudioRuntime) refreshLocked() error {
++	codec := a.current()
++	if codec == a.codec {
++		return nil
++	}
++	encoder, err := newCallAudioEncoder(codec)
++	if err != nil {
++		return err
++	}
++	a.receivers.configureAudioCodec(codec)
++	a.sender.setAudioTimestampStride(audioRTPClock(codec) * 60 / 1000)
++	a.codec, a.encoder = codec, encoder
++	return nil
++}
++
++func (a *callAudioRuntime) Protect(frame []float32) ([]byte, error) {
++	a.mu.Lock()
++	defer a.mu.Unlock()
++	if err := a.refreshLocked(); err != nil {
++		return nil, err
++	}
++	payload, err := a.encoder.Encode(frame)
++	if err != nil {
++		return nil, err
++	}
++	return a.sender.ProtectAudio(payload)
++}
++
++func (a *callAudioRuntime) Receive(packet []byte, now time.Time) ([]decodedParticipantAudio, bool, uint32, error) {
++	a.mu.Lock()
++	defer a.mu.Unlock()
++	if err := a.refreshLocked(); err != nil {
++		return nil, false, 0, err
++	}
++	clock := audioRTPClock(a.codec)
++	frames, ok := a.receivers.ReceiveAudio(packet, clock, now)
++	return frames, ok, clock, nil
++}
++
++func (p *MediaPipeline) setAudioTimestampStride(samples uint32) {
++	p.sendMu.Lock()
++	defer p.sendMu.Unlock()
++	p.stream.SetAudioTimestampStride(samples)
++}
+diff --git a/audio_codec_runtime_test.go b/audio_codec_runtime_test.go
+new file mode 100644
+index 0000000..0bb0da7
+--- /dev/null
++++ b/audio_codec_runtime_test.go
+@@ -0,0 +1,73 @@
++package meowcaller
++
++import (
++	"bytes"
++	"github.com/purpshell/meowcaller/rtp"
++	"testing"
++	"time"
++)
++
++func TestLateCallCodecSettingsReconfigureBothDirectionsWithoutRekey(t *testing.T) {
++	self, peer := mediaTestJID("100", 1), mediaTestJID("200", 2)
++	key := bytes.Repeat([]byte{7}, 32)
++	registry, err := newParticipantReceiveRegistry("CID", key, self.String(), peer.String(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer registry.clear()
++	registry.configureAudioCodec(AudioCodecMlow)
++	selfSSRC, _ := rtp.DeriveWasmParticipantSsrc("CID", rtp.FormatE2ESrtpParticipantID(self.String()), 0)
++	peerSSRC, _ := rtp.DeriveWasmParticipantSsrc("CID", rtp.FormatE2ESrtpParticipantID(peer.String()), 0)
++	sender, _ := NewMediaPipeline(key, self.String(), peer.String(), selfSSRC, FrameSamples)
++	remote, _ := NewMediaPipeline(key, peer.String(), self.String(), peerSSRC, FrameSamples)
++	codec := AudioCodecMlow
++	encoder, _ := newCallAudioEncoder(codec)
++	audio := &callAudioRuntime{codec: codec, encoder: encoder, receivers: registry, sender: sender, current: func() AudioCodec { return codec }}
++	frame := make([]float32, FrameSamples)
++	var lastSequence uint16
++	for phase, want := range []AudioCodec{AudioCodecMlow, AudioCodecOpus, AudioCodecMlow} {
++		// This is the field onAccept/applyVoipSettingsCodec updates after relay
++		// startup; no new media loop or callback publication is needed.
++		codec = want
++		first, err := audio.Protect(frame)
++		if err != nil {
++			t.Fatal(err)
++		}
++		second, err := audio.Protect(frame)
++		if err != nil {
++			t.Fatal(err)
++		}
++		h1, _ := rtp.ParseRtpHeader(first)
++		h2, _ := rtp.ParseRtpHeader(second)
++		if h2.Timestamp-h1.Timestamp != audioRTPClock(want)*60/1000 {
++			t.Fatal("late setting left old RTP clock")
++		}
++		if phase > 0 && h1.SequenceNumber != lastSequence+1 {
++			t.Fatal("codec switch reset RTP sequence/ROC")
++		}
++		lastSequence = h2.SequenceNumber
++		for _, packet := range [][]byte{first, second} {
++			_, payload, ok := remote.UnprotectAudio(packet)
++			if !ok || len(newCallAudioDecoder(want).Decode(payload)) != FrameSamples {
++				t.Fatal("outgoing codec or SRTP mismatch")
++			}
++		}
++		peerEncoder, err := newCallAudioEncoder(want)
++		if err != nil {
++			t.Fatal(err)
++		}
++		payload, err := peerEncoder.Encode(frame)
++		if err != nil {
++			t.Fatal(err)
++		}
++		remote.setAudioTimestampStride(audioRTPClock(want) * 60 / 1000)
++		packet, err := remote.ProtectAudio(payload)
++		if err != nil {
++			t.Fatal(err)
++		}
++		pcm, ok, clock, err := audio.Receive(packet, time.Unix(int64(phase), 0))
++		if err != nil || !ok || clock != audioRTPClock(want) || len(pcm) != 1 || len(pcm[0].PCM) != FrameSamples {
++			t.Fatalf("late receive setting: codec=%s frames=%d clock=%d err=%v", want, len(pcm), clock, err)
++		}
++	}
++}
+diff --git a/audio_receive_runtime.go b/audio_receive_runtime.go
+index 9aef3e6..c4c4aca 100644
+--- a/audio_receive_runtime.go
++++ b/audio_receive_runtime.go
+@@ -51,7 +51,7 @@ func (r *participantReceiveRegistry) ReceiveAudio(packet []byte, clock uint32, n
+ 			output = append(output, decodedParticipantAudio{
+ 				ParticipantID: receiver.participantID, UserJID: receiver.userJID, DeviceJID: receiver.deviceJID,
+ 				PID: receiver.pid, HasPID: receiver.hasPID, SSRC: header.Ssrc,
+-				Timestamp: previous + uint32(receiver.order.previousSamples), PCM: concealer.Conceal(gap),
++				Timestamp: previous + uint32(receiver.order.previousSamples), PCM: concealer.Conceal(gap), Concealed: true,
+ 			})
+ 		}
+ 		pcm := receiver.decoder.Decode(packet.payload)
+diff --git a/engine_media.go b/engine_media.go
+index abcdb53..ef516ad 100644
+--- a/engine_media.go
++++ b/engine_media.go
+@@ -439,6 +439,15 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
+ 	if err != nil {
+ 		return err
+ 	}
++	audioRuntime := &callAudioRuntime{codec: selectedCodec, encoder: enc,
++		receivers: audioReceivers, sender: txPipe, current: func() AudioCodec {
++			e.mu.Lock()
++			defer e.mu.Unlock()
++			if current := e.calls[callID]; current != nil && current == m {
++				return current.codec
++			}
++			return selectedCodec
++		}}
+ 	if err = audioReceivers.attachSendPipeline(txPipe); err != nil {
+ 		return fmt.Errorf("attach audio RTP sender: %w", err)
+ 	}
+@@ -587,17 +596,13 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
+ 					frame = f
+ 				}
+ 			}
+-			payload, err := enc.Encode(frame)
+-			if err != nil {
+-				continue
+-			}
+-			packet, err := txPipe.ProtectAudio(payload)
++			packet, err := audioRuntime.Protect(frame)
+ 			if err != nil {
+ 				continue
+ 			}
+ 			e.c.diag.Emit("media_out", map[string]any{
+ 				"frame": txCount, "frame_samples": len(frame), "pcm_rms": rmsFloat32(frame),
+-				"payload_len": len(payload), "packet_len": len(packet),
++				"packet_len": len(packet),
+ 			})
+ 			if _, err := ch.Send(packet); err != nil {
+ 				return
+@@ -1088,7 +1093,10 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
+ 			})
+ 			continue
+ 		}
+-		frames, ok := audioReceivers.ReceiveAudio(pkt, rtpClock, time.Now())
++		frames, ok, receiveClock, codecErr := audioRuntime.Receive(pkt, time.Now())
++		if codecErr != nil {
++			return fmt.Errorf("audio codec reconfiguration: %w", codecErr)
++		}
+ 		if !ok {
+ 			if unprotectFail++; unprotectFail == 1 {
+ 				log.Warn().Uint32("ssrc", vh.Ssrc).Int("bytes", n).Msg("audio RTP did not match an authenticated active participant")
+@@ -1096,19 +1104,17 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
+ 			e.c.diag.Emit("srtp", map[string]any{"event": "unprotect_failed", "ssrc": vh.Ssrc, "bytes": n})
+ 			continue
+ 		}
+-		audioReception.Observe(vh.Ssrc, vh.SequenceNumber, vh.Timestamp, uint64(time.Now().UnixMilli()), rtpClock)
++		audioReception.Observe(vh.Ssrc, vh.SequenceNumber, vh.Timestamp, uint64(time.Now().UnixMilli()), receiveClock)
++		e.c.diag.Emit("rtp", map[string]any{
++			"event": "in", "ssrc": vh.Ssrc, "seq": vh.SequenceNumber,
++			"ts": vh.Timestamp, "pt": vh.PayloadType, "marker": vh.Marker,
++		})
++		e.c.diag.Emit("srtp", map[string]any{
++			"event": "frame_authenticated", "ssrc": vh.Ssrc, "seq": vh.SequenceNumber,
++		})
+ 		for _, audio := range frames {
+-			e.c.diag.Emit("rtp", map[string]any{
+-				"event": "in", "ssrc": audio.SSRC, "seq": vh.SequenceNumber,
+-				"ts": audio.Timestamp, "pt": vh.PayloadType, "marker": vh.Marker,
+-				"participant_id": audio.ParticipantID, "pid": audio.PID, "has_pid": audio.HasPID,
+-			})
+-			e.c.diag.Emit("srtp", map[string]any{
+-				"event": "frame_authenticated", "ssrc": audio.SSRC, "seq": vh.SequenceNumber,
+-				"participant_id": audio.ParticipantID, "pid": audio.PID, "has_pid": audio.HasPID,
+-			})
+ 			e.c.diag.Emit("media_in", map[string]any{
+-				"seq": vh.SequenceNumber, "samples": len(audio.PCM),
++				"timestamp": audio.Timestamp, "concealed": audio.Concealed, "samples": len(audio.PCM),
+ 				"pcm_rms": rmsFloat32(audio.PCM), "participant_id": audio.ParticipantID,
+ 			})
+ 			mixedMode := groupMixing.Load()
+diff --git a/group_media_receive.go b/group_media_receive.go
+index 016dcc9..2bc7885 100644
+--- a/group_media_receive.go
++++ b/group_media_receive.go
+@@ -26,6 +26,7 @@ type decodedParticipantAudio struct {
+ 	SSRC          uint32
+ 	Timestamp     uint32
+ 	PCM           []float32
++	Concealed     bool
+ }
+ 
+ type unprotectedParticipantMedia struct {
+diff --git a/rtp/rtp.go b/rtp/rtp.go
+index 29af618..32637d6 100644
+--- a/rtp/rtp.go
++++ b/rtp/rtp.go
+@@ -359,6 +359,14 @@ type RtpStream struct {
+ 	log              zerolog.Logger
+ }
+ 
++// SetAudioTimestampStride changes only the codec clock step. The caller owns
++// serialization; sequence, timestamp, SSRC and SRTP ROC are never reset.
++func (s *RtpStream) SetAudioTimestampStride(samples uint32) {
++	if samples != 0 {
++		s.samplesPerPacket = samples
++	}
++}
++
+ // VideoRtpStream sequences WhatsApp video packets. All packets in one access unit
+ // share a timestamp; the marker packet advances the 90 kHz clock.
+ type VideoRtpStream struct {

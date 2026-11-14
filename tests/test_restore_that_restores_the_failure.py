@@ -32,6 +32,7 @@ import pytest
 
 from core import profile_recovery
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 LOGIN_STORE = os.path.join(
     "Default", "IndexedDB", "https_web.whatsapp.com_0.indexeddb.leveldb")
@@ -60,8 +61,11 @@ def _write_login_store(root, payload):
 
 
 @pytest.fixture
-def gd(tmp_path):
-    return str(tmp_path)
+def gd(tmp_path_factory):
+    # A short directory name, not tmp_path: tmp_path embeds the test's name,
+    # and the snapshot's IndexedDB path under it passes Windows' 260-character
+    # limit as soon as a parallel run adds its worker directory.
+    return str(tmp_path_factory.mktemp("gd"))
 
 
 def _seed(gd, live=None, snapshot=None, previous=None):
@@ -215,7 +219,7 @@ class _InlineThread:
 def recovery(monkeypatch):
     monkeypatch.setattr("main.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
     monkeypatch.setattr("main.threading.Thread", _InlineThread)
-    monkeypatch.setattr("main.api_post", lambda *a, **kw: None)
+    patch_main_global(monkeypatch, "api_post", lambda *a, **kw: None)
 
     def _restore(global_dir, session_name, prefer_previous=False):
         _restore.calls.append(prefer_previous)

@@ -1,0 +1,15 @@
+<!--nav: 💾 Copii de siguranță și jurnale-->
+<h3>Copia de siguranță a profilului</h3>
+<p>Profilul browserului intern este locul în care trăiește conexiunea ta la WhatsApp. În Setări &gt; Stocare &gt; Copie de siguranță a profilului:</p>
+<ul>
+  <li>Stabilește cât de des reînnoiește WinZapp copia de siguranță la închidere (implicit: 24 de ore; 0 o face la fiecare închidere).</li>
+  <li>Activează copia de siguranță și cât timp WinZapp este deschis, la intervalul ales. WhatsApp rămâne deconectat cât timp se face, ceea ce poate dura câteva minute, iar WinZapp poate întreba înainte de fiecare dată. Copia nouă o înlocuiește pe cea anterioară abia după ce WhatsApp se conectează din nou cu ea.</li>
+  <li>"Nu păstrați copii de siguranță ale profilului" economisește spațiu dar, dacă profilul se deteriorează, va trebui să asociezi din nou. Când o bifezi, WinZapp spune cât spațiu ocupă copiile și întreabă dacă vrei să le ștergi.</li>
+</ul>
+<p>Cu motorul Neonize, care nu folosește un browser intern, nu există un profil de salvat: copia de siguranță a profilului nu apare în Setări &gt; Stocare și nici în managerul de stocare.</p>
+<p>Aceste copii sunt ceea ce folosește WinZapp pentru a se recupera singur (vezi secțiunea Conturi, zona de notificări și sincronizare). Pentru a păstra istoricul de mesaje și media, copiază folderul <code>data</code>.</p>
+
+<h3>Jurnale</h3>
+<p>Jurnalele WinZapp (<code>log.log</code>) și ale serverului local (<code>wppconnect.log</code>) maschează numerele de telefon, identificatorii WhatsApp și numele contactelor, deci pot fi trimise la raportarea unei probleme fără a-ți expune contactele. Se află în <code>data\accounts\&lt;id-ul contului&gt;\logs</code>, în folderul WinZapp. <code>log.log</code> este înlocuit la fiecare pornire. Pentru probleme cu cererea de a asocia din nou sau cu pierderea sesiunii, trimite și <code>shutdown_audit.log</code>.</p>
+<p>În Avansate, butonul "Exportă jurnalele acestui cont..." salvează în fundal un fișier .zip cu jurnalele contului curent și ale punții Neonize și anunță când termină.</p>
+<p>Raportează probleme și cere funcții în Issues din depozit (<code>github.com/gabrielhhaber/WinZapp_Python/issues</code>). Ajutor &gt; Despre program arată versiunea, pe care formularul de erori o cere.</p>

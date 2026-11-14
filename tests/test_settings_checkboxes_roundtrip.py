@@ -6,32 +6,39 @@ remembered to test.
 The list of checkboxes is not written out here. It comes from the same parse
 tests/test_settings_checkboxes_wiring.py uses, so a checkbox added to any tab
 is covered the moment it exists, and that file fails loudly if the parse stops
-finding them.
+finding them. A box whose section is read through its own module (the
+Transcrição tab's) is not visible to that parse; it is declared there, with
+the key it writes, in WIRED_THROUGH_A_MODULE, and driven here all the same.
 
 The static file proves load and save name the same key; this one proves that
 wiring actually carries the value through wx, which a source reading cannot
 see (a load that runs before the control exists, a later write in
 _apply_values() overwriting the key, a side effect that resets a box).
 
-Start with Windows is not toggled: it is not a settings.json value (see
-NOT_BACKED_BY_SETTINGS there) and applying it would write the real Windows
-registry of whoever runs the suite.
+Start with Windows and the locked-chat navigation policy are not toggled: they
+are not settings.json values (see NOT_BACKED_BY_SETTINGS in the static wiring
+test). Applying the first would write the runner's real Windows registry; the
+second belongs to the authenticated encrypted vault and has its own focused
+tests.
 
 Needs a real wx.App — see tests/test_settings_dialog_apply_button.py's
 docstring for why this dialog cannot be exercised against a stub.
 """
 
 import pytest
+import wx
 
 from core.i18n import I18n
 from core.sound_system import DEFAULT_PACK_ID
 from core.utils import DEFAULT_SETTINGS
 from tests.conftest import hidden_frame
+from tests.settings_dialog_frame import give_global_settings
 from tests.test_settings_checkboxes_wiring import checkbox_keys
 from ui.dialogs.settings_dialog import SettingsDialog
 
 # Creates a REAL top-level wx dialog - see the wxgui marker in pytest.ini.
 pytestmark = pytest.mark.wxgui
+
 
 CHECKBOXES = checkbox_keys()
 IDS = [attr for attr, _, _ in CHECKBOXES]
@@ -54,6 +61,9 @@ class _FakeSoundSystem:
 def _make_frame(settings):
     frame = hidden_frame()
     frame.settings = settings
+    # _apply_values() reports storage changes to the main window; the stub
+    # has no sweep to start.
+    frame._on_auto_download_settings_changed = lambda old, new: None
     frame.app_name = "WinZapp"
     frame.i18n = I18n(frame)
     frame.i18n.get_language()
@@ -63,10 +73,13 @@ def _make_frame(settings):
     frame._default_sound_pack = {"name": "Default", "path": ""}
     frame.set_global_hotkey = lambda vk, mod: None
     frame.save_settings = lambda: None
+    give_global_settings(frame)
     frame.load_sounds = lambda: None
     frame.apply_language_changes = lambda: None
     frame.sound_system = _FakeSoundSystem()
     frame.refresh_sound_packs = lambda: None
+    frame.chat_refreshes = []
+    frame.add_chats_to_ui = lambda: frame.chat_refreshes.append(True)
     # Turning "show tray icon" off (its default is on) reads and clears
     # main_window.tray_icon; _init_tray is only reached going off -> on, which
     # these tests never do, and is stubbed so a future one cannot build a real
@@ -152,6 +165,24 @@ def test_opening_again_after_apply_keeps_every_choice(make_dialog):
     assert wrong == []
 
 
+def test_hiding_own_sender_refreshes_the_open_messages(make_dialog):
+    from types import SimpleNamespace
+
+    dialog = make_dialog({})
+    refreshed = []
+    dialog.main_window.conversations_panel = SimpleNamespace(
+        conversation={"jid": "chat"},
+        populate_messages=lambda **kwargs: refreshed.append(kwargs),
+    )
+    dialog._hide_own_sender_cb.SetValue(True)
+
+    assert dialog._apply_values() is True
+
+    assert refreshed == [{"preserve_focus": True}]
+    assert dialog.main_window.chat_refreshes == [True]
+    assert dialog.main_window.settings["user_interface"]["hide_own_sender_in_message_list"] is True
+
+
 def test_unchanged_boxes_are_saved_as_they_were(make_dialog):
     """Opening Settings and pressing OK must not reset anything.
 
@@ -165,3 +196,114 @@ def test_unchanged_boxes_are_saved_as_they_were(make_dialog):
 
     stored = dialog.main_window.settings
     assert {(s, k): stored[s][k] for (s, k) in expected} == expected
+
+
+def test_fixed_quick_reactions_box_sits_on_the_reactions_tab_and_reaches_the_reaction_dialog(
+    make_dialog,
+):
+    """Pinned by name as well as by the parse above: this is the key
+    ConversationsPanel._on_menu_react reads to use the twelve configured rows
+    (off by default: most-used first)."""
+    assert ("_fixed_quick_reactions_cb", "reactions",
+            "fixed_quick_reactions") in CHECKBOXES
+
+    dialog = make_dialog({})
+    box = dialog._fixed_quick_reactions_cb
+    assert box.GetParent() is dialog._reactions_page
+    assert box.GetValue() is False
+
+    box.SetValue(True)
+    assert dialog._apply_values() is True
+    assert dialog.main_window.settings["reactions"]["fixed_quick_reactions"] is True
+
+    assert make_dialog(dialog.main_window.settings)._fixed_quick_reactions_cb.GetValue() is True
+
+
+def test_show_typing_row_box_sits_on_the_ui_tab_and_apply_refreshes_the_open_chat(make_dialog):
+    """Pinned by name as well as by the parse above: the key
+    ui/conversation_panel/typing_row.py reads on every presence update (off by
+    default). Apply must also refresh the open conversation, so the row shows
+    or goes away at once instead of at the next presence event."""
+    assert ("_show_typing_row_cb", "user_interface", "show_typing_row") in CHECKBOXES
+
+    class _ConversationsPanel:
+        def __init__(self):
+            self.refreshed = 0
+
+        def refresh_typing_row(self):
+            self.refreshed += 1
+
+    dialog = make_dialog({})
+    panel = _ConversationsPanel()
+    dialog.main_window.conversations_panel = panel
+    box = dialog._show_typing_row_cb
+    assert box.GetParent() is dialog._messages_page
+    assert box.GetValue() is False
+
+    box.SetValue(True)
+    assert dialog._apply_values() is True
+    assert dialog.main_window.settings["user_interface"]["show_typing_row"] is True
+    assert panel.refreshed == 1
+
+    assert make_dialog(dialog.main_window.settings)._show_typing_row_cb.GetValue() is True
+
+
+class TestTheUserInterfacePageScrolls:
+    """The Interface options are in the windows of the Messages and
+    Conversations buttons, which scroll: on a plain panel the sizer squeezed
+    the bottom ones to a height of zero, and NVDA, which finds a control's
+    group box by geometry, read "Posição para anunciar itens selecionados" on
+    the checkbox after the group instead of on its radio buttons. The mechanism
+    is pinned without a dialog in test_settings_ui_page_scrolls.py; these are
+    the real pages."""
+
+    @staticmethod
+    def _pages(dlg):
+        pages = (dlg._messages_page, dlg._chats_page)
+        for page in pages:
+            page.Layout()
+            page.FitInside()
+        return pages
+
+    def test_the_pages_are_scrolled_panels(self, make_dialog):
+        from wx.lib.scrolledpanel import ScrolledPanel
+        dlg = make_dialog()
+        for page in (dlg._ui_page, dlg._messages_page, dlg._chats_page):
+            assert isinstance(page, ScrolledPanel)
+
+    def test_no_option_is_squeezed_out_of_existence(self, make_dialog):
+        for page in self._pages(make_dialog()):
+            flat = [child for child in page.GetChildren()
+                    if child.IsShown() and child.GetSize().height <= 0]
+            assert not flat, [child.GetLabel() for child in flat]
+
+    def test_every_radio_button_sits_inside_a_group_box(self, make_dialog):
+        from tests.test_settings_ui_page_scrolls import group_box_of
+        for page in self._pages(make_dialog()):
+            boxes = [child for child in page.GetChildren() if isinstance(child, wx.StaticBox)]
+            radios = [child for child in page.GetChildren() if isinstance(child, wx.RadioButton)]
+            assert boxes and radios
+            outside = [radio.GetLabel() for radio in radios if group_box_of(radio, boxes) is None]
+            assert not outside
+
+    def test_the_reported_group_and_the_checkbox_before_it(self, make_dialog):
+        from tests.test_settings_ui_page_scrolls import group_box_of
+        dlg = make_dialog()
+        page = self._pages(dlg)[1]
+        boxes = [child for child in page.GetChildren() if isinstance(child, wx.StaticBox)]
+        for radio in (dlg._selected_announce_start_rb, dlg._selected_announce_end_rb):
+            assert group_box_of(radio, boxes) is dlg._selected_announce_box
+        assert group_box_of(dlg._keep_search_after_open_cb, boxes) is None
+
+
+def test_changing_the_unread_position_repaints_the_chat_list(make_dialog):
+    """Issue 684: every row says its new-message count; a changed position
+    must not wait for the next full rebuild (the single-row refresh would
+    mix both orders meanwhile)."""
+    dialog = make_dialog({})
+    dialog._unread_position_before_rb.SetValue(True)
+
+    assert dialog._apply_values() is True
+
+    assert dialog.main_window.settings["user_interface"]["unread_count_position"] == "before"
+    assert dialog.main_window.chat_refreshes

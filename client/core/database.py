@@ -31,9 +31,30 @@ from typing import Any
 import aiosqlite
 from cryptography.fernet import Fernet
 
+from core.phone_contacts import SYNCED_KEY, is_phone_synced
+from core.quote_recovery import is_undecrypted_placeholder, keep_known_content, knows_content
+from core.star_storage import (
+    preserve_stars, starred_messages, update_star_state, upgrade_starred_column)
+from core.transcription.stored import (
+    TRANSCRIPTION_KEY,
+    decision_time,
+    fold_transcription,
+    drop_all,
+    drop_model,
+    may_hold_transcription,
+    newer_decision,
+    next_decision_time,
+    tombstone,
+    with_known_transcription,
+    with_missing_results,
+)
 from core.utils import MEASURED_SECONDS_KEY
 
 log = logging.getLogger(__name__)
+
+#: Ids per `IN (...)` list — under SQLite's historical 999-variable limit
+#: with room for the remote_jid parameter.
+_IN_CHUNK = 900
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -62,6 +83,9 @@ CREATE TABLE IF NOT EXISTS messages (
     status          INTEGER DEFAULT 0,
     PRIMARY KEY (message_id, remote_jid)
 );
+-- The Calls tab reads every call record of every chat (get_call_logs()).
+CREATE INDEX IF NOT EXISTS idx_msgs_type_ts
+    ON messages(message_type, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_msgs_jid_ts
     ON messages(remote_jid, timestamp DESC);
 
@@ -72,6 +96,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     push_name       TEXT DEFAULT '',
     profile_pic_url TEXT DEFAULT '',
     is_saved        INTEGER DEFAULT 0,
+    synced_to_phone INTEGER DEFAULT 0,
     updated_at      TEXT DEFAULT (datetime('now'))
 );
 
@@ -118,6 +143,13 @@ _CHAT_PAGE_SIZE = 200
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _synced_to_phone(contact: dict) -> int:
+    """The contacts.synced_to_phone value for *contact*: 1 when it lives in
+    the phone's address book, whether WinZapp saved it there or WhatsApp
+    reports it so (core.phone_contacts.is_phone_synced)."""
+    return 1 if is_phone_synced(contact) else 0
 
 
 def _now_ts() -> str:
@@ -185,10 +217,14 @@ def _delivery_status(msg: dict) -> int:
     return 0
 
 
-_MEDIA_MESSAGE_TYPES = (
-    "audioMessage", "documentMessage", "imageMessage", "stickerMessage",
-    "videoMessage", "audio", "ptt", "document", "doc", "image", "sticker",
-    "video",
+# Labels of message_type whose rows can never hold a transcription or a
+# measured video duration (see _carries_local_fields): both the Baileys-style
+# keys _message_type() produces and WPPConnect's own `type` spellings.
+_TYPES_WITHOUT_LOCAL_FIELDS = (
+    "conversation", "extendedTextMessage", "imageMessage", "stickerMessage",
+    "contactMessage", "pollCreationMessage", "eventMessage", "buttonsMessage", "listMessage",
+    "templateMessage", "protocolMessage", "chat", "image", "sticker",
+    "orderMessage", "orderUpdateMessage", "productMessage",
 )
 
 
@@ -209,6 +245,7 @@ def _message_type(msg: dict) -> str:
             "stickerMessage",
             "contactMessage",
             "pollCreationMessage",
+            "eventMessage",
             "buttonsMessage",
             "listMessage",
             "templateMessage",
@@ -264,6 +301,10 @@ class DatabaseManager:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        # A deleted row (a transcription's tombstone, a deleted message) is
+        # zeroed in its page instead of lingering readable in the free list.
+        # Only the main file: frames in the -wal go when it is checkpointed.
+        await self._conn.execute("PRAGMA secure_delete=ON")
         # Without this, any external lock on the file (antivirus scanning
         # messages.db/-wal, OneDrive sync, etc.) makes SQLite raise "database
         # is locked" immediately instead of waiting briefly and retrying.
@@ -283,6 +324,8 @@ class DatabaseManager:
                 log.error("[connect] ALTER TABLE chats ADD COLUMN t failed: %s", exc)
                 raise
         await self._upgrade_unresolvable_lids()
+        await self._upgrade_contacts_synced_to_phone()
+        await upgrade_starred_column(self._conn)
         await self._conn.commit()
 
     async def _upgrade_unresolvable_lids(self) -> None:
@@ -294,6 +337,24 @@ class DatabaseManager:
         log.info("[connect] Upgrading unresolvable_lids to the expiring schema.")
         await self._conn.execute("DROP TABLE IF EXISTS unresolvable_lids")
         await self._conn.executescript(_SCHEMA_SQL)
+
+    async def _upgrade_contacts_synced_to_phone(self) -> None:
+        """Add contacts.synced_to_phone to a database created before it.
+
+        The column records that a contact lives in the phone's address book
+        (core/phone_contacts.py). Without it the mark was lost at every
+        restart, and until the next contact sync a contact saved to the phone
+        was handled as a local one: deleting it removed it from WinZapp only.
+        Existing rows start at 0, which is what they were treated as anyway.
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(contacts)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "synced_to_phone" in columns:
+            return
+        log.info("[connect] Adding contacts.synced_to_phone.")
+        await self._conn.execute(
+            "ALTER TABLE contacts ADD COLUMN synced_to_phone INTEGER DEFAULT 0")
 
     async def close(self) -> None:
         """Close the connection if open."""
@@ -459,6 +520,12 @@ class DatabaseManager:
         archived = 1 if (data.get("archived") or data.get("archive")) else 0
         chat_type = data.get("type", "chat") or "chat"
         last_msg = data.get("lastMessage")
+        if isinstance(last_msg, dict) and TRANSCRIPTION_KEY in last_msg:
+            # The chat row is a preview; the transcription lives in the
+            # message's own row, and a second copy here is one the delete
+            # would have to race: upsert_chat() runs debounced, after the
+            # "deleted" has been said. Nothing reads it from here.
+            last_msg = {k: v for k, v in last_msg.items() if k != TRANSCRIPTION_KEY}
         last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
 
         t = 0
@@ -572,12 +639,54 @@ class DatabaseManager:
                 )
 
             # 2. Anything still under old_jid at this point has a confirmed
-            #    surviving twin under new_jid — safe to drop.
+            #    surviving twin under new_jid — safe to drop, once the twin
+            #    has taken what only this copy knows. The two copies are not
+            #    equal: a voice note that arrived live under the @lid and was
+            #    transcribed there carries the transcription on this row
+            #    alone, while the sync filed the server's copy — without it —
+            #    under the phone; dropping this one blindly lost the text
+            #    after the window had said it was kept. A measured video
+            #    duration had the same hole. Each twin is decrypted once, and
+            #    its survivor read only when it carries one of the two.
             cursor = await conn.execute(
-                "SELECT COUNT(*) AS cnt FROM messages WHERE remote_jid=?", (old_jid,)
+                "SELECT COUNT(*) FROM messages WHERE remote_jid=?", (old_jid,)
             )
-            row = await cursor.fetchone()
-            remaining = row["cnt"] if row else 0
+            remaining = (await cursor.fetchone())[0]
+            # message_type is in clear: a text, image or sticker row cannot
+            # carry a transcription or a measured duration, and decrypting
+            # every one of a long chat's twins to learn so is the cost.
+            placeholders = ",".join("?" * len(_TYPES_WITHOUT_LOCAL_FIELDS))
+            cursor = await conn.execute(
+                "SELECT message_id, message_json FROM messages "
+                "WHERE remote_jid=? AND (message_type IS NULL "
+                f"OR message_type NOT IN ({placeholders}))",
+                (old_jid, *_TYPES_WITHOUT_LOCAL_FIELDS),
+            )
+            twins = await cursor.fetchall()
+            folded = 0
+            for twin in twins:
+                src = self._decrypt_json(twin["message_json"])
+                if not self._carries_local_fields(src):
+                    continue
+                dst = await self._stored_message(conn, new_jid, twin["message_id"])
+                if dst is None:
+                    continue
+                merged = dst
+                if self._video_wants_stored_duration(dst):
+                    merged = self._with_known_video_duration(dst, src)
+                changed = merged is not dst
+                if fold_transcription(merged, src):
+                    changed = True
+                if changed:
+                    await conn.execute(
+                        "UPDATE messages SET message_json=? WHERE remote_jid=? AND message_id=?",
+                        (self._encrypt_json(merged), new_jid, twin["message_id"]),
+                    )
+                    folded += 1
+            if folded:
+                # A count only: which message, and what it carried, is the
+                # transcription package's business not to log.
+                log.info("[merge_or_rename_chat] kept local fields of %d duplicate(s)", folded)
             if remaining:
                 log.info(
                     "[merge_or_rename_chat] %s -> %s: moved %d message(s), "
@@ -727,6 +836,58 @@ class DatabaseManager:
                 result.append(msg)
         return result
 
+    async def update_message_star_state(self, remote_jid: str, message_id: str, state: dict) -> None:
+        await update_star_state(self, remote_jid, message_id, state)
+
+    async def merge_message_star_states(self, remote_jid: str, messages: list[dict]) -> list[dict]:
+        async with self._write_lock:
+            return await preserve_stars(self, await self._ensure_conn(), remote_jid, messages)
+
+    async def get_message_by_id(self, remote_jid: str, message_id: str) -> dict | None:
+        """Return one stored message of a chat by its id, or None."""
+        if not message_id:
+            return None
+        conn = await self._ensure_conn()
+        jids = self._jid_variants(remote_jid)
+        placeholders = ",".join("?" for _ in jids)
+        cursor = await conn.execute(
+            f"""SELECT message_json FROM messages
+               WHERE message_id = ? AND remote_jid IN ({placeholders})
+               LIMIT 1""",
+            (message_id, *jids),
+        )
+        row = await cursor.fetchone()
+        return (self._decrypt_json(row["message_json"]) or None) if row else None
+
+    async def get_call_logs(self, limit: int = 1000) -> list[tuple[str, dict]]:
+        """Every stored call record of every chat, newest first, as
+        ``(remote_jid, msg)`` -- what the Calls tab lists (core/call_log.py).
+
+        ``message_type`` is stored in clear, so only the matching rows are
+        decrypted. Both spellings: builds before the call-log branch stored the
+        raw WhatsApp type.
+        """
+        conn = await self._ensure_conn()
+        cursor = await conn.execute(
+            """SELECT remote_jid, message_json FROM messages
+               WHERE message_type IN ('callLogMessage', 'call_log')
+               ORDER BY timestamp DESC
+               LIMIT ?""",
+            (int(limit),),
+        )
+        rows = await cursor.fetchall()
+        result = []
+        for row in rows:
+            msg = self._decrypt_json(row["message_json"])
+            if msg:
+                result.append((row["remote_jid"], msg))
+        return result
+
+    async def get_starred_messages(self, limit: int = 2000) -> list[tuple[str, dict]]:
+        """Every starred message of every chat, newest first, as
+        ``(remote_jid, msg)``: the starred messages window (star_storage)."""
+        return await starred_messages(self, limit)
+
     async def get_message_count(self, remote_jid: str) -> int:
         """Return total message count for a chat."""
         conn = await self._ensure_conn()
@@ -740,7 +901,7 @@ class DatabaseManager:
         return row["cnt"] if row else 0
 
     def _build_message_values(self, remote_jid: str, msg: dict) -> tuple | None:
-        """Compute the 8-tuple bound to the messages upsert, shared by every
+        """Compute the 9-tuple bound to the messages upsert, shared by every
         message-import path (insert_message/insert_messages_batch/
         import_from_dict). Returns None for an id-less message — an empty
         message_id is not "no ID yet", it IS a value, and the
@@ -758,10 +919,134 @@ class DatabaseManager:
         mtype = _message_type(msg)
         ts = _timestamp(msg)
         msg_enc = self._encrypt_json(msg)
+        # starred in clear (core/star_storage.py): the starred messages
+        # window lists them without decrypting every row
         return (mid, remote_jid, from_me, participant, mtype, msg_enc, ts,
-                _delivery_status(msg))
+                _delivery_status(msg), 1 if msg.get("starred") else 0)
 
-    async def _with_known_video_duration(self, conn, remote_jid: str, msg: dict) -> dict:
+    async def _with_known_local_fields(self, conn, remote_jid: str, msg: dict) -> dict:
+        """*msg*, with what WinZapp knows about it that the server never will
+        carried over from the stored row: a measured video duration
+        (_with_known_video_duration) and a transcription
+        (core.transcription.stored.with_known_transcription).
+
+        One read of the row serves both rules, and only when one of them needs
+        it — a text message costs nothing, a voice note one SELECT, never two.
+        This is the one-message path; the batch paths read their rows ahead in
+        blocks (_stored_rows_by_id()) and apply the same rules through
+        _apply_stored_row(). The caller holds _write_lock across this and the
+        write that follows; see insert_message().
+        """
+        if not self._needs_stored_row(msg):
+            # Still through the transcription rule: a message deleted for
+            # everyone must drop the key, and that needs no read.
+            return with_known_transcription(msg, None)
+        message_id = (msg.get("key") or {}).get("id") or ""
+        if not message_id:
+            return msg
+        stored = await self._stored_message(conn, remote_jid, message_id)
+        return self._apply_known_local_fields(msg, stored)
+
+    def _needs_stored_row(self, msg: dict) -> bool:
+        """Whether writing *msg* has to read its stored row first."""
+        return (self._video_wants_stored_duration(msg) or may_hold_transcription(msg)
+                or is_undecrypted_placeholder(msg))
+
+    def _apply_known_local_fields(self, msg: dict, stored: dict | None) -> dict:
+        """_with_known_local_fields()'s rules over a row already read."""
+        if stored is None:
+            return with_known_transcription(msg, None)
+        if is_undecrypted_placeholder(msg) and knows_content(stored):
+            # A ciphertext never overwrites a message already decrypted here
+            # (core/quote_recovery.keep_known_content).
+            msg = dict(msg)
+            keep_known_content(msg, stored)
+        if self._video_wants_stored_duration(msg):
+            msg = self._with_known_video_duration(msg, stored)
+        return with_known_transcription(msg, stored)
+
+    @staticmethod
+    def _carries_local_fields(msg) -> bool:
+        """Whether *msg* holds anything WinZapp alone knows about it."""
+        if not isinstance(msg, dict):
+            return False
+        if decision_time(msg.get(TRANSCRIPTION_KEY)) is not None:
+            return True
+        video = (msg.get("message") or {}).get("videoMessage")
+        return isinstance(video, dict) and MEASURED_SECONDS_KEY in video
+
+    async def _stored_message(self, conn, remote_jid: str, message_id: str) -> dict | None:
+        """The decrypted record stored for (remote_jid, message_id), or None."""
+        cursor = await conn.execute(
+            "SELECT message_json FROM messages WHERE remote_jid=? AND message_id=?",
+            (remote_jid, message_id),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        stored = self._decrypt_json(row["message_json"])
+        return stored if isinstance(stored, dict) else None
+
+    async def _stored_rows_by_id(self, conn, remote_jid: str, msgs) -> dict:
+        """message_id -> encrypted message_json of the stored rows *msgs*
+        need read before they are written: one SELECT per block of _IN_CHUNK
+        ids, never one per message.
+
+        The batch counterpart of _stored_message(). insert_messages_batch()
+        runs on every sync round, and a SELECT per voice note there, under the
+        write lock, doubled its cost with the rows already stored — which is
+        what a resync always finds. Only the ids a rule will look at are
+        asked for (_needs_stored_row()), and nothing is decrypted here:
+        _apply_stored_row() decrypts the rows it actually uses.
+        """
+        wanted = [
+            mid for mid in (
+                (m.get("key") or {}).get("id") for m in msgs
+                if self._needs_stored_row(m)
+            ) if mid
+        ]
+        rows = {}
+        for start in range(0, len(wanted), _IN_CHUNK):
+            chunk = wanted[start:start + _IN_CHUNK]
+            cursor = await conn.execute(
+                "SELECT message_id, message_json FROM messages "
+                f"WHERE remote_jid=? AND message_id IN ({','.join('?' * len(chunk))})",
+                (remote_jid, *chunk),
+            )
+            for row in await cursor.fetchall():
+                rows[row["message_id"]] = row["message_json"]
+        return rows
+
+    def _apply_stored_row(self, msg: dict, stored_rows: dict) -> dict:
+        """_with_known_local_fields() for a message whose row was read ahead
+        by _stored_rows_by_id().
+
+        The caller puts back into *stored_rows* what it writes for each id,
+        so a later copy of the same message in the same batch sees that write
+        — as it did when every message read its own row.
+        """
+        if not self._needs_stored_row(msg):
+            # Still through the transcription rule, as in
+            # _with_known_local_fields(): a withdrawn copy drops the key.
+            return with_known_transcription(msg, None)
+        mid = (msg.get("key") or {}).get("id") or ""
+        if not mid:
+            # An id-less record is left alone, as _with_known_local_fields()
+            # leaves it; _build_message_values() refuses it anyway.
+            return msg
+        token = stored_rows.get(mid)
+        stored = self._decrypt_json(token) if token else None
+        return self._apply_known_local_fields(
+            msg, stored if isinstance(stored, dict) else None
+        )
+
+    @staticmethod
+    def _video_wants_stored_duration(msg: dict) -> bool:
+        """Whether *msg* is a video that states no measured duration of its own."""
+        video = (msg.get("message") or {}).get("videoMessage")
+        return isinstance(video, dict) and MEASURED_SECONDS_KEY not in video
+
+    def _with_known_video_duration(self, msg: dict, stored: dict) -> dict:
         """*msg*, with a video duration WinZapp measured earlier restored when
         the incoming copy carries none.
 
@@ -787,20 +1072,14 @@ class DatabaseManager:
         if not isinstance(video, dict) or MEASURED_SECONDS_KEY in video:
             return msg
         message_id = (msg.get("key") or {}).get("id") or ""
-        if not message_id:
-            return msg
-        cursor = await conn.execute(
-            "SELECT message_json FROM messages WHERE remote_jid=? AND message_id=?",
-            (remote_jid, message_id),
-        )
-        row = await cursor.fetchone()
-        if not row:
-            return msg
-        stored = self._decrypt_json(row["message_json"]) or {}
         stored_video = (stored.get("message") or {}).get("videoMessage")
         if not isinstance(stored_video, dict) or MEASURED_SECONDS_KEY not in stored_video:
             return msg
         known = stored_video[MEASURED_SECONDS_KEY]
+        # The id stays: this line is about the video's duration, never its
+        # transcription (which is not logged anywhere), and the id is what ties
+        # it to _apply_probed_video_duration()'s own when a video's length
+        # "goes back to 0 seconds" again.
         log.info(
             "[messages] %s: keeping the measured %ss duration; the incoming copy carries none",
             message_id, known,
@@ -814,14 +1093,15 @@ class DatabaseManager:
         """Insert a single message record.
 
         The whole read-then-write sits inside one lock hold: the read is
-        _with_known_video_duration()'s lookup of a duration this row may
-        already carry, and releasing the lock between the two would let
-        another write land in the gap — the very race that helper exists to
-        close.
+        _with_known_local_fields()'s lookup of a duration or a transcription
+        this row may already carry, and releasing the lock between the two
+        would let another write land in the gap — the very race that helper
+        exists to close.
         """
         async with self._write_lock:
             conn = await self._ensure_conn()
-            msg = await self._with_known_video_duration(conn, remote_jid, msg)
+            msg = (await preserve_stars(self, conn, remote_jid, [msg]))[0]
+            msg = await self._with_known_local_fields(conn, remote_jid, msg)
             values = self._build_message_values(remote_jid, msg)
             if values is None:
                 log.warning(
@@ -833,8 +1113,8 @@ class DatabaseManager:
             await conn.execute(
                 """INSERT OR REPLACE INTO messages
                    (message_id, remote_jid, from_me, participant,
-                    message_type, message_json, timestamp, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    message_type, message_json, timestamp, status, starred)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 values,
             )
             await conn.commit()
@@ -842,7 +1122,14 @@ class DatabaseManager:
     async def insert_messages_batch(
         self, remote_jid: str, msgs: list[dict]
     ) -> None:
-        """Insert many messages in a single transaction."""
+        """Insert many messages in a single transaction.
+
+        The hot write path: sync_chat_messages() calls it on every round, for
+        every chat with something new. The rows the local-field rules need
+        (_with_known_local_fields()) are read ahead in blocks by
+        _stored_rows_by_id(), inside the same lock hold as the writes, rather
+        than one SELECT per voice note.
+        """
         if not msgs:
             return
         skipped = 0
@@ -850,8 +1137,10 @@ class DatabaseManager:
             conn = await self._ensure_conn()
             try:
                 await conn.execute("BEGIN")
+                msgs = await preserve_stars(self, conn, remote_jid, msgs)
+                stored_rows = await self._stored_rows_by_id(conn, remote_jid, msgs)
                 for msg in msgs:
-                    msg = await self._with_known_video_duration(conn, remote_jid, msg)
+                    msg = self._apply_stored_row(msg, stored_rows)
                     values = self._build_message_values(remote_jid, msg)
                     if values is None:
                         # See _build_message_values() — an empty id-less
@@ -863,10 +1152,11 @@ class DatabaseManager:
                     await conn.execute(
                         """INSERT OR REPLACE INTO messages
                            (message_id, remote_jid, from_me, participant,
-                            message_type, message_json, timestamp, status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            message_type, message_json, timestamp, status, starred)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         values,
                     )
+                    stored_rows[values[0]] = values[5]
                 await conn.commit()
             except Exception:
                 await conn.rollback()
@@ -914,6 +1204,258 @@ class DatabaseManager:
                 (status, message_id, remote_jid),
             )
             await conn.commit()
+
+    async def set_message_transcription(
+        self, remote_jids, message_id: str, value: dict
+    ) -> bool:
+        """Store *value* as the message's transcription, under every JID in
+        *remote_jids* — one JID, or the several a conversation's rows may be
+        filed under (MainWindow._transcription_storage_jids()). False when
+        none of them has the row — an answer, not an error.
+
+        Only the key changes. The row is read and written back under one hold
+        of _write_lock, and never rebuilt from the caller's copy of the
+        message: a transcription takes minutes, and the record the UI held
+        when it started may since have been overtaken by a sync (a delivery
+        status, a reaction, an edit) that writing it whole would undo in
+        silence. An UPDATE of message_json alone, never INSERT OR REPLACE:
+        update_message_id() renames only the message_id column, so the JSON
+        of a promoted own message still carries its old local id, and
+        _build_message_values() would re-key the row under it.
+
+        True does not always mean the text was written: a row holding a
+        later decision keeps it, and a row that can no longer hold a
+        transcription — the message was deleted for everyone meanwhile —
+        refuses it (_rewrite_transcription()). Either way the row answered,
+        and the caller must not fall back to writing the record whole.
+
+        Nothing about the message is logged — not its id either (see the
+        transcription package's privacy rule).
+        """
+        return await self._rewrite_transcription(remote_jids, message_id, value)
+
+    async def delete_message_transcription(
+        self, remote_jids, message_id: str, deleted_at: float
+    ) -> bool:
+        """Delete the message's transcription under every JID in
+        *remote_jids*. False when none of them has the row.
+
+        Leaves a tombstone dated *deleted_at* rather than removing the key, so
+        that a stale copy of the record still holding the text cannot bring it
+        back through insert_message()'s rule — see core.transcription.stored.
+        """
+        return await self._rewrite_transcription(
+            remote_jids, message_id, tombstone(deleted_at)
+        )
+
+    async def _rewrite_transcription(
+        self, remote_jids, message_id: str, value: dict
+    ) -> bool:
+        """set/delete_message_transcription()'s single write: every JID, one
+        hold of _write_lock, one commit.
+
+        One hold rather than one call per JID because the rows of one decision
+        must not be interleaved with another decision's: with a call per JID,
+        a save and a delete of the same message could each land on one of
+        the two rows first, and the pair would disagree about whether the
+        text exists.
+
+        The two kinds of value are dated differently, on purpose:
+
+        * **A tombstone always wins**, dated just after whatever the row
+          holds. Deleting is a decision about whatever text is there, and
+          "Transcrição apagada" has already been said — the disk has to agree
+          with it, whatever the clock said when it was decided.
+
+        * **A text is written only if it is at least as recent as the row's
+          decision** (newer_decision()), and never re-dated. Re-dating it is
+          what turned a save that reached the database late — behind a delete
+          made after it — into the later decision: the text came back over a
+          deletion the user had already been told about. A decision older
+          than the stored one is simply the older one. The clock-set-back case
+          that used to need the re-dating is handled where the decision is
+          made: MainWindow dates it after every copy in memory
+          (next_decision_time()).
+
+        A text is also refused on a row that can no longer be the voice note
+        (may_hold_transcription()): a message its sender deleted for everyone
+        while it was being transcribed. Its text is exactly what that sender
+        withdrew. A tombstone is still written there — it holds no text.
+        """
+        if not message_id:
+            return False
+        jids = [remote_jids] if isinstance(remote_jids, str) else [j for j in remote_jids if j]
+        deleting = bool(value.get("deleted"))
+        found = written = False
+        refused_withdrawn = refused_older = False
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            # All of it or none of it, in the mould of insert_messages_batch():
+            # the first UPDATE opens a transaction, and if a later JID's write
+            # fails, what is left in it would otherwise be committed by the
+            # next unrelated write — after the user heard it had failed.
+            try:
+                for remote_jid in jids:
+                    stored = await self._stored_message(conn, remote_jid, message_id)
+                    if stored is None:
+                        continue
+                    found = True
+                    current = stored.get(TRANSCRIPTION_KEY)
+                    row_value = value
+                    if deleting:
+                        at = decision_time(value)
+                        if at is not None:
+                            later = next_decision_time(at, current)
+                            if later != at:
+                                row_value = dict(value, at=later)
+                    elif not may_hold_transcription(stored):
+                        refused_withdrawn = True
+                        continue
+                    elif newer_decision(value, current) is not value:
+                        refused_older = True
+                        continue
+                    else:
+                        # Other models' results the row holds and the value,
+                        # built from a copy in memory, may not.
+                        row_value = with_missing_results(value, current)
+                    stored[TRANSCRIPTION_KEY] = row_value
+                    await conn.execute(
+                        "UPDATE messages SET message_json=? WHERE remote_jid=? AND message_id=?",
+                        (self._encrypt_json(stored), remote_jid, message_id),
+                    )
+                    written = True
+                    if deleting:
+                        await self._scrub_transcription_from_preview(conn, remote_jid, message_id)
+                if written:
+                    await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        # One line per decision, and only when it did not do what was asked:
+        # a JID without the row is routine (the @lid half of a conversation
+        # usually has none), a decision nobody could write is not.
+        if not found:
+            log.info("[messages] transcription not written: no stored row under any of the conversation's chats")
+        elif refused_withdrawn:
+            log.info("[messages] transcription not written: the message was deleted for everyone")
+        elif refused_older:
+            log.info("[messages] transcription not written: the row holds a later decision")
+        return found
+
+    #: Rows read and rewritten per hold of _write_lock by clear_model_transcriptions().
+    _CLEAR_TRANSCRIPTIONS_CHUNK = 400
+
+    async def clear_model_transcriptions(
+        self, model_id: str, backend_id, decided_at: float
+    ) -> int:
+        """Drop every stored transcription made by one model, in every chat.
+
+        Returns how many results went. Only that model's results go: the other
+        models' stay, the newest of them becoming the message's current one at
+        a decision time after the one it replaces (core.transcription.stored.
+        drop_model()), so a stale copy still holding the dropped text loses to
+        it instead of bringing it back. A message left with nothing gets a
+        tombstone, like a deletion.
+        """
+        if not model_id:
+            return 0
+        return await self._rewrite_all_transcriptions(
+            lambda value, decided: drop_model(value, model_id, backend_id, decided),
+            decided_at,
+        )
+
+    async def clear_all_transcriptions(self, decided_at: float) -> int:
+        """Drop every stored transcription of every model, in every chat.
+
+        Each message that held any ends with a tombstone dated after its own
+        decision (core.transcription.stored.drop_all()). Returns how many
+        results went.
+        """
+        return await self._rewrite_all_transcriptions(drop_all, decided_at)
+
+    async def _rewrite_all_transcriptions(self, transform, decided_at: float) -> int:
+        """Apply `transform(value, decision time) -> (new value, dropped)` to the
+        transcription of every message that holds one; the count dropped.
+
+        The text lives inside the encrypted message_json, so there is no column
+        to select on: the rows that can hold a transcription are read, decrypted
+        and rewritten in chunks. The lock is taken once per chunk and not for
+        the whole scan, so a sync writing meanwhile waits for one chunk and not
+        for every message in the database. Rows are visited in primary-key
+        order, so a row rewritten by another writer in between is neither
+        skipped nor visited twice. Only message_json changes, in an UPDATE of
+        that column alone — never a rebuild from a copy (see
+        _rewrite_transcription()).
+
+        Nothing about a message is logged: counts only.
+        """
+        marks = ",".join("?" for _ in _TYPES_WITHOUT_LOCAL_FIELDS)
+        cleared = 0
+        last_id, last_jid = "", ""
+        while True:
+            async with self._write_lock:
+                conn = await self._ensure_conn()
+                cursor = await conn.execute(
+                    "SELECT message_id, remote_jid, message_json FROM messages "
+                    f"WHERE message_type NOT IN ({marks}) "
+                    "AND (message_id > ? OR (message_id = ? AND remote_jid > ?)) "
+                    "ORDER BY message_id, remote_jid LIMIT ?",
+                    (*_TYPES_WITHOUT_LOCAL_FIELDS, last_id, last_id, last_jid,
+                     self._CLEAR_TRANSCRIPTIONS_CHUNK),
+                )
+                rows = await cursor.fetchall()
+                if not rows:
+                    break
+                changed = False
+                try:
+                    for row in rows:
+                        stored = self._decrypt_json(row["message_json"])
+                        if not isinstance(stored, dict):
+                            continue
+                        value = stored.get(TRANSCRIPTION_KEY)
+                        if not isinstance(value, dict):
+                            continue
+                        decided = next_decision_time(decided_at, value)
+                        new_value, dropped = transform(value, decided)
+                        if not dropped:
+                            continue
+                        stored[TRANSCRIPTION_KEY] = new_value
+                        await conn.execute(
+                            "UPDATE messages SET message_json=? WHERE remote_jid=? AND message_id=?",
+                            (self._encrypt_json(stored), row["remote_jid"], row["message_id"]),
+                        )
+                        cleared += dropped
+                        changed = True
+                    if changed:
+                        await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+                last_id, last_jid = rows[-1]["message_id"], rows[-1]["remote_jid"]
+        if cleared:
+            log.info("[messages] cleared %d stored transcription(s)", cleared)
+        return cleared
+
+    async def _scrub_transcription_from_preview(self, conn, remote_jid: str, message_id: str) -> None:
+        """Drop the key from the chat preview of *remote_jid* if it holds this
+        message's. _build_chat_values() no longer writes the key into a
+        chat's preview, but a row written before it did may still hold the
+        text there — and "deleted" has to be true of the disk."""
+        cursor = await conn.execute(
+            "SELECT jid, last_message_json FROM chats WHERE jid=? OR remote_jid=?",
+            (remote_jid, remote_jid),
+        )
+        for chat_row in await cursor.fetchall():
+            if not chat_row["last_message_json"]:
+                continue
+            last = self._decrypt_json(chat_row["last_message_json"])
+            if (isinstance(last, dict) and TRANSCRIPTION_KEY in last
+                    and (last.get("key") or {}).get("id") == message_id):
+                del last[TRANSCRIPTION_KEY]
+                await conn.execute(
+                    "UPDATE chats SET last_message_json=? WHERE jid=?",
+                    (self._encrypt_json(last), chat_row["jid"]),
+                )
 
     async def delete_message(self, remote_jid: str, message_id: str) -> None:
         """Delete a single message by remote_jid + message_id."""
@@ -972,6 +1514,7 @@ class DatabaseManager:
                 "profilePicUrl": row["profile_pic_url"] or "",
                 "type": "contact",
                 "isSaved": bool(row["is_saved"]),
+                SYNCED_KEY: bool(row["synced_to_phone"]),
             }
         return result
 
@@ -988,9 +1531,10 @@ class DatabaseManager:
             await conn.execute(
                 """INSERT OR REPLACE INTO contacts
                    (jid, remote_jid, name, push_name, profile_pic_url,
-                    is_saved, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (jid, remote_jid, name, push_name, pic, saved, _now_ts()),
+                    is_saved, synced_to_phone, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (jid, remote_jid, name, push_name, pic, saved,
+                 _synced_to_phone(data), _now_ts()),
             )
             await conn.commit()
 
@@ -1009,9 +1553,10 @@ class DatabaseManager:
                     await conn.execute(
                         """INSERT OR REPLACE INTO contacts
                            (jid, remote_jid, name, push_name, profile_pic_url,
-                            is_saved, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (jid, remote_jid, name, push_name, pic, saved, _now_ts()),
+                            is_saved, synced_to_phone, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (jid, remote_jid, name, push_name, pic, saved,
+                         _synced_to_phone(data), _now_ts()),
                     )
                 await conn.commit()
             except Exception:
@@ -1247,7 +1792,20 @@ class DatabaseManager:
                             .get("messages", {})
                             .get("records", [])
                     )
+                    # save_data() — which runs only when an incremental write
+                    # has failed; the hot path is insert_messages_batch() —
+                    # writes every record held in memory through here, and a
+                    # record held in memory can be older than the row: the
+                    # same rule as insert_message(), under the lock this
+                    # method already holds, with the rows read in blocks the
+                    # way insert_messages_batch() reads them. A clear_first
+                    # import has nothing stored to read.
+                    stored_rows = (
+                        {} if clear_first
+                        else await self._stored_rows_by_id(conn, remote_jid, records)
+                    )
                     for msg in records:
+                        msg = self._apply_stored_row(msg, stored_rows)
                         values = self._build_message_values(remote_jid, msg)
                         if values is None:
                             # See _build_message_values(): an id-less message
@@ -1257,10 +1815,11 @@ class DatabaseManager:
                         await conn.execute(
                             """INSERT OR REPLACE INTO messages
                                (message_id, remote_jid, from_me, participant,
-                                message_type, message_json, timestamp, status)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                message_type, message_json, timestamp, status, starred)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             values,
                         )
+                        stored_rows[values[0]] = values[5]
                         total += 1
 
                 # ── Contacts ─────────────────────────────────────────────
@@ -1273,9 +1832,10 @@ class DatabaseManager:
                     await conn.execute(
                         """INSERT OR REPLACE INTO contacts
                            (jid, remote_jid, name, push_name, profile_pic_url,
-                            is_saved, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (jid, remote_jid, name, push_name, pic, saved, now),
+                            is_saved, synced_to_phone, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (jid, remote_jid, name, push_name, pic, saved,
+                         _synced_to_phone(contact), now),
                     )
                     total += 1
 

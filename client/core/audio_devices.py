@@ -13,6 +13,8 @@ name is resolved back to the current index each time it's needed.
 import ctypes
 import logging
 
+from core.voice_stereo import recording_configs_preferring
+
 try:
     import pyaudio
 except ImportError:
@@ -25,13 +27,63 @@ except ImportError:
     pyaudio = None
 
 
+def repair_device_name(name) -> str:
+    """Undo PyAudio's latin-1 reading of PortAudio's UTF-8 device names.
+
+    PortAudio hands device names over as UTF-8 on Windows, and PyAudio 0.2.14
+    decodes them as latin-1, so every accented name came out as mojibake:
+    "Mixagem estéreo" was listed as "Mixagem estÃ©reo" in the microphone
+    combos (measured 2026-09-21; sounddevice reads the same device correctly).
+    Worse than cosmetic: that mangled name is what got SAVED, and it never
+    matched the real name when a call or a recording resolved the device, so
+    the choice silently fell back to the default microphone.
+
+    Re-encoding as latin-1 and decoding as UTF-8 recovers the real name. A
+    name that is already right is returned unchanged: plain ASCII trivially,
+    and genuine accented text almost never forms valid UTF-8 byte sequences
+    when read back as latin-1 -- which is also what makes this idempotent.
+    """
+    text = str(name or "")
+    if all(ord(ch) < 128 for ch in text):
+        return text
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+def repair_stored_input_device_names(settings) -> bool:
+    """Repair microphone names saved while the combos showed mojibake.
+
+    Both the voice-message and the call microphone are stored by name.
+    Idempotent (see repair_device_name), so it needs no one-shot flag: a
+    correct name is left exactly as it is. Returns True when anything changed.
+    """
+    changed = False
+    if not isinstance(settings, dict):
+        return False
+    for section_name in ("audio_devices", "call_audio_devices"):
+        section = settings.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        stored = section.get("input_device_name")
+        if not isinstance(stored, str) or not stored:
+            continue
+        repaired = repair_device_name(stored)
+        if repaired != stored:
+            section["input_device_name"] = repaired
+            changed = True
+    return changed
+
+
 def _match_device(name: str, devices: list):
     """Return the index of the device named `name` in `devices`
     ([(index, friendly_name), ...]), or None if absent/empty."""
     if not name:
         return None
+    wanted = repair_device_name(name)
     for idx, dev_name in devices:
-        if dev_name == name:
+        if repair_device_name(dev_name) == wanted:
             return idx
     return None
 
@@ -116,7 +168,7 @@ def _pyaudio_input_devices(pa: "pyaudio.PyAudio") -> list:
                 # Inside the try: a device whose info dict is missing
                 # index/name is one device to skip, not a reason to drop
                 # every device found so far.
-                devices.append((info["index"], str(info["name"]).strip()))
+                devices.append((info["index"], repair_device_name(info["name"]).strip()))
         except Exception:
             continue
     return devices
@@ -255,7 +307,7 @@ def fallback_input_device_indices(pa: "pyaudio.PyAudio | None" = None, exclude=(
 RECORDING_SAMPLE_CONFIGS = [(48000, 1), (48000, 2), (44100, 1), (44100, 2)]
 
 
-def recording_configs_for(device_index, pa=None) -> list:
+def recording_configs_for(device_index, pa=None, prefer_stereo: bool = False) -> list:
     """RECORDING_SAMPLE_CONFIGS with `device_index`'s own native rate first.
 
     The fixed list above was written for WASAPI devices, whose native rate is
@@ -287,7 +339,16 @@ def recording_configs_for(device_index, pa=None) -> list:
 
     Never raises, and never returns an empty list: a device whose info cannot
     be read falls back to exactly the previous behaviour.
+
+    ``prefer_stereo`` moves every two-channel combination ahead of the mono
+    ones, for a stereo voice message (core/voice_stereo.py); the mono ones stay
+    as the tail, so a microphone without two channels still records.
     """
+    return recording_configs_preferring(
+        _recording_configs_for(device_index, pa), prefer_stereo)
+
+
+def _recording_configs_for(device_index, pa=None) -> list:
     if pyaudio is None:
         return list(RECORDING_SAMPLE_CONFIGS)
     owns_pa = pa is None
@@ -312,9 +373,9 @@ def recording_configs_for(device_index, pa=None) -> list:
 
     configs = []
     if native > 0:
-        # Mono first for the same reason the fixed list does it: WhatsApp voice
-        # messages are mono, and a stereo capture costs a downmix loop in pure
-        # Python. A device reporting a single input channel never gets asked
+        # Mono first for the same reason the fixed list does it: a device test
+        # costs nothing more that way. A recording asks for stereo first
+        # (core/voice_stereo.py). A device reporting a single input channel never gets asked
         # for two — an HFP microphone is exactly that.
         for channels in (1, 2):
             if max_channels and channels > max_channels:

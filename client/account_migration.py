@@ -38,7 +38,7 @@ from coord_locks import registry_lock, canonical_dir
 # Frozen whitelist of legacy entries (relative to flat data/).
 _LEGACY_ENTRIES = (
     "settings.json", "secret.key", "messages.db", "token.tk",
-    "media", "voice_messages", "media_failed.json", "log",
+    "media", "voice_messages", "media_failed.json", "media_cleaned.json", "log",
 )
 # Dirs that belong to the NEW layout and must never be treated as legacy source.
 _NEW_LAYOUT = {"global", "accounts", "logs"}

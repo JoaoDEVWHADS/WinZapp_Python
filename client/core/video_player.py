@@ -349,7 +349,7 @@ class VideoPlayer:
 
     def _start_audio(self, video_path: str, speed: float = 1.0):
         # Always open a decoded stream wrapped in Tempo FX, exactly like
-        # ConversationsPanel._play_audio()'s _open_stream() helper — a plain
+        # ConversationsPanel._open_audio_stream_from_temp_file() — a plain
         # (decode=False) stream has no way to change tempo after opening, so
         # keeping that shortcut at 1x would make set_speed() a no-op for any
         # video started at the default speed (the common case). The fallback

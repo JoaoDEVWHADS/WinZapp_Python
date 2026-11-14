@@ -136,6 +136,7 @@ class _Db:
 class _Stub:
     _apply_possible_edit = MainWindow._apply_possible_edit
     _apply_remote_revoke = MainWindow._apply_remote_revoke
+    _revoke_stored_copies = MainWindow._revoke_stored_copies
     _persist_and_repaint_edit = MainWindow._persist_and_repaint_edit
 
     def __init__(self):

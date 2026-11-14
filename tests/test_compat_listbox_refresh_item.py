@@ -24,6 +24,7 @@ import types
 from pathlib import Path
 
 from ui.accessible import CompatListBoxMessagesCtrl
+from tests.god_modules import conversations_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,7 +88,7 @@ def test_the_control_answers_the_whole_listctrl_surface_the_messages_list_uses()
     Collected from the source rather than hardcoded, so a call added later is
     covered without editing this list.
     """
-    src = (ROOT / "client" / "ui" / "conversations.py").read_text(encoding="utf-8")
+    src = conversations_source()
     tree = ast.parse(src, filename="conversations.py")
 
     used = set()

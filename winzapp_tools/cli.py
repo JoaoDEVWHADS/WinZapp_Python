@@ -66,6 +66,14 @@ def setup_api() -> None:
     _run("setup_api")
 
 
+def setup_neonize() -> None:
+    """Prepare the Neonize bridge used by the development app."""
+    from .neonize_setup import ensure_build_tools
+    ensure_build_tools()
+    _exec([sys.executable, str(ROOT / "neonize_bridge" / "prepare.py"),
+           *sys.argv[1:]], ROOT)
+
+
 def build_onefile() -> None:
     """Build the portable one-file executable (does not require GCC/windres)."""
     _run("build_onefile")
@@ -79,3 +87,29 @@ def build_installer() -> None:
 def test() -> None:
     """Run pytest without foreground wx dialogs by default."""
     _exec([sys.executable, "-m", "pytest", *sys.argv[1:]], ROOT)
+
+
+def _translations(*fixed_args: str) -> int:
+    """Run the gettext workflow from the repository root."""
+    from .translations import main
+    return main([*fixed_args, *sys.argv[1:]])
+
+
+def translations_update() -> int:
+    """Merge the English PO source into every registered locale."""
+    return _translations("update")
+
+
+def translations_check() -> int:
+    """Validate complete translation catalogs for a release."""
+    return _translations("check")
+
+
+def translations_check_draft() -> int:
+    """Validate catalog syntax while translators still have pending entries."""
+    return _translations("check", "--allow-incomplete")
+
+
+def translations_compile() -> int:
+    """Validate and compile MO resources for local builds."""
+    return _translations("compile")

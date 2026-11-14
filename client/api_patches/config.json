@@ -3,6 +3,7 @@
   "startAllSession": false,
   "createOptions": {
     "autoClose": 0,
-    "deviceSyncTimeout": 0
+    "deviceSyncTimeout": 0,
+    "injectionTimeout": 60000
   }
 }

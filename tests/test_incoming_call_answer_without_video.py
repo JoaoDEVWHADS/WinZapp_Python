@@ -49,11 +49,14 @@ class _I18n:
 
 
 class _MainStub:
+    _uses_neonize = lambda self: False      # these tests are about the WPPConnect engine
     accept_incoming_call = MainWindow.accept_incoming_call
     stop_incoming_call_alert = MainWindow.stop_incoming_call_alert
     _call_control_payload = MainWindow._call_control_payload
     _close_incoming_call_dialog = MainWindow._close_incoming_call_dialog
     _stop_call_camera = MainWindow._stop_call_camera
+    _send_call_camera_stop = MainWindow._send_call_camera_stop
+    _probe_call_camera = MainWindow._probe_call_camera
 
     def __init__(self):
         self._active_incoming_calls = {}
@@ -83,16 +86,22 @@ class _MainStub:
     def _sync_voice_call_bar(self):
         pass
 
-    def _start_call_camera(self, *, announce_failure=True, transmit=True):
+    def _start_call_camera(self, *, announce_failure=True, transmit=True, expected_call=None):
+        assert expected_call is self._active_voice_call
         self.camera_starts += 1
         self.camera_announce_failure_values.append(announce_failure)
         self.camera_transmit_values.append(transmit)
         self._call_camera_available = True
         self._call_camera_capture = object()
         self._call_camera_enabled = True
+        return True  # like the real one once the capture is running
 
-    def _start_voice_call_audio(self, identity, details):
+    def _start_voice_call_audio(self, identity, details, *, expected_call=None):
+        # The real start preserves the exact record passed by the accept
+        # worker; replacing it would make the post-start ownership guard fail.
+        assert expected_call is self._active_voice_call
         self.audio_starts.append(identity)
+        return True
 
     def _post_call_control(self, endpoint, payload, *, timeout=15):
         self.posted_controls.append((endpoint, payload))
@@ -205,6 +214,29 @@ def test_answer_without_video_on_a_voice_only_call_never_touches_the_camera():
     assert stub._call_camera_available is None
 
 
+def test_answering_a_group_call_records_the_group_not_the_ringing_participant():
+    """The offer names a participant in peer_jid and the group in group_jid.
+    The accepted call -- and every later state event -- must follow the group."""
+    stub = _MainStub()
+    group_jid = "120363427511142886@g.us"
+    stub._incoming_call_details["group-call"] = {
+        "call_id": "group-call",
+        "peer_jid": "5511888888888@lid",
+        "group_jid": group_jid,
+        "is_group": True,
+        "name": "Família",
+        "is_video": False,
+    }
+    stub._active_incoming_calls["group-call"] = "5511888888888@lid"
+
+    stub.accept_incoming_call("group-call")
+
+    assert stub._active_voice_call["peer_jid"] == group_jid
+    assert stub._active_voice_call["group_jid"] == group_jid
+    assert stub._active_voice_call["is_group"] is True
+    assert stub.posted_controls == [("accept", {"callId": "group-call"})]
+
+
 class _FakeParent:
     def __init__(self, i18n):
         self.i18n = i18n
@@ -216,6 +248,7 @@ def test_video_call_dialog_offers_answer_with_and_without_video_buttons(wx_app):
 
     frame = hidden_frame()
     frame.i18n = _I18n()
+    frame.settings = {}
     calls = {"answer": 0, "answer_without_video": 0}
     dialog = IncomingCallDialog(
         frame,
@@ -249,6 +282,7 @@ def test_voice_call_dialog_keeps_the_single_answer_button(wx_app):
 
     frame = hidden_frame()
     frame.i18n = _I18n()
+    frame.settings = {}
     dialog = IncomingCallDialog(
         frame,
         "Fulano está te ligando.",

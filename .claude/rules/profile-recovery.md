@@ -3,6 +3,7 @@ paths:
   - "client/core/profile_recovery.py"
   - "client/api_patches/src/util/createSessionUtil.ts"
   - "client/api_patches/src/controller/sessionController.ts"
+  - "client/main_window/session_lifecycle.py"
 ---
 
 # Profile recovery

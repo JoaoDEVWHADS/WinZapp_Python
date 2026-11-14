@@ -43,6 +43,9 @@ class TestRuntimeStateSurvivesAReinstall:
     def test_the_chrome_profile_is_kept(self):
         assert _survives_the_clean_step("userDataDir")
 
+    def test_the_downloaded_browser_is_kept(self):
+        assert _survives_the_clean_step(".cache")
+
     def test_winzapps_own_root_files_are_kept(self):
         assert _survives_the_clean_step("start.js")
         assert _survives_the_clean_step("config.json")

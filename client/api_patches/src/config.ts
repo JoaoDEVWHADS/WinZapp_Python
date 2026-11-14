@@ -59,7 +59,16 @@ export default {
   customUserDataDir,
   webhook: {
     url: null,
+    // Upstream 2.10.51 reads these from WEBHOOK_* variables; this file reads
+    // none (see the top). WinZapp sets no webhook, so they are upstream's
+    // defaults and never take effect.
+    allowedUrls: [],
     autoDownload: true,
+    retryAttempts: 3,
+    retryDelay: 5000,
+    requestTimeout: 30000,
+    // Bytes; media larger than this is not inlined as base64 (0 = no limit).
+    autoDownloadMaxSize: 0,
     uploadS3: false,
     readMessage: true,
     allUnreadOnStart: false,
@@ -78,6 +87,9 @@ export default {
     uploadS3: false,
   },
   chatwoot: {
+    // Upstream 2.10.70 reads CHATWOOT_ALLOWED_URLS; this file reads no
+    // variable (see the top). WinZapp does not use Chatwoot.
+    allowedUrls: [],
     sendQrCode: true,
     sendStatus: true,
   },
@@ -108,6 +120,11 @@ export default {
     // actually stated. Nothing in WinZapp consumes the 'phoneNotConnected'
     // status this timer produces.
     deviceSyncTimeout: 0,
+    // wppconnect >= 2.3.5 bounds injecting wa-js and waiting for WPP.isReady
+    // (default 120 s); 2.3.4 ignores the key, where core/wppconnect_browser_layer_patch.py
+    // gives the same wait the same 60 s. Under the 90 s that the power-resume
+    // path gives a start that made no progress.
+    injectionTimeout: 60000,
     // IMPORTANT: index.ts merges this with the config start.js passes to
     // initServer() using `merge-deep`, and merge-deep UNIONS arrays rather
     // than replacing them. A flag listed here therefore reaches Chrome no

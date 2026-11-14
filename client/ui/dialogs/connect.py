@@ -8,6 +8,7 @@ import requests
 from core.api_client import (api_get, api_post, redact_api_error,
                              redact_api_url, redact_token)
 from core.i18n import I18n
+from main_window.identity_rules import linked_number_differs
 from core.websocket_client import WebSocketClient
 from app_paths import data_path, resource_path
 from traceback import format_exc
@@ -16,6 +17,9 @@ import base64
 from io import BytesIO
 from countries import get_countries, get_default_country_index
 from core.combo_search import bind_incremental_search
+from core import app_restart, connection_engine, neonize_bridge_process
+from ui.dialogs import connect_engine, connect_history
+from core import qr_geometry
 import logging
 
 
@@ -167,9 +171,11 @@ class Connect:
             f"{self.main_window.wpp_server}"
             f":{self.main_window.wpp_port}/api/{token}/start-session"
         )
-        payload = {
-            "waitQrCode": False
-        }
+        # Neonize: the history the pairing asks for (connect_history.py)
+        payload = connect_history.with_history(
+            {"waitQrCode": False},
+            getattr(self.main_window, "wpp_engine", connection_engine.WPPCONNECT),
+            self.main_window.settings)
         headers = self._wpp_headers(use_global_key=True)
 
         try:
@@ -634,6 +640,22 @@ class Connect:
 
         # Main sizer
         main_sizer = wx.BoxSizer(wx.VERTICAL)
+        # First in the tab order, before the country: someone who has not paired
+        # cannot reach Settings to change the engine.
+        self._offered_engines = connect_engine.offered_engines(
+            neonize_bridge_process.command(neonize_bridge_process.bridge_dir()) is not None,
+            getattr(self.main_window, "wpp_engine", connection_engine.WPPCONNECT),
+            getattr(self.main_window, "_other_account_is_running", lambda: False)())
+        self.engine_choice = connect_engine.build_row(
+            self.connection_dial, main_sizer, self.i18n, self._offered_engines,
+            getattr(self.main_window, "wpp_engine", connection_engine.WPPCONNECT))
+        if self.engine_choice is not None:
+            self.engine_choice.Bind(wx.EVT_CHOICE, self.on_engine_chosen)
+        # Neonize only: how much history the pairing brings (connect_history.py)
+        self.history_row = connect_history.HistoryRow.build(
+            self.connection_dial, main_sizer, self.i18n,
+            getattr(self.main_window, "wpp_engine", connection_engine.WPPCONNECT),
+            self.main_window, api_post)
         main_sizer.Add(self.qrcode_panel, 1, wx.ALL | wx.EXPAND, 5)
         main_sizer.Add(self.phone_panel, 1, wx.ALL | wx.EXPAND, 5)
         main_sizer.Add(self.quit_btn, 0, wx.ALL | wx.CENTER, 5)
@@ -869,7 +891,12 @@ class Connect:
         # paired account" from "brand-new pairing" once that token is gone,
         # and used to always wipe local data as a result. See that method's
         # own docstring for the full story.
-        was_paired = bool(self.main_window.settings.get("privateinfo", {}).get("paired"))
+        # WA_phone_number_linked: after _on_disconnect(wipe=False) it alone
+        # says this install has a history, and who scans the code is checked
+        # against it once pairing closes.
+        _privateinfo = self.main_window.settings.get("privateinfo", {})
+        was_paired = bool(_privateinfo.get("paired")
+                          or _privateinfo.get("WA_phone_number_linked"))
 
         # Whatever on_switch_to_phone() captured belongs to the session we are
         # about to tear down, so it must not survive as a reuse candidate for
@@ -1145,11 +1172,19 @@ class Connect:
             src_w, src_h = image.GetWidth(), image.GetHeight()
             # Quiet zone first, magnification second: padding then scaling keeps
             # the border proportional and every edge on a whole pixel.
-            pad = self._qr_quiet_zone(min(src_w, src_h))
+            geometry = qr_geometry.measure(bytes(image.GetData()), src_w, src_h)
+            margin, module = geometry if geometry else (0, None)
+            pad = qr_geometry.extra_margin(margin, module,
+                                           self._qr_quiet_zone(min(src_w, src_h)))
             if pad:
                 image = image.Size(wx.Size(src_w + 2 * pad, src_h + 2 * pad),
                                    wx.Point(pad, pad), 255, 255, 255)
             padded = min(image.GetWidth(), image.GetHeight())
+            divisor = qr_geometry.shrink_divisor(padded, self._QR_BOX, module, margin + pad)
+            if divisor > 1:
+                image = image.Scale(image.GetWidth() // divisor, image.GetHeight() // divisor,
+                                    wx.IMAGE_QUALITY_NEAREST)
+                padded = min(image.GetWidth(), image.GetHeight())
             factor = self._qr_scale_factor(padded, self._QR_BOX)
             if factor > 1:
                 image = image.Scale(image.GetWidth() * factor, image.GetHeight() * factor,
@@ -1284,6 +1319,27 @@ class Connect:
         return bool(privateinfo.get("paired", False))
 
     @staticmethod
+    def _history_belongs_to(privateinfo: dict, phone_number: str) -> bool:
+        """_is_same_account(), or the number WhatsApp confirmed for the data
+        on disk: the question that decides the wipe.
+
+        _on_disconnect(wipe=False) sends the user to this dialog to keep their
+        history, and drops WA_phone_number and `paired` on the way. Those two
+        alone answered "another account" for the owner's own number, and the
+        history went anyway: a Mac logged out across a sleep at 16:06, its user
+        typed their number at 16:25, and the database and media were deleted
+        (2026-10-26). WA_phone_number_linked survives that path for exactly
+        this reason. Not used for reusing a session, which still needs the
+        strict answer; only for not deleting.
+        """
+        if Connect._is_same_account(privateinfo, phone_number):
+            return True
+        if not isinstance(privateinfo, dict):
+            return False
+        linked = privateinfo.get("WA_phone_number_linked")
+        return bool(linked and phone_number) and not linked_number_differs(linked, phone_number)
+
+    @staticmethod
     def _can_reuse_existing_session(privateinfo: dict, phone_number: str,
                                     existing_token: str) -> bool:
         """True when a stored WPPConnect token is worth reusing for this number.
@@ -1400,7 +1456,7 @@ class Connect:
                 if not _instance_exists:
                     # New session: sync from scratch, so wait for messages.set
                     self.main_window.messages_set_completed = False
-                if not self._is_same_account(_privateinfo, self.phone_number):
+                if not self._history_belongs_to(_privateinfo, self.phone_number):
                     self.main_window.clear_local_data()
 
                 if _instance_exists:
@@ -1511,7 +1567,10 @@ class Connect:
                     f"{self.main_window.wpp_server}"
                     f":{self.main_window.wpp_port}/api/{self.main_window.token}/start-session"
                 )
-                payload = {"phone": self.phone_number, "waitQrCode": False}
+                payload = connect_history.with_history(
+                    {"phone": self.phone_number, "waitQrCode": False},
+                    getattr(self.main_window, "wpp_engine", connection_engine.WPPCONNECT),
+                    self.main_window.settings)
                 ws_ref = self.main_window.ws  # capture before thread starts
                 headers = self._wpp_headers(use_global_key=True)
 
@@ -2186,6 +2245,27 @@ class Connect:
 
         self._close_active_session()
         event.Skip()
+
+    def on_engine_chosen(self, event):
+        """The engine list of the dialog changed: confirm, store it and restart
+        WinZapp on it (connect_engine.py)."""
+        current = getattr(self.main_window, "wpp_engine", connection_engine.WPPCONNECT)
+        index = self.engine_choice.GetSelection()
+        if index == wx.NOT_FOUND or self._offered_engines[index] == current:
+            return
+        engine = self._offered_engines[index]
+        label = self.i18n.t(connection_engine.LABEL_KEYS[engine])
+        title = self.i18n.t("pairing_engine_switch_title")
+        answer = wx.MessageBox(
+            self.i18n.t("pairing_engine_switch_message").format(engine=label), title,
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION, self.connection_dial)
+        if answer == wx.YES and connect_engine.switch_and_restart(
+                self.main_window, self.i18n, engine, app_restart.restart_this_program):
+            logging.info("[engine] pairing dialog: restarting on the %s engine", engine)
+            self.on_quit_from_connect(None)
+            return
+        self.engine_choice.SetSelection(self._offered_engines.index(current)
+                                        if current in self._offered_engines else 0)
 
     def on_quit_from_connect(self, event):
         logging.info("[on_quit_from_connect] Quit requested from connection dialog.")

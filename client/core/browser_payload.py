@@ -120,3 +120,48 @@ def installed_version_dir(binary_path, cache_dir):
         # directory, and removing either would take more than this install.
         return None
     return os.path.join(cache_root, parts[0], parts[1])
+
+
+#: A version directory younger than this may be a download still running
+#: (the api/ folder, and its cache, are shared by every account's process).
+EMPTY_VERSION_DIR_GRACE_S = 600
+
+
+def version_dirs_without_browser(cache_dir, names, now=None, grace=EMPTY_VERSION_DIR_GRACE_S):
+    """The version directories under ``cache_dir`` (``<cache>/<product>/<v>``)
+    holding no file called one of ``names``, older than ``grace`` seconds.
+
+    Measured on 2026-10-29: a download cut short left
+    ``chrome/win64-148.0.7778.97`` empty. @puppeteer/browsers then refuses to
+    install over it ("the browser folder exists but the executable is
+    missing"), and the repair above never saw it, since it starts from an
+    executable that exists. Every launch spent 2.3 s on an install that could
+    not succeed. Only directories found by listing the cache are named, so
+    nothing outside it can be."""
+    import time as _time
+    now = _time.time() if now is None else now
+    found = []
+    try:
+        products = sorted(os.listdir(cache_dir))
+    except OSError:
+        return found
+    for product in products:
+        product_dir = os.path.join(cache_dir, product)
+        if not os.path.isdir(product_dir):
+            continue
+        try:
+            versions = sorted(os.listdir(product_dir))
+        except OSError:
+            continue
+        for version in versions:
+            version_dir = os.path.join(product_dir, version)
+            try:
+                if not os.path.isdir(version_dir) or now - os.path.getmtime(version_dir) < grace:
+                    continue
+                has_browser = any(
+                    name in files for _root, _dirs, files in os.walk(version_dir) for name in names)
+            except OSError:
+                continue
+            if not has_browser:
+                found.append(version_dir)
+    return found

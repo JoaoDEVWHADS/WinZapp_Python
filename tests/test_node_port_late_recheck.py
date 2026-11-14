@@ -23,6 +23,7 @@ itself is the real, already pure-tested implementation (tests/test_node_ports.py
 """
 
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 _ensure_wpp_port_still_free = MainWindow._ensure_wpp_port_still_free
 
@@ -33,6 +34,7 @@ class _Stub:
     def __init__(self, wpp_port, global_dir, custom_api=False, has_registry=True,
                  account_id="acc1", busy_ports=()):
         self.settings = {"connection": {"wpp_custom_api": custom_api}}
+        self.wpp_custom_api = custom_api
         self.wpp_port = wpp_port
         self.global_dir = global_dir
         self.registry = object() if has_registry else None
@@ -94,6 +96,28 @@ class TestSkipsWhenNotApplicable:
     def test_custom_api_is_left_untouched(self, tmp_path):
         stub = _Stub(wpp_port=6301, global_dir=str(tmp_path), custom_api=True,
                      busy_ports={6301})
+
+        stub._ensure_wpp_port_still_free()
+
+        assert stub.wpp_port == 6301
+        assert stub.save_calls == 0
+
+    def test_it_follows_the_api_this_process_runs_not_the_shared_copy(self, tmp_path):
+        """The connection block is install-wide: another account turning the
+        custom API on reaches this copy mid-session, while this process keeps
+        its own Node (self.wpp_custom_api) until it starts again. A Node
+        restart here still needs its port checked."""
+        stub = _Stub(wpp_port=6301, global_dir=str(tmp_path), busy_ports={6301})
+        stub.settings["connection"]["wpp_custom_api"] = True
+
+        stub._ensure_wpp_port_still_free()
+
+        assert stub.wpp_port != 6301
+
+    def test_and_a_custom_api_in_use_is_left_alone_whatever_the_copy_says(self, tmp_path):
+        stub = _Stub(wpp_port=6301, global_dir=str(tmp_path), custom_api=True,
+                     busy_ports={6301})
+        stub.settings["connection"]["wpp_custom_api"] = False
 
         stub._ensure_wpp_port_still_free()
 
@@ -250,7 +274,7 @@ class TestTheDialogIsHandedTheReResolvedPort:
         fake_mod.ApiStartupDialog = _FakeDialog
         monkeypatch.setitem(sys.modules, "ui.dialogs.api_startup", fake_mod)
         monkeypatch.setattr(main.os.path, "isfile", lambda *_a, **_k: True)
-        monkeypatch.setattr(main, "resource_path", lambda *parts: str(tmp_path / "x"))
+        patch_main_global(monkeypatch, "resource_path", lambda *parts: str(tmp_path / "x"))
         monkeypatch.setattr(main.wx, "CallAfter", lambda fn, *a, **k: None)
 
         class _RunStub:
@@ -264,12 +288,21 @@ class TestTheDialogIsHandedTheReResolvedPort:
             def _is_wpp_running(self):
                 return False
 
+            def _main_window_is_up(self):
+                return False
+
+            def _make_room_for_wppconnect(self):
+                pass  # the engine-switch step before the port re-check
+
             def _ensure_wpp_port_still_free(self):
                 # Stands in for the real re-check finding the port taken.
                 self.wpp_port = 6342
 
             def _start_wpp_background(self):
                 self.started = True
+
+            def _start_wpp_background_after_catalogue(self):
+                self._start_wpp_background()
 
             def _register_node_lease(self):
                 pass

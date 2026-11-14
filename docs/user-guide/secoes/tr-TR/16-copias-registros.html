@@ -1,0 +1,15 @@
+<!--nav: 💾 Yedekler ve günlükler-->
+<h3>Profil yedeği</h3>
+<p>Dahili tarayıcının profili, WhatsApp bağlantınızın yaşadığı yerdir. Ayarlar &gt; Depolama &gt; Profil yedekleme içinde:</p>
+<ul>
+  <li>WinZapp'ın kapanırken yedeği ne sıklıkla yenileyeceğini belirleyin (varsayılan: 24 saat; 0 her kapanışta yapar).</li>
+  <li>Yedeği WinZapp açıkken de, seçtiğiniz aralıkla açın. Yedek alınırken WhatsApp bağlantısız kalır, bu birkaç dakika sürebilir ve WinZapp her seferinde önce sorabilir. Yeni yedek, önceki yedeğin yerini yalnızca WhatsApp onunla yeniden bağlandıktan sonra alır.</li>
+  <li>"Profil yedeklerini saklama" yer kazandırır ancak profil zarar görürse yeniden eşleştirmeniz gerekir. İşaretlediğinizde WinZapp yedeklerin ne kadar yer kapladığını söyler ve silmek isteyip istemediğinizi sorar.</li>
+</ul>
+<p>Dahili tarayıcısı olmayan Neonize motoruyla yedeklenecek bir profil yoktur: profil yedeği Ayarlar &gt; Depolama içinde ve depolama yöneticisinde gösterilmez.</p>
+<p>WinZapp'ın kendi kendine kurtarma için kullandığı yedekler bunlardır (Hesaplar, tepsi ve eşitleme bölümüne bakın). Mesaj ve medya geçmişinizi korumak için <code>data</code> klasörünü kopyalayın.</p>
+
+<h3>Günlükler</h3>
+<p>WinZapp (<code>log.log</code>) ve yerel sunucunun (<code>wppconnect.log</code>) günlükleri telefon numaralarını, WhatsApp kimliklerini ve kişi adlarını maskeler; böylece bir sorunu bildirirken kişilerinizi açığa çıkarmadan gönderilebilirler. WinZapp klasörünün içinde <code>data\accounts\&lt;hesap kimliği&gt;\logs</code> altındadırlar. <code>log.log</code> her başlangıçta değiştirilir. Yeniden eşleştirme istenmesi veya oturum kaybı sorunlarında <code>shutdown_audit.log</code> dosyasını da gönderin.</p>
+<p>Gelişmiş bölümünde "Bu hesabın günlüklerini dışa aktar..." düğmesi, geçerli hesabın ve Neonize köprüsünün günlüklerini içeren bir .zip dosyasını arka planda kaydeder ve bittiğinde duyurur.</p>
+<p>Sorunları bildirin ve özellik isteyin: deponun Issues sayfası (<code>github.com/gabrielhhaber/WinZapp_Python/issues</code>). Yardım &gt; Program hakkında hata formunun istediği sürümü gösterir.</p>

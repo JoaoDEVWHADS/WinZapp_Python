@@ -1,5 +1,22 @@
 # Sync completion, on-demand history and the incremental round
 
+## A missing CDP result is not an empty ChatStore (2026-10-16)
+
+On a live 715-chat account, the page reported `WPP.isReady=true`,
+`isMainReady()=true`, and 715 results from `WPP.chat.list()`. Returning the
+WAPI-serialized model graph through Puppeteer nevertheless produced
+`undefined`. Returning its JSON snapshot in the same session delivered all
+715 chats. The route had converted the missing result into `[]`; diagnostics
+also defaulted to `storeReady=false` and `rawFirst=na`, misleadingly suggesting
+a lost store. Python kept its cached chats but retried full synchronization.
+
+Materialize the HTTP JSON snapshot inside the page before crossing CDP:
+`returnByValue` does not apply native models' JSON hooks like `JSON.stringify`
+does. `tests/test_chat_store_serialization.py` runs the actual route/page
+callback with synthetic models, covering both its first read and recovery
+read without starting a browser. An absent `rawFirst` is missing diagnostic
+evidence, never proof that the page's own store was empty.
+
 > One chat in `message_failures` holds the whole account 'not synced'; every history request lights up the user's phone; the incremental plan only reads chat-list metadata.
 >
 > Moved verbatim out of `CLAUDE.md` so it is read when the area is touched, not on every session. Keep it here: this is measured history, not a summary.
@@ -23,12 +40,14 @@ Both follow the same shape: subtracted from `successful_jids`, folded into the d
 
 Two rules hold the fix together. Only an explicit `false` refuses: `null` means the internal lookup failed, and refusing on unknown would silently stop all history backfill the day WhatsApp renames that module. And the refusal must return a non-`requested` body, because `_backfill_empty_chats()` reads that as the **terminal** "no older history" verdict and drops the chat from the persisted queue — which is what stops the re-asking, not the skipped send. A `None` there would keep it queued and ask again after `_OLDER_REQUEST_GRACE`, which is the loop itself.
 
-**That gate is necessary and not sufficient — four more bounds sit on top of it, each added after the previous one still left a stream of notifications:**
+**That gate is necessary and not sufficient — five more bounds sit on top of it, each added after the previous one still left a stream of notifications:**
 
 - **Only chats the user has opened** may cost a phone request at all (`_note_conversation_opened()` / `_user_has_opened()`, persisted, resolving both `@lid` and phone forms plus legacy `@c.us`). Everything else the backfill does is local and free; this is the only step that lights up someone's lock screen, and it was being spent on the whole address book — 82 chats short of the 200-message target after a profile restore rolled WhatsApp Web's store back, one request every two minutes for hours, for conversations never opened on an account synced for weeks. `fetch_older_messages()` (scrolling up) is unaffected and always was: that request is attended by definition.
 - **One request per pass, with a floor between requests** (`_OLDER_REQUESTS_PER_PASS = 1`, `_PHONE_REQUEST_MIN_GAP`). Ten per pass put four notifications on the phone inside 900 ms. The floor is separate from the pass backoff on purpose: that backoff collapses to `_BACKFILL_FIRST_DELAY` whenever a pass makes progress, and a chunk landing *is* progress, so every productive request bought itself another pass 30 s later (measured: passes settled at the 5-minute ceiling, then ran at 32 s intervals as soon as chunks began landing).
 - **Progress means *older* history arrived, not "the record count grew".** A chat also grows when a message is sent or received in it, and reading that as backfill progress hands it a fresh request budget — so writing in a short chat bought itself a round of sync notifications. Both the budget and the backoff key on `_anchor_identity(_oldest_stored_message(jid))`, which can only stay put or move further back. The repaint still keys on any growth.
 - **A chat the phone answers with silence is retired durably.** `primaryHasMore=false` is a refusal and costs nothing; the other answer is the request going out, the phone announcing a sync, delivering nothing, and following up with "Sync paused" — an *error*. Measured: two groups holding 1 and 2 messages, asked twice each, `oldestMsgKey` byte-identical across both asks and twelve get-messages rounds in between. `_older_request_attempts` is in memory, so every launch handed them a fresh budget; the verdict now goes into the persisted `_exhausted_chats` (`_older_history_is_exhausted()` / `_retire_chat_without_older_history()`), the same set `fetch_older_messages()` writes — so scrolling up still clears it. The verdict is taken from the *outcome*, not from `endOfHistoryTransferType`, so it stays right if WhatsApp renumbers those (for reference: the productive asks that day carried 0, the useless ones 4 and null).
+- **A phone-only chat is never asked (issue #220).** `primaryHasMoreMessagesReadyToLoad` answers "does the phone hold older messages", not "may this device ask for them": it is true for states 0, 3, 4 and 5, while WhatsApp Web's own banner (`WAWebConversationLoadMoreMessagesHistorySync`) offers the request for 0 only (and 5 behind a gate). For 4 — `COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY`, what a chat becomes once an on-demand sync has delivered all a linked device is given — it shows only "Use WhatsApp on your phone to see older messages." The controller now refuses that state before sending and reports `phoneOnly`; `client/main_window/history_boundary.py` carries the verdict to the backfill, to the scroll-up path and to the panel, which speaks `older_messages_on_phone`. Measured over CDP on 2026-10-04: 569 chats, 422 in state 0, 72 in 1, 41 in 3, 28 undefined, 5 in 4, 1 in 2; the page function run on real chats with the send replaced by a counter sent for a state-4 chat before the fix and refused it after. Three things to keep: this is the **only** state read by number (by name, through `WAWebChatConstants`, with the literal as fallback) — 3 and null stay with the outcome-based retirement above, because `WAPI.getChat()` answers null for an id form the store does not hold and that must not read as a verdict. The probe is **its own GET route** (`older-history-state`), never a flag on the POST: an API built before it existed answers 404, where a flag it does not know would send for real. And on scroll-up the verdict ends the search **at once** — the 300 s wait and the grace are for a request that went out, and this one never did; a chat already asked is probed rather than asked again, since a productive request is exactly what leaves a chat phone-only.
+  **Neonize's one exception** (`neonize_bridge/older_history.py`, decided by the maintainer on 2026-11-10): where the history says the rest is on the phone (whatsmeow's types 2/3), the bridge answers `phoneOnly` too, except when the user pressed Home — the client then posts `{"userAsked": true}`; the backfill never does. That anchor is asked **once**, marked exhausted as the request goes out (the phone often never answers there), and Home may ask again only once a batch that did come gave an older anchor. A silent phone costs one notification per anchor, never one per Home.
 
 ## The incremental round (`client/core/incremental_sync.py`)
 
@@ -41,3 +60,143 @@ Two rules hold the fix together. Only an explicit `false` refuses: `null` means 
 **Every signal the plan reads is chat-list metadata, so a chat whose metadata goes stale is skipped forever.** `t`, `unreadCount`, `lastReceivedKey`, `lastMessage` — none of them looks at stored content, and when they stop moving for one chat every signal honestly agrees nothing changed. Nothing in the plan can break out of it; `force_full` (F5) was the only escape, which is why issue #181 read as "only F5 fixes it": two chats sat at 200 messages ending 08:35 and 07:34, and F5 moved them to 17:12 and 17:11 by fetching 34 and 7 messages *newer* than anything stored. The history-repair queue could never have covered it — that asks the phone for messages *older* than what is held. So staleness is bounded by time instead: `select_stale_rechecks()` promotes the chats that have gone longest without a real get-messages, `_STALE_RECHECK_PER_ROUND` of them per plan, whatever the markers say, at a cost per round that stays fixed however large the account grows. The last-verified timestamp is persisted, because a chat last fetched before a restart is exactly as stale afterwards.
 
 One trap found wiring that up, worth repeating for anything added to this path: the new bookkeeping first sat inside `sync_chat_messages()`' persist `try`, whose `except` sets `persist_ok = False`. Raising there would report a perfectly good fetch as a **failed** one — and one failed chat holds the whole account in "not synced" (see the sync-completion trap above), so a diagnostic added to help with a resync loop could have caused one.
+
+## Resuming must query messages even when the chat list looks unchanged
+
+A 2026-10-07 report showed a private chat fetched at 09:47, suspension from
+09:58 to 11:00, and no automatic query for that chat during recovery. A manual
+conversation resync at 11:07 fetched 1,047 records and grew the visible list
+from 1,000 to 1,044 rows. Those rows are not proof that all were received
+during sleep, but the automatic planner had not checked the chat at all.
+
+`reset_state_for_resume()` now arms `_resume_message_sync_since`. The planner
+promotes warm chats not queried since that wake, even with unchanged metadata:
+the active conversation first, then recent chats, at most 20 extra per round.
+The existing retry and empty-delta mechanisms still own unsuccessful outcomes.
+This only reads linked-device messages; it never requests phone history or
+wipes the cache. The timestamp recorded in `_chat_verified_at` is the query's
+start, not its completion: a query frozen across suspension must not satisfy
+the recovery. Alias forms count as the same verified chat. Account-data reset
+clears the wake cutoff. `[message-refresh]` logs fetched and new-to-cache ID
+counts, while `[resume-message-sync]` explains promotions and deferred batches.
+
+The follow-up log from 16:27–16:33 that day contained a fresh launch, no wake
+event, and an automatic 50-message query for the affected chat. The diagnostic
+claimed `fetched=200`: it was counting the merged cache, not the response.
+Take the diagnostic snapshot before merging local/late-arriving records, and
+log `newer_than_cache` separately from new IDs: an older-history backfill can
+add hundreds of IDs without recovering any missing recent message. UTC ISO
+timestamps keep the latest returned/cached times readable through PII masking.
+A log truncated by relaunch cannot establish what happened at the prior wake.
+
+## A known LID is an update to the phone chat, not a duplicate to discard
+
+On 2026-10-07 a cached private conversation ended at 2026-10-06 21:26:33 UTC,
+while its linked-device chat held messages through 2026-10-07 23:00:48 UTC.
+The phone/LID mapping was correct. A read-only 200-message query returned
+200 IDs absent from the cache, all newer than its last message.
+
+`get_remote_chats()` saw the incoming `@lid` mapped to an existing phone chat,
+recorded only the server unread count, then continued. This dropped `t` and
+`lastReceivedKey` before the delta planner could see them, so normal startup
+and periodic rounds classified the stale conversation as unchanged. More wake
+rechecks did not repair that merge bug.
+
+Resolve that snapshot to the existing phone key after checking deletion under
+both aliases, then run the ordinary merge. Preserve cached records and the
+activity floor; keep the clear/read guards and the group-participant filter.
+Leave the raw snapshot's `remoteJid` intact for the later metadata passes.
+The same measured snapshot now selects an incremental activity refresh.
+
+## History flags must survive normalization (2026-10-13)
+
+`on_messages_upsert()` distinguishes old `isMdHistoryMsg` replays from current
+messages, but the raw WPPConnect event first passes through
+`_normalize_wpp_message()`. Dropping the flag there bypasses the history
+handler entirely. Test the **raw received-message event**, not just a canonical
+dict passed directly to the dispatcher: the latter never crosses the broken
+boundary. Preserve the existing exception for fresh history-flagged messages
+in a known chat, so real arrivals still notify.
+
+"Known chat" includes a cached phone/LID alias. A fresh flagged LID event
+must not be silenced merely because the chat is stored under its phone JID.
+Historical ingestion also uses the live canonical-message merge before chat
+lookup and persistence, or enabling the flag just splits history into a new
+LID chat. An unresolved history replay does not launch new identity requests;
+its pending DB insert is still tracked so a later LID merge can wait for it.
+
+Unflagged deliveries can also arrive out of order. `on_new_message()` must
+sort such a resident insertion before trimming oldest rows; trimming arrival
+order can evict a newer message for an old replay. The disk insert still runs
+even when that old row falls outside the resident window. The panel's live
+append must independently reject a row older than its visible tail and use
+the existing debounced, focus-preserving refresh. Do not insert an unread
+separator or scroll to that old row. Genuine tail arrivals retain the cheap
+append and keep the separate pagination list aligned; check alignment before
+inserting the unread separator, which itself is not a database message.
+
+The 12 October report described older messages suddenly appearing at the tail
+and returning to their chronological positions after Shift+F5. These mechanisms
+were reproduced with synthetic messages; the incident's message log had been
+replaced by the next launch, so they are not proof of its exact live cause.
+
+## A missing alias cannot conceal an I/O failure (2026-10-13)
+
+When a primary LID lookup says `chat not found` but the known phone fallback
+times out or returns a session/server error, the chat's absence is **unknown**.
+Previously only the primary response decided `chat_absent`, so the failed
+fallback was classified as an answer and could eventually commit the activity
+marker. Require an explicit chat miss under every attempted address before
+entering the existing bounded absence path. A fallback fault remains an I/O
+failure on the durable retry list. Two explicit misses are still nonfatal,
+and a successful fallback still stores the messages; do not restore the old
+global sync loop for real phantom chats.
+
+## get-messages is throttled to two at a time in the pools (issue #379)
+
+Every get-messages is evaluated in the single WhatsApp Web page Puppeteer drives
+over one CDP connection, so firing it from six sync threads (plus the backfill's
+three) buys no speed and costs CPU and memory: a 616-chat account measured 143%
+CPU and 2.98 GB of Chromium over 3,085 calls in an hour. The requests of those
+two pools — and only those — pass through one shared gate
+(`core/api_client.py`: `SYNC_FETCH_CONCURRENCY = 2`, `sync_throttled()`), which
+is the first experiment the maintainers and the reporter agreed on, with the
+launch flags and the V8 heap cap **left out on purpose** (a 350 MB cap was once
+removed because it made the renderer run out of memory during heavy history
+loads). Forced garbage collection came next, as part 2 (below).
+
+- **The pools are unchanged**: same workers, order, run-id checks, retries. A
+  worker waits at the gate for its turn and holds nothing while it waits, and
+  the holder of the gate is inside one HTTP call, so the gate cannot deadlock.
+- **Only `sync_throttled(self.sync_chat_messages)` is throttled** (the sync pool's
+  two submits and the backfill's). Opening a chat, scrolling up, the resync
+  command and the open conversation's reconciliation call `api_get` outside that
+  mark and never queue behind a background sweep. A test fails if any other code
+  submits the chat sync unwrapped.
+- **Waiting is not a fault.** A request's own `timeout` still measures its HTTP
+  call only, so a queue cannot turn into entries in `message_failures` — the one
+  mistake that holds the whole account "not synced". The wait itself is bounded
+  (`SYNC_GATE_MAX_WAIT_SECONDS`): past it the request goes out unthrottled, which
+  is what it did before.
+- To try another number, change the constant; nothing else depends on it.
+
+## One V8 garbage collection after a large batch (issue #379, part 2)
+
+`core/page_heap.py` asks WinZapp's own route (`collect-page-garbage`,
+`api_patches/src/controller/pageHeapController.ts`) for `HeapProfiler.collectGarbage`
+in the WhatsApp Web page. It reclaims only unreferenced objects, so no WhatsApp
+Web state is lost; its cost is a pause of the page's JavaScript.
+
+- **Only between batches.** `collect_after_batch(self)` runs once a sync pass's
+  pool or a backfill pass's pool has finished, never inside a worker and never
+  for anything a person is waiting on.
+- **Only after a large one.** api_client meters the size of the get-messages
+  answers inside the gate (the same calls part 1 throttles); below
+  `GC_PAYLOAD_BYTES` since the last collection nothing happens, so the
+  once-a-minute rounds never trigger one. At most one every
+  `GC_MIN_INTERVAL_SECONDS`, one at a time, on its own thread, only with
+  WhatsApp connected and WinZapp not shutting down.
+- **Never a sync failure.** Whatever the route answers, nothing reaches
+  `message_failures`. A 404 (a server without the route) stops the requests
+  for the rest of the run.
+- The V8 heap cap of part 3 stays out: see the start of this section.

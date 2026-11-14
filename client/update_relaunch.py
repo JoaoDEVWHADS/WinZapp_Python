@@ -1,0 +1,311 @@
+"""Relaunch from the original account after an installer finishes.
+
+The application's waiter inherits its account and elevation, including when
+UAC runs the installer under a different administrator. Guarded installers
+are Job Object children: they must never launch the new application inside
+that job. Their outside waiter requires a terminal result and guardian exit.
+The guardian PID/create-time also keeps older startup gates closed.
+
+The legacy unguarded path keeps its batch fallback when no waiter takes the
+handoff. Both paths suppress relaunch while the original parent is alive,
+after an abort, or when the wait limit expires. A missing terminal receipt
+never authorizes a guarded relaunch. The wait limit is a count, not a clock.
+
+Already-elevated applications keep their intentional elevation. Environment
+cleanup removes WinZapp/Node and PyInstaller child state. Native UAC, Job
+Object, cross-account and packaged behavior require controlled acceptance;
+source tests do not exercise those OS operations. See
+`docs/traps/updater-channels.md` for contracts and remaining limits.
+"""
+
+import ctypes
+import logging
+import os
+import subprocess
+import time
+from ctypes import wintypes
+
+#: How many times the waiter checks on the installer before giving up
+#: without a relaunch. Each check runs tasklist and then sleeps one second,
+#: so this is at least 30 minutes, somewhat more on a slow machine (a batch
+#: script has no clock it can do arithmetic on without parsing the
+#: locale-formatted %TIME%). An update finishes in minutes; this only bounds
+#: the case where the script was killed and its pid went to another cmd.exe.
+WAITER_PASSES = 30 * 60
+
+#: Variables WinZapp itself puts into os.environ for its Node
+#: (wpp_server._start_wpp_background). A fresh start has none of them, so
+#: the relaunched WinZapp does not get them either.
+WINZAPP_NODE_VARIABLES = (
+    "AUTHENTICATION_API_KEY",
+    "WPP_LID_MODE",
+    "PORT",
+    "PUPPETEER_CACHE_DIR",
+    "WINZAPP_INSTALLATION_ID",
+    "WINZAPP_INSTANCE_ID",
+    "WINZAPP_USER_DATA_DIR",
+    "WINZAPP_TOKEN_STORE_DIR",
+)
+
+
+class SHELLEXECUTEINFOW(ctypes.Structure):
+    """shellapi.h's SHELLEXECUTEINFOW (112 bytes on 64-bit Windows,
+    pinned by tests/test_update_relaunch.py there)."""
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("fMask", wintypes.ULONG),
+        ("hwnd", wintypes.HWND),
+        ("lpVerb", wintypes.LPCWSTR),
+        ("lpFile", wintypes.LPCWSTR),
+        ("lpParameters", wintypes.LPCWSTR),
+        ("lpDirectory", wintypes.LPCWSTR),
+        ("nShow", ctypes.c_int),
+        ("hInstApp", wintypes.HINSTANCE),
+        ("lpIDList", ctypes.c_void_p),
+        ("lpClass", wintypes.LPCWSTR),
+        ("hkeyClass", wintypes.HKEY),
+        ("dwHotKey", wintypes.DWORD),
+        ("hIconOrMonitor", wintypes.HANDLE),
+        ("hProcess", wintypes.HANDLE),
+    ]
+
+
+def relaunch_environment(environment) -> dict:
+    """The environment a relaunched WinZapp starts from: WinZapp's own,
+    minus what this run of it added.
+
+    The old elevated relaunch got a fresh environment from UAC; a child of
+    this process would otherwise carry the PyInstaller bootloader's
+    _PYI_* state, which a onefile build reads as "I am a child of that
+    run" and would reuse its extraction folder, deleted by then.
+    PYINSTALLER_RESET_ENVIRONMENT=1 (PyInstaller 6.9+, the build pins
+    6.21) tells the bootloader to start as a new top-level instance; the
+    _PYI_* names are dropped as well, in case it is ignored."""
+    drop = {name.upper() for name in WINZAPP_NODE_VARIABLES}
+    child = {
+        name: value for name, value in environment.items()
+        if not name.upper().startswith("_PYI_") and name.upper() not in drop
+    }
+    child["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return child
+
+
+def relaunch_lines(exe_path: str, log_path: str, handoff_path: str = "",
+                   indent: str = "", waiter_required: bool = False,
+                   relaunch: bool = True, notice: str = "") -> str:
+    """The installer script's relaunch of WinZapp.
+
+    Without *handoff_path* (the non-elevated install) it is the original
+    single line. With it, the script leaves the relaunch to the waiter when
+    the marker exists, relaunches by itself otherwise, and then tells the
+    waiter it is done."""
+    if not relaunch:
+        # Installed on exit (update_on_exit.py): the user quit, so the app
+        # stays closed and the new version runs the next time they open it.
+        # *notice* (core/update_exit_notice.py) tells them it is over.
+        from core.update_exit_notice import indented
+        return (f'{indent}>> "{log_path}" echo installed on exit - not relaunching WinZapp\n'
+                + indented(notice, indent))
+    start = f'if exist "{exe_path}" start "" /normal "{exe_path}"\n'
+    if not handoff_path:
+        return indent + start
+    return (
+        f'{indent}if exist "{handoff_path}" (\n'
+        f'{indent}    >> "{log_path}" echo relaunch left to the waiter running without administrator rights\n'
+        f'{indent}    echo done> "{handoff_path}.done"\n'
+        f"{indent}) else (\n"
+        + (f'{indent}    >> "{log_path}" echo relaunch waiter unavailable - manual launch required\n'
+           if waiter_required else f"{indent}    {start}") +
+        f"{indent})\n"
+    )
+
+
+def build_relaunch_waiter_script(installer_pid: int, exe_path: str, log_path: str,
+                                 handoff_path: str,
+                                 passes: int = WAITER_PASSES, parent_pid: int = 0,
+                                 completion_path: str = "", installer_image: str = "cmd.exe",
+                                 recovery_path: str = "", relaunch: bool = True,
+                                 notice=None) -> str:
+    """The waiter's batch text. Pure — every path is already console-safe.
+    *notice* (an ExitNotice) is shown by the guarded waiter of an install on
+    exit; the legacy script shows its own."""
+    done_path = handoff_path + ".done"
+    abort_path = handoff_path + ".abort"
+    if installer_image not in ("cmd.exe", "powershell.exe"):
+        raise ValueError("invalid installer process image")
+    if completion_path:
+        from core.update_recovery import build_guarded_waiter
+        return build_guarded_waiter(installer_pid, exe_path, log_path, handoff_path,
+                                     passes, parent_pid, completion_path, installer_image,
+                                     recovery_path, relaunch=relaunch, notice=notice)
+    # Also fail closed if the abort marker could not be written. A PID reused
+    # by an unrelated process may suppress a relaunch, never create a duplicate.
+    parent_check = (
+        f'tasklist /FI "PID eq {parent_pid}" 2>NUL | find "{parent_pid}" >NUL\n'
+        "if not errorlevel 1 goto ABORT\n"
+        if parent_pid else ""
+    )
+    return (
+        "@echo off\n"
+        "setlocal EnableDelayedExpansion\n"
+        # First, before anything else: the marker is what tells both this
+        # process and the elevated script that a waiter is running.
+        f'echo waiting> "{handoff_path}"\n'
+        f'if not exist "{handoff_path}" exit /b 1\n'
+        "set /a WAITED=0\n"
+        ":WAIT\n"
+        f'if exist "{abort_path}" goto ABORT\n'
+        f'if exist "{done_path}" goto RELAUNCH\n'
+        f'tasklist /FI "PID eq {installer_pid}" /FI "IMAGENAME eq {installer_image}" 2>NUL | find "{installer_pid}" >NUL\n'
+        "if errorlevel 1 goto RELAUNCH\n"
+        ":WAIT_AGAIN\n"
+        "set /a WAITED+=1\n"
+        f"if !WAITED! GEQ {passes} goto GAVE_UP\n"
+        "timeout /t 1 /nobreak >NUL\n"
+        "goto WAIT\n"
+        ":GAVE_UP\n"
+        f'if exist "{abort_path}" goto ABORT\n'
+        + parent_check +
+        # The marker stays: a script still running must not relaunch too.
+        f'>> "{log_path}" echo installer wait limit reached - not relaunching over a running copy\n'
+        'del "%~f0"\n'
+        "goto :EOF\n"
+        +
+        ":RELAUNCH\n"
+        f'if exist "{abort_path}" goto ABORT\n'
+        + parent_check
+        + (f'>> "{log_path}" echo installer finished - relaunching WinZapp without administrator rights\n'
+           f'if exist "{exe_path}" start "" /normal "{exe_path}"\n' if relaunch else
+           f'>> "{log_path}" echo installer finished - installed on exit, not relaunching\n') +
+        f'del "{handoff_path}" >NUL 2>&1\n'
+        f'del "{done_path}" >NUL 2>&1\n'
+        'del "%~f0"\n'
+        "goto :EOF\n"
+        ":ABORT\n"
+        f'>> "{log_path}" echo installer aborted while WinZapp was still running - not relaunching\n'
+        f'del "{handoff_path}" >NUL 2>&1\n'
+        f'del "{done_path}" >NUL 2>&1\n'
+        f'del "{abort_path}" >NUL 2>&1\n'
+        'del "%~f0"\n'
+        "exit /b 1\n"
+    )
+
+
+def start_relaunch_waiter(bat_path: str, installer_pid, exe_path: str, log_path: str,
+                          handoff_path: str, write_script, popen=None,
+                          appear_timeout: float = 10.0, parent_pid: int = 0,
+                          completion_path: str = "", installer_image: str = "cmd.exe",
+                          recovery_path: str = "", relaunch: bool = True,
+                          notice=None) -> bool:
+    """Start the non-elevated waiter and wait for it to take the relaunch
+    over (its marker). Returns True when it did. Every other outcome leaves
+    no marker and no waiter. The legacy script can use its direct fallback;
+    a guarded caller must abort before committing installation.
+
+    *write_script* is updater._write_installer_script (OEM code page)."""
+    if not installer_pid:
+        logging.warning("Auto-updater: installer PID unavailable; cannot prepare "
+                        "the relaunch handoff")
+        return False
+    waiter_path = bat_path[:-len(".bat")] + "_relaunch.bat"
+    script = build_relaunch_waiter_script(installer_pid, exe_path, log_path, handoff_path,
+                                          parent_pid=parent_pid, completion_path=completion_path,
+                                          installer_image=installer_image, recovery_path=recovery_path,
+                                          relaunch=relaunch, notice=notice)
+    if not write_script(waiter_path, script):
+        return False
+    popen = popen or subprocess.Popen
+    try:
+        # Same flags as the non-elevated installer, for the same code-page
+        # reason; this process is the user's own, so the waiter and the
+        # WinZapp it starts are too.
+        proc = popen(["cmd.exe", "/c", waiter_path],
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                     env=relaunch_environment(os.environ))
+    except OSError:
+        logging.exception("Auto-updater: could not start the relaunch waiter")
+        _remove_quietly(waiter_path)
+        return False
+    deadline = time.monotonic() + appear_timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(handoff_path):
+            logging.info("Auto-updater: relaunch waiter started for installer pid %s",
+                         installer_pid)
+            return True
+        time.sleep(0.05)
+    logging.error("Auto-updater: the relaunch waiter did not start in %ss; "
+                  "stopping the waiter without completing the handoff",
+                  appear_timeout)
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        logging.exception("Auto-updater: could not stop the relaunch waiter")
+    # It may have created the marker between the last look and the kill.
+    if not _remove_quietly(handoff_path):
+        logging.error("Auto-updater: could not remove the relaunch marker; "
+                      "WinZapp may not be relaunched after the update")
+    _remove_quietly(waiter_path)
+    return False
+
+
+def _remove_quietly(path: str) -> bool:
+    """Remove *path*; True when it is gone (or never existed)."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logging.exception("Auto-updater: could not remove %s", os.path.basename(path))
+        return False
+    return True
+
+
+def run_elevated(bat_path: str):
+    """Run ``cmd.exe /c <bat_path>`` through UAC. Returns ``(launched, pid)``.
+
+    ShellExecuteExW rather than ShellExecuteW because only the Ex form hands
+    back the process, and the waiter needs its pid. launched is False when
+    the user declined the prompt (ERROR_CANCELLED) or the call failed; pid is
+    None when Windows returned no process handle, and then there is no
+    waiter and the script relaunches WinZapp itself."""
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SEE_MASK_NOASYNC = 0x00000100
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.lpVerb = "runas"
+    info.lpFile = "cmd.exe"
+    info.lpParameters = f'/c "{bat_path}"'
+    info.nShow = 0  # SW_HIDE, as the ShellExecuteW call this replaces
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = (ctypes.POINTER(SHELLEXECUTEINFOW),)
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        logging.warning(
+            "Auto-updater: ShellExecuteExW('runas', ...) failed or was "
+            "declined by the user (error=%s); batch installer was not launched.",
+            ctypes.get_last_error(),
+        )
+        return False, None
+    if not info.hProcess:
+        return True, None
+    kernel32 = None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetProcessId.argtypes = (wintypes.HANDLE,)
+        kernel32.GetProcessId.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        return True, (kernel32.GetProcessId(info.hProcess) or None)
+    except Exception:
+        # ShellExecuteExW already succeeded. Missing PID metadata only means
+        # no waiter, never permission to release the installer's token.
+        logging.exception("Auto-updater: installer launched but its PID is unavailable")
+        return True, None
+    finally:
+        if kernel32 is not None:
+            try:
+                kernel32.CloseHandle(info.hProcess)
+            except Exception:
+                logging.exception("Auto-updater: could not close the installer process handle")

@@ -31,14 +31,13 @@ same way, and one whose placeholders are not all supplied fails identically.
 """
 
 import ast
-import json
 import pathlib
 import re
 
 import pytest
 
 CLIENT = pathlib.Path(__file__).resolve().parents[1] / "client"
-LANGUAGES = CLIENT / "languages"
+from tests.locales import load_strings, registered_locale_codes
 
 # Directories under client/ that are not WinZapp's own Python: the vendored
 # WPPConnect Server clone and the portable Node runtime (both git-ignored, both
@@ -56,10 +55,8 @@ def _placeholders_by_key():
     failure here.
     """
     found: dict[str, set[str]] = {}
-    for path in LANGUAGES.glob("*.json"):
-        if path.stem == "language_map":  # {code: display name}, not translations
-            continue
-        for key, text in json.loads(path.read_text(encoding="utf-8")).items():
+    for locale in registered_locale_codes():
+        for key, text in load_strings(locale).items():
             if isinstance(text, str):
                 found.setdefault(key, set()).update(re.findall(r"\{([^{}]*)\}", text))
     return found

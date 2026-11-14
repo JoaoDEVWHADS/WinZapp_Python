@@ -109,11 +109,8 @@ def test_checksum_parser_ignores_manifest_metadata_lines(tmp_path, monkeypatch):
         f"{digest}  WinZapp.zip\n"
     )
     monkeypatch.setattr(
-        updater.requests,
-        "get",
-        lambda *a, **kw: SimpleNamespace(
-            text=manifest, raise_for_status=lambda: None
-        ),
+        updater.tls_trust, "get",
+        lambda *a, **kw: SimpleNamespace(content=manifest, text=manifest.decode(), raise_for_status=lambda: None),
     )
     ok, detail = updater._verify_sha256sums(
         str(zip_path), "WinZapp.zip", "https://x/SHA256SUMS.txt"
@@ -224,18 +221,55 @@ def test_updater_checksum_boundary_is_independent_of_signature_helpers(
     zip_path = tmp_path / "WinZapp.zip"
     zip_path.write_bytes(b"the release")
     digest = hashlib.sha256(b"the release").hexdigest()
-    manifest = f"{digest}  WinZapp.zip\n"
-    monkeypatch.setattr(
-        updater.requests,
-        "get",
-        lambda *a, **kw: SimpleNamespace(
-            text=manifest, raise_for_status=lambda: None
-        ),
+    manifest = _manifest(version, body=f"{digest}  WinZapp.zip\r\n")
+    return zip_path, manifest, signing.sign_manifest(manifest, signer).encode("ascii")
+
+
+def test_updater_installs_a_correctly_signed_release(tmp_path, keys, monkeypatch):
+    zip_path, manifest, sig = _signed_zip_release(tmp_path, keys, "1.2.0.0", keys.stable)
+    monkeypatch.setattr(updater.tls_trust, "get", _Responses({"https://x/sums": manifest, "https://x/sig": sig}))
+    ok, detail = updater._verify_sha256sums(
+        str(zip_path), "WinZapp.zip", "https://x/sums", signature_url="https://x/sig",
+        expected_version="1.2.0.0", stable_keys=[keys.stable_pub], alpha_keys=[keys.alpha_pub],
     )
 
-    assert updater._verify_sha256sums(
-        str(zip_path), "WinZapp.zip", "https://x/SHA256SUMS.txt"
-    ) == (True, "")
+
+def test_updater_refuses_an_unsigned_release_once_keys_exist(tmp_path, keys, monkeypatch):
+    zip_path, manifest, _ = _signed_zip_release(tmp_path, keys, "1.2.0.0", keys.stable)
+    monkeypatch.setattr(updater.tls_trust, "get", _Responses({"https://x/sums": manifest}))
+    ok, _ = updater._verify_sha256sums(
+        str(zip_path), "WinZapp.zip", "https://x/sums", expected_version="1.2.0.0",
+        stable_keys=[keys.stable_pub], alpha_keys=[keys.alpha_pub],
+    )
+    assert not ok
+
+
+def test_updater_refuses_a_release_with_no_manifest_once_keys_exist(tmp_path, keys):
+    ok, _ = updater._verify_sha256sums(
+        str(tmp_path / "WinZapp.zip"), "WinZapp.zip", "", expected_version="1.2.0.0",
+        stable_keys=[keys.stable_pub], alpha_keys=[keys.alpha_pub],
+    )
+    assert not ok
+
+
+def test_updater_still_checks_the_hash_of_a_signed_manifest(tmp_path, keys, monkeypatch):
+    zip_path, manifest, sig = _signed_zip_release(tmp_path, keys, "1.2.0.0", keys.stable)
+    zip_path.write_bytes(b"swapped after signing")
+    monkeypatch.setattr(updater.tls_trust, "get", _Responses({"https://x/sums": manifest, "https://x/sig": sig}))
+    ok, detail = updater._verify_sha256sums(
+        str(zip_path), "WinZapp.zip", "https://x/sums", signature_url="https://x/sig",
+        expected_version="1.2.0.0", stable_keys=[keys.stable_pub], alpha_keys=[keys.alpha_pub],
+    )
+    assert not ok and "mismatch" in detail.lower()
+
+
+def test_signature_asset_is_found_by_name():
+    assets = [
+        {"name": "SHA256SUMS.txt", "browser_download_url": "https://x/SHA256SUMS.txt"},
+        {"name": "SHA256SUMS.txt.sig", "browser_download_url": "https://x/SHA256SUMS.txt.sig"},
+    ]
+    assert updater._find_signature_asset(assets) == "https://x/SHA256SUMS.txt.sig"
+    assert updater._find_sha256sums_asset(assets) == "https://x/SHA256SUMS.txt"
 
 
 # ── The signing script ───────────────────────────────────────────────────────

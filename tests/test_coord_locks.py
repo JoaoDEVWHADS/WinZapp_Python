@@ -12,7 +12,9 @@ import pytest
 
 from coord_locks import (
     app_settings_lock,
+    canonical_dir,
     LockTimeout,
+    models_lock,
     NamedLock,
     node_lock,
     node_port_lock,
@@ -147,6 +149,40 @@ def test_factory_names_differ(tmp_path):
         updater_lock(gd).name,
         sessions_lock(gd).name,
     }
+    # The Whisper models directory is its own critical section. It is the one
+    # factory that does NOT share the (global_dir, timeout) shape of the others,
+    # and deliberately: the models root is user-chosen and movable, so the lock
+    # is KEYED on that root, while the lock FILE still has to live in the global
+    # dir — writing it inside the user's own folder would litter it and defeat
+    # model_store's "leave no empty directory of ours behind" cleanup. Hence two
+    # arguments here rather than one.
+    models_root = os.path.join(gd, "whisper_models")
+    assert models_lock(models_root, gd).name not in {
+        registry_lock(gd).name,
+        node_lock(gd).name,
+        updater_lock(gd).name,
+        sessions_lock(gd).name,
+        node_port_lock(gd).name,
+        app_settings_lock(gd).name,
+    }
+
+
+def test_models_lock_keys_two_spellings_of_one_dir_together(tmp_path):
+    """Windows folds case and resolves junctions/subst drives; abspath does
+    not. Two spellings of one models directory must share one lock, or two
+    processes would write the same model.bin.part under different mutexes."""
+    gd = str(tmp_path / "global")
+    root = str(tmp_path / "Whisper_Models")
+    other_spelling = str(tmp_path / "whisper_models")
+    assert canonical_dir(root) == canonical_dir(other_spelling) or os.name != "nt"
+    if canonical_dir(root) == canonical_dir(other_spelling):
+        assert models_lock(root, gd).name == models_lock(other_spelling, gd).name
+    # Different roots stay independent either way, and the lock file never
+    # lands inside the root it guards.
+    assert (
+        models_lock(root, gd).name != models_lock(str(tmp_path / "elsewhere"), gd).name
+    )
+    assert not models_lock(root, gd).lock_path.startswith(root)
 
 
 def test_same_global_dir_same_name(tmp_path):

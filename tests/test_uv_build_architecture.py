@@ -15,6 +15,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -115,6 +117,10 @@ class TestProjectCommands:
             "build-onefile": "build_onefile",
             "build-installer": "build_installer",
             "test": "test",
+            "translations-update": "translations_update",
+            "translations-check": "translations_check",
+            "translations-check-draft": "translations_check_draft",
+            "translations-compile": "translations_compile",
         }.items():
             assert scripts[name] == f"winzapp_tools.cli:{target}"
             assert callable(getattr(cli, target))
@@ -131,6 +137,18 @@ class TestProjectCommands:
         cmd, cwd = cli.command_for("build_onefile", ["--help"], python="py")
         assert cwd == ROOT
         assert cmd == ["py", str(ROOT / "build.py"), "--onefile", "--help"]
+
+    @pytest.mark.parametrize("command, expected", [
+        ("translations_update", ("update",)),
+        ("translations_check", ("check",)),
+        ("translations_check_draft", ("check", "--allow-incomplete")),
+        ("translations_compile", ("compile",)),
+    ])
+    def test_translation_shortcuts_select_the_expected_workflow(self, monkeypatch, command, expected):
+        seen = []
+        monkeypatch.setattr(cli, "_translations", lambda *args: seen.append(args) or 0)
+        assert getattr(cli, command)() == 0
+        assert seen == [expected]
 
 
 def test_build_script_hands_over_before_touching_site_packages():

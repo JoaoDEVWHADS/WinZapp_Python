@@ -128,7 +128,7 @@ class TestAppendPathsCallIt:
         # _apply_message_edit().
         "_send_new_text_message",
         "_send_voice_message",
-        "_on_send_attachment",
+        "_send_attachment_file",
         "_on_attach_contact",
     ])
     def test_every_append_path_clears_the_placeholder_first(self, method_name):

@@ -82,6 +82,11 @@ def _stub(main_window):
     stub._ensure_media_on_disk = types.MethodType(
         ConversationsPanel._ensure_media_on_disk, stub
     )
+    # The download half, split out so the transcription can use it without
+    # the report; bound under its real name because the method calls it.
+    stub._download_media_to_disk = types.MethodType(
+        ConversationsPanel._download_media_to_disk, stub
+    )
     return stub
 
 

@@ -61,6 +61,7 @@ from core.message_queue import MessageQueue, PendingMessage
 from core.websocket_client import WebSocketClient
 from main import MainWindow
 from ui.conversations import ConversationsPanel
+from tests.god_modules import patch_conversations_global
 
 
 CHAT = "5511999999999@s.whatsapp.net"
@@ -678,7 +679,7 @@ class TestACancelThatLandsInsideAnOutcomeBranch:
         """The consequence the report exists to prevent, end to end: A is
         deleted while its send is failing, then B is sent and echoes back. The
         echo must resolve B, not the record A left behind."""
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         pending_a = _pending_text("loc-A", "primeira")
         pending_b = _pending_text("loc-B", "segunda")
         main_window = _EchoMainWindow(records=[pending_a, pending_b])
@@ -835,6 +836,7 @@ class _EchoMainWindow(_MainWindow):
 
     def __init__(self, records):
         super().__init__()
+        self._lid_mapping_lock = threading.RLock()
         self.chats = {CHAT: {"remoteJid": CHAT, "unreadCount": 0, "t": 0,
                              "messages": {"messages": {"records": records}}}}
         self._lid_to_phone = {}
@@ -1036,8 +1038,7 @@ class TestCancellingAPendingRow:
         voice.mkdir()
         (tmp_path / "media").mkdir()
         open(str(voice / "loc-1.msv"), "wb").close()
-        monkeypatch.setattr(
-            conversations, "data_path", lambda name: str(tmp_path / name)
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path / name)
         )
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
@@ -1053,7 +1054,7 @@ class TestCancellingAPendingRow:
         assert os.listdir(str(voice)) == []
 
     def test_a_cancellation_that_lost_holds_the_record(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1085,7 +1086,7 @@ class TestReleasingAHeldCancellation:
         """_cancel_pending_message() returns early when the record is not in the
         chat, without creating the messages block the release path then writes
         to. Reachable, and a KeyError here happens on the UI thread."""
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         main_window = _EchoMainWindow(records=[])
         main_window.chats[CHAT] = {"remoteJid": CHAT}      # no messages block
         panel = _make_panel(main_window)
@@ -1096,7 +1097,7 @@ class TestReleasingAHeldCancellation:
         assert main_window.chats[CHAT]["messages"]["messages"]["records"] == []
 
     def test_a_dropped_message_is_deleted_for_real(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1113,7 +1114,7 @@ class TestReleasingAHeldCancellation:
 
 class TestCompletingACancellationThatLost:
     def test_the_delivered_message_is_revoked(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1135,7 +1136,7 @@ class TestCompletingACancellationThatLost:
         assert msg_key["fromMe"] is True
 
     def test_a_successful_revoke_is_announced_and_leaves_nothing(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1155,7 +1156,7 @@ class TestCompletingACancellationThatLost:
     def test_a_failed_revoke_puts_the_row_back_under_the_real_id(self, monkeypatch, tmp_path):
         """A delivered message the app pretends to have cancelled is worse than
         a cancellation that visibly failed."""
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1173,8 +1174,28 @@ class TestCompletingACancellationThatLost:
         assert main_window.records() == [msg]
         assert main_window.spoken == ["cancelled_message_still_sent"]
 
+    def test_a_restored_reply_is_stored_without_its_recovery_copy(self, monkeypatch, tmp_path):
+        """Delivered after all: the reply's draft copy is not saved to the DB."""
+        from core.reply_failure import REPLY_DRAFT_KEYS
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
+        msg = _pending_text("loc-1", "oi")
+        msg.update({"_reply_draft_text": "oi", "_reply_draft_mentions": [],
+                    "_reply_draft_mention_names": {}})
+        main_window = _EchoMainWindow(records=[msg])
+        stored = []
+        main_window.db.insert_message = lambda jid, m: stored.append(dict(m))
+        main_window.message_queue = _FakeQueue(result=False)
+        panel = _make_panel(main_window, msg)
+        ConversationsPanel._cancel_pending_message(panel, msg, "loc-1")
+
+        ConversationsPanel._finish_cancelled_message_delivery(
+            panel, "loc-1", "REAL_A", False
+        )
+
+        assert stored and not any(key in stored[-1] for key in REPLY_DRAFT_KEYS)
+
     def test_a_restored_row_drops_a_quote_that_never_went_out(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         msg["contextInfo"] = {"quotedMessage": {"conversation": "citada"}}
         main_window = _EchoMainWindow(records=[msg])
@@ -1190,7 +1211,7 @@ class TestCompletingACancellationThatLost:
 
     def _delivered_without_an_id(self, monkeypatch, tmp_path):
         """The {"ok": True}-with-no-id answer, restored and back in the chat."""
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg = _pending_text("loc-1", "oi")
         main_window = _EchoMainWindow(records=[msg])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1239,7 +1260,7 @@ class TestCompletingACancellationThatLost:
 
         _mark_message_unconfirmed() already answers this for a send that was
         never cancelled, and this mirrors it."""
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         msg_a = _pending_text("loc-A", "primeira")
         main_window = _EchoMainWindow(records=[msg_a])
         main_window.message_queue = _FakeQueue(result=False)
@@ -1266,7 +1287,7 @@ class TestCompletingACancellationThatLost:
     def test_a_failed_revoke_with_no_record_left_still_says_so(self, monkeypatch, tmp_path):
         """The row cannot come back (the stash entry is gone), but the user must
         not be left believing a delivered message was cancelled."""
-        monkeypatch.setattr(conversations, "data_path", lambda name: str(tmp_path))
+        patch_conversations_global(monkeypatch, "data_path", lambda name: str(tmp_path))
         main_window = _EchoMainWindow(records=[])
         panel = _make_panel(main_window)
 

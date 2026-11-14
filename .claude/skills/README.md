@@ -11,8 +11,8 @@ primeiro vem junto com o `git clone`.
 ### Skills: ninguém invoca, elas aparecem
 
 Uma skill **carrega sozinha** quando a tarefa bate com a descrição dela. Mexeu
-em `client/languages/`, a `i18n-ui-string` entra em cena e o agente já sabe dos
-cinco arquivos, do `&&` e dos placeholders — você não precisa lembrar de nada.
+em `translations/` ou `client/languages/`, a `i18n-ui-string` entra em cena e o agente já sabe dos
+catálogos de todos os idiomas registrados, do `&&` e dos placeholders — você não precisa lembrar de nada.
 Para forçar, digite `/nome-da-skill`.
 
 ### Agentes: você chama pelo nome
@@ -52,17 +52,13 @@ O `CLAUDE.md` é carregado inteiro em toda sessão, então guarda só o que vale
 para qualquer tarefa. A história por trás de cada regra — o incidente medido,
 as hipóteses descartadas, os trechos de log — fica em `docs/traps/` (e o
 material de referência em `docs/reference/`). Dois mecanismos levam o agente
-até lá sem custar tokens em toda sessão:
+até lá sem custar tokens em toda sessão: cada `.claude/rules/<area>.md` tem
+`paths:` no frontmatter e só entra no contexto quando o agente toca num
+arquivo que bate no glob. O corpo é a regra em três linhas e o ponteiro para o
+trap completo.
 
-- **`.claude/rules/<area>.md`** — cada um tem `paths:` no frontmatter e só
-  entra no contexto quando o agente toca num arquivo que bate no glob. O corpo
-  é a regra em três linhas e o ponteiro para o trap completo.
-- **A tabela no fim do `CLAUDE.md`** — "antes de mexer em X, leia o trap
-  daquela área". O agente lê com `Read` quando a tarefa pede.
-
-Escrevendo um post-mortem novo: vai para `docs/traps/`, ganha uma regra em
-`.claude/rules/` com os `paths` que ele protege, e uma linha na tabela. Não
-volta para o `CLAUDE.md`. `tests/test_claude_md_matches_reality.py` confere
+Escrevendo um post-mortem novo: vai para `docs/traps/` e ganha uma regra em
+`.claude/rules/` com os `paths` que ele protege. Não volta para o `CLAUDE.md`. `tests/test_claude_md_matches_reality.py` confere
 que todo caminho citado nesses arquivos existe.
 
 ### O fluxo de uma feature nova
@@ -95,12 +91,13 @@ próprio agente quando a tarefa se encaixa na descrição — não é preciso in
 
 | skill | quando ela vale |
 | --- | --- |
-| `i18n-ui-string` | Qualquer texto que o usuário lê ou o leitor de tela fala. `I18n.t()` é `translations.get(key, key)`, sem fallback por chave: uma chave faltando vira o nome cru dela na tela, lido em voz alta. Cobre os cinco locales, `&` como mnemônico do wx (um `&` literal se escreve `&&`) e placeholders `{}`. |
+| `i18n-ui-string` | Qualquer texto que o usuário lê ou o leitor de tela fala. `I18n.t()` é `translations.get(key, key)`, sem fallback por chave: uma chave faltando vira o nome cru dela na tela, lido em voz alta. Cobre todos os idiomas de `language_map.json`, `&` como mnemônico do wx (um `&` literal se escreve `&&`) e placeholders `{}`. |
 | `write-test` | Teste novo ou estendido. `MainWindow` é `wx.Frame` e `ConversationsPanel` é `wx.Panel`: nenhum dos dois instanciável sem `wx.App`, então ou a lógica sai para nível de módulo, ou o método real é ligado a um stub. Também as fixtures do `conftest.py` e o `asyncio_mode=auto` (teste async é só `async def`, sem decorator). |
 | `wppconnect-patch` | Conserto do lado Node. São três mecanismos de patch diferentes, cada um com suas listas; escolher o errado é silencioso, e a mudança some no próximo `setup_api.py`. Nunca editar `client/api/` direto. |
 | `accessible-ui` | Qualquer mexida em `client/ui/`, `status_panel.py` ou no wx do `main.py`. Controles padrão do wx, toda fala por `speak_output`, `Freeze`/`Thaw` com `try/finally` em volta de mutação de lista, e o limite de 511 caracteres do SysListView32. |
+| `extract-from-god-file` | Extrair lógica testável ou dividir um módulo de mixin que excedeu o orçamento, sem mudar comportamento. Os índices dos pacotes mostram a responsabilidade de cada módulo. |
 
-As quatro estão escritas em inglês, para casar com o `CLAUDE.md` e o `AGENTS.md`
+As skills do projeto estão escritas em inglês, para casar com o `CLAUDE.md` e o `AGENTS.md`
 — são documentos do mesmo tipo, dirigidos ao agente.
 
 ### Escrevendo uma skill nova
@@ -195,7 +192,7 @@ exige um comando que fique vermelho *neste* bug antes de teorizar.
 
 **Onde o `winzapp-reviewer` entra:** o `/code-review` do Matt cobre estrutura
 e spec; o nosso cobre o que quebra *este* repositório (JID, sync gate, echo
-matching, cinco locales, leitor de tela, mecanismo de patch). Não são
+matching, todos os idiomas, leitor de tela, mecanismo de patch). Não são
 alternativos — rode os dois antes de abrir PR, o do Matt primeiro.
 
 `/improve-codebase-architecture` acha candidatos a extração; a execução é o
@@ -229,8 +226,12 @@ Vale saber antes de alguém pedir "roda o code-review" e receber outra coisa:
 
 ---
 
-## O que ainda não temos
+## Testes: local e CI
 
-Sem CI em `pull_request`: os testes só rodam **depois** do merge, no build alpha.
-Enquanto isso, a aprovação humana é o único portão antes do merge — e é por isso
-que rodar `pytest` local antes de abrir PR não é opcional.
+O `ci.yml` roda a suíte completa em todo PR para a `main`, em 4 shards com
+`-n auto`. Numa sessão local rode só os arquivos de teste do que você mudou
+(`uv run pytest tests/test_x.py`); a suíte inteira (`uv run pytest`, serial, no
+máximo uma execução local, um agente por vez) fica para mudanças transversais.
+Numa sessão na nuvem dá para rodar em paralelo (`-n auto`, `--shard K/N`) e
+com vários agentes. Os testes
+`load` só rodam no CI ou com `--run-load`. Nunca `--run-wx-gui`.

@@ -112,15 +112,36 @@ def _script(install=r"C:\WinZapp", source=r"C:\tmp\ext"):
 
 
 class TestInstallerScript:
+    def test_parent_wait_is_bounded_and_timeout_never_copies_kills_or_relaunches(self):
+        s = _script()
+        loop = s.split(":WAIT\n", 1)[1].split("xcopy", 1)[0]
+        assert "if !PARENT_WAIT_SECONDS! GEQ 300 goto PARENT_TIMEOUT" in loop
+        abort = s.split(":PARENT_TIMEOUT\n", 1)[1]
+        assert "WinZapp did not exit" in abort and "exit /b 1" in abort
+        assert not any(cmd in abort for cmd in ("xcopy", "taskkill", 'start ""'))
+
+    def test_parent_timeout_signals_the_elevated_waiter_to_abort(self):
+        s = updater._build_installer_script("source", "install", "exe", "log", "failed",
+                                             pid=42, api_port=6300, relaunch_handoff="handoff")
+        abort = s.split(":PARENT_TIMEOUT\n", 1)[1]
+        assert 'echo aborted> "handoff.abort"' in abort
+        assert "echo done" not in abort and 'start ""' not in abort
+
     def test_it_copies_from_the_source_to_the_install_dir(self):
         s = _script()
         assert r'xcopy /E /Y /I /H "C:\tmp\ext\*" "C:\WinZapp\"' in s
 
     def test_it_waits_for_the_pid_and_frees_the_api_port(self):
-        s = _script()
+        s = updater._build_installer_script(
+            r"C:\tmp\ext", r"C:\WinZapp", r"C:\WinZapp\WinZapp.exe",
+            r"C:\WinZapp\update_install.log", r"C:\WinZapp\update_failed.marker",
+            pid=4242, api_port=6300, node_pids=[777],
+        )
         assert '"PID eq 4242"' in s
-        assert ":6300" in s
-        assert ":5433" in s
+        assert '":6300"' in s and "taskkill /F /PID 777" in s
+        # The PostgreSQL port is no longer touched: nothing of WinZapp's
+        # listens there (tests/test_update_node_kill.py).
+        assert ":5433" not in s
 
     def test_it_writes_a_log_next_to_the_install(self):
         """The original script recorded nothing anywhere, which is why a user
@@ -172,11 +193,64 @@ class TestInstallerScript:
                   if line.strip().startswith("xcopy ")]
         assert len(copies) == 2 and copies[0] == copies[1]
 
+    def test_an_identical_portable_node_is_not_reopened_for_writing(self):
+        s = _script()
+        compare = (
+            'fc /B "C:\\tmp\\ext\\node\\node.exe" '
+            '"C:\\WinZapp\\node\\node.exe"'
+        )
+        hold = (
+            'move /Y "C:\\tmp\\ext\\node\\node.exe" '
+            '"C:\\tmp\\ext.node.exe.winzapp-unchanged"'
+        )
+        restore = (
+            'move /Y "C:\\tmp\\ext.node.exe.winzapp-unchanged" '
+            '"C:\\tmp\\ext\\node\\node.exe"'
+        )
+        first_copy = s.index("xcopy /E /Y /I /H")
+        second_copy = s.index("xcopy /E /Y /I /H", first_copy + 1)
+
+        assert s.index(compare) < s.index(hold) < first_copy
+        assert s.index(restore) > second_copy
+        assert "if not errorlevel 1" in s[s.index(compare):first_copy]
+        assert "node.exe unchanged - skipping locked replacement" in s
+
+    def test_only_an_fc_result_of_exactly_zero_counts_as_identical(self):
+        # fc prints -1 on a syntax error; "if not errorlevel 1" is true for it.
+        s = _script()
+        compare = s.index(r'fc /B "C:\tmp\ext\node\node.exe"')
+        hold = s.index("move /Y", compare)
+        assert 'if "!ERRORLEVEL!"=="0" (' in s[compare:hold]
+
+    def test_a_failed_restore_of_the_held_node_is_logged(self):
+        s = _script()
+        restore = s.index(
+            r'move /Y "C:\tmp\ext.node.exe.winzapp-unchanged" '
+            r'"C:\tmp\ext\node\node.exe"'
+        )
+        assert "could not restore the held node.exe" in s[restore:restore + 250]
+
+    def test_the_held_node_is_outside_xcopys_source_tree(self):
+        s = _script()
+        assert r'"C:\tmp\ext.node.exe.winzapp-unchanged"' in s
+        assert r'"C:\tmp\ext\node\node.exe.winzapp-unchanged"' not in s
+
+    def test_restoring_the_staged_node_cannot_mask_xcopys_result(self):
+        s = _script()
+        first_copy = s.index("xcopy /E /Y /I /H")
+        second_copy = s.index("xcopy /E /Y /I /H", first_copy + 1)
+        save = s.index("set XCOPY_RESULT=!ERRORLEVEL!", second_copy)
+        restore = s.index("node.exe.winzapp-unchanged", save)
+        reinstate = s.index("cmd /c exit !XCOPY_RESULT!", restore)
+        verdict = s.index('if not "!XCOPY_RESULT!"=="0"', reinstate)
+
+        assert second_copy < save < restore < reinstate < verdict
+
     def test_a_failed_copy_marks_it_and_keeps_the_evidence(self):
         s = _script()
         assert r'echo update failed > "C:\WinZapp\update_failed.marker"' in s
-        # The LAST errorlevel-4 block is the verdict; the first is the retry.
-        start = s.rindex("if errorlevel 4")
+        # Only zero is success, including the no-files/interrupted cases.
+        start = s.index('if not "!XCOPY_RESULT!"=="0"')
         failure_block = s[start:s.index(")\n", start)]
         assert "exit /b 1" in failure_block
         assert 'del "%~f0"' not in failure_block, (
@@ -189,18 +263,16 @@ class TestInstallerScript:
 
     def test_a_successful_copy_relaunches_and_cleans_up(self):
         s = _script()
-        assert r'if exist "C:\WinZapp\WinZapp.exe" start "" "C:\WinZapp\WinZapp.exe"' in s
-        # The script now has a later OTHER_ACCOUNT_TIMEOUT error branch, so
-        # self-deletion is no longer literally the final line of the file.
-        # It must still happen on the successful copy path, before that path
-        # jumps over the failure-only branch.
-        success_end = s.index(":OTHER_ACCOUNT_TIMEOUT")
-        success_path = s[:success_end]
-        assert 'del "%~f0"' in success_path
-        assert success_path.rfind('del "%~f0"') < success_path.rfind("goto :EOF")
+        assert r'if exist "C:\WinZapp\WinZapp.exe" start "" /normal "C:\WinZapp\WinZapp.exe"' in s
+        success = s.split(":PARENT_TIMEOUT\n", 1)[0]
+        assert success.rstrip().endswith('del "%~f0"\ngoto :EOF')
 
 
 class TestWritingTheScript:
+    def test_write_error_preserves_the_actual_cause_for_the_worker(self, tmp_path):
+        with pytest.raises(OSError):
+            updater._write_installer_script(str(tmp_path / "missing" / "u.bat"), _script())
+
     def test_an_ascii_script_is_written_as_ascii(self, tmp_path):
         bat = tmp_path / "u.bat"
         assert updater._write_installer_script(str(bat), _script()) is True

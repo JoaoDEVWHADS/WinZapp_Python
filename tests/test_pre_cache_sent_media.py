@@ -24,6 +24,7 @@ from cryptography.fernet import Fernet
 
 import ui.conversations as conversations_module
 from ui.conversations import ConversationsPanel
+from tests.god_modules import patch_conversations_global
 
 
 class _FakeMainWindow:
@@ -45,7 +46,7 @@ def fake_data_path(tmp_path, monkeypatch):
         os.makedirs(p.parent if parts else p, exist_ok=True)
         return str(p)
 
-    monkeypatch.setattr(conversations_module, "data_path", _data_path)
+    patch_conversations_global(monkeypatch, "data_path", _data_path)
     return tmp_path
 
 

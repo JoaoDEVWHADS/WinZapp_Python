@@ -4,6 +4,13 @@ paths:
   - "client/core/incremental_sync.py"
   - "tests/test_*sync*.py"
   - "tests/test_*backfill*.py"
+  - "client/main_window/sync.py"
+  - "client/main_window/backfill.py"
+  - "client/main_window/history.py"
+  - "client/main_window/conversation_sync.py"
+  - "client/main_window/chats_store.py"
+  - "client/main_window/message_rules.py"
+  - "client/main_window/contacts.py"
 ---
 
 # Sync completion

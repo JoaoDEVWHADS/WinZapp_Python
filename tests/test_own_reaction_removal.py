@@ -15,6 +15,12 @@ from ui.conversations import ConversationsPanel
 
 
 class _FakeMessagesList:
+    def Freeze(self):
+        pass
+
+    def Thaw(self):
+        pass
+
     def SetItemText(self, pos, text):
         pass
 
@@ -47,6 +53,7 @@ class _FakeMainWindow:
 class _Stub:
     _on_own_reaction_sent    = ConversationsPanel._on_own_reaction_sent
     _persist_reaction_record = ConversationsPanel._persist_reaction_record
+    _matches_open_conversation = ConversationsPanel._matches_open_conversation
     _SELF_REACTOR_KEY        = ConversationsPanel._SELF_REACTOR_KEY
 
     def __init__(self, jid, existing_messages=None, reaction_map=None):

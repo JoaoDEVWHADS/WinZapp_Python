@@ -12,11 +12,14 @@ import re
 import threading
 import wx
 
+from core.number_lookup import resolve_typed_number
 from core.utils import format_number, is_phone_like, looks_like_binary_blob, contact_dedup_key
 
 
 class NewConversationDialog(wx.Dialog):
     """Search for a contact or number and open a conversation."""
+
+    _typed_jid = None
 
     def __init__(self, main_window):
         self._mw = main_window
@@ -59,17 +62,26 @@ class NewConversationDialog(wx.Dialog):
         sizer.Add(self._results_list, 1, wx.EXPAND | wx.ALL, 10)
 
         # Buttons row
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # Wraps: five buttons do not fit one row at the dialog's width.
+        btn_sizer = wx.WrapSizer(wx.HORIZONTAL)
 
         self._new_group_btn = wx.Button(panel, label=i18n.t("new_group"))
         self._new_group_btn.Bind(wx.EVT_BUTTON, self._on_new_group)
-        btn_sizer.Add(self._new_group_btn, 0, wx.RIGHT, 8)
+        btn_sizer.Add(self._new_group_btn, 0, wx.RIGHT | wx.BOTTOM, 8)
 
         self._new_contact_btn = wx.Button(panel, label=i18n.t("new_contact"))
         self._new_contact_btn.Bind(wx.EVT_BUTTON, self._on_new_contact)
-        btn_sizer.Add(self._new_contact_btn, 0, wx.RIGHT, 8)
+        btn_sizer.Add(self._new_contact_btn, 0, wx.RIGHT | wx.BOTTOM, 8)
 
-        btn_sizer.AddStretchSpacer()
+        from ui.dialogs.group_join_dialog import open_join_dialog
+        self._join_group_btn = wx.Button(panel, label=i18n.t("new_conversation_join_by_link"))
+        self._join_group_btn.Bind(wx.EVT_BUTTON, lambda event: open_join_dialog(self, event))
+        btn_sizer.Add(self._join_group_btn, 0, wx.RIGHT | wx.BOTTOM, 8)
+
+        from ui.dialogs.communities import open_communities
+        self._communities_btn = wx.Button(panel, label=i18n.t("communities_button"))
+        self._communities_btn.Bind(wx.EVT_BUTTON, lambda event: open_communities(self, event))
+        btn_sizer.Add(self._communities_btn, 0, wx.RIGHT | wx.BOTTOM, 8)
 
         close_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("close"))
         btn_sizer.Add(close_btn, 0)
@@ -184,11 +196,13 @@ class NewConversationDialog(wx.Dialog):
                 self._results.append((name, jid, None))
 
         # ── If query looks like a phone number, add direct option ─────────────
+        self._typed_jid = None
         digits = re.sub(r"\D", "", query)
         if len(digits) >= 7:
             direct_jid = digits + "@s.whatsapp.net"
             if self._dedup_key(direct_jid) not in seen:
                 display = format_number(direct_jid)
+                self._typed_jid = direct_jid
                 self._results.append((display, direct_jid, None))
 
         # Sort alphabetically, case-insensitively, so the list is predictable
@@ -221,6 +235,19 @@ class NewConversationDialog(wx.Dialog):
             chat = {"remoteJid": jid, "pushName": name}
         self.EndModal(wx.ID_OK)
         mw = self._mw
+        if jid == self._typed_jid and chat.get("remoteJid") == jid:
+            # a typed number: open the chat under the address WhatsApp knows.
+            # The lookup is a network call, so it runs off the GUI thread.
+            def lookup():
+                resolved = resolve_typed_number(mw, jid.split("@")[0]) or jid
+                wx.CallAfter(self._finish_open, name, resolved, chat)
+            threading.Thread(target=lookup, daemon=True, name="new-chat-lookup").start()
+            return
+        self._finish_open(name, jid, chat)
+
+    def _finish_open(self, name, jid, chat):
+        mw = self._mw
+        chat["remoteJid"] = jid
         norm_jid, existing = self._find_existing_chat(mw, jid)
         if existing is None:
             chat["remoteJid"] = norm_jid

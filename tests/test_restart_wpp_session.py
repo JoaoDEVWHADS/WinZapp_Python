@@ -53,6 +53,11 @@ class _Stub:
         self.waited_statuses.append((predicate, timeout, stop_when_connected))
         return self.closed_status
 
+    def _probe_whatsapp_host(self):
+        """The network answers. The no-route branch has its own tests in
+        tests/test_offline_session_start_deferral.py."""
+        return True
+
 
 class TestRestartWppSession:
     def test_calls_close_session_then_start_session(self, monkeypatch):

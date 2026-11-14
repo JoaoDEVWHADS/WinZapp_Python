@@ -108,6 +108,8 @@ cover/
 # Translations
 *.mo
 *.pot
+!/translations/winzapp.pot
+/client/languages/winzapp.keys
 
 # Environments
 .env
@@ -241,3 +243,10 @@ shutdown_audit.log
 
 # Scratch copies of tracked modules pulled out of git for one-off comparisons.
 .hl_*.py
+*.catalogue.lock
+
+# Neonize DLL workspace and build output (neonize_bridge/build_neonize.py)
+neonize_bridge/neonize_build/
+
+.patch-no-commit/
+

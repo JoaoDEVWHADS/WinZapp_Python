@@ -96,6 +96,9 @@ class _Stub:
     def _update_read_more_button(self, index):
         pass
 
+    def _hide_inline_poll(self):
+        pass
+
 
 def test_switch_uses_persistent_control_and_keeps_current_row(monkeypatch):
     stub = _Stub()

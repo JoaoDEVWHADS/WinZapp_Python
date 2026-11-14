@@ -20,8 +20,7 @@ This test keeps them that way.
 
 Dialog subclasses own their own construction and cannot be positioned from the
 outside, so the handful of modules that build one carry the `wxgui` marker
-instead — deselect them (`-m "not wxgui"`) when running this suite on a
-machine somebody is actually using.
+instead. The default run skips them; only CI enables `--run-wx-gui`.
 """
 
 import ast
@@ -97,12 +96,43 @@ class TestTheDefaultRunIsSafe:
                 command = _pytest_command_in_workflow_line(line)
                 if command is None:
                     continue
-                if "--run-wx-gui" not in command:
+                if "--run-wx-gui" not in command and not _runs_only_the_bridge_suite(command):
                     offenders.append(f"{wf.name}:{i}: {command}")
         assert not offenders, (
             "these CI steps run pytest without --run-wx-gui, so the wxgui "
             f"tests are skipped there too and nothing covers them: {offenders}"
         )
+
+    def test_the_one_suite_allowed_without_the_flag_builds_no_window(self):
+        """The Neonize bridge suite (neonize_bridge/) has its own pytest.ini and
+        no conftest, so `--run-wx-gui` is an unknown option there; the guard
+        above lets a command that runs only that folder go without it. That is
+        only safe while nothing in the folder can put a window up."""
+        from tests.ci_shards import _REAL_WINDOWS
+
+        bridge = TESTS.parent / "neonize_bridge"
+        assert any(bridge.glob("test_*.py")), "no bridge tests found: has the path changed?"
+        offenders = []
+        for path in sorted(bridge.glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            if re.search(r"^\s*(?:import|from)\s+wx\b", source, re.MULTILINE) or _REAL_WINDOWS.search(source):
+                offenders.append(path.name)
+        assert not offenders, (
+            "neonize_bridge/ is exempt from --run-wx-gui only while it builds no "
+            f"window, but these files reach for wx: {offenders}")
+
+    @pytest.mark.parametrize("command,exempt", [
+        (r"venv\Scripts\python.exe -m pytest neonize_bridge -q", True),
+        ("uv run pytest neonize_bridge", True),
+        ("pytest neonize_bridge/test_prepare.py -q", True),
+        ("pytest -q", False),
+        ("uv run pytest --run-wx-gui -n auto --shard 1/4", False),
+        ("pytest tests neonize_bridge", False),
+        ("pytest tests/test_x.py neonize_bridge", False),
+        ("pytest tests", False),
+    ])
+    def test_only_a_command_that_targets_the_bridge_alone_is_exempt(self, command, exempt):
+        assert _runs_only_the_bridge_suite(command) is exempt
 
     def test_launcher_prefixes_do_not_blind_the_guard(self):
         """`uv run pytest` used to read as "not pytest", which silently turned
@@ -172,6 +202,15 @@ def _pytest_command_in_workflow_line(line):
     return _as_pytest_invocation(command)
 
 
+def _runs_only_the_bridge_suite(command):
+    """True for a pytest command whose every target is under neonize_bridge/."""
+    after = re.split(r"(?:^|[\s\\/])pytest(?:\.exe)?(?=\s|$)", command, maxsplit=1)
+    if len(after) < 2:
+        return False
+    targets = [t for t in after[1].split() if not t.startswith("-")]
+    return bool(targets) and all(re.match(r"neonize_bridge(?:[\\/]|$)", t) for t in targets)
+
+
 def _as_pytest_invocation(command):
     """`command` if it runs the test suite, however it is launched, else None.
 
@@ -220,3 +259,56 @@ class TestTheMarkerIsRegisteredAndUsed:
             "these modules construct a real wx dialog but are not marked "
             f"`wxgui`: {unmarked}"
         )
+
+
+def _is_wx(node):
+    """`wx`, `wx.adv`, ... or `sys.modules["wx..."]`."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    if isinstance(node, ast.Name):
+        return node.id == "wx"
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+        and node.slice.value.split(".")[0] == "wx"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "modules"
+    )
+
+
+def _import_time_wx_assignments(body):
+    """Lines that assign onto wx while the module is imported. Function and
+    class bodies run later (and can use monkeypatch); an `except ImportError`
+    handler only runs when wx is not installed, so it stubs a fake module, not
+    the real one."""
+    lines = []
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Attribute) and _is_wx(t.value) for t in targets):
+                lines.append(node.lineno)
+        for field in ("body", "orelse", "finalbody"):
+            lines += _import_time_wx_assignments(getattr(node, field, None) or [])
+        for handler in getattr(node, "handlers", None) or []:
+            name = handler.type
+            if not (isinstance(name, ast.Name) and name.id in ("ImportError", "ModuleNotFoundError")):
+                lines += _import_time_wx_assignments(handler.body)
+    return lines
+
+
+@pytest.mark.parametrize("path", _test_modules(), ids=lambda p: p.name)
+def test_no_module_changes_the_real_wx_for_the_tests_after_it(path):
+    """`wx.CallAfter = <run now>` at module level stays in force for the rest
+    of the run. test_group_presence_isgroup_fallback.py did exactly that, and a
+    later pairing test's background thread then ran connect.py's error handler
+    on the spot and showed a real wx.MessageBox on the user's desktop. Patch wx
+    inside a test or fixture with monkeypatch, which undoes it afterwards."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    lines = _import_time_wx_assignments(tree.body)
+    assert not lines, (
+        f"{path.name} line(s) {lines} change wx when the module is imported, "
+        f"for every test that runs after it. Use monkeypatch in a fixture."
+    )

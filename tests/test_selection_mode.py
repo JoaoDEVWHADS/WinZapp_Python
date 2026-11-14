@@ -36,6 +36,8 @@ from ui.conversations import (
     toggle_jid_selection,
     visible_jid_selected,
 )
+from tests.god_modules import conversations_method_source
+from ui.conversation_panel.reading_position import ReadingPositionMixin
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,7 +112,7 @@ def _separator():
     return {"_type": "unread_separator", "count": 1}
 
 
-class _Stub:
+class _Stub(ReadingPositionMixin):
     """Minimal stand-in for ConversationsPanel."""
 
     _is_separator = ConversationsPanel._is_separator
@@ -127,6 +129,10 @@ class _Stub:
     _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
     _on_messages_list_key_down = ConversationsPanel._on_messages_list_key_down
     _on_conv_list_key_down = ConversationsPanel._on_conv_list_key_down
+    _handle_chat_selection_key = ConversationsPanel._handle_chat_selection_key
+    _repaint_chat_selection = ConversationsPanel._repaint_chat_selection
+    _announce_chat_selected = ConversationsPanel._announce_chat_selected
+    _reset_after_chat_cleared = ConversationsPanel._reset_after_chat_cleared
     _on_escape_conversation = ConversationsPanel._on_escape_conversation
 
     def __init__(self, sorted_messages=None, chats_list=None, ui_settings=None,
@@ -766,6 +772,8 @@ class TestEscape:
 
 
 def _method_source(class_name: str, method_name: str) -> str:
+    if class_name == "ConversationsPanel":
+        return conversations_method_source(method_name)
     path = ROOT / "client" / "ui" / "conversations.py"
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source)

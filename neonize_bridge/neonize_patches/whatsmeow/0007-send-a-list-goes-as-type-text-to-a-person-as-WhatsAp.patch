@@ -1,0 +1,243 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
+Date: Tue, 27 Oct 2026 08:35:51 -0300
+Subject: [PATCH] send: a list goes as type text to a person, as WhatsApp Web
+ sends it
+
+WhatsApp Web's stanza for a list to a person (captured over CDP on
+2026-10-27): <message type="text">, <enc mediatype="list">, <biz><list
+v="2" type="product_list"/></biz>. To a group it stays type "media"
+(wa-js applyGroupListStanza).
+---
+ send.go                 |  13 ++-
+ send_nativeflow_test.go | 192 ++++++++++++++++++++++------------------
+ 2 files changed, 117 insertions(+), 88 deletions(-)
+
+diff --git a/send.go b/send.go
+index 5791c69..c75efa2 100644
+--- a/send.go
++++ b/send.go
+@@ -939,6 +939,17 @@ func getTypeFromMessage(msg *waE2E.Message) string {
+ 	}
+ }
+ 
++// chatMessageType is the <message> type for `to`. A list goes as "text" to a
++// person, as WhatsApp Web sends it (wa-js forces typeAttributeFromProtobuf to
++// "text" for a list), and as "media" with mediatype "list" to a group (wa-js
++// applyGroupListStanza), which is getTypeFromMessage's answer.
++func chatMessageType(msg *waE2E.Message, to types.JID) string {
++	if to.Server != types.GroupServer && getButtonTypeFromMessage(msg) == "list" {
++		return "text"
++	}
++	return getTypeFromMessage(msg)
++}
++
+ func getMediaTypeFromMessage(msg *waE2E.Message) string {
+ 	switch {
+ 	case msg.ViewOnceMessage != nil:
+@@ -1279,7 +1290,7 @@ func (cli *Client) prepareMessageNode(
+ 		})
+ 	}
+ 
+-	msgType := getTypeFromMessage(message)
++	msgType := chatMessageType(message, to)
+ 	encAttrs := waBinary.Attrs{}
+ 	// Only include encMediaType for 1:1 messages (groups don't have a device-sent message plaintext)
+ 	if encMediaType := getMediaTypeFromMessage(message); dsmPlaintext != nil && encMediaType != "" {
+diff --git a/send_nativeflow_test.go b/send_nativeflow_test.go
+index f3cf754..f920cbc 100644
+--- a/send_nativeflow_test.go
++++ b/send_nativeflow_test.go
+@@ -1,87 +1,105 @@
+-package whatsmeow
+-
+-import (
+-	"testing"
+-
+-	"google.golang.org/protobuf/proto"
+-
+-	waBinary "go.mau.fi/whatsmeow/binary"
+-	"go.mau.fi/whatsmeow/proto/waE2E"
+-)
+-
+-func nativeFlow(button string) *waE2E.Message {
+-	return &waE2E.Message{InteractiveMessage: &waE2E.InteractiveMessage{
+-		InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+-			NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+-				Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+-					{Name: proto.String(button)},
+-				},
+-			},
+-		},
+-	}}
+-}
+-
+-func flowAttrs(t *testing.T, msg *waE2E.Message) waBinary.Attrs {
+-	t.Helper()
+-	biz := getNativeFlowBizNode(msg)
+-	if biz == nil {
+-		t.Fatal("no biz node")
+-	}
+-	interactive := biz.GetChildByTag("interactive")
+-	if interactive.AttrGetter().String("type") != "native_flow" {
+-		t.Fatalf("unexpected biz node %s", biz.String())
+-	}
+-	return interactive.GetChildByTag("native_flow").Attrs
+-}
+-
+-func TestReplyAndActionButtonsAreMixed(t *testing.T) {
+-	for _, button := range []string{"quick_reply", "cta_url", "cta_call", "cta_copy"} {
+-		attrs := flowAttrs(t, nativeFlow(button))
+-		if attrs["v"] != "9" || attrs["name"] != "mixed" {
+-			t.Errorf("%s: %v", button, attrs)
+-		}
+-	}
+-}
+-
+-func TestPaymentInfoKeepsItsName(t *testing.T) {
+-	attrs := flowAttrs(t, nativeFlow("payment_info"))
+-	if len(attrs) != 1 || attrs["name"] != "payment_info" {
+-		t.Errorf("%v", attrs)
+-	}
+-}
+-
+-func TestOrderUpdatesAreAnAttribute(t *testing.T) {
+-	biz := getNativeFlowBizNode(nativeFlow("review_and_pay"))
+-	if biz.Attrs["native_flow_name"] != "order_details" || len(biz.GetChildren()) != 0 {
+-		t.Errorf("%s", biz.String())
+-	}
+-	if getNativeFlowBizNode(&waE2E.Message{Conversation: proto.String("oi")}) != nil {
+-		t.Error("a text has no biz node")
+-	}
+-}
+-
+-func TestListsAreProductLists(t *testing.T) {
+-	msg := &waE2E.Message{ListMessage: &waE2E.ListMessage{
+-		ListType: waE2E.ListMessage_SINGLE_SELECT.Enum(),
+-	}}
+-	attrs := getButtonAttributes(msg)
+-	if attrs["v"] != "2" || attrs["type"] != "product_list" {
+-		t.Errorf("%v", attrs)
+-	}
+-}
+-
+-func TestANativeFlowReplyNamesItsFlow(t *testing.T) {
+-	reply := &waE2E.Message{InteractiveResponseMessage: &waE2E.InteractiveResponseMessage{
+-		InteractiveResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage_{
+-			NativeFlowResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage{
+-				Name: proto.String("quick_reply"),
+-			},
+-		},
+-	}}
+-	if name := nativeFlowResponseName(reply); name != "quick_reply" {
+-		t.Errorf("%q", name)
+-	}
+-	if name := nativeFlowResponseName(&waE2E.Message{Conversation: proto.String("oi")}); name != "" {
+-		t.Errorf("%q", name)
+-	}
+-}
++package whatsmeow
++
++import (
++	"testing"
++
++	"google.golang.org/protobuf/proto"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/types"
++)
++
++func nativeFlow(button string) *waE2E.Message {
++	return &waE2E.Message{InteractiveMessage: &waE2E.InteractiveMessage{
++		InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
++			NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
++				Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
++					{Name: proto.String(button)},
++				},
++			},
++		},
++	}}
++}
++
++func flowAttrs(t *testing.T, msg *waE2E.Message) waBinary.Attrs {
++	t.Helper()
++	biz := getNativeFlowBizNode(msg)
++	if biz == nil {
++		t.Fatal("no biz node")
++	}
++	interactive := biz.GetChildByTag("interactive")
++	if interactive.AttrGetter().String("type") != "native_flow" {
++		t.Fatalf("unexpected biz node %s", biz.String())
++	}
++	return interactive.GetChildByTag("native_flow").Attrs
++}
++
++func TestReplyAndActionButtonsAreMixed(t *testing.T) {
++	for _, button := range []string{"quick_reply", "cta_url", "cta_call", "cta_copy"} {
++		attrs := flowAttrs(t, nativeFlow(button))
++		if attrs["v"] != "9" || attrs["name"] != "mixed" {
++			t.Errorf("%s: %v", button, attrs)
++		}
++	}
++}
++
++func TestPaymentInfoKeepsItsName(t *testing.T) {
++	attrs := flowAttrs(t, nativeFlow("payment_info"))
++	if len(attrs) != 1 || attrs["name"] != "payment_info" {
++		t.Errorf("%v", attrs)
++	}
++}
++
++func TestOrderUpdatesAreAnAttribute(t *testing.T) {
++	biz := getNativeFlowBizNode(nativeFlow("review_and_pay"))
++	if biz.Attrs["native_flow_name"] != "order_details" || len(biz.GetChildren()) != 0 {
++		t.Errorf("%s", biz.String())
++	}
++	if getNativeFlowBizNode(&waE2E.Message{Conversation: proto.String("oi")}) != nil {
++		t.Error("a text has no biz node")
++	}
++}
++
++func TestListsAreProductLists(t *testing.T) {
++	msg := &waE2E.Message{ListMessage: &waE2E.ListMessage{
++		ListType: waE2E.ListMessage_SINGLE_SELECT.Enum(),
++	}}
++	attrs := getButtonAttributes(msg)
++	if attrs["v"] != "2" || attrs["type"] != "product_list" {
++		t.Errorf("%v", attrs)
++	}
++}
++
++func TestANativeFlowReplyNamesItsFlow(t *testing.T) {
++	reply := &waE2E.Message{InteractiveResponseMessage: &waE2E.InteractiveResponseMessage{
++		InteractiveResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage_{
++			NativeFlowResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage{
++				Name: proto.String("quick_reply"),
++			},
++		},
++	}}
++	if name := nativeFlowResponseName(reply); name != "quick_reply" {
++		t.Errorf("%q", name)
++	}
++	if name := nativeFlowResponseName(&waE2E.Message{Conversation: proto.String("oi")}); name != "" {
++		t.Errorf("%q", name)
++	}
++}
++
++func TestAListIsTextToAPersonAndMediaToAGroup(t *testing.T) {
++	list := &waE2E.Message{ListMessage: &waE2E.ListMessage{}}
++	if got := chatMessageType(list, types.NewJID("5511", types.DefaultUserServer)); got != "text" {
++		t.Errorf("to a person: %s", got)
++	}
++	if got := chatMessageType(list, types.NewJID("1", types.HiddenUserServer)); got != "text" {
++		t.Errorf("to a lid: %s", got)
++	}
++	if got := chatMessageType(list, types.NewJID("1203", types.GroupServer)); got != "media" {
++		t.Errorf("to a group: %s", got)
++	}
++	text := &waE2E.Message{Conversation: proto.String("hi")}
++	if got := chatMessageType(text, types.NewJID("5511", types.DefaultUserServer)); got != "text" {
++		t.Errorf("a text: %s", got)
++	}
++}

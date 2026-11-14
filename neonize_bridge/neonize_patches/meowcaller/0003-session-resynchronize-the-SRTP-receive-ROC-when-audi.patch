@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: reffehcsoibaf <290818442+reffehcsoibaf@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 01:15:58 -0300
+Subject: [PATCH] session: resynchronize the SRTP receive ROC when audio stops
+ authenticating
+
+After a sequence rollover or heavy loss the ROC estimate could fall out
+of step and every later packet failed authentication: the call went
+silent. On a failure the neighbouring ROCs are tried; one that
+authenticates resynchronizes the estimator (the tag still rejects forged
+packets). Failures are logged sparingly with the estimator's state.
+---
+ session.go  | 36 +++++++++++++++++++++++++++++++++---
+ srtp/e2e.go | 12 ++++++++++++
+ 2 files changed, 45 insertions(+), 3 deletions(-)
+
+diff --git a/session.go b/session.go
+index 187a502..fd54545 100644
+--- a/session.go
++++ b/session.go
+@@ -167,6 +167,7 @@ type MediaPipeline struct {
+ 	sendRoc      srtp.RocTracker
+ 	recvMu       sync.Mutex
+ 	recvRoc      srtp.RecvRocTracker
++	unprotectBad atomic.Int64 // audio packets that failed authentication (for the log)
+ 	packetsSent  atomic.Uint32
+ 	octetsSent   atomic.Uint32
+ 	rtpTimestamp atomic.Uint32
+@@ -353,9 +354,38 @@ func (p *MediaPipeline) UnprotectAudio(packet []byte) (rtp.RtpHeader, []byte, bo
+ 	roc := p.recvRoc.EstimateRoc(header.SequenceNumber)
+ 	tag := packet[len(withoutTag):]
+ 	if !srtp.VerifyWarpMITag(p.recvKeys.AuthKey[:], withoutTag, roc, p.warpMITagLen, tag, p.log) {
+-		p.recvMu.Unlock()
+-		p.log.Debug().Uint32("ssrc", header.Ssrc).Uint16("seq", header.SequenceNumber).Uint32("roc", roc).Msg("unprotect: WARP MI authentication failed")
+-		return rtp.RtpHeader{}, nil, false
++		// WinZapp: the estimator may have lost the ROC (sequence rollover, heavy
++		// loss). Try the neighbours; if one authenticates, the packet is valid and
++		// the estimator follows it again. The authentication tag guarantees no
++		// forged packet is accepted.
++		estimated := roc
++		resync := false
++		for _, cand := range []uint32{estimated + 1, estimated - 1, estimated + 2} {
++			if cand > estimated+2 || (cand < estimated && estimated == 0) {
++				continue
++			}
++			if srtp.VerifyWarpMITag(p.recvKeys.AuthKey[:], withoutTag, cand, p.warpMITagLen, tag, p.log) {
++				p.recvRoc.Resync(cand, header.SequenceNumber)
++				roc = cand
++				resync = true
++				break
++			}
++		}
++		if resync {
++			p.log.Info().Uint32("ssrc", header.Ssrc).Uint16("seq", header.SequenceNumber).
++				Uint32("roc_estimated", estimated).Uint32("roc_resynced", roc).Msg("recv roc resynchronized")
++		} else {
++			n := p.unprotectBad.Add(1)
++			if n <= 3 || n%200 == 0 {
++				r, sL, ini := p.recvRoc.Snapshot()
++				p.log.Warn().Uint32("ssrc", header.Ssrc).Uint16("seq", header.SequenceNumber).
++					Uint32("roc_estimated", estimated).Uint32("roc_current", r).Uint16("last_seq", sL).
++					Bool("initialized", ini).Int64("failures", n).Msg("unprotect: authentication failed")
++			}
++			p.recvMu.Unlock()
++			p.log.Debug().Uint32("ssrc", header.Ssrc).Uint16("seq", header.SequenceNumber).Uint32("roc", roc).Msg("unprotect: WARP MI authentication failed")
++			return rtp.RtpHeader{}, nil, false
++		}
+ 	}
+ 	p.recvRoc.CommitRoc(roc, header.SequenceNumber)
+ 	plain, err := srtp.CryptPayload(&p.recvKeys, header.Ssrc, header.SequenceNumber, roc, withoutTag[headerLen:])
+diff --git a/srtp/e2e.go b/srtp/e2e.go
+index 86d5b8e..a8f5d0e 100644
+--- a/srtp/e2e.go
++++ b/srtp/e2e.go
+@@ -312,6 +312,18 @@ func (t *RecvRocTracker) CommitRoc(v uint32, seq uint16, log ...zerolog.Logger)
+ 	lg.Trace().Uint16("seq", seq).Uint32("committed_roc", v).Uint32("roc", t.roc).Msg("recv roc committed")
+ }
+ 
++// Snapshot returns the estimator's state (for the log): ROC, highest sequence seen
++// and whether it was initialized.
++func (t *RecvRocTracker) Snapshot() (uint32, uint16, bool) {
++	return t.roc, t.sL, t.initialized
++}
++
++// Resync sets the ROC and sequence from a packet that authenticated with a ROC
++// other than the estimated one (heavy loss, sequence restart).
++func (t *RecvRocTracker) Resync(roc uint32, seq uint16) {
++	t.roc, t.sL, t.initialized = roc, seq, true
++}
++
+ // GuessRoc estimates and commits seq in one step.
+ func (t *RecvRocTracker) GuessRoc(seq uint16, log ...zerolog.Logger) uint32 {
+ 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/2f001b5a3d6374cc5cf7177792c2a81f87a54080/wacore/src/voip/e2e_srtp.rs#L190-L198

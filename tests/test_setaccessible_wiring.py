@@ -32,8 +32,10 @@ import wx
 import status_panel
 import ui.accessible as accessible_module
 import ui.conversations
+import ui.dialogs.ai_result_dialog
 import ui.dialogs.incoming_call
 import ui.media_viewer
+from tests.god_modules import conversations_modules, main_window_modules, status_panel_modules
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,7 +48,25 @@ FILES = (
     ("client/status_panel.py", status_panel),
     ("client/ui/media_viewer.py", ui.media_viewer),
     ("client/ui/dialogs/incoming_call.py", ui.dialogs.incoming_call),
+    ("client/ui/dialogs/ai_result_dialog.py", ui.dialogs.ai_result_dialog),
+    # ConversationsPanel, ArchivedConversationsPanel and MainWindow are split
+    # over these packages; every module in them is walked, each paired with
+    # itself so a class local to it (transfer_gauge.py's
+    # _FocusedTransferGaugeAccessible) resolves.
+    *(
+        (f"client/{mod.__name__.replace('.', '/')}.py", mod)
+        for mod in (conversations_modules()[1:] + main_window_modules()[1:]
+                    + status_panel_modules()[1:])
+    ),
 )
+
+
+def test_the_split_packages_are_walked():
+    """The generator above must not come back empty: the archived panel's
+    search field and the transfer gauge wire their Accessible there."""
+    walked = {rel for rel, _ in FILES}
+    assert "client/ui/conversation_panel/archived_panel.py" in walked
+    assert "client/ui/conversation_panel/transfer_gauge.py" in walked
 
 
 def _setaccessible_construction_calls(rel_path):

@@ -3,6 +3,7 @@ conversation: skip the file picker and go straight to the attachment panel,
 same shortcut the official WhatsApp client offers.
 """
 
+import types
 import os
 import tempfile
 import time
@@ -12,6 +13,10 @@ import wx
 
 from tests.conftest import set_clipboard_data, set_clipboard_text
 from ui.conversations import ConversationsPanel
+
+# The system clipboard is one shared resource: in a parallel run these tests
+# must share a worker with the other clipboard file.
+pytestmark = pytest.mark.xdist_group("clipboard")
 
 
 _SENTINEL = object()
@@ -28,6 +33,8 @@ class _Stub:
         self._staged_attachments = []
         self.panel_shown_calls = 0
         self.message_field = _FakeMessageField()
+        # No pasted_audio_as saved: the default, audio stays audio.
+        self.main_window = types.SimpleNamespace(settings={})
 
     def _show_attachment_panel(self):
         self.panel_shown_calls += 1
@@ -236,3 +243,52 @@ class TestPasteFromMessagesList:
         ]
         assert stub.message_field.value == ""
         assert event.skipped is False
+
+
+class TestPasteInAChannel:
+    """A channel takes text, and photos, videos and polls when the engine
+    posts them: otherwise a file is refused with the reason, and text still
+    pastes (channel_conversation.refuse_in_channel)."""
+
+    def _stub(self, kinds=frozenset()):
+        stub = _Stub(conversation={"remoteJid": "120363000000000001@newsletter"})
+        stub.said = []
+        stub.main_window = types.SimpleNamespace(
+            settings={}, output=stub.said.append, i18n=types.SimpleNamespace(t=lambda key: key),
+            _channel_post_kinds=set(kinds))
+        return stub
+
+    def _paste(self, stub):
+        if not wx.TheClipboard.Open():
+            pytest.skip("clipboard unavailable")
+        try:
+            return stub._paste_clipboard_as_attachment()
+        finally:
+            wx.TheClipboard.Close()
+
+    def test_a_file_is_refused_with_the_reason(self, wx_app, tmp_path):
+        f = tmp_path / "photo.png"
+        f.write_bytes(b"PNG")
+        if not _set_clipboard_files([str(f)]):
+            pytest.skip("clipboard unavailable")
+        stub = self._stub()
+        assert self._paste(stub) is True
+        assert stub._staged_attachments == [] and stub.panel_shown_calls == 0
+        assert stub.said == ["channel_text_only"]
+
+    def test_a_photo_is_staged_when_the_engine_posts_media(self, wx_app, tmp_path):
+        f = tmp_path / "photo.png"
+        f.write_bytes(b"PNG")
+        if not _set_clipboard_files([str(f)]):
+            pytest.skip("clipboard unavailable")
+        stub = self._stub({"photo_video"})
+        assert self._paste(stub) is True
+        assert [a["media_type"] for a in stub._staged_attachments] == ["image"]
+        assert stub.said == []
+
+    def test_text_still_pastes(self, wx_app):
+        if not _set_clipboard_text("Novidade do canal"):
+            pytest.skip("clipboard unavailable")
+        stub = self._stub()
+        assert self._paste(stub) is False          # the native text paste runs
+        assert stub.said == []

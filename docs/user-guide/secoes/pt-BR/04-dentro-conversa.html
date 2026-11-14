@@ -1,0 +1,122 @@
+<!--nav: 📨 Dentro de uma conversa-->
+<p class="lead">Ao abrir uma conversa você tem a lista de mensagens e o campo de mensagem. Cada mensagem é uma linha que o leitor de tela lê com remetente, conteúdo e estado.</p>
+
+<h3>Enviar mensagens</h3>
+<p>Digite no campo de mensagem e aperte Enter; Shift+Enter insere uma nova linha. Os envios vão por uma fila em segundo plano. Se o WhatsApp aceitar a mensagem mas não confirmar a entrega, o WinZapp avisa para você conferir a conversa antes de reenviar, para não entregar duas vezes. Enviar mensagem para si mesmo (a conversa "Eu (mensagens para mim)") também funciona.</p>
+<ul>
+  <li><strong>Emoticons viram emojis ao digitar</strong>: <code>:)</code> vira 🙂, <code>:D</code> vira 😃, <code>&lt;3</code> vira ❤️, ao digitar um espaço ou pontuação depois. Backspace logo após a conversão devolve o que você digitou. Dá para desligar em Configurações &gt; Geral. Ctrl+. abre o seletor de emojis (as setas para a esquerda e direita mudam o tom de pele).</li>
+  <li><strong>Verificação ortográfica:</strong> um som próprio toca ao errar uma palavra, ao digitar pontuação depois dela e quando o cursor chega a uma palavra errada. No menu de contexto do campo, o submenu "Ortografia" oferece sugestões do dicionário do Windows. Em Configurações você escolhe seguir o Windows, sempre ativada ou sempre desativada.</li>
+  <li><strong>Menções:</strong> digite <code>@</code> para escolher alguém (Enter insere a menção, Esc fecha). Em grupos, <code>@todos</code> também funciona.</li>
+</ul>
+<p>No F1, "Sugestões de menção" é a lista que aparece ao digitar @: Enter insere a menção selecionada e Esc fecha as sugestões. "Menções nesta mensagem" se refere às pessoas mencionadas em uma mensagem recebida ou enviada: Enter ou Espaço abre a menção selecionada. São contextos diferentes, mesmo quando usam as mesmas teclas.</p>
+
+<h3>Ler as mensagens</h3>
+<table class="field-table">
+  <tr><th>Atalho</th><th>Ação</th></tr>
+  <tr><td class="field-name">Alt+2</td><td>Vai para a última mensagem</td></tr>
+  <tr><td class="field-name">Alt+3</td><td>Vai para as mensagens não lidas (também Alt+U e Ctrl+L)</td></tr>
+  <tr><td class="field-name">Alt+L</td><td>Lê o restante de uma mensagem de texto cortada na lista</td></tr>
+  <tr><td class="field-name">Alt+C</td><td>Mostra o texto da mensagem numa janela (para ler com calma ou copiar um trecho)</td></tr>
+  <tr><td class="field-name">Alt+Shift+L</td><td>Anuncia o estado da mensagem focada (enviada, entregue, lida)</td></tr>
+  <tr><td class="field-name">Alt+Shift+K</td><td>Anuncia data e hora da mensagem focada</td></tr>
+  <tr><td class="field-name">Alt+Shift+Q</td><td>Vai para a mensagem citada, numa resposta</td></tr>
+  <tr><td class="field-name">Alt+Shift+M / Alt+Shift+J</td><td>Vai para a mensagem anterior / próxima que menciona você</td></tr>
+  <tr><td class="field-name">Alt+Shift+P / Alt+Shift+O</td><td>Vai para a mensagem anterior / próxima que responde a você (repetindo, volta pelas respostas e, depois da mais antiga, retorna à mais recente)</td></tr>
+  <tr><td class="field-name">Alt+T</td><td>Anuncia o estado do contato: visto por último, online, digitando. O botão da conversa e os detalhes do contato mostram as mesmas informações, sempre atualizadas</td></tr>
+</table>
+<p>Alt+T lê a informação disponível mais recente sem esperar uma consulta à rede. Digitação e gravação de áudio podem aparecer mesmo sem informação de visibilidade online; esses indicadores não significam que a pessoa compartilha essa visibilidade. A atividade expira após dez segundos sem atualização. A privacidade do visto por último continua respeitada. A atividade pertence à conversa em que ocorre: grupos e conversas privadas são acompanhados separadamente.</p>
+<p>As atualizações de presença dos contatos não alteram os totais de mensagens não lidas nem reescrevem títulos da janela ou rótulos de conversas arquivadas que não mudaram. Os avisos de digitação e gravação seguem suas configurações de fala. Novos nomes de contatos são salvos em segundo plano; não é preciso ativar outra opção.</p>
+
+<p><strong>Revisar mensagens recentes por posição:</strong> há dez comandos, da mensagem mais nova (1) até a décima (0), que leem aquela mensagem sem mover o foco; apertar a mesma tecla duas vezes rápido copia. Eles vêm sem tecla, porque Alt+1 a Alt+9 pertencem à janela principal: escolha as teclas em Configurações &gt; Interface &gt; Atalhos de teclado.</p>
+<p><strong>"Digitando" na lista:</strong> com "Mostrar quem está digitando ou gravando áudio como última linha da lista de mensagens" (Configurações &gt; Interface &gt; Mensagens), uma linha temporária como "Ana está digitando..." aparece no fim da lista e some quando a pessoa para. Ela nunca move o foco nem é falada sozinha.</p>
+<p><strong>Outros tipos de linha:</strong> mensagens que o WhatsApp ainda não carregou aparecem como "Aguardando mensagem. Isso pode levar alguns instantes." e viram o texto quando chega. Mensagens de visualização única aparecem como "Mensagem de visualização única. Abra no celular para ver." Mensagens de pedido e de produto de empresas mostram itens, total e estado. Ligações aparecem no ponto da conversa em que aconteceram ("Ligação de voz perdida", "Ligação de vídeo atendida"...).</p>
+
+<h3>Responder, editar, apagar, encaminhar</h3>
+<table class="field-table">
+  <tr><th>Atalho</th><th>Ação</th></tr>
+  <tr><td class="field-name">Alt+R</td><td>Responder à mensagem em foco</td></tr>
+  <tr><td class="field-name">Alt+Shift+R</td><td>Responder em particular (em grupos)</td></tr>
+  <tr><td class="field-name">Alt+Shift+V</td><td>Conversar com o participante (em grupos)</td></tr>
+  <tr><td class="field-name">Alt+E</td><td>Editar uma mensagem sua</td></tr>
+  <tr><td class="field-name">Delete</td><td>Apagar a mensagem (para você ou para todos)</td></tr>
+  <tr><td class="field-name">Ctrl+Shift+E</td><td>Encaminhar</td></tr>
+  <tr><td class="field-name">Ctrl+C</td><td>Copiar a mensagem; num link em foco, copia o link</td></tr>
+  <tr><td class="field-name">Ctrl+Shift+C</td><td>Copiar a legenda de foto, vídeo ou documento</td></tr>
+  <tr><td class="field-name">Alt+Shift+D</td><td>Dados da mensagem</td></tr>
+</table>
+<ul>
+  <li><strong>Responder:</strong> se a mensagem original não for encontrada antes do envio, o WinZapp avisa que a citação está ausente e mantém o seu texto para você editar pelo menu da mensagem ("Editar resposta não enviada sem a citação"). Respostas com menção levam a citação junto. Com o Neonize, ao citar uma mensagem de voz, a duração dela aparece na citação vista pela outra pessoa.</li>
+  <li><strong>Apagar mídia:</strong> ao apagar foto, vídeo, áudio ou documento, a confirmação traz "Apagar também a mídia do celular", marcada por padrão. Desmarque para apagar a mensagem e manter o arquivo guardado no celular. A caixa vale também para várias mensagens selecionadas e só aparece quando há mídia entre elas. Em Configurações &gt; Interface &gt; Mensagens, você define como ela começa.</li>
+  <li><strong>Encaminhar:</strong> escolha os destinos numa lista com pesquisa (a seta para baixo no campo leva ao primeiro resultado). Quando dá certo, o leitor de tela fala "Mensagem encaminhada." (ou quantas foram), sem janela para fechar. Mensagens de voz encaminhadas chegam como áudio comum, a não ser que você marque "Encaminhar mensagens de voz como mensagens de voz, em vez de áudio" em Configurações &gt; Áudio. Com o Neonize, a cópia encaminhada aparece na hora na conversa de destino. Quando uma mensagem selecionada tem prévia de link, a caixa "Preservar prévia do link" começa como definido em Configurações &gt; Interface do usuário &gt; Conversas, "Preservar prévias de links por padrão ao encaminhar mensagens". Com a WPPConnect a cópia é enviada como mensagem nova e não vem marcada como encaminhada; com o Neonize vem.</li>
+  <li><strong>Dados da mensagem:</strong> numa mensagem sua, mostra quando foi entregue, lida e reproduzida, com data e hora completas, consultando o próprio WhatsApp (então recibos que chegaram com o WinZapp fechado também aparecem). Em grupo, lista quem recebeu e quem leu, pelo nome.</li>
+  <li><strong>Mensagens citadas:</strong> numa resposta, só os links da própria resposta contam como links.</li>
+</ul>
+
+<h3>Reagir</h3>
+<p>Ctrl+Shift+R abre as reações da mensagem (ou, numa ligação perdida, retorna a ligação). A lista traz 12 reações rápidas; seleciona-se uma para reagir, e a sua reação atual vem marcada, selecionando-a de novo ela é removida. As setas para a esquerda e a direita mudam o tom de pele do emoji. No fim, "Adicionar mais reações" abre o seletor completo de emojis. As reações que você mais usa passam a aparecer entre as 12, com as mais usadas no topo. Se preferir posições fixas, use Configurações &gt; Interface &gt; Reações: "Usar reações rápidas fixas" e, em cada posição, Enter abre o seletor para escolher o emoji dela; "Restaurar posições padrão" desfaz. Um som próprio toca quando alguém reage à sua mensagem (Configurações &gt; Sons de eventos). Alt+Shift+E lê, em voz alta, as reações recentes que a mensagem em foco recebeu.</p>
+
+<h3>Favoritar e fixar</h3>
+<ul>
+  <li><strong>Favoritar</strong> (Ctrl+Shift+O): os favoritos são sincronizados com o WhatsApp, e cada alteração é verificada. Para enviar ao WhatsApp os favoritos locais antigos, use "Sincronizar favoritos locais antigos com o WhatsApp" no menu da conversa.</li>
+  <li><strong>Mensagens favoritas</strong> (Alt+0, ou a linha "Mensagens favoritas" da lista de navegação): todas as mensagens favoritas de todas as conversas, das mais novas para as mais antigas, lidas como conversa, remetente, texto e data. "Pesquisar nas favoritas" filtra a lista por qualquer palavra, sem diferenciar acentos nem maiúsculas; Enter ou "Abrir na conversa" abre a conversa naquela mensagem, e Delete ou "Remover dos favoritos" tira o favorito.</li>
+  <li><strong>Fixar mensagem</strong> (Ctrl+Shift+P, quando você não está gravando): um botão em cada conversa lista as mensagens fixadas no WhatsApp, inclusive antigas; Enter leva até a mensagem no histórico. Ao abrir a conversa, a quantidade de fixadas é anunciada sem mudar o foco.</li>
+</ul>
+
+<h3>Marcadores</h3>
+<p>Marcadores são posições que você cria nas mensagens para voltar depois. Com a mensagem em foco, Ctrl+0 a Ctrl+9 cria um marcador (ou, se o número já existe, vai até ele); Ctrl+Shift+0 a 9 remove. Alt+Shift+0 a 9 cria marcadores temporários, apagados quando você sai da conversa; Ctrl+Alt+Shift+0 a 9 remove os temporários. Em Configurações &gt; Interface &gt; Conversas, "Remover marcadores permanentes automaticamente após o primeiro uso" e "Remover marcadores temporários automaticamente após o primeiro uso" fazem a ida até um marcador já removê-lo, e a mesma tecla cria um marcador novo na próxima vez.</p>
+<h3>Chats de acesso rápido</h3>
+<p>Com um chat em foco na lista ou aberto, pressione Ctrl+Alt+Shift+F1 a F10 para atribuí-lo a uma posição de acesso rápido. Ctrl+Shift+a mesma tecla de função abre o chat de qualquer lugar da janela principal. F1 a F9 correspondem às posições 1 a 9; F10 corresponde à posição 0. As atribuições são separadas por conta e permanecem após reiniciar. Você pode mudar os atalhos em Configurações, Interface do usuário, Atalhos de teclado, ou atribuir pelo menu de contexto do chat. Chats protegidos não podem ser atribuídos.</p>
+
+<h3>Pesquisar na conversa</h3>
+<p>Ctrl+Shift+F abre a pesquisa. F3 vai ao próximo resultado e Shift+F3 ao anterior, de qualquer lugar da conversa aberta; o foco acompanha o resultado e o leitor de tela anuncia a posição. Os botões "Resultado anterior" e "Próximo resultado" também funcionam, e dentro do campo de pesquisa Enter e Shift+Enter fazem o mesmo.</p>
+
+<h3>Links</h3>
+<p>Uma mensagem com dois ou mais links vira uma lista navegável. Enter ou Espaço num link o abre; Ctrl+C copia o link; o menu de contexto tem "Abrir link" e "Copiar link". Links de convite de grupo (<code>chat.whatsapp.com/...</code>) abrem a janela "Entrar no grupo por link" do WinZapp, com a prévia do grupo, em vez do navegador; o menu do link oferece também "Entrar no grupo por link" e mantém "Abrir link" para quem quiser o navegador. Suas mensagens enviadas também levam prévia do link.</p>
+<p>Na prévia de um link, o título e a descrição aparecem com os caracteres de verdade, sem códigos HTML como &amp;amp; ou &amp;eacute;, tanto na prévia que o WinZapp envia quanto na que você lê.</p>
+<p>Enquanto você escreve uma mensagem com link, o leitor de tela diz "Carregando prévia..." quando o WinZapp começa a buscar a prévia, "Prévia adicionada." quando ela é anexada à mensagem, ou "Não foi possível carregar a prévia do link" seguido do motivo. Em Configurações &gt; Acessibilidade &gt; Conteúdo falado, "Anunciar adição e carregamento das prévias de links" liga ou desliga as três mensagens.</p>
+
+<h3>Contatos, enquetes e cartões</h3>
+<ul>
+  <li><strong>Cartão de contato recebido:</strong> Enter ou Espaço salva como contato. O menu de contexto traz ver nome e número, copiar o número com Ctrl+C e conversar. Se o cartão tiver mais de um número, o WinZapp pergunta qual usar.</li>
+  <li><strong>Enquetes recebidas:</strong> a linha lê a pergunta e depois cada opção, com porcentagem e votos quando o WinZapp os recebe. Enter abre uma janela com a mesma lista, caixas de seleção para votar e uma barra de progresso por opção. Numa enquete de resposta única, Tab a partir da mensagem leva às opções e marcar uma já vota. O botão "Ver votos" (Alt+V) lista quem votou em quê. Para criar uma enquete, veja a seção Anexos.</li>
+  <li><strong>Mensagens de pedido:</strong> Enter abre o pedido; veja a seção Empresas.</li>
+  <li><strong>Avisos de comunidades:</strong> no menu de uma mensagem de aviso, "Respostas ao aviso da comunidade" abre uma janela para ler e enviar respostas e atualizar a lista; o texto é conservado se o envio não for confirmado.</li>
+</ul>
+
+<h3>Conversa com a Meta AI</h3>
+<p>O WhatsApp exige aceitar os termos de serviço da Meta AI antes da primeira mensagem. O WinZapp mostra os termos, com um link para lê-los, e registra o aceite.</p>
+
+<h3>Selecionar mensagens e ações em massa</h3>
+<p>Funciona como nas conversas: Ctrl+Espaço marca, depois o Espaço marca os seguintes, Ctrl+Shift+Espaço marca tudo. No submenu "Ações em massa" (ou pelos atalhos), as mensagens selecionadas podem ser:</p>
+<table class="field-table">
+  <tr><th>Ação</th><th>Atalho</th></tr>
+  <tr><td>Copiar</td><td class="field-name">Ctrl+Alt+Shift+C</td></tr>
+  <tr><td>Encaminhar</td><td class="field-name">Ctrl+Alt+Shift+E</td></tr>
+  <tr><td>Favoritar</td><td class="field-name">Ctrl+Alt+Shift+F</td></tr>
+  <tr><td>Fixar</td><td class="field-name">Ctrl+Alt+Shift+X</td></tr>
+  <tr><td>Salvar</td><td class="field-name">Ctrl+Alt+Shift+S</td></tr>
+  <tr><td>Apagar</td><td class="field-name">Delete (com seleção)</td></tr>
+  <tr><td>Transcrever e mostrar juntas / nas linhas / apagar transcrições</td><td class="field-name">Ctrl+Alt+Shift+T / N / Delete</td></tr>
+</table>
+<p>A seleção termina junto com a conversa: ao fechá-la, nada fica marcado.</p>
+
+<h3>Rascunhos, reenvio e os controles depois da lista</h3>
+<p>O campo de mensagem guarda o que você digitou com a conversa: saia de uma conversa sem enviar, e o texto, com as menções, volta quando você a abrir de novo. Em Configurações &gt; Interface &gt; Conversas, "Mensagem não enviada ao sair de uma conversa" escolhe entre manter no campo para a próxima conversa, guardar como rascunho daquela conversa (o padrão) ou descartar. Os rascunhos duram até o WinZapp ser fechado.</p>
+<p>Uma mensagem sua que falhou ou não foi confirmada, texto ou anexo, tem "Tentar enviar de novo" no menu, também com Ctrl+Shift+Y. O WinZapp nunca reenvia nada sozinho.</p>
+<p>Durante a reprodução, o Tab depois da lista de mensagens passa pelo botão de velocidade e pela barra de duração, e numa mensagem de voz, foto ou vídeo, pelo botão de IA online. Cada um pode sair do caminho: "Ocultar o botão de velocidade durante a reprodução (os atalhos de velocidade continuam funcionando)" e "Ocultar a barra de duração durante a reprodução (o Tab não passa por ela)" em Configurações &gt; Áudio &gt; Reprodução de áudio, e "Ocultar o botão de IA online que fica depois da lista de mensagens (o menu da mensagem continua oferecendo)" em IA online: Transcrições e Descrições. Os atalhos e o menu da mensagem continuam funcionando.</p>
+
+<h3>Mensagens no chat correto</h3>
+<p>Mensagens: identidades alternativas conflitantes não direcionam mais mensagens enviadas a outra pessoa ou recebidas dela para a conversa com você mesmo. Correspondências inválidas são ignoradas; as mensagens permanecem no chat original até a identidade ser resolvida.</p>
+
+<p>No motor Neonize, a tecla Home no começo da conversa pede ao celular as mensagens mais antigas, um lote a cada vez, até ele não ter mais nada para mandar daquela conversa. O celular costuma entregar assim cerca de um ano para trás; para trazer mais, escolha o período ao conectar.</p>
+
+<h3>Modelos comerciais e botões</h3>
+<p>Os modelos comerciais compatíveis mostram o título, a mensagem, o rodapé e as opções disponíveis. Depois de selecionar a mensagem, use Tab para chegar aos botões e Enter ou Espaço para ativar um deles. Links da web só abrem quando ativados; uma resposta ou opção de lista envia uma única resposta, o botão de copiar copia um código e o botão de telefone lê o número sem iniciar uma ligação. Alguns formulários, ações específicas de aplicativos e mídias dentro do modelo não estão disponíveis aqui, e isso é informado. Um registro antigo que não guardou o texto ou o link não pode ser reconstruído; confira no WhatsApp do celular.</p>
+
+<h3>Tradução de mensagens</h3>
+<p>Pressione Shift+Enter em uma mensagem de texto da lista de mensagens, ou escolha "Traduzir mensagem" no menu de contexto dela. O WinZapp diz "Traduzindo com …" e depois lê a tradução. O atalho pode ser trocado nas Configurações. Para configurar, abra Configurações &gt; "IA online: Transcrições e Descrições" &gt; "Tradução de mensagens"; esse botão aparece mesmo com os outros recursos de IA desativados. Escolha o "Provedor": um dos seus provedores de IA, Grok (xAI), ou "OpenAI Compatible" ou "Anthropic Compatible" com o seu próprio "Endereço personalizado da API" (https, ou http só neste computador). Depois escolha o "Modelo" (os provedores revisados já vêm com um; "Buscar modelos" lista os outros) e o "Idioma de destino". Deixe a chave da API em branco para usar a chave já salva daquele provedor. Grok, endereços personalizados e modelos que o WinZapp não conhece precisam passar em "Testar tradução" antes de o OK ser aceito. "Exibição da tradução" substitui o texto da mensagem na lista, mostra a tradução depois do original ou a abre em uma janela separada com o botão "Copiar". Essas configurações valem para todas as contas do WinZapp.</p>
+<p>"Tradução automática" traduz as mensagens de texto recebidas assim que chegam. Em "Conversas com tradução automática", escolha "Todas as conversas, exceto as que eu desativar" ou "Somente as conversas que eu ativar"; depois, no menu de contexto de uma conversa, use "Ativar tradução automática nesta conversa" ou "Desativar tradução automática nesta conversa". "Traduzir automaticamente as mensagens recebidas até:" e o limite diário (0 para ilimitado) protegem a sua cota, e o WinZapp avisa uma vez por dia quando o limite é atingido. Se o provedor recusar a chave, a cota ou o crédito, a tradução automática pausa por uma hora e avisa; aplicar de novo as configurações de IA a retoma.</p>
+<div class="callout info">
+  <div class="callout-title">🔒 Conversas trancadas</div>
+  Conversas trancadas nunca são traduzidas automaticamente. Traduzir uma mensagem delas exige o cofre aberto e pede confirmação toda vez. Ativar a tradução automática em todas as conversas também pede confirmação antes.
+</div>

@@ -17,12 +17,18 @@ import os
 
 import pytest
 
+from core import connection_engine as engines
 from core import save_location
 from core.spell_checker import SPELL_CHECK_MODES
 from core.utils import GROUP_MEDIA_TYPES, AUTO_DOWNLOAD_MEDIA_TYPES
+from core.reaction_shortcuts import DEFAULT_QUICK_REACTIONS, assign_quick_reaction
+
+# Row 1 set to 🐶 the way Enter + the picker does it, minus the modal picker.
+_QUICK_REACTION_SLOTS = ["🐶", *DEFAULT_QUICK_REACTIONS[1:]]
 
 # Creates a REAL top-level wx dialog - see the wxgui marker in pytest.ini.
 pytestmark = pytest.mark.wxgui
+
 
 
 def _write(path):
@@ -35,10 +41,68 @@ def _write(path):
 # tmp_path when the value depends on it), how to set the controls, and how to
 # tell the reopened dialog shows it. Every function receives (dialog, tmp_path).
 SCENARIOS = {
+    # Settings > General > Notifications (core/notification_burst.py).
+    "notification_burst_limit": dict(
+        saves={("general", "notification_burst_limit"): 7},
+        set=lambda d, t: d._notification_burst_spin.SetValue(7),
+        shows=lambda d, t: d._notification_burst_spin.GetValue() == 7,
+    ),
+    # Settings > Conversations (ui/dialogs/reading_position_options.py).
+    "message_list_open_position": dict(
+        saves={("user_interface", "message_list_open_position"): "last_focused"},
+        set=lambda d, t: d._open_position_radio.SetSelection(1),
+        shows=lambda d, t: d._open_position_radio.GetSelection() == 1,
+    ),
+    "remove_bookmarks_after_use": dict(
+        saves={("user_interface", "remove_bookmarks_after_use"): True},
+        set=lambda d, t: d._remove_bookmarks_after_use_cb.SetValue(True),
+        shows=lambda d, t: d._remove_bookmarks_after_use_cb.GetValue() is True,
+    ),
+    "remove_temp_bookmarks_after_use": dict(
+        saves={("user_interface", "remove_temp_bookmarks_after_use"): True},
+        set=lambda d, t: d._remove_temp_bookmarks_after_use_cb.SetValue(True),
+        shows=lambda d, t: d._remove_temp_bookmarks_after_use_cb.GetValue() is True,
+    ),
+    "voice_recording_mode": dict(
+        saves={("general", "voice_recording_mode"): "mono"},
+        set=lambda d, t: d._voice_recording_mode_radio.SetSelection(1),
+        shows=lambda d, t: d._voice_recording_mode_radio.GetSelection() == 1,
+    ),
+    "voice_recording_bitrate": dict(
+        saves={("general", "voice_recording_bitrate"): 128},
+        set=lambda d, t: d._voice_bitrate_choice.SetSelection(4),
+        shows=lambda d, t: d._voice_bitrate_choice.GetSelection() == 4,
+    ),
+    "voice_recording_bitrate_stereo": dict(
+        saves={("general", "voice_recording_bitrate_stereo"): 192},
+        set=lambda d, t: d._voice_bitrate_stereo_choice.SetSelection(5),
+        shows=lambda d, t: d._voice_bitrate_stereo_choice.GetSelection() == 5,
+    ),
+    # Settings > Advanced (ui/dialogs/advanced_tab.py).
+    "advanced_wpp_all_updates": dict(
+        saves={("general", "wpp_all_updates"): True},
+        set=lambda d, t: d._wpp_all_updates_check.SetValue(True),
+        shows=lambda d, t: d._wpp_all_updates_check.GetValue() is True,
+    ),
     "language": dict(
         saves={("general", "language"): "en-US"},
         set=lambda d, t: d._lang_combo.SetSelection(d._lang_codes.index("en-US")),
         shows=lambda d, t: d._lang_codes[d._lang_combo.GetSelection()] == "en-US",
+    ),
+    "pasted_audio_as": dict(
+        saves={("general", "pasted_audio_as"): "document"},
+        set=lambda d, t: d._pasted_audio_radio.SetSelection(1),
+        shows=lambda d, t: d._pasted_audio_radio.GetSelection() == 1,
+    ),
+    "notification_content": dict(
+        saves={("general", "notification_content"): "sound"},
+        set=lambda d, t: d._notification_content_radio.SetSelection(2),
+        shows=lambda d, t: d._notification_content_radio.GetSelection() == 2,
+    ),
+    "group_toast_order": dict(
+        saves={("general", "group_toast_order"): "group"},
+        set=lambda d, t: d._group_toast_order_radio.SetSelection(1),
+        shows=lambda d, t: d._group_toast_order_radio.GetSelection() == 1,
     ),
     "spell_check_mode": dict(
         saves={("general", "spell_check_mode"): "off"},
@@ -90,6 +154,11 @@ SCENARIOS = {
         set=lambda d, t: d._selected_announce_start_rb.SetValue(True),
         shows=lambda d, t: d._selected_announce_start_rb.GetValue(),
     ),
+    "unread_count_position": dict(
+        saves={("user_interface", "unread_count_position"): "before"},
+        set=lambda d, t: d._unread_position_before_rb.SetValue(True),
+        shows=lambda d, t: d._unread_position_before_rb.GetValue(),
+    ),
     "voice_message_mode": dict(
         saves={("user_interface", "voice_message_mode"): "audio"},
         set=lambda d, t: d._voice_msg_mode_audio_rb.SetValue(True),
@@ -106,6 +175,18 @@ SCENARIOS = {
         set=lambda d, t: d._group_media_types_list.CheckItem(0, False),
         shows=lambda d, t: d._selected_group_media_types() == list(GROUP_MEDIA_TYPES[1:]),
     ),
+    "quick_reaction_slots": dict(
+        saves={("reactions", "quick_reaction_slots"): _QUICK_REACTION_SLOTS},
+        set=lambda d, t: d._set_quick_reaction_slots(
+            assign_quick_reaction(d._quick_reaction_slots, 0, "🐶")
+        ),
+        shows=lambda d, t: (
+            d._quick_reaction_slots == _QUICK_REACTION_SLOTS
+            and d._quick_reaction_slots_list.GetItemText(0)
+            == d._quick_reaction_slot_text(0, "🐶")
+            and d._quick_reaction_slots_list.GetItemCount() == 12
+        ),
+    ),
     "connection_fields": dict(
         saves={("connection", "wpp_server"): "http://10.0.0.5",
                ("connection", "wpp_ws_server"): "ws://10.0.0.5",
@@ -118,6 +199,12 @@ SCENARIOS = {
         shows=lambda d, t: (d._server_field.GetValue(), d._ws_server_field.GetValue(),
                             d._port_field.GetValue(), d._api_key_field.GetValue())
         == ("http://10.0.0.5", "ws://10.0.0.5", "6400", "chave-de-teste"),
+    ),
+    "connection_engine": dict(
+        saves={("connection", "wpp_engine"): "custom"},
+        set=lambda d, t: (d._engine_choice.SetSelection(engines.index_of(engines.CUSTOM)),
+                          d._custom_api_check.SetValue(True)),
+        shows=lambda d, t: d._engine_choice.GetSelection() == engines.index_of(engines.CUSTOM),
     ),
     "storage_limits": dict(
         saves={("storage", "media_max_days"): 12, ("storage", "media_max_mb"): 34},
@@ -160,6 +247,13 @@ SCENARIOS = {
         and d._alert_private_custom_field.GetValue().endswith("private.wav")
         and d._alert_group_custom_field.GetValue().endswith("group.wav"),
     ),
+    "foreground_sounds": dict(
+        saves={("foreground_sounds", "active"): "notification",
+               ("foreground_sounds", "other"): "notification"},
+        set=lambda d, t: [c.SetSelection(1) for c in d._foreground_sound_choice._combos.values()],
+        shows=lambda d, t: all(c.GetSelection() == 1
+                               for c in d._foreground_sound_choice._combos.values()),
+    ),
     "profile_backup_intervals": dict(
         saves={("profile_backup", "close_snapshot_min_hours"): 6,
                ("profile_backup", "live_snapshot_interval_hours"): 3},
@@ -194,6 +288,7 @@ def _make_frame(settings):
     from core.i18n import I18n
     from core.sound_system import DEFAULT_PACK_ID
     from tests.conftest import hidden_frame
+    from tests.settings_dialog_frame import give_global_settings
 
     class _FakeSoundSystem:
         def get_output_devices(self):
@@ -228,7 +323,9 @@ def _make_frame(settings):
 
     frame.set_global_hotkey = set_global_hotkey
     frame.save_settings = lambda: None
+    give_global_settings(frame)
     frame.load_sounds = lambda: None
+    frame._on_auto_download_settings_changed = lambda old, new: None
     frame.apply_language_changes = lambda: None
     frame.sound_system = _FakeSoundSystem()
     frame.refresh_sound_packs = lambda: None
@@ -327,6 +424,114 @@ def test_the_live_backup_options_follow_their_checkbox(make_dialog):
     assert all(c.IsShown() for c in _live_backup_options(reopened))
 
 
+def _every_other_backup_option(dialog):
+    return (dialog._close_snapshot_hours_label, dialog._close_snapshot_hours_field,
+            dialog._live_snapshot_check) + _live_backup_options(dialog)
+
+
+def _tick(check, value):
+    import wx
+
+    check.SetValue(value)
+    event = wx.CommandEvent(wx.wxEVT_CHECKBOX, check.GetId())
+    event.SetEventObject(check)
+    event.SetInt(int(value))
+    check.GetEventHandler().ProcessEvent(event)
+
+
+def test_keeping_no_copies_hides_the_rest_of_the_tab(make_dialog):
+    """Nothing else on the tab means anything while "keep no profile backups"
+    is ticked — hidden, so Tab and the screen reader skip it. Unticked, the
+    tab is back as it was, live options included."""
+    dialog = make_dialog({"profile_backup": {"live_snapshot_enabled": True}})
+    assert dialog._no_profile_snapshots_check.GetValue() is False
+    assert all(c.IsShown() for c in _every_other_backup_option(dialog))
+
+    _tick(dialog._no_profile_snapshots_check, True)
+    assert dialog._no_profile_snapshots_check.IsShown()
+    assert not any(c.IsShown() for c in _every_other_backup_option(dialog))
+
+    _tick(dialog._no_profile_snapshots_check, False)
+    assert all(c.IsShown() for c in _every_other_backup_option(dialog))
+
+    reopened = make_dialog({"profile_backup": {"snapshots_disabled": True,
+                                               "live_snapshot_enabled": True}})
+    assert reopened._no_profile_snapshots_check.GetValue() is True
+    assert not any(c.IsShown() for c in _every_other_backup_option(reopened))
+
+
+def test_turning_copies_off_offers_to_delete_the_ones_on_disk(make_dialog, monkeypatch):
+    """Apply with the box just ticked asks once, No by default; Yes deletes.
+    A dialog opened with it already ticked does not ask again."""
+    import wx
+    import ui.dialogs.settings_dialog as settings_dialog_module
+
+    asked = []
+    monkeypatch.setattr(settings_dialog_module.wx, "MessageBox",
+                        lambda message, title, style, *a, **kw:
+                        asked.append(style) or wx.YES)
+    dialog = make_dialog({})
+    deleted = []
+    dialog.main_window.profile_snapshots_size = lambda: 1024 ** 3
+    dialog.main_window.delete_profile_snapshots = lambda: deleted.append(True)
+
+    _tick(dialog._no_profile_snapshots_check, True)
+    assert dialog._apply_values() is not False
+    assert dialog._apply_values() is not False
+
+    assert len(asked) == 1 and asked[0] & wx.NO_DEFAULT
+    assert deleted == [True]
+    assert dialog.main_window.settings["profile_backup"]["snapshots_disabled"] is True
+
+    again = make_dialog({"profile_backup": {"snapshots_disabled": True}})
+    again.main_window.profile_snapshots_size = lambda: 1024 ** 3
+    again.main_window.delete_profile_snapshots = lambda: deleted.append(True)
+    assert again._apply_values() is not False
+    assert len(asked) == 1
+
+
+def _quick_reaction_rows(dialog):
+    return (dialog._quick_reaction_slots_label, dialog._quick_reaction_slots_list,
+            dialog._reset_quick_reactions_btn)
+
+
+def test_the_quick_reaction_rows_follow_their_checkbox(make_dialog):
+    """The twelve rows and the restore button appear only while fixed quick
+    reactions are ticked, same as the live backup options above."""
+    import wx
+
+    dialog = make_dialog({})
+    assert not any(c.IsShown() for c in _quick_reaction_rows(dialog))
+
+    check = dialog._fixed_quick_reactions_cb
+    check.SetValue(True)
+    event = wx.CommandEvent(wx.wxEVT_CHECKBOX, check.GetId())
+    event.SetEventObject(check)
+    event.SetInt(1)
+    check.GetEventHandler().ProcessEvent(event)
+    assert all(c.IsShown() for c in _quick_reaction_rows(dialog))
+
+    check.SetValue(False)
+    event.SetInt(0)
+    check.GetEventHandler().ProcessEvent(event)
+    assert not any(c.IsShown() for c in _quick_reaction_rows(dialog))
+
+    reopened = make_dialog({"reactions": {"fixed_quick_reactions": True}})
+    assert all(c.IsShown() for c in _quick_reaction_rows(reopened))
+
+
+def test_the_quick_reaction_list_is_named_by_its_instruction(make_dialog):
+    """NVDA names the list after the label right before it, which is where
+    "press Enter to choose the emoji" lives; the list opens on row 1."""
+    dialog = make_dialog({"reactions": {"fixed_quick_reactions": True}})
+    i18n = dialog.main_window.i18n
+    assert dialog._quick_reaction_slots_label.GetLabel() == i18n.t("reactions_slots_label")
+    children = list(dialog._reactions_page.GetChildren())
+    label_at = children.index(dialog._quick_reaction_slots_label)
+    assert children[label_at + 1] is dialog._quick_reaction_slots_list
+    assert dialog._quick_reaction_slots_list.GetFirstSelected() == 0
+
+
 @pytest.fixture
 def error_boxes(monkeypatch):
     """wx.MessageBox is modal; record what it would say instead."""
@@ -349,13 +554,14 @@ _STORED = {"profile_backup": {"close_snapshot_min_hours": 5, "live_snapshot_inte
 ])
 @pytest.mark.parametrize("bad", ["abc", "", "1.5", "-1"])
 def test_an_invalid_hour_value_refuses_to_save(make_dialog, error_boxes, field, message_key,
-                                               live_on, bad):
+                                               live_on, bad, monkeypatch):
     """OK and Apply both go through _apply_values(): an hour field that is not
     a whole number is an error, whether or not the live option is ticked, and
     nothing is written."""
     import copy
 
     dialog = make_dialog(copy.deepcopy(_STORED))
+    monkeypatch.setattr(dialog._backup_dialog, "open", lambda control=None: None)
     dialog._live_snapshot_check.SetValue(live_on)
     dialog._update_live_snapshot_fields()
     getattr(dialog, field).SetValue(bad)
@@ -363,7 +569,9 @@ def test_an_invalid_hour_value_refuses_to_save(make_dialog, error_boxes, field, 
     assert dialog._apply_values() is False
     assert error_boxes == [dialog.main_window.i18n.t(message_key)]
     assert dialog.main_window.settings["profile_backup"] == _STORED["profile_backup"]
-    assert dialog._notebook.GetSelection() == dialog._notebook.FindPage(dialog._profile_backup_page)
+    # The backup options live in a window opened from the Storage page: the
+    # error selects that page and asks for the window with the field focused.
+    assert dialog._notebook.GetSelection() == dialog._notebook.FindPage(dialog._storage_page)
     # A hidden field cannot be corrected: the error brings it back into view.
     assert getattr(dialog, field).IsShown()
 

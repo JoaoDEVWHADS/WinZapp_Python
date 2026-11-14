@@ -26,6 +26,10 @@ import threading
 
 import pytest
 
+# on_switch_to_qrcode() arms a wx.Timer, which needs the wx.App to exist. Without
+# this the file only passed when an earlier test had already created one.
+pytestmark = pytest.mark.usefixtures("wx_app")
+
 import ui.dialogs.connect as connect_module
 from ui.dialogs.connect import Connect
 

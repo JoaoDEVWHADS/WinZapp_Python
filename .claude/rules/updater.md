@@ -2,11 +2,23 @@
 paths:
   - "client/updater.py"
   - "client/update_coord.py"
+  - "client/update_channel_choice.py"
+  - "client/update_background.py"
+  - "client/update_package.py"
+  - "client/update_progress.py"
+  - "client/core/update_handoff.py"
+  - "client/update_relaunch.py"
+  - "client/update_node_kill.py"
+  - "client/core/npm_environment.py"
+  - "client/core/api_staging.py"
+  - "client/core/update_keeps_server.py"
+  - "client/main_window/wpp_background_update.py"
   - "client/version.py"
   - ".github/workflows/*.yml"
   - ".github/scripts/*.py"
   - "client/core/release_signature.py"
   - "client/core/release_keys.py"
+  - "client/main_window/updates.py"
 ---
 
 # Updater

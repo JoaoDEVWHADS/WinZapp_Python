@@ -136,14 +136,16 @@ def test_stress_many_concurrent_triggers_grant_exactly_one():
 # instead of guessing a duration.
 
 
-def test_closed_and_destroyed_and_empty_count_as_flushed():
-    for status in ("CLOSED", "DESTROYED", ""):
+def test_only_explicit_closed_and_destroyed_count_as_flushed():
+    for status in ("CLOSED", "DESTROYED"):
         assert cs.session_closed_after_flush(status) is True
 
 
-def test_none_status_counts_as_flushed():
-    # A missing/None status (server no longer knows the session) is closed too.
-    assert cs.session_closed_after_flush(None) is True
+def test_unreadable_status_never_counts_as_flushed():
+    # A failed probe is unknown; the server explicitly returns CLOSED when
+    # there is no client. An unknown read may not authorize a Chrome kill.
+    for status in (None, ""):
+        assert cs.session_closed_after_flush(status) is False
 
 
 def test_live_statuses_are_not_yet_flushed():

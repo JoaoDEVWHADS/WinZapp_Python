@@ -9,10 +9,13 @@ the layer that actually owns it.
 
 import json
 import os
+import types
 
 import pytest
 
 import update_coord
+import updater
+from updater import UpdateChecker
 
 
 @pytest.fixture
@@ -138,5 +141,96 @@ class TestHolderInspection:
             gd, "0.26.0.0beta", pid=111, create_time=1.0, is_alive=_alive
         )
 
-        assert update_coord.update_prompt_holder(gd, is_alive=_dead) is None
-        assert not os.path.exists(os.path.join(gd, "update_prompt.json"))
+
+@pytest.fixture
+def as_separate_processes(monkeypatch):
+    """Route the checker's claim through the real coordinator, but with each
+    stub's own pid and a liveness answer that does not depend on those pids
+    existing on the machine running the tests."""
+    real = update_coord.try_claim_update_prompt
+
+    def _claim(global_dir, version, **kw):
+        import inspect as _inspect
+        caller = _inspect.currentframe().f_back.f_locals.get("self")
+        pid = getattr(caller, "_pid", None) or 111
+        return real(global_dir, version, pid=pid, create_time=float(pid),
+                    is_alive=_alive)
+
+    monkeypatch.setattr(update_coord, "try_claim_update_prompt", _claim)
+
+
+class TestTheCheckerUsesIt:
+    def test_two_accounts_only_one_prompt(self, gd, as_separate_processes):
+        a, b = _StubChecker(gd, pid=111), _StubChecker(gd, pid=222)
+        assert a._claim_prompt("0.26.0.0beta") is True
+        assert b._claim_prompt("0.26.0.0beta") is False
+
+    def test_declining_hands_it_back(self, gd, as_separate_processes):
+        a, b = _StubChecker(gd, pid=111), _StubChecker(gd, pid=222)
+        a._claim_prompt("0.26.0.0beta")
+        a._release_prompt()
+        assert b._claim_prompt("0.26.0.0beta") is True
+
+    def test_no_global_dir_means_no_coordination(self, tmp_path):
+        """A single-account or dev run has no shared directory — and no second
+        account to duplicate the dialog for."""
+        checker = _StubChecker(None)
+        assert checker._claim_prompt("0.26.0.0beta") is True
+        assert checker._prompt_token is None
+
+    def test_it_fails_open(self, gd, monkeypatch):
+        """A prompt that cannot be coordinated is worth far more than a prompt
+        suppressed by a bug in the coordination."""
+        def _boom(*a, **kw):
+            raise RuntimeError("coordination is broken")
+        monkeypatch.setattr(update_coord, "try_claim_update_prompt", _boom)
+
+        assert _StubChecker(gd)._claim_prompt("0.26.0.0beta") is True
+
+
+class TestTheClaimIsHeldAcrossTheInstall:
+    def test_saying_yes_does_not_release_before_installing(self):
+        """Releasing on ID_YES would let another account open its own dialog
+        while this one is already downloading and about to relaunch the shared
+        install directory."""
+        src = inspect.getsource(UpdateChecker._show_update_dialog)
+        yes_branch = src[src.index("if result == wx.ID_YES:"):src.index("else:")]
+        assert "_release_prompt" not in yes_branch
+        assert "_do_install" in yes_branch
+
+    @pytest.mark.parametrize("modal_result, retries", [
+        (updater.wx.ID_CANCEL, 1),
+        (updater.wx.ID_OK, 0),
+        (updater.wx.ID_ABORT, 1),
+    ], ids=["cancelled", "dev-mode", "declined-retry"])
+    def test_every_install_exit_that_leaves_us_running_releases_it(
+            self, gd, as_separate_processes, monkeypatch, modal_result, retries):
+        """Exercise settled non-launch outcomes through the public install
+        entry point: another account must be able to prompt afterwards.
+        Completion may live in a helper without weakening this invariant."""
+        checker = _StubChecker(gd, pid=111)
+        other = _StubChecker(gd, pid=222)
+        assert checker._claim_prompt("9.9.9")
+        assert not other._claim_prompt("9.9.9")
+        exits, scheduled, discarded, destroyed = [], [], [], []
+        checker._mw.real_exit = lambda: exits.append(True)
+        checker._mw.i18n = types.SimpleNamespace(t=lambda key: key)
+        checker._schedule_retry = lambda: scheduled.append(True)
+        checker._do_install = types.MethodType(UpdateChecker._do_install, checker)
+        dialog = types.SimpleNamespace(
+            _install_ok=False, _error_msg="synthetic prelaunch failure",
+            run=lambda: modal_result, Destroy=lambda: destroyed.append(True),
+        )
+        monkeypatch.setattr(updater, "UpdateProgressDialog", lambda *a, **kw: dialog)
+        monkeypatch.setattr(updater, "bring_to_front_if_hidden", lambda *a: None)
+        monkeypatch.setattr(updater, "message_box", lambda *a, **kw: updater.wx.NO)
+        monkeypatch.setattr(updater, "discard_package", discarded.append)
+
+        checker._do_install("9.9.9", "https://example.invalid/update.zip",
+                            extracted_dir="synthetic-package")
+
+        assert not exits and not checker._install_pending
+        assert len(scheduled) == retries
+        assert destroyed == [True] and discarded == ["synthetic-package"]
+        assert checker._prompt_token is None
+        assert other._claim_prompt("9.9.9"), "settled non-launch must hand the prompt back"

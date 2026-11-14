@@ -119,3 +119,20 @@ def send_failure_is_ambiguous(status_code) -> bool:
     except (TypeError, ValueError):
         return True
     return code >= 500
+
+
+def quote_is_status(quoted, quoted_id) -> bool:
+    """True when a send's quote is a status (story) rather than a chat message.
+
+    A status reply goes through /send-reply alone (replyToStatusMessage on the
+    Node side, which ignores mentions): a mention in a status-reply DM means
+    nothing, and /send-mentioned cannot quote a status, so combining them
+    would degrade the reply to a plain DM. Also true when the quote *claims*
+    to be a status but has no serializable id, so the caller can refuse it
+    instead of sending a plain message.
+    """
+    if quoted_id and "status@broadcast" in quoted_id:
+        return True
+    if not isinstance(quoted, dict):
+        return False
+    return (quoted.get("key") or {}).get("remoteJid") == "status@broadcast"

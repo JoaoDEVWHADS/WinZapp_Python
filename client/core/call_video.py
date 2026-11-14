@@ -5,10 +5,25 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 
 def camera_names(ffmpeg_output: str) -> list[str]:
-    """Extract DirectShow video device names, excluding audio and aliases."""
+    """Extract DirectShow video device names, excluding audio and aliases.
+
+    Two listing formats are in the field. Newer FFmpeg builds print a
+    ``DirectShow video devices`` header and list bare quoted names under it.
+    The build WinZapp bundles (``client/lib/ffmpeg.exe``, which
+    ``_find_api_ffmpeg()`` prefers) prints no header at all and tags each
+    line itself::
+
+        [dshow @ 000] "HP TrueVision HD Camera" (video)
+        [dshow @ 000] "Microphone Array (Realtek(R) Audio)" (audio)
+
+    Requiring the header made that build enumerate zero cameras, so a real
+    camera was reported as "No camera found" and the call went out
+    receive-only.
+    """
     names = []
     in_video = False
     for line in ffmpeg_output.splitlines():
@@ -17,13 +32,24 @@ def camera_names(ffmpeg_output: str) -> list[str]:
             continue
         if 'DirectShow audio devices' in line:
             in_video = False
-        if not in_video or 'Alternative name' in line:
+            continue
+        if 'Alternative name' in line:
             continue
         # Recent FFmpeg builds may append a media-kind suffix, e.g.
         #   [dshow @ ...]  "Integrated Camera" (video)
         # and spacing after the dshow prefix is not stable.
-        match = re.search(r'\]\s+"([^"]+)"(?:\s+\(video\))?\s*$', line, re.IGNORECASE)
-        if match:
+        match = re.search(
+            r'\]\s+"([^"]+)"(?:\s+\((video|audio)\))?\s*$', line, re.IGNORECASE
+        )
+        if not match:
+            continue
+        kind = (match.group(2) or '').lower()
+        if kind == 'audio':
+            continue
+        # A tagged (video) line names its own kind, so it is authoritative
+        # without the header. An untagged name still needs the header, which
+        # is what keeps audio devices in the older format out.
+        if kind == 'video' or in_video:
             names.append(match.group(1))
     return names
 
@@ -51,7 +77,7 @@ def jpeg_frames(stream, stop_event):
         if not chunk:
             break
         buffer.extend(chunk)
-        while True:
+        while not stop_event.is_set():
             start = buffer.find(b'\xff\xd8')
             if start < 0:
                 buffer.clear()
@@ -103,7 +129,19 @@ class CameraCapture:
         )
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
-        if not self.ready.wait(8):
+        # Poll instead of one flat ready.wait(8): when the camera is already
+        # held by another app, ffmpeg exits within milliseconds, and waiting
+        # out the full 8 s afterwards is pure dead time: the call is already
+        # connected by then (the camera opens after the accept/offer POST),
+        # and until this returns the user's video neither starts nor reports
+        # "no camera" -- silence for a blind user who pressed Answer.
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if self.ready.wait(0.1):
+                break
+            if self.process.poll() is not None:
+                break
+        if not self.ready.is_set():
             self.stop()
             raise RuntimeError('Camera did not produce video frames')
 
@@ -122,7 +160,14 @@ class CameraCapture:
                     # Probing with transmit=False must never leak a frame to
                     # the peer: skip send_frame entirely rather than racing
                     # a caller that stops capture right after ready fires.
-                    if self.transmit:
+                    #
+                    # stop_event is re-read here, not just between chunks:
+                    # one read(4096) can carry several complete JPEGs, so
+                    # after "turn video off" set the event, the frames
+                    # already decoded from that last chunk would still have
+                    # been sent -- the peer kept seeing the user for a
+                    # moment after WinZapp announced video was off.
+                    if self.transmit and not self.stop_event.is_set():
                         try:
                             self.send_frame(frame)
                         except Exception:

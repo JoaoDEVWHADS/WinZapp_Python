@@ -628,10 +628,8 @@ def _translations():
     every {name}/{author} placeholder, and with the names gone from the
     rendered line the differential below would see no change and pass on
     everything."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "client", "languages", "pt-BR.json")
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    from tests.locales import load_strings
+    return load_strings("pt-BR")
 
 
 class _I18n:
@@ -695,9 +693,11 @@ class _RenderPanel(_PanelStub):
     _render_separator = ConversationsPanel._render_separator
     _get_message_content = ConversationsPanel._get_message_content
     _sender_label = ConversationsPanel._sender_label
+    _saved_contact_name = ConversationsPanel._saved_contact_name
     _get_quoted_sender = ConversationsPanel._get_quoted_sender
     _get_quoted_preview = ConversationsPanel._get_quoted_preview
     _resolve_mentions_in_text = ConversationsPanel._resolve_mentions_in_text
+    _message_mentioned_jids = staticmethod(ConversationsPanel._message_mentioned_jids)
     _get_participant_name = ConversationsPanel._get_participant_name
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)
     _is_message_forwarded = ConversationsPanel._is_message_forwarded

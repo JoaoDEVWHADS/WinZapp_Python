@@ -14,6 +14,7 @@ ffmpeg subprocess or audio channel running in the background).
 """
 
 from ui.conversations import ConversationsPanel
+from tests.god_modules import conversations_modules
 
 
 class _FakeVideoPlayer:
@@ -92,6 +93,7 @@ class _Stub:
         self._media_bitmap         = _FakeWidget()
         self._action_open_btn      = _FakeWidget()
         self._action_save_as_btn   = _FakeWidget()
+        self._action_describe_btn  = _FakeWidget()
         self._action_download_btn  = _FakeWidget()
         self._buttons_container    = _FakeWidget()
         self._contact_converse_btn = _FakeWidget()
@@ -511,15 +513,20 @@ class TestOpenActionAlwaysExternalForVideo:
         }
         stub = _OpenActionStub([video_msg], settings=settings)
         import ui.conversations as conv_mod
+        # data_path is looked up in the module the method lives in, which
+        # after the split is one of ui/conversation_panel/'s modules.
+        bound = [m for m in conversations_modules() if "data_path" in vars(m)]
         orig_thread = conv_mod.threading.Thread
-        orig_data_path = conv_mod.data_path
+        orig_data_path = [(m, m.data_path) for m in bound]
         conv_mod.threading.Thread = _FakeThread
-        conv_mod.data_path = lambda *parts: "/".join(("fake_data",) + parts)
+        for m in bound:
+            m.data_path = lambda *parts: "/".join(("fake_data",) + parts)
         try:
             stub._on_action_open(None, index=0)
         finally:
             conv_mod.threading.Thread = orig_thread
-            conv_mod.data_path = orig_data_path
+            for m, orig in orig_data_path:
+                m.data_path = orig
         return stub
 
     def test_dialog_mode_still_opens_externally_not_the_dialog(self):
@@ -544,15 +551,20 @@ class TestOpenActionAlwaysExternalForVideo:
         }
         stub = _OpenActionStub([image_msg])
         import ui.conversations as conv_mod
+        # data_path is looked up in the module the method lives in, which
+        # after the split is one of ui/conversation_panel/'s modules.
+        bound = [m for m in conversations_modules() if "data_path" in vars(m)]
         orig_thread = conv_mod.threading.Thread
-        orig_data_path = conv_mod.data_path
+        orig_data_path = [(m, m.data_path) for m in bound]
         conv_mod.threading.Thread = _FakeThread
-        conv_mod.data_path = lambda *parts: "/".join(("fake_data",) + parts)
+        for m in bound:
+            m.data_path = lambda *parts: "/".join(("fake_data",) + parts)
         try:
             stub._on_action_open(None, index=0)
         finally:
             conv_mod.threading.Thread = orig_thread
-            conv_mod.data_path = orig_data_path
+            for m, orig in orig_data_path:
+                m.data_path = orig
 
         assert stub.media_viewer_calls == []
         assert len(_FakeThread.instances) == 1

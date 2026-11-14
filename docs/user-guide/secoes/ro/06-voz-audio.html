@@ -1,0 +1,39 @@
+<!--nav: 🎙️ Mesaje vocale și audio-->
+<p class="lead">Înregistrează, ascultă și trimite mesaje vocale și controlează redarea fără a ieși din conversație.</p>
+
+<h3>Înregistrare</h3>
+<table class="field-table">
+  <tr><th>Comandă rapidă</th><th>Acțiune</th></tr>
+  <tr><td class="field-name">Ctrl+R</td><td>Înregistrați mesajul vocal</td></tr>
+  <tr><td class="field-name">Ctrl+Shift+P</td><td>Întrerupe și reia înregistrarea</td></tr>
+  <tr><td class="field-name">Ctrl+P</td><td>Ascultă ce s-a înregistrat cât înregistrarea este întreruptă</td></tr>
+  <tr><td class="field-name">Ctrl+Shift+D</td><td>Renunță la înregistrare</td></tr>
+  <tr><td class="field-name">Ctrl+Shift+H</td><td>Înregistrați microfonul și sunetul computerului</td></tr>
+</table>
+<ul>
+  <li><strong>Canalele de înregistrare a mesajelor vocale:</strong> Există un singur buton de înregistrare. În Setări &gt; Audio, "Canalele de înregistrare a mesajelor vocale" oferă "Automat (folosește canalele dispozitivului)" (implicit), "Mono (combină stânga și dreapta)" și "Stereo (dacă este disponibil)". Automat și Stereo păstrează două canale când dispozitivul le acceptă și folosesc mono în caz contrar. Mono calculează media canalelor stâng și drept: alege-l pentru un microfon conectat doar la INPUT 1 sau INPUT 2 al unei interfețe audio. Cu o singură intrare activă, volumul scade după combinare și nu se aplică amplificare automată. În modul Automat, o înregistrare cu un canal complet fără semnal este trimisă mono, din canalul cu sunet. Alegerea se fixează la începutul înregistrării și se aplică și la ascultarea în pauză. Nu afectează apelurile sau înregistrarea microfonului împreună cu sunetul calculatorului. Mesajele vocale stereo sunt redate și pe iPhone.</li>
+  <li><strong>Microfon + sunetul calculatorului:</strong> înregistrează într-un singur mesaj vocea ta și ce redă calculatorul (un videoclip, muzică, cititorul de ecran). În timpul înregistrării, două glisoare reglează volumul celorlalte sunete și al NVDA (fără NVDA, al doilea este dezactivat); se aplică doar înregistrării și sunt păstrate pe cont. Înainte de a începe, WinZapp avertizează că tot ce se aude va intra în înregistrare, cu "Nu mai afișați" (opțiunea "Avertizați înainte de înregistrarea sunetului computerului" readuce avertismentul). Dacă WinZapp se blochează o secundă sau două (computer lent sau ocupat), sunetul din acel moment este omis, iar înregistrarea continuă. Înregistrarea este trimisă ca audio.</li>
+  <li>Anunțurile înregistrării pot fi reduse la tăcere; cititorul de ecran nu începe să spună "Trimite fișierele" înainte de a fi întrerupt.</li>
+  <li><strong>Reducerea zgomotului microfonului:</strong> cu "Activați reducerea zgomotului microfonului" bifată în Setări &gt; Audio, aceeași pagină arată "Model de reducere a zgomotului", cu starea și butonul "Descarcă modelul de reducere a zgomotului". Modelul neuronal se descarcă o singură dată, prin internet, iar înregistrările sunt procesate pe acest computer. Fără model, reducerea folosește gate-ul de zgomot de bază; dacă nu poate fi folosit pentru o înregistrare, WinZapp anunță prin cititorul de ecran și folosește gate-ul de zgomot de bază la acea trimitere. Dacă reducerea zgomotului nu poate fi aplicată deloc, mesajul este trimis neprocesat, tot cu un anunț.</li>
+  <li>Microfonul și difuzorul folosite se află în Setări &gt; Audio.</li>
+  <li>Cu Neonize, mesajul vocal este livrat și contactelor de pe Android.</li>
+  <li>Dacă biblioteca de tipuri de fișiere a computerului (libmagic) nu se încarcă, Neonize recunoaște tipul chiar din fișier, iar mesajul vocal pleacă normal.</li>
+  <li>Mesajele vocale mono sunt înregistrate implicit la 64 kbps, iar cele stereo la 128 kbps. În Setări &gt; Audio, "Rata de biți a mesajelor vocale (kbps)" (mono) și "Rata de biți a mesajelor vocale stereo (kbps)" permit alegerea între 32 și 256 kbps.</li>
+</ul>
+
+<h3>Ascultare</h3>
+<ul>
+  <li>La mesajele vocale și audio, <strong>Enter</strong> sau <strong>Spațiu</strong> redau și întrerup. În Setări &gt; Audio poți distinge mesajele vocale de fișierele audio.</li>
+  <li><strong>Viteză:</strong> Alt+, încetinește, iar Alt+. accelerează. Viteza implicită se stabilește în Setări &gt; Audio &gt; Redare audio.</li>
+  <li><strong>Avans și revenire:</strong> Shift+Săgeată dreapta/stânga mută cu 5 secunde; Shift+Page Down/Up mută cu 1 minut; Shift+Home și Shift+End merg la începutul și sfârșitul a ceea ce se redă.</li>
+  <li>Mesajele vocale următoare se redau în secvență, dacă nu debifați "Redă automat mesajele vocale în secvență" în Setări &gt; Interfața utilizatorului. În timpul secvenței, rândul cu focalizarea așteaptă să-și actualizeze starea, astfel încât cititorul de ecran să nu vorbească peste audio.</li>
+  <li><strong>Ctrl+Alt+Shift+P</strong> întrerupe sau reia audio-ul care se redă, din orice panou.</li>
+  <li>Dacă dispozitivul de ieșire se schimbă (căștile sunt scoase, de exemplu), WinZapp trece pe dispozitivul implicit și redă mesajul prima dată.</li>
+  <li>Dacă placa de sunet nu este disponibilă (de exemplu, când calculatorul se trezește), WinZapp încearcă să restabilească ieșirea audio când o redare eșuează; dacă tot nu poate reda, anunță prin cititorul de ecran.</li>
+  <li>În setări există o opțiune pentru a nu marca audio-ul ca redat.</li>
+</ul>
+
+<h3>Schimbarea dispozitivului audio pe loc</h3>
+<p>Ctrl+Alt+Shift+H deschide lista dispozitivelor de redare, iar Ctrl+Alt+Shift+G pe cea a dispozitivelor de înregistrare, numerotate de la 1 la 0: apasă numărul pentru a schimba imediat sau folosește săgețile și Enter. Schimbarea se aplică sunetelor, mesajelor vocale și apelurilor (un apel în curs se schimbă fără să se întrerupă), în toate conturile deschise, până închizi WinZapp. Dispozitivele alese în setări nu se schimbă.</p>
+
+<p>În Setări > Audio, butonul "Setările reducerii zgomotului" deschide fereastra reducerii: starea modelului neural și butonul care îl descarcă, procesorul pe care rulează (al computerului, o placă NVIDIA cu CUDA 12 sau CUDA 13, ori Core ML pe Mac), componentele de care acel procesor mai are nevoie, cu butonul care descarcă doar pe cele lipsă, și butoane care elimină componentele și modelul. CUDA 12 folosește cuBLAS-ul transcrierii locale, iar schimbarea procesorului se aplică de la următoarea pornire a WinZapp. Cu reducerea zgomotului pornită și modelul instalat, caseta "Folosiți reducerea neurală a zgomotului" alege între ea și reducerea obișnuită, mai rapidă.</p>

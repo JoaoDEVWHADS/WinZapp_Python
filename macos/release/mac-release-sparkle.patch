@@ -1,0 +1,1431 @@
+diff --git a/.github/mac-release-tools/README.md b/.github/mac-release-tools/README.md
+new file mode 100644
+index 0000000..2780d0b
+--- /dev/null
++++ b/.github/mac-release-tools/README.md
+@@ -0,0 +1,13 @@
++# Appcast tools, pinned
++
++What the `appcast` job of `mac-release.yml` runs in the one step that holds
++`SPARKLE_ED_PRIVATE_KEY`: copies of `macos/release/appcast.py`,
++`macos/winzapp_mac/provenance.py` and `macos/winzapp_mac/sparkle_policy.py`
++from gabrielhhaber/WinZapp_Python, kept on this branch so that step never runs
++code from the tag it publishes (the tag is read as data only: its changelogs
++and `language_map.json`). Sparkle's `sign_update` comes from the official
++Sparkle 2.10.0 release, pinned by SHA-256 in the workflow.
++
++Update these copies by hand, after reviewing the upstream change, when
++`appcast.py` or the appcast format changes there; the appcast items they
++write must stay what that release's `sparkle_policy.decide()` accepts.
+diff --git a/.github/mac-release-tools/release/appcast.py b/.github/mac-release-tools/release/appcast.py
+new file mode 100644
+index 0000000..5d766aa
+--- /dev/null
++++ b/.github/mac-release-tools/release/appcast.py
+@@ -0,0 +1,325 @@
++#!/usr/bin/env python3
++"""The Sparkle appcasts of the macOS releases (one per architecture).
++
++Run by the releases repository's workflow (macos/release/README.md) on a Mac
++runner, over the zips downloaded from the published release (and checked
++against its SHA256SUMS.txt). The workflow runs its own pinned copy of this
++file, never the one in the tag being added: the step that holds the private
++key runs no code from that tag, which it reads as data only (--source: its
++changelogs and language map).
++
++    appcast.py sign-zip --zip pub/WinZapp-macOS-arm64.zip --out sparkle-arm64.json \\
++        --tag v2.1.0.4258alpha --public-key "$SPARKLE_PUBLIC_ED_KEY" --sign-update tools/sign_update
++    appcast.py add --site site --tag v2.1.0.4258alpha --arch arm64 \\
++        --repo rocco-labs/WinZapp_Python --signature sparkle-arm64.json \\
++        --source src --sign-update tools/sign_update
++
++The private EdDSA key is read from SPARKLE_ED_PRIVATE_KEY and handed to
++Sparkle's own sign_update (from the Sparkle release build_app.py pins) on its
++standard input: never an argument, never a file. sign_update signs the zip
++(sparkle:edSignature) and then the whole feed, so the apps, which require a
++signed feed (SURequireSignedFeed), trust nothing in it that was changed after.
++
++The items of each feed live in site/appcast-<arch>.json, and the XML is
++rebuilt from them each time: adding a release never edits signed XML in
++place. Only full zips are listed, never deltas: the app refuses an item with
++deltas (sparkle_policy.decide), since the release its tag stands for is the
++full zip.
++
++The parsing and rendering are pure and tested on any platform
++(tests/test_macos_appcast.py).
++"""
++
++import argparse
++import datetime
++import email.utils
++import importlib.util
++import json
++import os
++import plistlib
++import re
++import subprocess
++import sys
++import xml.etree.ElementTree as ET
++import zipfile
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++MACOS = os.path.dirname(HERE)
++ROOT = os.path.dirname(MACOS)
++if MACOS not in sys.path:
++    sys.path.insert(0, MACOS)
++
++from winzapp_mac import provenance, sparkle_policy  # noqa: E402  (pure standard library)
++
++SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
++XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
++KEEP_ALPHA = 5              # newest alphas kept in a feed
++KEEP_STABLE = 3             # newest stables; never pushed out by alphas
++KEY_ENV = "SPARKLE_ED_PRIVATE_KEY"
++
++_SIGN_OUTPUT = re.compile(r'sparkle:edSignature="([A-Za-z0-9+/=]+)"\s+length="(\d+)"', re.ASCII)
++# client/updater.py's _HDR_RE: a "V1.2.3.4" line starts a version's section.
++_HEADER = re.compile(r"^V(\d+\.\d+\.\d+\.\d+(?:dev|alpha|beta)?)\s*$", re.IGNORECASE | re.ASCII)
++# A pull request in a GitHub release body, as client/core/release_notes.py reads it.
++_PULL = re.compile(r"^\s*[*-]\s+(?P<title>.+?)\s+by\s+@[\w.-]+(?:\[bot\])?\s+in\s+\S*/pull/(?P<number>\d+)\s*$")
++
++ET.register_namespace("sparkle", SPARKLE_NS)
++
++
++# -- pure ------------------------------------------------------------------------
++
++def parse_sign_output(text):
++    """{"edSignature", "length"} from what sign_update prints for an archive."""
++    m = _SIGN_OUTPUT.search(text or "")
++    if not m:
++        raise ValueError("sign_update printed no signature")
++    return {"edSignature": m.group(1), "length": int(m.group(2))}
++
++
++def _section_key(version):
++    """Order of a changelog header, as provenance orders tags (a "dev"
++    header, which no release tag has, sorts before alpha)."""
++    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\.(\d+)(dev|alpha|beta)?", version, re.IGNORECASE | re.ASCII)
++    pre = {"dev": 0, "alpha": 1, "beta": 2, "": 3}[(m.group(5) or "").lower()]
++    return tuple(int(m.group(i)) for i in range(1, 5)), pre
++
++
++INFO_PLIST = "WinZapp.app/Contents/Info.plist"
++
++
++def key_refusal(zip_path, tag, public_key):
++    """"" when the app in *zip_path* is a Sparkle build of release *tag* that
++    trusts *public_key*, otherwise why not. Once one Sparkle build exists,
++    every release offered to it must carry the key (Sparkle refuses an update
++    that drops it, SUUpdateValidator.m: "Sparkle only supports rotation, but
++    not removal of (Ed)DSA keys"), and only after the user has downloaded the
++    whole zip, so a release without it never goes into the appcast."""
++    if not sparkle_policy.valid_public_key(public_key):
++        return "no Sparkle public key given to check the build against"
++    try:
++        with zipfile.ZipFile(zip_path) as zf:
++            info = plistlib.loads(zf.read(INFO_PLIST))
++    except (OSError, KeyError, zipfile.BadZipFile, plistlib.InvalidFileException, ValueError) as exc:
++        return f"cannot read {INFO_PLIST} in the zip: {type(exc).__name__}"
++    if info.get(sparkle_policy.PUBLIC_KEY) != public_key:
++        return "the build does not carry this repository's Sparkle public key"
++    if info.get(provenance.RELEASE_TAG_KEY) != tag:
++        return f"the build is not release {tag}"
++    if not sparkle_policy.configured(info):
++        return "the build's Sparkle configuration is incomplete"
++    return ""
++
++
++def release_notes(changelog_text, tag):
++    """The newest section of a changelog_<locale>.txt at or below *tag*:
++    for an alpha, the "what's new" of the release it is heading to."""
++    want = _section_key(provenance.tag_version(tag))
++    best, best_key, current, lines = None, None, None, []
++    for line in (changelog_text or "").splitlines() + ["V0.0.0.0"]:
++        m = _HEADER.match(line.strip())
++        if not m:
++            if current is not None:
++                lines.append(line)
++            continue
++        if current is not None:
++            key = _section_key(current)
++            body = "\n".join(lines).strip()
++            if body and key <= want and (best_key is None or key > best_key):
++                best, best_key = body, key
++        current, lines = m.group(1), []
++    return best or ""
++
++
++def pull_requests(markdown):
++    """The pull requests a GitHub release body lists, one "- title (#N)" line
++    each, without the author's @handle or the link; "" when it lists none."""
++    lines = []
++    for line in (markdown or "").splitlines():
++        m = _PULL.match(line)
++        if m:
++            lines.append(f"- {m.group('title').strip()} (#{m.group('number')})")
++    return "\n".join(lines)
++
++
++def alpha_notes(notes, tag, markdown):
++    """For an alpha, *notes* with the pull requests of its GitHub release
++    first: the changelog section is the same for every alpha heading to one
++    release, so on its own it cannot say what this alpha changed. The app
++    shows its own notes when it can fetch them (winzapp_mac/sparkle_notes.py);
++    these are what it falls back to."""
++    pulls = pull_requests(markdown) if tag.endswith("alpha") else ""
++    if not pulls:
++        return dict(notes)
++    return {lang: f"{pulls}\n\n{text}" for lang, text in notes.items()}
++
++
++def localized_notes(changelog_dir, tag, locales):
++    """{xml:lang: text} from each locale's changelog in *changelog_dir*,
++    English first (Sparkle's choice when none matches the user's languages)."""
++    notes = {}
++    for locale in sorted(locales, key=lambda c: c != "en-US"):
++        path = os.path.join(changelog_dir, f"changelog_{locale}.txt")
++        if os.path.isfile(path):
++            with open(path, encoding="utf-8") as fh:
++                text = release_notes(fh.read(), tag)
++            if text:
++                notes[sparkle_policy.bundle_localization(locale)] = text
++    return notes
++
++
++def make_item(tag, arch, repo, signature, notes, markdown="", pub_date=None):
++    """One appcast item, as the JSON state keeps it."""
++    if not provenance.is_release_tag(tag):
++        raise ValueError(f"{tag!r} is not a release tag")
++    if not provenance.valid_repo(repo):
++        raise ValueError(f"{repo!r} is not a repository")
++    return {
++        "tag": tag,
++        "version": provenance.bundle_version(tag),
++        "short_version": provenance.tag_version(tag),
++        "channel": sparkle_policy.ALPHA_CHANNEL if tag.endswith("alpha") else "",
++        "url": sparkle_policy.zip_url(repo, tag, arch),
++        "length": int(signature["length"]),
++        "ed_signature": signature["edSignature"],
++        "notes": dict(notes),
++        "markdown": markdown if not notes else "",
++        "pub_date": pub_date or email.utils.format_datetime(datetime.datetime.now(datetime.timezone.utc)),
++    }
++
++
++def merge(items, new):
++    """*new* added (replacing an item of the same tag), newest first, with the
++    newest KEEP_ALPHA alphas and KEEP_STABLE stables (betas count as stable:
++    they are offered to everyone).
++
++    Only the newest item of each channel keeps its release notes: it is the
++    one Sparkle offers, and every app downloads the whole feed on each check
++    (seven locales of notes are over 100 KB an item). The older items stay
++    so a withdrawn release can be dropped by hand without leaving the feed
++    empty."""
++    items = [dict(i) for i in items if i["tag"] != new["tag"]] + [dict(new)]
++    items.sort(key=lambda i: tuple(int(p) for p in i["version"].split(".")), reverse=True)
++    alphas = [i for i in items if i["channel"]][:KEEP_ALPHA]
++    stables = [i for i in items if not i["channel"]][:KEEP_STABLE]
++    for older in alphas[1:] + stables[1:]:
++        older["notes"], older["markdown"] = {}, ""
++    return [i for i in items if any(i is k for k in alphas + stables)]
++
++
++def render(items, arch):
++    """The appcast XML (unsigned) for *items*."""
++    rss = ET.Element("rss", {"version": "2.0"})
++    channel = ET.SubElement(rss, "channel")
++    ET.SubElement(channel, "title").text = f"WinZapp for macOS ({arch})"
++    ET.SubElement(channel, "language").text = "en"
++    for i in items:
++        item = ET.SubElement(channel, "item")
++        ET.SubElement(item, "title").text = f"WinZapp {i['short_version']}"
++        ET.SubElement(item, "pubDate").text = i["pub_date"]
++        ET.SubElement(item, f"{{{SPARKLE_NS}}}version").text = i["version"]
++        ET.SubElement(item, f"{{{SPARKLE_NS}}}shortVersionString").text = i["short_version"]
++        if i["channel"]:
++            ET.SubElement(item, f"{{{SPARKLE_NS}}}channel").text = i["channel"]
++        ET.SubElement(item, f"{{{SPARKLE_NS}}}minimumSystemVersion").text = \
++            sparkle_policy.MINIMUM_SYSTEM_VERSION
++        for lang, text in i["notes"].items():
++            desc = ET.SubElement(item, "description",
++                                 {XML_LANG: lang, f"{{{SPARKLE_NS}}}format": "plain-text"})
++            desc.text = text
++        if not i["notes"] and i.get("markdown"):
++            ET.SubElement(item, "description", {f"{{{SPARKLE_NS}}}format": "markdown"}).text = i["markdown"]
++        ET.SubElement(item, "enclosure", {
++            "url": i["url"], "length": str(i["length"]), "type": "application/octet-stream",
++            f"{{{SPARKLE_NS}}}edSignature": i["ed_signature"]})
++    ET.indent(rss)
++    return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(rss, encoding="utf-8") + b"\n"
++
++
++# -- Sparkle's tools ---------------------------------------------------------------
++
++def sign_update_tool():
++    """bin/sign_update of the Sparkle release build_app.py pins (downloaded
++    and SHA-256 checked there)."""
++    spec = importlib.util.spec_from_file_location("winzapp_build_app", os.path.join(MACOS, "build_app.py"))
++    build_app = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(build_app)
++    return os.path.join(build_app.fetch_sparkle(), "bin", "sign_update")
++
++
++def _sign(path, tool=None):
++    key = os.environ.get(KEY_ENV, "").strip()
++    if not key:
++        sys.exit(f"{KEY_ENV} is not set")
++    r = subprocess.run([tool or sign_update_tool(), "--ed-key-file", "-", path],
++                       input=key + "\n", capture_output=True, text=True)
++    if r.returncode != 0:
++        sys.exit(f"sign_update failed for {os.path.basename(path)}: {r.stderr.strip()[-300:]}")
++    return r.stdout
++
++
++def main(argv=None):
++    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    s = sub.add_parser("sign-zip", help="EdDSA-sign a release zip")
++    s.add_argument("--zip", required=True)
++    s.add_argument("--out", required=True)
++    s.add_argument("--sign-update", default="",
++                   help="Sparkle's sign_update (default: the one build_app.py pins)")
++    s.add_argument("--tag", required=True, help="the release the zip must be a build of")
++    s.add_argument("--public-key", required=True,
++                   help="the Sparkle public key the build must carry (SPARKLE_PUBLIC_ED_KEY)")
++    a = sub.add_parser("add", help="add a release to site/appcast-<arch>.xml and sign the feed")
++    a.add_argument("--site", required=True)
++    a.add_argument("--tag", required=True)
++    a.add_argument("--arch", required=True, choices=("arm64", "x86_64"))
++    a.add_argument("--repo", required=True)
++    a.add_argument("--signature", required=True, help="the JSON sign-zip wrote")
++    a.add_argument("--notes-markdown", default="",
++                   help="release notes used only when the tag has no changelog section")
++    a.add_argument("--source", default=ROOT,
++                   help="checkout of the tag, read as data (client/changelog_*, language_map.json)")
++    a.add_argument("--sign-update", default="",
++                   help="Sparkle's sign_update (default: the one build_app.py pins)")
++    args = ap.parse_args(argv)
++
++    if args.cmd == "sign-zip":
++        why = key_refusal(args.zip, args.tag, args.public_key)
++        if why:
++            sys.exit(f"{os.path.basename(args.zip)} of {args.tag} is not added to the appcast: {why}")
++        sig = parse_sign_output(_sign(args.zip, args.sign_update or None))
++        if sig["length"] != os.path.getsize(args.zip):
++            sys.exit("sign_update's length is not the zip's size")
++        with open(args.out, "w") as fh:
++            json.dump(sig, fh)
++        return
++
++    with open(args.signature) as fh:
++        signature = json.load(fh)
++    with open(os.path.join(args.source, "client", "languages", "language_map.json"), encoding="utf-8") as fh:
++        locales = list(json.load(fh))
++    markdown = ""
++    if args.notes_markdown and os.path.isfile(args.notes_markdown):
++        with open(args.notes_markdown, encoding="utf-8") as fh:
++            markdown = fh.read().strip()
++    notes = alpha_notes(localized_notes(os.path.join(args.source, "client"), args.tag, locales),
++                        args.tag, markdown)
++    item = make_item(args.tag, args.arch, args.repo, signature, notes, markdown)
++    os.makedirs(args.site, exist_ok=True)
++    state = os.path.join(args.site, sparkle_policy.feed_name(args.arch).replace(".xml", ".json"))
++    items = []
++    if os.path.isfile(state):
++        with open(state, encoding="utf-8") as fh:
++            items = json.load(fh)
++    items = merge(items, item)
++    with open(state, "w", encoding="utf-8") as fh:
++        json.dump(items, fh, ensure_ascii=False, indent=1)
++        fh.write("\n")
++    feed = os.path.join(args.site, sparkle_policy.feed_name(args.arch))
++    with open(feed, "wb") as fh:
++        fh.write(render(items, args.arch))
++    _sign(feed, args.sign_update or None)
++    print(f"{feed}: {len(items)} items, newest {items[0]['tag']}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/.github/mac-release-tools/winzapp_mac/__init__.py b/.github/mac-release-tools/winzapp_mac/__init__.py
+new file mode 100644
+index 0000000..420007a
+--- /dev/null
++++ b/.github/mac-release-tools/winzapp_mac/__init__.py
+@@ -0,0 +1 @@
++"""Pure modules of WinZapp's macOS layer, vendored for appcast.py (see ../README.md)."""
+diff --git a/.github/mac-release-tools/winzapp_mac/provenance.py b/.github/mac-release-tools/winzapp_mac/provenance.py
+new file mode 100644
+--- /dev/null
++++ b/.github/mac-release-tools/winzapp_mac/provenance.py
+@@ -0,0 +1,560 @@
++"""Commit provenance of a macOS release: does it declare an official tag and
++commit that WinZapp's own repository confirms?
++
++The Mac releases are published from another repository (Info.plist
++WinZappMacReleasesRepo), so the Apple signature only says "the Mac
++maintainer's Apple team signed this", never "this code went through
++gabrielhhaber/WinZapp_Python". Each Mac release therefore DECLARES, in a
++provenance file, an official tag and commit, and the updater checks that
++declaration against the OFFICIAL repository before installing. It does not
++prove the zip was built from that commit. Pure standard library on purpose: no PyObjC, no wx, so the
++normal Windows `pytest` exercises it and macos/build_app.py (which runs
++before any dependency is installed) can use it too.
++
++Threat model
++  Attacker: whoever controls the releases repository (a fork, its CI secrets,
++  its release assets) and can publish any zip and any provenance there.
++  Cannot: push a tag to the official repository, or make api.github.com
++  answer for it. The official repository's write access is the trust root the
++  Windows releases already rely on.
++  Goal: a Mac release that cannot name one of our tags and its commit must
++  not install. A stronger guarantee (the zip IS that commit's build) needs an
++  attestation from a workflow of the official repository, or a maintainer
++  signature over the zip hash like Windows.
++
++What is verified (in this order, every step fails closed)
++  1. The provenance file is well formed: exact keys, schema 1, source_repo is
++     the pinned official repository, source_commit 40 lowercase hex, version a
++     release tag, artifacts a small name -> sha256 map.
++  2. Its version is the tag of the release being installed (no replaying the
++     provenance of another release) and is newer than the running version,
++     which is the official tag the app was built from (Info.plist
++     WinZappReleaseTag), never client/version.py.
++  3. Over HTTPS, no redirects, against api.github.com/repos/<OFFICIAL_REPO>
++     only: the tag exists in the official repository and, peeled through
++     annotated tag objects, points at exactly source_commit.
++  4. The downloaded zip's sha256 equals artifacts[<zip name>].
++
++Why the tag, and not "the commit exists in our repo"
++  GitHub serves a fork's commits through the parent repository
++  (/repos/<parent>/commits/<sha> answers 200 for them), so existence proves
++  nothing. A tag can only be created in the official repository by someone
++  with write access to it, which a fork's owner does not have. A compare
++  against the default branch would additionally prove "reachable from main",
++  but it costs another API call (the unauthenticated limit is 60 an hour) and
++  would refuse a legitimate hotfix tag on another branch; the tag is already
++  the maintainer's explicit act, so it is the check used.
++
++What this does NOT prove
++  That the zip was built from that commit. The releaser can build from a
++  modified tree and name an honest commit. build_app.py refuses a dirty tree
++  and a HEAD that is not the tag, but that runs on the releaser's machine.
++  Only a reproducible build or a CI attestation checked by the updater
++  (docs/reference/macos.md, "Commit provenance") would prove it. Tags can
++  also be created or moved by anyone with write access: the tag rules of the
++  official repository are the real limit. Known gap: the ruleset "Allow tag
++  creation only for admins" excludes refs/tags/v*alpha, so a collaborator with
++  write access can create or move an alpha tag. Recommended to the maintainer:
++  cover alpha tags too (or restrict them to the alpha workflow).
++"""
++
++import hashlib
++import http.client
++import json
++import math
++import os
++import re
++import socket
++import ssl
++import threading
++import time
++import urllib.error
++import urllib.parse
++import urllib.request
++from email.utils import parsedate_to_datetime
++
++# Pinned here: not read from the plist, not from the provenance file.
++OFFICIAL_REPO = "gabrielhhaber/WinZapp_Python"
++API_HOST = "api.github.com"
++SCHEMA = 1
++SOURCE_COMMIT_KEY = "WinZappSourceCommit"      # Info.plist, written by build_app.py
++RELEASE_TAG_KEY = "WinZappReleaseTag"          # the official tag it was built from
++
++MAX_PROVENANCE_BYTES = 16 * 1024
++MAX_API_BYTES = 256 * 1024
++TIMEOUT = 15                                   # per socket read
++DEADLINE = 30                                  # whole request, however slowly it trickles
++MAX_ARTIFACTS = 8
++MAX_ZIP_BYTES = 2 << 30                        # the app is well under 1 GB; more is not our build
++DOWNLOAD_DEADLINE = 30 * 60
++CHUNK = 16 * 1024                              # small, so the deadline is looked at often
++MAX_TAG_DEPTH = 4                              # annotated tag -> tag -> ... -> commit
++
++_KEYS = {"schema", "version", "source_repo", "source_commit", "artifacts"}
++# fullmatch + ASCII: "$" would let a trailing newline through, and \d would
++# take digits of other scripts.
++_SHA1 = re.compile(r"[0-9a-f]{40}", re.ASCII)
++_SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
++_TAG = re.compile(r"v(\d{1,9})\.(\d{1,9})\.(\d{1,9})\.(\d{1,9})(alpha|beta)?", re.ASCII)
++# GitHub's charset: owner letters/digits/hyphens, no leading hyphen; name
++# letters/digits/._- with no leading dot and no "..".
++_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.)(?!.*\.\.)[A-Za-z0-9._-]{1,100}", re.ASCII)
++_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", re.ASCII)
++_PRE = {"alpha": 1, "beta": 2, "": 3}
++
++
++class ProvenanceError(Exception):
++    """Anything that stops a release from being verified."""
++
++    def __init__(self, message, *, code="", retry_after=0):
++        super().__init__(message)
++        self.code, self.retry_after = code, retry_after
++
++    def detail(self, stage):
++        detail = VerificationDetail(f"could not verify commit provenance: {self}")
++        detail.code, detail.stage, detail.retry_after = self.code, stage, self.retry_after
++        return detail
++
++
++class VerificationDetail(str):
++    """Keep safe network metadata until the UI translates it; still a str for logs."""
++
++
++def provenance_name(arch):
++    """One file per architecture, so the two build jobs never have to merge
++    or overwrite a shared one."""
++    return f"WinZapp-macOS-provenance-{arch}.json"
++
++
++def valid_repo(value):
++    """True for an "owner/name" GitHub repository (the plist's
++    WinZappMacReleasesRepo), nothing looser."""
++    return isinstance(value, str) and bool(_REPO.fullmatch(value))
++
++
++def is_commit(value):
++    return isinstance(value, str) and bool(_SHA1.fullmatch(value))
++
++
++def is_release_tag(value):
++    return isinstance(value, str) and bool(_TAG.fullmatch(value))
++
++
++def _tag_key(tag):
++    m = _TAG.fullmatch(tag)
++    return tuple(int(m.group(i)) for i in range(1, 5)), _PRE[m.group(5) or ""]
++
++
++def tag_is_newer(tag, running_tag):
++    """Is release *tag* strictly newer than *running_tag*, both release tags
++    ("v2.0.0.5", "v2.0.0.5alpha")? The numbers compare as integers and an
++    alpha or beta is older than the stable of the same number. An invalid
++    tag on either side, or an equal one, is never newer."""
++    if not is_release_tag(tag) or not is_release_tag(running_tag):
++        return False
++    return _tag_key(tag) > _tag_key(running_tag)
++
++
++def bundle_version(tag):
++    """CFBundleVersion of release *tag*, or "" for anything that is not one.
++
++    Sparkle decides "newer" (and its installer refuses a downgrade) by
++    comparing CFBundleVersion numerically, part by part, so this must order
++    exactly as tag_is_newer() does: v2.1.0.4258alpha < v2.1.0.4258beta <
++    v2.1.0.4258 < v2.1.0.4259alpha. The channel goes into the last digit of
++    the fourth number (alpha 1, beta 2, stable 3): "2.1.0.42581". Four
++    integers, the shape CFBundleShortVersionString already ships notarized
++    in, rather than a fifth part Apple's format does not describe."""
++    if not is_release_tag(tag):
++        return ""
++    nums, pre = _tag_key(tag)
++    return f"{nums[0]}.{nums[1]}.{nums[2]}.{nums[3] * 10 + pre}"
++
++
++def running_release_tag(info):
++    """The official tag this app was built from (Info.plist WinZappReleaseTag,
++    written by build_app.py), or "" for a development build. The running
++    version is this and nothing else: client/version.py is the unstamped
++    placeholder in every tagged commit (CI stamps it only at build), so it
++    cannot tell an old release from a new one."""
++    tag = info.get(RELEASE_TAG_KEY)
++    return tag if is_release_tag(tag) else ""
++
++
++def tag_version(tag):
++    """The version a release tag names, as client/version.py spells it
++    ("v2.1.0.4050alpha" -> "2.1.0.4050alpha"), or "" for anything that is
++    not a release tag."""
++    return tag[1:] if is_release_tag(tag) else ""
++
++
++# -- the file -------------------------------------------------------------------
++
++def parse_provenance(raw):
++    """The validated provenance dict, or ProvenanceError."""
++    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_PROVENANCE_BYTES:
++        raise ProvenanceError("provenance file missing or too large")
++    try:
++        data = json.loads(bytes(raw).decode("utf-8"))
++    except (ValueError, UnicodeDecodeError, RecursionError):
++        raise ProvenanceError("provenance file is not valid JSON")
++    if not isinstance(data, dict) or set(data) != _KEYS:
++        raise ProvenanceError("provenance file has unexpected fields")
++    if data["schema"] != SCHEMA or isinstance(data["schema"], bool):
++        raise ProvenanceError("provenance schema is not supported")
++    if data["source_repo"] != OFFICIAL_REPO:
++        raise ProvenanceError("provenance names a different source repository")
++    if not is_commit(data["source_commit"]):
++        raise ProvenanceError("provenance source_commit is not a full commit id")
++    if not is_release_tag(data["version"]):
++        raise ProvenanceError("provenance version is not a release tag")
++    arts = data["artifacts"]
++    if not isinstance(arts, dict) or not 1 <= len(arts) <= MAX_ARTIFACTS:
++        raise ProvenanceError("provenance artifacts are malformed")
++    for name, digest in arts.items():
++        if not (isinstance(name, str) and _NAME.fullmatch(name)
++                and isinstance(digest, str) and _SHA256.fullmatch(digest)):
++            raise ProvenanceError("provenance artifacts are malformed")
++    return data
++
++
++def build_provenance(tag, commit, artifacts):
++    """The JSON bytes build_app.py writes next to the zip."""
++    data = {"schema": SCHEMA, "version": tag, "source_repo": OFFICIAL_REPO,
++            "source_commit": commit, "artifacts": dict(artifacts)}
++    raw = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
++    parse_provenance(raw)                       # never emit what the updater would refuse
++    return raw
++
++
++# -- the official repository ----------------------------------------------------
++
++def _api(path):
++    return f"https://{API_HOST}/repos/{OFFICIAL_REPO}/{path}"
++
++
++def _json(fetch, url):
++    try:
++        data = json.loads(fetch(url).decode("utf-8"))
++    except ProvenanceError:
++        raise
++    except Exception as exc:
++        raise ProvenanceError(f"unreadable answer from {API_HOST}: {type(exc).__name__}")
++    if not isinstance(data, dict):
++        raise ProvenanceError(f"unexpected answer from {API_HOST}")
++    return data
++
++
++def _object(data):
++    obj = data.get("object")
++    if (not isinstance(obj, dict) or obj.get("type") not in ("commit", "tag")
++            or not is_commit(obj.get("sha"))):
++        raise ProvenanceError("unexpected object in the tag answer")
++    return obj["type"], obj["sha"]
++
++
++def resolve_official_tag(tag, fetch):
++    """The commit our repository's tag *tag* points at (annotated tags
++    peeled), or ProvenanceError when the tag is missing or odd. *fetch(url)*
++    returns the body bytes or raises."""
++    if not is_release_tag(tag):
++        raise ProvenanceError("not a release tag")
++    ref = _json(fetch, _api(f"git/ref/tags/{tag}"))
++    if ref.get("ref") != f"refs/tags/{tag}":
++        raise ProvenanceError("the official repository has no such tag")
++    kind, sha = _object(ref)
++    for _ in range(MAX_TAG_DEPTH):
++        if kind == "commit":
++            return sha
++        tag_obj = _json(fetch, _api(f"git/tags/{sha}"))
++        if tag_obj.get("sha") != sha:
++            raise ProvenanceError("tag object answer does not match the request")
++        kind, sha = _object(tag_obj)
++    raise ProvenanceError("tag chain is too deep")
++
++
++def resolve_build_source(git, fetch, tag_hint=""):
++    """Build time (macos/build_app.py): (tag, commit) when HEAD is exactly the
++    commit our repository's release tag points at, None for an untagged
++    development build (no provenance is made, and no updater accepts such a
++    build). Raises ProvenanceError for a tag that does not hold: a different
++    HEAD, uncommitted changes to tracked files, a tag we do not have.
++
++    *git(*args)* returns git's stdout stripped, raising on failure; *tag_hint*
++    is the tag a CI checkout names (it may not have fetched tags). Untracked
++    files are not looked at: this is a guard for an honest releaser, not a
++    proof (see the module docstring)."""
++    tag = tag_hint
++    if not tag:
++        try:
++            tag = git("describe", "--exact-match", "--tags", "HEAD")
++        except Exception:
++            return None
++    if not is_release_tag(tag):
++        raise ProvenanceError(f"{tag!r} is not a release tag")
++    head = git("rev-parse", "HEAD")
++    if not is_commit(head):
++        raise ProvenanceError("HEAD is not a full commit id")
++    if git("status", "--porcelain", "--untracked-files=no"):
++        raise ProvenanceError("tracked files differ from HEAD; build from a clean checkout")
++    official = resolve_official_tag(tag, fetch)
++    if official != head:
++        raise ProvenanceError(
++            f"HEAD is {head[:12]} but {OFFICIAL_REPO}'s {tag} is {official[:12]}")
++    return tag, head
++
++
++def verify_release(raw, tag, running_tag, fetch, running_commit=""):
++    """(ok, detail) before anything is downloaded: the provenance in *raw* is
++    valid, belongs to release *tag*, is newer than *running_tag*, and the
++    official repository's tag points at its source_commit. Nothing raises."""
++    try:
++        data = parse_provenance(raw)
++        if data["version"] != tag:
++            raise ProvenanceError("provenance belongs to another release")
++        if not tag_is_newer(tag, running_tag):
++            raise ProvenanceError("release is not newer than the running version")
++        if running_commit and data["source_commit"] == running_commit:
++            raise ProvenanceError("release is the commit already running")
++        got = resolve_official_tag(tag, fetch)
++        if got != data["source_commit"]:
++            raise ProvenanceError(
++                "the release tag in the official repository points at another commit")
++    except ProvenanceError as exc:
++        return False, exc.detail("official_tag")
++    return True, "ok"
++
++
++def check_artifact(raw, name, path):
++    """(ok, detail): the file at *path* has the sha256 *raw*'s provenance lists
++    for *name*."""
++    try:
++        want = parse_provenance(raw)["artifacts"].get(name)
++        if not want:
++            raise ProvenanceError(f"provenance does not list {name}")
++        h = hashlib.sha256()
++        with open(path, "rb") as fh:
++            for chunk in iter(lambda: fh.read(1 << 20), b""):
++                h.update(chunk)
++        if h.hexdigest() != want:
++            raise ProvenanceError(f"{name} does not match its provenance hash")
++    except (ProvenanceError, OSError) as exc:
++        return False, f"could not verify commit provenance: {exc}"
++    return True, "ok"
++
++
++# -- HTTP -----------------------------------------------------------------------
++
++class _NoRedirect(urllib.request.HTTPRedirectHandler):
++    def redirect_request(self, *args, **kwargs):
++        return None                             # surfaces as an HTTPError
++
++
++class _HttpsRedirectOnly(urllib.request.HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        if not newurl.lower().startswith("https://"):
++            return None
++        return super().redirect_request(req, fp, code, msg, headers, newurl)
++
++
++def _tls_context():
++    """A verifying context that holds certificates on every Mac.
++
++    The bundled OpenSSL looks for its CA file under
++    /Library/Frameworks/Python.framework, a path compiled into the python.org
++    build. It exists only on a Mac with that Python installed, which every
++    build machine has and most users' do not: there, every check here failed
++    as a TLS error. certifi travels inside the app.
++    """
++    context = ssl.create_default_context()
++    try:
++        import certifi
++        context.load_verify_locations(cafile=certifi.where())
++    except (ImportError, OSError, ssl.SSLError):
++        pass
++    return context
++
++
++_TLS = urllib.request.HTTPSHandler(context=_tls_context())
++_API_OPENER = urllib.request.build_opener(_TLS, _NoRedirect)
++_ASSET_OPENER = urllib.request.build_opener(_TLS, _HttpsRedirectOnly)
++
++
++UNREACHABLE = "GitHub unreachable or rate-limited, try again later"
++_RATE_LIMITS = {}                 # host -> monotonic deadline; never a cached positive verdict
++_RATE_LOCK = threading.Lock()
++
++
++def _rate_wait(headers):
++    """Read only bounded numeric/date hints, never an error body or URL."""
++    waits = []
++    for field, value in headers.items():
++        value = str(value).strip()
++        if len(value) > 64:
++            continue
++        if field.lower() == "retry-after":
++            try:
++                wait = int(value) if re.fullmatch(r"[0-9]{1,10}", value) else (
++                    parsedate_to_datetime(value).timestamp() - time.time())
++                waits.append(max(1, math.ceil(wait)))
++            except (ValueError, TypeError, OverflowError, OSError):
++                pass
++        elif field.lower() == "x-ratelimit-reset" and headers.get("x-ratelimit-remaining") == "0":
++            if re.fullmatch(r"[0-9]{1,10}", value):
++                waits.append(max(1, math.ceil(int(value) - time.time())))
++    return max(waits, default=60)
++
++
++def _http_failure(status, headers):
++    headers = {key.lower(): str(value) for key, value in (headers or {}).items()}
++    if status == 429 or (status == 403 and (
++            headers.get("x-ratelimit-remaining") == "0" or headers.get("retry-after"))):
++        return ProvenanceError(UNREACHABLE + " (rate_limited)", code="rate_limited",
++                               retry_after=_rate_wait(headers))
++    code = ("access_denied" if status == 403 else "not_found" if status == 404
++            else "server" if status >= 500 else "http_error")
++    wait = _rate_wait(headers) if code == "server" and headers.get("retry-after") else 0
++    return ProvenanceError(f"HTTP {status}", code=code, retry_after=wait)
++
++
++def _network_failure(exc):
++    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
++    code = ("tls" if isinstance(reason, ssl.SSLError) else
++            "dns" if isinstance(reason, socket.gaierror) else
++            "timeout" if isinstance(reason, TimeoutError) else
++            "connection" if isinstance(reason, (OSError, http.client.HTTPException))
++            or isinstance(exc, urllib.error.URLError) else "unexpected")
++    return ProvenanceError(f"{UNREACHABLE} ({code})", code=code)
++
++
++def _limit_wait(resp, remaining):
++    """Shrink the socket timeout of *resp* to what is left of the budget, so
++    one stalled read cannot outlive it. Best effort: a response without a
++    reachable socket (a test fake) keeps the timeout it was opened with."""
++    try:
++        resp.fp.raw._sock.settimeout(max(0.05, min(TIMEOUT, remaining)))
++    except Exception:
++        pass
++
++
++def _chunks(resp, deadline_at, size=CHUNK):
++    """The body of *resp* in small chunks, within the deadline: each read
++    gets at most the time that is left (a server sending a byte every few
++    seconds cannot hold one read open past it), and read1 returns whatever has
++    arrived instead of waiting to fill the chunk."""
++    read = getattr(resp, "read1", resp.read)
++    while True:
++        remaining = deadline_at - time.monotonic()
++        if remaining <= 0:
++            raise ProvenanceError(UNREACHABLE, code="timeout")
++        _limit_wait(resp, remaining)
++        data = read(size)
++        if not data:
++            return
++        yield data
++
++
++def _read(opener, url, limit, headers):
++    """At most two small GETs sharing one deadline. No retry for a trust refusal.
++
++    Quota responses delay subsequent checks on the same host in this process;
++    no sleep through a rate-limit window, and no cached verification success.
++    """
++    req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": "WinZapp-macOS"}))
++    host = urllib.parse.urlsplit(url).netloc
++    with _RATE_LOCK:
++        wait = math.ceil(_RATE_LIMITS.get(host, 0) - time.monotonic())
++    if wait > 0:
++        raise ProvenanceError(UNREACHABLE + " (rate_limited)", code="rate_limited", retry_after=wait)
++    deadline_at = time.monotonic() + DEADLINE
++    for attempt in range(2):
++        try:
++            remaining = deadline_at - time.monotonic()
++            if remaining <= 0:
++                raise ProvenanceError(UNREACHABLE, code="timeout")
++            with opener.open(req, timeout=min(TIMEOUT, remaining)) as resp:
++                if resp.status != 200:
++                    raise _http_failure(resp.status, getattr(resp, "headers", {}))
++                final = resp.geturl()
++                if not final.lower().startswith("https://"):
++                    raise ProvenanceError("answer did not come over HTTPS")
++                chunks, size = [], 0
++                for chunk in _chunks(resp, deadline_at):
++                    chunks.append(chunk)
++                    size += len(chunk)
++                    if size > limit:
++                        raise ProvenanceError("answer is too large")
++                return b"".join(chunks), final
++        except ProvenanceError as exc:
++            failure = exc
++        except urllib.error.HTTPError as exc:
++            failure = _http_failure(exc.code, exc.headers)
++            exc.close()
++        except Exception as exc:
++            failure = _network_failure(exc)
++        if failure.code == "rate_limited":
++            with _RATE_LOCK:
++                _RATE_LIMITS[host] = max(_RATE_LIMITS.get(host, 0),
++                                         time.monotonic() + failure.retry_after)
++        if attempt or failure.retry_after or failure.code not in {"server", "connection", "dns", "timeout"} or (
++                deadline_at - time.monotonic() <= 1):
++            raise failure from None
++        time.sleep(1)              # only the verification worker, never the UI thread
++
++
++def download_file(url, dest, progress=None, opener=None, limit=MAX_ZIP_BYTES,
++                  deadline=DOWNLOAD_DEADLINE):
++    """Download *url* (https, redirects to https only) to *dest* within *limit*
++    bytes and *deadline* seconds in total. On any failure the partial file is
++    deleted before the error goes on. *progress* gets 0-100 when the size is
++    known."""
++    if not url.startswith("https://"):
++        raise ProvenanceError("downloads are https only")
++    deadline_at = time.monotonic() + deadline
++    req = urllib.request.Request(url, headers={"User-Agent": "WinZapp-macOS"})
++    try:
++        with (opener or _ASSET_OPENER).open(req, timeout=TIMEOUT) as resp:
++            if resp.status != 200 or not resp.geturl().lower().startswith("https://"):
++                raise ProvenanceError(f"download refused (HTTP {resp.status})")
++            try:
++                total = int(resp.headers.get("content-length") or 0)
++            except ValueError:
++                total = 0
++            if total > limit:
++                raise ProvenanceError("the download is larger than any WinZapp build")
++            done = 0
++            with open(dest, "wb") as fh:
++                for chunk in _chunks(resp, deadline_at, 1 << 16):
++                    done += len(chunk)
++                    if done > limit:
++                        raise ProvenanceError("the download is larger than any WinZapp build")
++                    fh.write(chunk)
++                    if total and progress:
++                        progress(min(100, int(done * 100 / total)))
++    except BaseException:
++        try:
++            os.remove(dest)
++        except OSError:
++            pass
++        raise
++
++
++def fetch_official(url):
++    """GET from the official API: https, api.github.com only, no redirect,
++    size-capped, unauthenticated (no token is ever sent or logged)."""
++    if not url.startswith(f"https://{API_HOST}/repos/{OFFICIAL_REPO}/"):
++        raise ProvenanceError("refusing to ask anything but the official repository")
++    body, final = _read(_API_OPENER, url, MAX_API_BYTES,
++                        {"Accept": "application/vnd.github+json"})
++    if final != url:
++        raise ProvenanceError("answer came from another address")
++    return body
++
++
++def fetch_release_asset(url):
++    """GET a release asset from the releases repository. Downloads redirect
++    to GitHub's storage hosts, so https redirects are followed; the content
++    is untrusted until verify_release() and check_artifact() pass."""
++    if not url.startswith("https://github.com/"):
++        raise ProvenanceError("release assets come from github.com")
++    return _read(_ASSET_OPENER, url, MAX_PROVENANCE_BYTES, {})[0]
+diff --git a/.github/mac-release-tools/winzapp_mac/sparkle_policy.py b/.github/mac-release-tools/winzapp_mac/sparkle_policy.py
+new file mode 100644
+index 0000000..fbcd111
+--- /dev/null
++++ b/.github/mac-release-tools/winzapp_mac/sparkle_policy.py
+@@ -0,0 +1,246 @@
++"""What Sparkle may offer and install, decided without Sparkle.
++
++Pure standard library (plus provenance.py): no PyObjC, no wx, so the normal
++`pytest` on any platform exercises every decision, and macos/build_app.py
++(which runs before any dependency is installed) writes the same Info.plist
++keys the app later reads. sparkle_mac.py is only the bridge to Cocoa.
++
++What is checked, and why only this. Against the threat model of
++macos/README.md, "Commit provenance" (whoever controls the releases
++repository and its CI secrets: the Developer ID certificate, the notary key,
++SHA256SUMS and provenance files, and Sparkle's EdDSA key), byte checks of the
++zip prove nothing that attacker could not also produce. The one guarantee
++they cannot fake is the official repository's: the release is an existing
++tag of gabrielhhaber/WinZapp_Python, pointing at the commit its provenance
++declares, newer than the running tag. So Sparkle may offer or download a
++release only when that holds (decide(), asked before anything is shown or
++downloaded, for the scheduled background download too), and, where Sparkle
++still asks at "Ready to Install" (a check the user started), may install it
++only when it still holds at that moment (install_choice()). An update
++downloaded in the background installs when WinZapp quits, with no question
++left for a second check: the offer-time one is its gate. Sparkle's own checks
++(signed appcast, EdDSA signature of the zip, code signing) come on top, as
++integrity of the download.
++"""
++
++import base64
++import binascii
++
++from . import provenance
++
++ALPHA_CHANNEL = "alpha"                 # <sparkle:channel> of an alpha item
++# The update_coord claim (its own file, like WPP_PROMPT_FILE) held by the one
++# account process that runs scheduled checks.
++CLAIM_FILE = "sparkle_updater.json"
++SCHEDULED_CHECK_INTERVAL = 3 * 60 * 60  # WinZapp's own UpdateChecker._RETRY_INTERVAL
++MINIMUM_SYSTEM_VERSION = "12.0"         # Sparkle 2.10 and the bundled Chrome both need it
++
++PUBLIC_KEY = "SUPublicEDKey"
++FEED_URL = "SUFeedURL"
++
++# Sparkle 2.10.0's enums (SPUUpdateCheck.h, SPUUserUpdateState.h:29-60,
++# SUErrors.h:41-68) and the enclosure's default installation type.
++CHECK_USER = 0                          # SPUUpdateCheckUpdates
++CHECK_BACKGROUND = 1                    # SPUUpdateCheckUpdatesInBackground
++CHOICE_SKIP, CHOICE_INSTALL, CHOICE_DISMISS = 0, 1, 2
++STAGE_NOT_DOWNLOADED, STAGE_DOWNLOADED, STAGE_INSTALLING = 0, 1, 2
++INSTALLATION_APPLICATION = "application"
++ERROR_DOMAIN = "SUSparkleErrorDomain"
++# Sparkle's UI driver aborts on this code without showing anything, even for
++# a check the user asked for (SPUUIBasedUpdateDriver.m:482-483); every other
++# code is shown to the user as an error (:484-491).
++SILENT_ABORT = 4007                     # SUInstallationCanceledError
++REFUSED = 4009                          # SUNotValidUpdateError
++NO_UPDATE = 1001                        # SUNoUpdateError
++
++PROCEED, REFUSE, VERIFY = "proceed", "refuse", "verify"
++
++
++def feed_name(arch):
++    """One appcast per architecture: each release has a zip per Mac, and
++    Sparkle has no "Intel only" requirement to tell them apart in one feed."""
++    return f"appcast-{arch}.xml"
++
++
++def bundle_localization(locale):
++    """The localization name of a WinZapp locale, as Sparkle's own folders
++    name them (pt-BR.lproj, es.lproj): the language alone, except where
++    WinZapp has two variants of it (pt-BR, pt-PT)."""
++    return locale if locale.startswith("pt-") else locale.split("-")[0]
++
++
++def bundle_localizations(locales):
++    """CFBundleLocalizations for WinZapp's locales (language_map.json),
++    English first, each once."""
++    names = []
++    for name in ["en"] + [bundle_localization(c) for c in locales]:
++        if name not in names:
++            names.append(name)
++    return names
++
++
++def valid_public_key(value):
++    """True for a base64 Ed25519 public key (32 bytes), what generate_keys
++    prints."""
++    if not isinstance(value, str) or not value.isascii():
++        return False
++    try:
++        return len(base64.b64decode(value, validate=True)) == 32
++    except (binascii.Error, ValueError):
++        return False
++
++
++def valid_feed_base(value):
++    """An https base the appcasts are served from, without a trailing slash
++    (Sparkle refuses an http feed; so does this, earlier)."""
++    return (isinstance(value, str) and value.isascii() and value.startswith("https://")
++            and len(value) > len("https://") and not value.endswith("/")
++            and not any(c.isspace() for c in value))
++
++
++def plist_keys(public_key, feed_base, arch, locales=()):
++    """Info.plist keys of a Sparkle build (build_app.py writes them before
++    signing). Each value is a WinZapp decision, not a Sparkle default:
++
++    * SUEnableAutomaticChecks: on, as WinZapp's updates_enabled is by default;
++      it also keeps Sparkle from asking its own permission question on the
++      second launch, since Settings > General already asks it. The setting
++      itself is applied at run time (sparkle_mac), so it stays the one switch.
++    * SUAllowsAutomaticUpdates and SUAutomaticallyUpdate on: updates are
++      downloaded in the background and installed when WinZapp quits, as in
++      other Mac apps. A scheduled check then runs Sparkle's automatic driver
++      (SPUUpdater.m:622, while automaticallyDownloadsUpdates is on), which
++      downloads silently (SPUAutomaticUpdateDriver.m:87-97) once
++      updater:shouldProceedWithUpdate:... has let the release through, and
++      leaves the prepared installer waiting for the app to end
++      (:104-128, updater:willInstallUpdateOnQuit:...). A later check shows it
++      in Sparkle's standard window with "Install and Relaunch"
++      (SPUUpdater.m:903-906, SPUUIBasedUpdateDriver.m:236-237). The run-time
++      switch is WinZapp's "check for updates automatically" setting, which
++      sparkle_mac applies to automaticallyChecksForUpdates and
++      automaticallyDownloadsUpdates alike; this key is only the default.
++    * SURequireSignedFeed (with its prerequisite SUVerifyUpdateBeforeExtraction)
++      and no expiry for a signing failure: an unsigned or re-signed appcast is
++      never trusted, however long it stays that way.
++    * CFBundleLocalizations: WinZapp's languages, so Sparkle's windows use its
++      own translations of them; see sparkle_mac.py for which one it picks.
++    """
++    if not valid_public_key(public_key):
++        raise ValueError("not a base64 Ed25519 public key")
++    if not valid_feed_base(feed_base):
++        raise ValueError("the appcast base must be an https URL without a trailing slash")
++    keys = {
++        FEED_URL: f"{feed_base}/{feed_name(arch)}",
++        PUBLIC_KEY: public_key,
++        "SUEnableAutomaticChecks": True,
++        "SUAllowsAutomaticUpdates": True,
++        "SUAutomaticallyUpdate": True,
++        "SUScheduledCheckInterval": SCHEDULED_CHECK_INTERVAL,
++        "SUVerifyUpdateBeforeExtraction": True,
++        "SURequireSignedFeed": True,
++        "SUSignedFeedFailureExpirationInterval": 0,
++    }
++    if locales:
++        keys["CFBundleLocalizations"] = bundle_localizations(locales)
++    return keys
++
++
++def configured(info):
++    """True when this build's Info.plist turns Sparkle on: a public key, an
++    https feed, and a CFBundleVersion that is the bundle version of its release
++    tag (without it Sparkle's "newer" and provenance's would not agree).
++    Anything else leaves updates to updater_mac, as before Sparkle."""
++    tag = provenance.running_release_tag(info)
++    feed = info.get(FEED_URL)
++    return bool(tag and valid_public_key(info.get(PUBLIC_KEY))
++                and isinstance(feed, str) and feed.startswith("https://")
++                and info.get("CFBundleVersion") == provenance.bundle_version(tag))
++
++
++def allowed_channels(settings):
++    """Sparkle channels for WinZapp's "check for alpha updates" setting, read
++    fresh on every check like UpdateChecker._alpha_enabled(). The default
++    channel (stable) is always allowed; alpha only when explicitly on."""
++    try:
++        alpha = settings.get("general", {}).get("alpha_updates_enabled", False) is True
++    except Exception:
++        alpha = False
++    return [ALPHA_CHANNEL] if alpha else []
++
++
++def updates_enabled(settings):
++    try:
++        return settings.get("general", {}).get("updates_enabled", True) is not False
++    except Exception:
++        return True
++
++
++def zip_url(repo, tag, arch):
++    """The one URL an appcast item may point at: this Mac's zip in the
++    release of *tag* of the releases repository, where updater_mac has always
++    downloaded it from."""
++    return f"https://github.com/{repo}/releases/download/{tag}/WinZapp-macOS-{arch}.zip"
++
++
++def item_tag(version, display_version):
++    """The release tag an appcast item stands for, or "". The item's
++    shortVersionString is the tag's version and its sparkle:version must be
++    that tag's bundle_version(), so Sparkle's choice and provenance's tag are
++    the same release."""
++    if not isinstance(display_version, str):
++        return ""
++    tag = "v" + display_version
++    if not provenance.is_release_tag(tag) or version != provenance.bundle_version(tag):
++        return ""
++    return tag
++
++
++def decide(item, repo, arch, running_tag, verdict):
++    """(action, tag, detail) for the update Sparkle wants to show.
++
++    *item* is {"version", "display_version", "url", "deltas",
++    "installation_type"} read from Sparkle's SUAppcastItem; *verdict* is None
++    (provenance not asked yet) or (ok, detail) from
++    updater_mac.release_provenance() for that tag.
++
++    PROCEED: Sparkle may show it. VERIFY: ask the official repository first
++    (Sparkle aborts silently meanwhile). REFUSE: never shown, never
++    downloaded (*detail* says why)."""
++    tag = item_tag(item.get("version"), item.get("display_version"))
++    if not tag:
++        return REFUSE, "", "the appcast item does not name a release tag"
++    if item.get("url") != zip_url(repo, tag, arch):
++        return REFUSE, tag, "the appcast item does not point at this release's zip"
++    if item.get("deltas"):
++        return REFUSE, tag, "the appcast item offers delta updates"
++    if item.get("installation_type") != INSTALLATION_APPLICATION:
++        return REFUSE, tag, "the appcast item is not an application update"
++    if not provenance.tag_is_newer(tag, running_tag):
++        return REFUSE, tag, "release is not newer than the running version"
++    if verdict is None:
++        return VERIFY, tag, ""
++    ok, detail = verdict
++    return (PROCEED, tag, "ok") if ok else (REFUSE, tag, detail)
++
++
++def install_choice(choice, verdict):
++    """The answer Sparkle gets at "Ready to Install", its last question
++    before it installs, in a check the user started (a background download
++    never asks it: it installs on quit). *choice* is the user's; *verdict* the result of asking
++    the official repository (and checking the appcast item) again just now,
++    None when it was not asked because the user did not choose to install.
++
++    Only an install whose release still holds goes ahead. Anything else is
++    SPUUserUpdateChoiceSkip, which at that point cancels the prepared
++    installer (SPUCoreBasedUpdateDriver.m:313-314 -> SPUInstallerDriver.m:
++    563-572 -> AppInstaller.m:681-684, the installer exits) without marking
++    the release as skipped: from "Ready to Install" the choice goes straight
++    to finishInstallationWithResponse: (SPUUIBasedUpdateDriver.m:420-425),
++    not through the update window's handler that records skips (:282-283).
++    The release is offered again at the next check. Unreachable GitHub counts
++    as a refusal (fail closed): nothing is lost but the download. Left
++    unanswered, the window lets the update install when WinZapp quits, like
++    one downloaded in the background."""
++    if choice == CHOICE_INSTALL and verdict is not None and verdict[0]:
++        return CHOICE_INSTALL
++    return CHOICE_SKIP
+diff --git a/.github/workflows/mac-release.yml b/.github/workflows/mac-release.yml
+index d2e5460..2c65d59 100644
+--- a/.github/workflows/mac-release.yml
++++ b/.github/workflows/mac-release.yml
+@@ -10,7 +10,17 @@ name: macOS releases
+ #
+ # Secrets: MACOS_CERT_P12 (base64 Developer ID Application identity),
+ # MACOS_CERT_PASSWORD, MACOS_PROVISIONING_PROFILE (base64),
+-# NOTARY_KEY_P8 (base64 App Store Connect key), NOTARY_KEY_ID, NOTARY_ISSUER.
++# NOTARY_KEY_P8 (base64 App Store Connect key), NOTARY_KEY_ID, NOTARY_ISSUER,
++# SPARKLE_ED_PRIVATE_KEY (Sparkle's EdDSA private key, as generate_keys -x
++# exports it).
++# Variables: SPARKLE_PUBLIC_ED_KEY (its public key) and SPARKLE_FEED_BASE
++# (https://rocco-labs.github.io/WinZapp_Python). Without them builds carry no
++# Sparkle keys and update as before. With them, every published release whose
++# tag has Sparkle (macos/release/appcast.py) is added to appcast-<arch>.xml:
++# the feed's state lives on the appcast branch and the feed is published with
++# GitHub Pages (Settings > Pages > Source: GitHub Actions). The releases
++# themselves are unchanged (zips, provenance, SHA256SUMS.txt), so builds from
++# before Sparkle keep updating through them to the first Sparkle build.
+ 
+ on:
+   schedule:
+@@ -191,6 +201,9 @@ jobs:
+           # The checkout has no tags; build_app checks HEAD is this tag's commit.
+           WINZAPP_RELEASE_TAG: ${{ matrix.tag }}
+           WINZAPP_CI_GITHUB_TOKEN: ${{ github.token }}
++          # Read only by a tag whose build_app knows Sparkle; older tags ignore them.
++          WINZAPP_SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
++          WINZAPP_SPARKLE_FEED_BASE: ${{ vars.SPARKLE_FEED_BASE }}
+         run: |
+           set +e -uo pipefail
+           # build_app's provenance check asks api.github.com unauthenticated, and
+@@ -279,3 +292,223 @@ jobs:
+           # an official commit; the Mac updater refuses a release without it.
+           gh release create "$TAG" WinZapp-macOS-*.zip SHA256SUMS.txt $(ls WinZapp-macOS-provenance-*.json 2>/dev/null) \
+             --repo "$GITHUB_REPOSITORY" --title "$name" --notes-file notes.md "${flags[@]}"
++
++  appcast-plan:
++    # Which published releases the appcast still lacks, read from the
++    # releases and the appcast itself, not from this run's plan: a release
++    # whose appcast job failed (or that an earlier run published) is added
++    # on the next run. A tag older than the newest item of its channel
++    # already in a feed is never re-queued: that feed keeps only its newest
++    # items (appcast.py merge), so it would be pruned again on every run.
++    needs: publish
++    if: ${{ !cancelled() && vars.SPARKLE_PUBLIC_ED_KEY != '' }}
++    runs-on: ubuntu-latest
++    outputs:
++      tags: ${{ steps.plan.outputs.tags }}
++    steps:
++      - id: plan
++        env:
++          GH_TOKEN: ${{ github.token }}
++        run: |
++          set -euo pipefail
++          python3 - <<'PY' >> "$GITHUB_OUTPUT"
++          import base64, json, os, re, subprocess
++
++          REPO, UPSTREAM = os.environ["GITHUB_REPOSITORY"], os.environ["UPSTREAM"]
++          TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)\.(\d+)(alpha|beta)?")
++
++          def key(tag):   # provenance.tag_is_newer's order
++              m = TAG.fullmatch(tag)
++              return tuple(int(m.group(i)) for i in range(1, 5)) + ({"alpha": 1, "beta": 2}.get(m.group(5), 3),)
++
++          def channel(tag):
++              return "alpha" if tag.endswith("alpha") else ""
++
++          def gh(*args, ok=False):
++              r = subprocess.run(["gh", *args], capture_output=True, text=True)
++              if r.returncode and not (ok and "404" in r.stderr):
++                  raise SystemExit(r.stderr)
++              return r.returncode == 0, r.stdout
++
++          feeds = {}
++          for arch in ("arm64", "x86_64"):
++              found, out = gh("api", f"repos/{REPO}/contents/appcast-{arch}.json?ref=appcast", ok=True)
++              items = json.loads(base64.b64decode(json.loads(out)["content"])) if found else []
++              feeds[arch] = {i["tag"]: channel(i["tag"]) for i in items}
++
++          def needed(tag, arch):
++              listed = feeds[arch]
++              if tag in listed:
++                  return False
++              same = [t for t, c in listed.items() if c == channel(tag)]
++              return not same or key(tag) > max(map(key, same))
++
++          _, out = gh("api", f"repos/{REPO}/releases?per_page=30",
++                      "--jq", ".[] | select(.draft | not) | .tag_name")
++          todo = []
++          for tag in sorted((t for t in out.split() if TAG.fullmatch(t)), key=key):
++              if not (needed(tag, "arm64") or needed(tag, "x86_64")):
++                  continue
++              _, assets = gh("release", "view", tag, "--repo", REPO, "--json", "assets",
++                             "--jq", ".assets[].name")
++              if not {"WinZapp-macOS-arm64.zip", "WinZapp-macOS-x86_64.zip",
++                      "SHA256SUMS.txt"} <= set(assets.split()):
++                  continue
++              # Only tags whose own macOS layer has Sparkle: their builds carry
++              # the key. Older tags are not appcast material.
++              if not gh("api", f"repos/{UPSTREAM}/contents/macos/release/appcast.py?ref={tag}",
++                        "--silent", ok=True)[0]:
++                  continue
++              todo.append(tag)
++          print("tags=" + json.dumps(todo))
++          PY
++
++  appcast:
++    needs: appcast-plan
++    if: ${{ !cancelled() && needs.appcast-plan.outputs.tags != '' && needs.appcast-plan.outputs.tags != '[]' }}
++    runs-on: macos-15
++    permissions:
++      contents: write     # the appcast branch (the feed's state)
++      pages: write        # actions/deploy-pages
++      id-token: write     # actions/deploy-pages
++    environment:
++      name: github-pages
++      url: ${{ steps.deploy.outputs.page_url }}
++    env:
++      # Sparkle's tools for signing, pinned here (not taken from the tag):
++      # the official release archive and the SHA-256 GitHub publishes for it,
++      # the same pin as build_app.py's.
++      SPARKLE_URL: https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz
++      SPARKLE_SHA256: c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
++    steps:
++      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
++        with:
++          python-version: "3.13"
++
++      - name: This workflow's own appcast tools
++        # .github/mac-release-tools on this branch, at the commit that runs:
++        # the signing step below runs this code and nothing from a tag.
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ github.sha }}
++          path: self
++          sparse-checkout: .github/mac-release-tools
++
++      - name: Sparkle's sign_update, pinned by SHA-256
++        run: |
++          set -euo pipefail
++          mkdir -p "$RUNNER_TEMP/sparkle"
++          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" "$SPARKLE_URL"
++          echo "$SPARKLE_SHA256  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c
++          tar -xJf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle" ./bin/sign_update
++
++      - name: The appcast branch
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          path: site
++
++      - name: Switch to it (created on first use)
++        working-directory: site
++        run: |
++          set -euo pipefail
++          if git ls-remote --exit-code --heads origin appcast >/dev/null; then
++            git fetch --depth 1 origin appcast
++            git checkout -B appcast FETCH_HEAD
++          else
++            git checkout --orphan appcast
++            git rm -rf --quiet .
++          fi
++
++      - name: The published zips, and each tag's changelogs (read as data)
++        env:
++          GH_TOKEN: ${{ github.token }}
++          TAGS: ${{ needs.appcast-plan.outputs.tags }}
++        run: |
++          set -euo pipefail
++          for tag in $(echo "$TAGS" | jq -r '.[]'); do
++            w="work/$tag" && mkdir -p "$w/pub"
++            # The published assets themselves: the EdDSA signature is made over
++            # the bytes users download, never over a rebuild or a local copy.
++            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$w/pub" \
++              --pattern 'WinZapp-macOS-*.zip' --pattern SHA256SUMS.txt
++            (cd "$w/pub" && shasum -a 256 -c SHA256SUMS.txt)
++            # Release notes from the tag's changelogs: files only, never run.
++            git clone --quiet --depth 1 --branch "$tag" --no-checkout "https://github.com/$UPSTREAM.git" "$w/src"
++            git -C "$w/src" sparse-checkout set --no-cone '/client/changelog_*.txt' '/client/languages/language_map.json'
++            git -C "$w/src" checkout --quiet
++            gh api "repos/$UPSTREAM/releases/tags/$tag" --jq '.body // ""' > "$w/notes.md"
++          done
++
++      - name: Sign them and add them to appcast-<arch>.xml
++        # The only step that sees the private key, and it runs only this
++        # branch's pinned appcast.py, which hands the key to the pinned
++        # sign_update on standard input. The tag is only read as data.
++        env:
++          TAGS: ${{ needs.appcast-plan.outputs.tags }}
++          PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
++          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
++        run: |
++          set -euo pipefail
++          tool=self/.github/mac-release-tools/release/appcast.py
++          sign="$RUNNER_TEMP/sparkle/bin/sign_update"
++          : > refused.txt
++          for tag in $(echo "$TAGS" | jq -r '.[]'); do
++            w="work/$tag"
++            # Every release in the appcast must carry this repository's Sparkle
++            # key (Sparkle refuses an update that drops it, after the whole
++            # download): sign-zip refuses a zip whose app does not. Both
++            # architectures or neither.
++            ok=1
++            for arch in arm64 x86_64; do
++              python -I "$tool" sign-zip --sign-update "$sign" --tag "$tag" --public-key "$PUBLIC_KEY" \
++                --zip "$w/pub/WinZapp-macOS-$arch.zip" --out "$w/sparkle-$arch.json" || ok=0
++            done
++            if [ "$ok" != 1 ]; then
++              echo "::error::$tag is not added to the appcast: its build does not carry the Sparkle key"
++              echo "$tag" >> refused.txt
++              continue
++            fi
++            for arch in arm64 x86_64; do
++              python -I "$tool" add --sign-update "$sign" --source "$w/src" --site site \
++                --tag "$tag" --arch "$arch" --repo "$GITHUB_REPOSITORY" \
++                --signature "$w/sparkle-$arch.json" --notes-markdown "$w/notes.md"
++            done
++          done
++
++      - name: Keep the appcast's state on its branch
++        working-directory: site
++        env:
++          TAGS: ${{ needs.appcast-plan.outputs.tags }}
++        run: |
++          set -euo pipefail
++          git add -A
++          if git diff --cached --quiet; then echo "appcast unchanged"; exit 0; fi
++          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
++            commit --quiet -m "appcast: $TAGS"
++          git push origin appcast
++
++      # A push made with GITHUB_TOKEN does not trigger a Pages build ("Commits
++      # pushed by a GitHub Actions workflow that uses the GITHUB_TOKEN do not
++      # trigger a GitHub Pages build", docs.github.com, "Configuring a
++      # publishing source"), so the feed is deployed here, explicitly.
++      - name: The site
++        run: |
++          rm -rf _site && mkdir _site
++          # None yet when the only release so far was refused.
++          find site -maxdepth 1 -name 'appcast-*.xml' -exec cp {} _site/ \;
++      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
++        with:
++          path: _site
++      - id: deploy
++        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
++
++      - name: A release was refused
++        # After the good ones are published: the run still fails, so a release
++        # built without the key is seen and fixed (it is asked about again on
++        # every run until a newer release of its channel is in the appcast).
++        if: ${{ !cancelled() && hashFiles('refused.txt') != '' }}
++        run: |
++          if [ -s refused.txt ]; then
++            echo "::error::Not in the appcast (no Sparkle key in the build): $(tr '\n' ' ' < refused.txt)"
++            exit 1
++          fi

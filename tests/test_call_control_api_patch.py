@@ -1,4 +1,8 @@
+import re
 from pathlib import Path
+from types import SimpleNamespace
+
+from tests.god_modules import main_window_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,6 +19,7 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert '/api/:session/call/reject' in routes
     assert '/api/:session/call/end' in routes
     assert '/api/:session/call/offer' in routes
+    assert '/api/:session/call/group/offer' in routes
     assert '/api/:session/call/diagnostics' in routes
     assert "getVoipStackInterface" in controller
     assert "enableCallInterface" in controller
@@ -27,6 +32,9 @@ def test_wppconnect_patch_exposes_voice_call_control_routes():
     assert "WPP.call.rejectCall" in controller
     assert "WPP.call.end" in controller
     assert "WPP.call.offer" in controller
+    assert "startWAWebVoipGroupCallFromChat" in controller
+    assert "offerGroupCall" in controller
+    assert "group-offer" in controller
     assert "prepareAudioBridge(req)" in controller
     assert "isOutgoingOrLiveCall" in controller
     assert "without successful voipInit" in controller
@@ -69,8 +77,224 @@ def test_call_media_bridge_advertises_virtual_camera_on_headless_hosts():
     assert "cameraTrackRequests" in bridge
     assert "cameraFramesReceived" in bridge
     assert "call camera frames received from desktop=" in bridge
-    assert "version === 7" in bridge
-    assert "version: 7" in bridge
+    # The re-install guard and the state literal must name the SAME version,
+    # or a page that already carries an older bridge is never replaced (the
+    # guard returns early) or is replaced on every call (it never matches).
+    # Asserted as a pair rather than as a number, so a deliberate bump does
+    # not have to be re-typed here — only a mismatch fails.
+    guard = re.search(r"__winzappCallMediaBridge\?\.version === (\d+)", bridge)
+    literal = re.search(r"^\s*version: (\d+),", bridge, re.M)
+    assert guard and literal, "the bridge must carry a version at both sites"
+    assert guard.group(1) == literal.group(1), (
+        f"guard says v{guard.group(1)}, state literal says v{literal.group(1)}"
+    )
+
+
+def test_remote_audio_tap_prefers_an_audio_worklet_and_still_has_a_fallback():
+    """Measured 2026-09-23 on a live call: the ScriptProcessor tap dropped ~1%
+    of its own buffers (464 callbacks where 468.8 were due, longTaskCount 0),
+    delivering 47,507 samples/s against the 48,000 it declares — which drains
+    the Python jitter buffer forever. A worklet runs on the audio render
+    thread and cannot be starved by the main thread.
+
+    The fallback is not optional: addModule() needs a URL and WhatsApp Web's
+    CSP may refuse a blob: script, and a call with no remote audio at all is
+    far worse than a popping one. Assert on the shape of the guard — both taps
+    reachable, and which one ran reported — not on the wording.
+    """
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "registerProcessor('winzapp-call-tap'" in bridge
+    assert "audioWorklet" in bridge and "addModule" in bridge
+    assert "new win.AudioWorkletNode(context, 'winzapp-call-tap'" in bridge
+    # The fallback path survives, and is chosen only when the module is not.
+    assert "startScriptProcessorTap" in bridge
+    assert "createScriptProcessor(1024, 1, 1)" in bridge
+    # The shape of the fallback, not its wording: the ScriptProcessor tap is
+    # reachable from the module being refused AND from the node constructor
+    # throwing. A track left with no tap at all is silence on the call, which
+    # is worse than the popping this replaces.
+    assert bridge.count("startScriptProcessorTap(") >= 2  # two reachable call sites
+    assert re.search(
+        r"catch \(error[^)]*\) \{.{0,600}?startScriptProcessorTap\(", bridge, re.S
+    ), "a worklet node that throws must fall back, not leave the track untapped"
+    assert re.search(
+        r"if \(ready\)[^}]*startWorkletTap\(\)", bridge, re.S
+    ), "the worklet tap is used only when the module actually registered"
+
+    # Two guards that are the difference between a working call and a silent
+    # or double-tapped one, and neither is visible in the happy path.
+    assert "state.remotePipelines.get(id) !== pipeline" in bridge, (
+        "a track that ended while addModule() was in flight must not be revived"
+    )
+    teardown = bridge[bridge.index("const disconnectRemotePipeline"):]
+    teardown = teardown[: teardown.index("\n  };")]
+    assert "pipeline.node?.disconnect()" in teardown, (
+        "a worklet node outliving the call goes on sending frames to Python"
+    )
+    assert "pipeline.processor?.disconnect()" in teardown
+    # Which tap ran has to be visible from outside: a silent fallback looks
+    # fixed and is not, and finding that out costs another live call.
+    assert "audioWorkletStatus" in bridge
+    assert "tap=audio-worklet" in bridge
+    assert "tap=script-processor" in bridge
+    assert "remoteTapMode" in _source("client/api_patches/src/controller/callController.ts")
+    # Batching happens in the worklet (128-sample quanta -> ~1024), never on
+    # the main thread, which is the thread being taken off the audio path.
+    assert "REMOTE_TAP_BATCH_SAMPLES = 1024" in bridge
+    assert "batchSamples: REMOTE_TAP_BATCH_SAMPLES" in bridge
+    # The real context rate goes with the frames; only the Linux relay, which
+    # creates its own devices, may assume 48000.
+    assert "callback(base64, context.sampleRate)" in bridge
+    assert "REMOTE_TAP_MAX_FRAME_BYTES" in bridge
+
+
+def test_microphone_tap_prefers_an_audio_worklet_and_can_swap_back():
+    """The peer hears this side chop for the mirror-image reason.
+
+    Measured the same way as the remote tap: the mic ScriptProcessor missed
+    0.37% of its callbacks against the remote tap's 1.01%. That was judged
+    tolerable when the microphone was a separate device; with the headset's
+    own microphone the people on the other end reported the chop, so the
+    producer moves to the audio render thread too.
+
+    It is NOT a mirror of the remote tap: zero inputs, and what has to leave
+    the main thread is the PULL, so the frame queue moves INTO the worklet.
+    Assert on the shape — the queue's home, both producers reachable, one at
+    a time, on one destination — never on reason wording.
+    """
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    assert "registerProcessor('winzapp-call-mic'" in bridge
+    assert "new win.AudioWorkletNode(context, 'winzapp-call-mic'" in bridge
+    # Zero inputs: a mirror of the remote tap's `numberOfInputs: 1` would make
+    # the node wait for a source that does not exist.
+    mic_node = bridge[bridge.index("'winzapp-call-mic', {"):]
+    mic_node = mic_node[: mic_node.index("});")]
+    assert "numberOfInputs: 0" in mic_node
+
+    # The queue lives in the worklet, and so does the drop policy: a queue
+    # left on the main thread would put main-thread scheduling straight back
+    # on the audio path, which is the whole defect being fixed.
+    worklet = bridge[bridge.index("class WinzappCallMicProcessor"):]
+    worklet = worklet[: worklet.index("registerProcessor('winzapp-call-mic'")]
+    assert "this.queue.push(data)" in worklet
+    assert "this.queue.shift()" in worklet
+    assert "this.dropped" in worklet, "the latency drop policy moved in here too"
+    # Counters cross as DELTAS, so a mid-call swap cannot make the totals jump
+    # or go backwards.
+    assert "consumed: this.consumed" in worklet and "this.consumed = 0" in worklet
+
+    # Both producers exist, exactly one is connected, and both feed the same
+    # destination — WhatsApp cloned that track once and never asks again.
+    assert "createScriptProcessor(1024, 0, 1)" in bridge
+    # Exact, not a lower bound: a lower bound against N real call sites lets
+    # any one of them be deleted with the test still green. Every terminal
+    # fallback goes through swapMicProducerToScriptProcessor (watchdog, node
+    # constructor throwing, upgrade-in-place throwing); the ScriptProcessor
+    # itself is started from that wrapper and from the not-yet-ready branch.
+    assert bridge.count("startMicScriptProcessorTap(") == 2
+    assert bridge.count("swapMicProducerToScriptProcessor(") == 3
+    teardown = bridge[bridge.index("const disconnectMicProducer"):]
+    teardown = teardown[: teardown.index("\n  };")]
+    assert "state.micNode = null" in teardown and "state.micProcessor = null" in teardown
+    assert "state.micNode?.disconnect()" in teardown
+    assert re.search(
+        r"catch \(error[^)]*\) \{.{0,400}?swapMicProducerToScriptProcessor\(", bridge, re.S
+    ), "a mic worklet node that throws must fall back, not leave the call mute"
+
+    # A silent microphone is discovered by the PEER, so the worklet gets a
+    # deadline rather than trust, and the swap goes back to the same
+    # destination.
+    assert "MIC_WORKLET_WATCHDOG_MS" in bridge
+    # The watchdog has to be ARMED where the worklet starts — asserting the
+    # name alone is satisfied by its own definition, so deleting the call
+    # would leave an unwatched worklet and a green test.
+    start_worklet = bridge[bridge.index("const startMicWorkletTap"):]
+    start_worklet = start_worklet[: start_worklet.index("\n  };")]
+    assert "armMicWorkletWatchdog();" in start_worklet
+    watchdog = bridge[bridge.index("const armMicWorkletWatchdog"):]
+    watchdog = watchdog[: watchdog.index("\n  };")]
+    assert "state.micFramesPushed === pushedAtArm" in watchdog, (
+        "silence proves nothing until frames have actually been handed over"
+    )
+    assert "state.micSamplesConsumed > consumedAtArm" in watchdog, (
+        "a worklet that IS consuming must not be swapped out"
+    )
+    assert "swapMicProducerToScriptProcessor(" in watchdog, (
+        "firing without handing the destination back leaves the call mute"
+    )
+    # The watchdog is a MICROPHONE verdict. Writing audioWorkletStatus here
+    # would condemn the remote tap, which branches on that same flag, and put
+    # the blind user's own audio back on the ScriptProcessor #281 replaced.
+    # The ASSIGNMENT, not the word: the comment in there explains at length
+    # why this flag must not be touched, and prose must not satisfy the test.
+    assert "state.audioWorkletStatus =" not in watchdog
+    assert "state.micWorkletUnscheduled = true" in watchdog
+    # The terminal fallback is wrapped: if it throws, both producers are null
+    # on a track that still reads 'live', so ensureMicTrack() would early
+    # return it forever and the microphone would be dead for the session.
+    swap_body = bridge[bridge.index("const swapMicProducerToScriptProcessor"):]
+    swap_body = swap_body[: swap_body.index("\n  };")]
+    assert "try {" in swap_body and "state.micDestination = null" in swap_body
+
+    # The verdict must be READ, not just written. Without both gates the flag
+    # is write-only: the watchdog condemns an unscheduled worklet, and then
+    # the next track rebuild (call 2, a device change) constructs the very
+    # same one again because audioWorkletStatus still says 'ready' — the peer
+    # loses the first 1.5 s of every later call while the watchdog swaps it
+    # out again.
+    ensure_mic = bridge[bridge.index("const ensureMicTrack"):]
+    ensure_mic = ensure_mic[: ensure_mic.index("\n  };")]
+    assert ensure_mic.count("!state.micWorkletUnscheduled") == 2, (
+        "both the ready branch and the upgrade branch must respect the "
+        "microphone's own verdict on the worklet"
+    )
+
+    # The upgrade-in-place guard, both halves: the wrong destination means a
+    # newer track owns the page, and an existing node means two producers on
+    # one destination — the peer would hear doubled audio.
+    assert "state.micDestination !== destination || state.micNode" in bridge
+
+    # The node is recorded BEFORE it is connected: a throw from connect()
+    # would otherwise leave an orphan disconnectMicProducer() cannot find.
+    assert start_worklet.index("state.micNode = node") < start_worklet.index(
+        "node.connect("
+    ), "record the node before connecting it — #281 learned this one"
+
+    # Two explicit edges instead of a timer looping for the life of the page:
+    # stood down when the call ends, re-armed when the next one starts. The
+    # destination survives between calls, so without the re-arm the second
+    # and later calls of a session would run unwatched.
+    reset_body = bridge[bridge.index("state.reset = () => {"):]
+    reset_body = reset_body[: reset_body.index("\n  };")]
+    assert "clearTimeout(state.micWorkletWatchdog)" in reset_body
+    enable = bridge[bridge.index("state.enable = () => {"):]
+    enable = enable[: enable.index("\n  };")]
+    assert "armMicWorkletWatchdog()" in enable
+
+    # Counters are ADDED on this side too, not assigned.
+    assert "state.micSamplesConsumed += data.consumed" in bridge
+    # The partially-consumed head frame is kept while older complete frames
+    # are dropped; dropping the head instead cuts a frame mid-sample.
+    assert worklet.count("const dropIndex = this.offset > 0 ? 1 : 0;") == 2
+
+    # pushMicrophone hands frames to the worklet when it is live, and the
+    # queue below it is the fallback's, not a second copy.
+    assert "state.micNode.port.postMessage(samples)" in bridge
+    # reset() has to reach the queue that now lives on the audio thread.
+    reset = bridge[bridge.index("state.reset = () => {"):]
+    reset = reset[: reset.index("\n  };")]
+    assert "postMessage({ type: 'clear' })" in reset
+
+    # Which producer is live is visible from outside, same reason as the
+    # remote tap — and here the user cannot hear the failure himself.
+    assert "micTapMode" in bridge
+    assert "micTapMode" in _source("client/api_patches/src/controller/callController.ts")
+    # The synthetic track is still registered as local, or the bridge loops
+    # our own microphone back into the speaker pipeline.
+    assert "state.localTrackIds.add(track.id)" in bridge
+
 
 def test_chromium_does_not_disable_voice_input_for_python_call_bridge():
     start_js = _source("client/api_patches/start.js")
@@ -155,14 +379,59 @@ def test_setup_api_copies_call_patch_files_into_runtime_api():
 
 
 def test_outgoing_call_allows_native_voip_more_than_generic_http_timeout():
-    main_py = _source("client/main.py")
+    main_py = main_window_source()
 
-    offer = main_py[main_py.index("def _start_individual_call"):]
+    offer = main_py[main_py.index("def _start_call(self"):]
     offer = offer[: offer.index("threading.Thread(target=_worker")]
-    assert '"offer",' in offer
     assert "timeout=75," in offer
-    assert "dial_jid = self._resolve_jid_for_send(peer_jid) or peer_jid" in offer
+    assert "self._resolve_jid_for_send(peer_jid) or peer_jid" in offer
     assert '{"to": dial_jid, "isVideo": is_video}' in offer
+    assert '{"groupJid": dial_jid, "isVideo": is_video}' in offer
+
+
+def test_call_control_urls_prefix_call_exactly_once(monkeypatch):
+    """Every control URL is ``/api/<token>/call/<endpoint>``.
+
+    The group offer used to pass ``"call/group/offer"`` as the endpoint, and
+    the prefix turned that into ``/call/call/group/offer`` — a 404 that no
+    test caught, because the call-path tests all stub ``_post_call_control``
+    itself and never see the URL it builds.
+    """
+    from main_window import calls as calls_module
+
+    urls = []
+
+    def _capture(url, **_kwargs):
+        urls.append(url)
+        return object()
+
+    monkeypatch.setattr(calls_module, "api_post", _capture)
+    stub = SimpleNamespace(
+        wpp_server="http://127.0.0.1", wpp_port=6300, token="tok"
+    )
+    calls_module.CallsMixin._post_call_control(
+        stub, "group/offer", {"groupJid": "1@g.us"}
+    )
+    calls_module.CallsMixin._post_call_control(
+        stub, "offer", {"to": "1@s.whatsapp.net"}
+    )
+
+    assert urls == [
+        "http://127.0.0.1:6300/api/tok/call/group/offer",
+        "http://127.0.0.1:6300/api/tok/call/offer",
+    ]
+
+
+def test_group_calls_are_dispatched_and_started_without_a_peer_dial():
+    main_py = main_window_source()
+
+    assert 'if str(peer_jid or "").endswith("@g.us"):' in main_py
+    assert "self._start_group_call(peer_jid, name, is_video=False)" in main_py
+    assert "self._start_group_call(peer_jid, name, is_video=True)" in main_py
+    group = main_py[main_py.index("def _start_call(self"):]
+    group = group[: group.index("threading.Thread(target=_worker")]
+    # A group has no contact JID to resolve, and its record follows the group.
+    assert "peer_jid if is_group" in group
 
 def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
     controller = _source("client/api_patches/src/controller/callController.ts")
@@ -175,6 +444,83 @@ def test_outgoing_call_prefers_new_active_call_over_stale_collection_model():
     assert "!preexistingIds.has(modelId)" in controller
 
 
+def test_offer_starts_the_call_as_a_user_gesture():
+    """WhatsApp Web 2.3000.1048x asks "Start a WhatsApp call with <name>?" for
+    any call started without an entry trust, and wa-js 4.6.0's
+    WPP.call.offer() passes none. In the hidden page nobody answers the popup,
+    so every offer hung until the 75 s abort (two popups found over CDP,
+    2026-09-23). The offer must pass entryTrust "user_gesture" itself, and
+    fall back to WPP.call.offer() only where the function is not exposed."""
+    controller = _source("client/api_patches/src/controller/callController.ts")
+    offer = controller[controller.index("const startOutgoingCall"):]
+    offer = offer[: offer.index("throw new Error(`Unsupported call action")]
+
+    assert "win.WPP?.whatsapp?.functions?.startWAWebVoipCall" in offer
+    assert "await start(peer, isVideo, 8, 5, undefined, { entryTrust: 'user_gesture' })" in offer
+    assert "return win.WPP.call.offer(to, { isVideo })" in offer
+    assert "peer?.isUser?.()" in offer
+    assert "() => startOutgoingCall(String(payload.to), !!payload.isVideo)" in offer
+    assert "await win.WPP.call.offer(payload.to" not in offer
+
+
+def test_group_offer_uses_whatsapps_own_group_start_entry_points():
+    """A group call has no single peer to dial. The patch must go through
+    startWAWebVoipGroupCallFromChat with the GROUP_CHAT_INFO WAM entry points,
+    exactly like WhatsApp's own group-info buttons, and never hand-roll group
+    signaling or fall back to WPP.call.offer() for a group."""
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    group = controller[controller.index("const startOutgoingGroupCall"):]
+    group = group[: group.index("const waitForOfferedCall")]
+
+    assert "win.WPP?.whatsapp?.functions?.startWAWebVoipGroupCallFromChat" in group
+    assert "requireWa('WAWebVoipStartCall')?.startWAWebVoipGroupCallFromChat" in group
+    assert "requireWa('WAWebWidFactory')?.createWid" in group
+    assert "requireWa('WAWebChatCollection')?.ChatCollection" in group
+    assert "chats.get(createWid(groupJid))" in group
+    assert "chat.groupMetadata" in group
+    assert "WAWebWamEnumCallFromUi" in group
+    assert "WAWebWamEnumLobbyEntryPointType" in group
+    assert "await start(chat, isVideo, callFromUi, lobbyEntryPoint)" in group
+    assert "WPP.call.offer" not in group
+
+    assert "if (action === 'group-offer')" in controller
+    assert "String(payload.groupJid)" in controller
+    assert "'an outgoing group'" in controller
+    assert "offerGroupCall" in controller
+    assert "Parameter groupJid is required!" in controller
+
+
+def test_call_discovery_never_initialises_voip_and_a_join_is_checked_first():
+    """The Calls tab and an open group poll every ten seconds: discovery must
+    return before the VoIP warm-up and the init policy, or each tick would
+    initialise calling and touch audio devices. A join is validated before the
+    media bridge is enabled, and its failure stands the bridge down only when
+    the page proves no other call owns it."""
+    controller = _source("client/api_patches/src/controller/callController.ts")
+
+    evaluate = controller[controller.index("async function evaluateWppCall("):]
+    discovery = evaluate[evaluate.index("if (action === 'group-ongoing'"):]
+    discovery = discovery[: discovery.index("\n  }\n")]
+    for action in ("'group-ongoing'", "'ongoing-list'", "'participants'", "'group-join-check'"):
+        assert action in discovery
+    assert "return page.evaluate(" in discovery
+    discovery_end = evaluate.index(discovery) + len(discovery)
+    assert discovery_end < evaluate.index("await warmCallVoipRuntime(")
+    assert discovery_end < evaluate.index("installVoipInitPolicyInPage")
+
+    join = controller[controller.index("export async function joinGroupCall("):]
+    join = join[: join.index("\n}\n")]
+    assert "Parameters callId and chatJid are required!" in join
+    assert (join.index("res.status(400)")
+            < join.index("'group-join-check'")
+            < join.index("prepareAudioBridge(req)")
+            < join.index("'group-join',"))
+    catch = join[join.index("} catch (error) {"):]
+    assert "mayStopAudio(callId) === true" in catch
+    assert catch.count("stopAudioBridge(req)") == 1
+    assert "if (mayStop) await stopAudioBridge(req);" in catch
+    assert catch.index("let mayStop = false;") < catch.index("if (mayStop)")
 
 
 def test_active_call_poll_tolerates_transient_active_call_gaps():
@@ -216,7 +562,8 @@ def test_session_prewarms_lazy_whatsapp_voip_runtime():
     assert "getVoipStackInterface" in bridge
     assert "void warmCallVoipRuntime(client, req.logger)" in create_session
 def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
-    controller = _source("client/api_patches/src/controller/callController.ts")
+    controller = (_source("client/api_patches/src/controller/callController.ts")
+                  + _source("client/api_patches/src/util/voipInitPolicy.ts"))
 
     assert "const maxAttempts = 8" in controller
     assert "isVoipInitError(error)" in controller
@@ -228,7 +575,8 @@ def test_native_call_actions_wait_for_lazy_voip_rpc_initialization():
 
 def test_voip_initialization_can_retry_after_lazy_backend_failure():
     """A failed lazy VoIP initialization must be retried by WinZapp's bridge."""
-    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+    bridge = (_source("client/api_patches/src/util/callMediaBridge.ts")
+              + _source("client/api_patches/src/util/voipInitPolicy.ts"))
 
     assert "WPP?.call?.enableCallInterface" in bridge
     assert "getDidVoipInitError" in bridge
@@ -236,7 +584,8 @@ def test_voip_initialization_can_retry_after_lazy_backend_failure():
     assert "attempt < 10" in bridge
 
 def test_voip_runtime_warmup_is_deduplicated_per_session():
-    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+    bridge = (_source("client/api_patches/src/util/callMediaBridge.ts")
+              + _source("client/api_patches/src/util/voipInitPolicy.ts"))
 
     assert "__winzappVoipWarmupPromise" in bridge
     assert "if (pending) return pending" in bridge
@@ -258,13 +607,17 @@ def test_page_native_audio_mutes_message_ping_but_preserves_call_end_chime():
     assert "return !(el.srcObject instanceof MediaStream) && el.loop === true;" in bridge
 
     # A live/ringing -> terminal transition opens the short-audio exception,
-    # but only for a call that was actually answered (state.enabled at some
-    # point) — a merely-ringing call being cancelled/rejected must not open it,
-    # or a coincident missed-call message ping slips through unmuted.
-    assert "let callWasAnswered = false;" in bridge
-    assert "if (state.enabled) callWasAnswered = true;" in bridge
-    assert "if (callWasAnswered) allowCallEndChime();" in bridge
-    assert "if (state.enabled) allowCallEndChime();" in bridge
+    # but only for a call that was actually CONNECTED -- a merely-ringing call
+    # being cancelled/rejected must not open it, or a coincident missed-call
+    # message ping slips through unmuted. "Connected" comes from the page's
+    # CallStore state, keyed by call id, never from state.enabled (enabled too
+    # early on outgoing calls, never on the Linux path). Its behaviour is
+    # executed for real in tests/test_call_end_chime_policy.py.
+    assert "let answeredPageCallKey: string | null = null;" in bridge
+    assert "if (active && isConnectedPageCall(call)) answeredPageCallKey = key;" in bridge
+    assert "if (lastCallWasAnswered()) allowCallEndChime();" in bridge
+    assert "state.enabled) allowCallEndChime" not in bridge
+    assert "callWasAnswered" not in bridge
     assert "pageAudioNow() + 2500" in bridge
     assert "if (pageAudioNow() <= allowCallEndChimeUntil)" in bridge
     assert "restorePageAudio(el);" in bridge
@@ -319,3 +672,127 @@ def test_call_media_bridge_bounds_microphone_backlog_to_live_audio():
     assert "const PAGE_MIC_TARGET_BACKLOG_FRAMES = 2;" in bridge
     assert "state.micFramesDroppedForLatency" in bridge
     assert "const dropIndex = state.micOffset > 0 ? 1 : 0;" in bridge
+
+
+def test_turning_video_off_reaches_the_page_and_blanks_the_canvas():
+    """REGRESSION: the page draws our camera frames onto a canvas and hands
+    WhatsApp a captureStream() of it, which keeps emitting whatever that
+    canvas last holds at 10 fps. Stopping the desktop-side ffmpeg capture
+    therefore froze the user's last frame and went on transmitting that
+    picture of them -- for the rest of the call, and into the next one,
+    because reset() never cleared the canvas or the track either.
+
+    Asserted on the shape of the mechanism rather than on one string: a
+    stopCamera() the socket can reach, a blank actually painted, and a
+    teardown wired into reset().
+    """
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    # Reachable from the Node layer, which is how "turn video off" travels.
+    assert "socket.on('call:video:camera:stop'" in bridge
+    assert "__winzappCallMediaBridge?.stopCamera?.(stoppedEpoch, nativeMute)" in bridge
+
+    # WhatsApp Web sends our camera through its own call engine, so turning
+    # video off and on goes through that engine's camera toggle -- the same
+    # one WhatsApp's UI button uses.
+    assert "socket.on('call:video:camera:start'" in bridge
+    assert "__winzappCallMediaBridge?.resumeCamera?.()" in bridge
+    assert "stack?.setCallVideoMute" in bridge
+    assert "if (native) setNativeVideoMute(true);" in bridge
+    assert "setNativeVideoMute(false);" in bridge
+    assert "pushCameraFrame?.(frame, frameEpoch)" in bridge
+
+    # The blank is what actually stops the transmission; the track stays live
+    # so the peer connection is not torn down mid-call.
+    assert "state.stopCamera = (epoch?: number, native?: boolean) =>" in bridge
+    assert "blankCameraCanvas" in bridge
+    assert "context.fillRect(0, 0, canvas.width, canvas.height)" in bridge
+
+    # A decode that lands after the stop must not repaint the frame the blank
+    # just erased.
+    assert "generation === state.cameraGeneration" in bridge
+
+    # A frame from a capture the desktop already stopped is dropped, keyed on
+    # the desktop's own epochs -- NOT on state.enabled, which never becomes
+    # true on the Linux/PulseAudio path and is cleared by a mid-call reset().
+    assert "epoch <= state.cameraStoppedEpoch" in bridge
+    push_body = bridge[
+        bridge.index("state.pushCameraFrame = "):bridge.index("const blankCameraCanvas")
+    ]
+    assert "state.enabled" not in push_body
+
+    # reset() blanks the SAME canvas and never replaces it: it also runs
+    # mid-call on an audio device restart, and WhatsApp keeps its clone of the
+    # original track, so replacing the canvas left the peer watching black for
+    # the rest of the call while WinZapp said video was on.
+    assert "blankCamera();" in bridge
+    assert "teardownCamera" not in bridge
+    assert "state.cameraCanvas = null;" not in bridge
+    assert "state.cameraTrack = null;" not in bridge
+
+
+def test_the_desktop_side_has_a_camera_stop_channel():
+    from tests.test_call_media_epoch import socket_methods
+    sent = []
+    owner = 'a' * 32
+    ws = SimpleNamespace(instance_name='synthetic',
+                         main_window=SimpleNamespace(_active_voice_call={'media_epoch': owner}),
+                         sio=SimpleNamespace(emit=lambda *args: sent.append(args)))
+    methods = socket_methods('send_call_camera_stop', 'send_call_camera_start')
+    methods['send_call_camera_stop'](ws, epoch=17, native=True)
+    methods['send_call_camera_start'](ws, epoch=18)
+    assert sent == [
+        ('call:video:camera:stop', {'session': 'synthetic', 'mediaProtocol': 1,
+                                    'mediaEpoch': owner, 'epoch': 17, 'native': True}),
+        ('call:video:camera:start', {'session': 'synthetic', 'mediaProtocol': 1,
+                                     'mediaEpoch': owner, 'epoch': 18}),
+    ]
+
+
+
+def test_notices_raised_while_placing_a_call_are_answered():
+    # Calling a WhatsApp Business account for the first time opens "About this
+    # call ... [Learn more] [Continue]" in the hidden page; nobody could answer
+    # it, so the offer hung until the 75 s abort and the call never rang.
+    controller = _source("client/api_patches/src/controller/callController.ts")
+    offer = controller[controller.index("export async function offerCall"):
+                       controller.index("function watchOutgoingCallNotices")]
+    assert "watchOutgoingCallNotices(req)" in offer
+    assert "stopWatching()" in offer.split("finally", 1)[1]
+
+    watcher = controller[controller.index("function watchOutgoingCallNotices"):]
+    watcher = watcher[:watcher.index("\n}\n") + 2]
+    assert '[role="dialog"]' in watcher
+    # The primary (last) button, so it does not depend on the UI language.
+    assert "buttons[buttons.length - 1].click()" in watcher
+    # Dialogs already open before the call are left alone.
+    assert "__winzappCallNoticesSeen" in watcher
+    # Detached dialog nodes must not be kept alive by the seen-set.
+    assert "new WeakSet()" in watcher and "new Set()" not in watcher
+    # No more than three buttons: a bigger dialog is not a notice.
+    assert "buttons.length > 3" in watcher
+    # Only informational dialogs (with a "Learn more" link) are answered; a
+    # decision dialog such as "Unblock X to call?" is left alone, and the
+    # link check comes before the click.
+    assert "a[href],[role=\"link\"]" in watcher
+    assert watcher.index("a[href],[role=\"link\"]") < watcher.index(".click()")
+    # The log records the button count, never the dialog text (log-pii.md).
+    assert "[call-notice]" in watcher
+    assert "innerText" not in watcher and "textContent" not in watcher
+    # The watcher stops after a minute and when the offer settles.
+    assert "60_000" in watcher
+    assert "clearTimeout(limit)" in watcher
+
+
+def test_voip_backend_is_initialised_once_per_page():
+    """WhatsApp's VoIP wasm loads once per page: a second init fails with
+    "cannot load module more than once per process"."""
+    controller = _source("client/api_patches/src/controller/callController.ts")
+    bridge = _source("client/api_patches/src/util/callMediaBridge.ts")
+
+    for source in (controller, bridge):
+        # Both serialized callbacks use the same page policy. Its behaviour
+        # (single flight, ready, fatal, bounded retry) runs under Node in
+        # test_voip_init_policy.py; these assertions only guard the wiring.
+        assert "installVoipInitPolicyInPage" in source
+        assert "await win.__winzappInitializeVoip(initModule," in source

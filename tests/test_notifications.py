@@ -23,7 +23,12 @@ import time
 import pytest
 import wx
 
-from core.notification_manager import NotificationManager
+from core.notification_manager import (
+    NotificationManager,
+    format_locked_notification,
+    packaged_process_aumid,
+    toaster_aumid_candidates,
+)
 
 
 class _FakeToaster:
@@ -54,6 +59,8 @@ class _FakeI18n:
     def t(self, key):
         if key == "unread_sep_plural":
             return "{count} [unread_sep_plural]"
+        if key == "chat_lock_notification_plural":
+            return "{count} [chat_lock_notification_plural]"
         return f"[{key}]"
 
 
@@ -66,9 +73,14 @@ class _FakeMessageQueue:
 
 
 class _FakeMainWindow:
-    def __init__(self, chats=None):
+    def __init__(self, chats=None, locked_jids=None):
         self.chats = chats if chats is not None else {}
         self.message_queue = _FakeMessageQueue()
+        self.locked_jids = set(locked_jids or ())
+        self.app_name = "WinZapp"
+
+    def is_chat_locked(self, jid):
+        return jid in self.locked_jids
 
 
 def _chat(unread=0, records=1):
@@ -92,6 +104,7 @@ class _Stub:
     _COALESCE_SETTLE_SECONDS = 0
 
     _coalesce_pending     = NotificationManager._coalesce_pending
+    _chat_key             = NotificationManager._chat_key
     _clear_active_toasts  = NotificationManager._clear_active_toasts
     _dispatch             = NotificationManager._dispatch
     _do_reply             = NotificationManager._do_reply
@@ -99,14 +112,20 @@ class _Stub:
     def _play_sound(self, remote_jid=""):
         pass
 
-    def __init__(self, toaster=None, interactable=False, chats=None):
+    def __init__(self, toaster=None, interactable=False, chats=None, locked_jids=None):
         self._queue = queue.Queue()
         self._toaster = toaster
         self._last_toast = None
         self._last_shown_at = None
         self._interactable = interactable
         self.i18n = _FakeI18n()
-        self.main_window = _FakeMainWindow(chats)
+        self.main_window = _FakeMainWindow(chats, locked_jids)
+
+
+def test_locked_notification_format_contains_only_app_and_count():
+    title, body = format_locked_notification(7, _FakeI18n(), "WinZapp")
+    assert title == "WinZapp"
+    assert body == "7 [chat_lock_notification_plural]"
 
 
 class TestCoalescePending:
@@ -300,6 +319,13 @@ class TestSetupToasterAumid:
         def _register_aumid_registry(self):
             pass  # touches the real Windows registry — irrelevant here
 
+    @pytest.fixture(autouse=True)
+    def _unpackaged(self, monkeypatch):
+        """These tests describe an unpackaged interpreter. Running them under
+        Python from the Microsoft Store would otherwise put that package's
+        AUMID first (see TestPackagedInterpreter)."""
+        monkeypatch.setattr("core.notification_manager.packaged_process_aumid", lambda: "")
+
     def test_dev_mode_tries_the_registered_app_id_first(self, monkeypatch):
         monkeypatch.setattr("core.notification_manager._is_frozen", lambda: False)
         attempts = []
@@ -354,6 +380,76 @@ class TestSetupToasterAumid:
         stub._setup_toaster()
 
         assert attempts == ["WinZapp"]
+
+
+class TestPackagedInterpreter:
+    """Python from the Microsoft Store is an MSIX package, and so is every venv
+    made from it. Reported 2026-09-23 running from source: sound, no banner,
+    no error. "WinZapp" became "<package>!WinZapp", an app the package does not
+    declare, so Windows accepted every toast and displayed none. Creating that
+    notifier does not fail, so the candidate list cannot count on falling
+    through: the package's own AUMID has to come first."""
+
+    PACKAGED = "PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0!Python"
+
+    def test_a_packaged_process_starts_with_its_own_aumid(self):
+        assert toaster_aumid_candidates("WinZapp", "python.exe", self.PACKAGED) == [
+            self.PACKAGED, "WinZapp", "python.exe"]
+
+    def test_an_unpackaged_process_keeps_the_registered_id_first(self):
+        assert toaster_aumid_candidates("WinZapp", "python.exe", "") == [
+            "WinZapp", "python.exe"]
+
+    def test_no_candidate_is_tried_twice(self):
+        assert toaster_aumid_candidates("WinZapp", "WinZapp", "") == ["WinZapp"]
+
+    def test_setup_builds_the_toaster_on_the_package_aumid(self, monkeypatch):
+        monkeypatch.setattr("core.notification_manager._is_frozen", lambda: False)
+        monkeypatch.setattr("core.notification_manager.packaged_process_aumid",
+                            lambda: self.PACKAGED)
+        attempts = []
+
+        class FakeInteractable:
+            def __init__(self, app_id, notifierAUMID=None):
+                attempts.append(notifierAUMID)
+
+        monkeypatch.setattr("windows_toasts.InteractableWindowsToaster", FakeInteractable)
+        stub = TestSetupToasterAumid._ToasterStub()
+
+        stub._setup_toaster()
+
+        assert attempts == [self.PACKAGED]
+
+    def test_an_unpackaged_process_reports_no_package_aumid(self):
+        """kernel32 answers APPMODEL_ERROR_NO_APPLICATION outside a package."""
+
+        class _Kernel32:
+            def GetCurrentApplicationUserModelId(self, length, buffer):
+                return 15703
+
+        assert packaged_process_aumid(_Kernel32()) == ""
+
+    def test_a_packaged_process_reports_its_aumid(self):
+        aumid = self.PACKAGED
+
+        class _Kernel32:
+            def GetCurrentApplicationUserModelId(self, length, buffer):
+                if buffer is None:
+                    length._obj.value = len(aumid) + 1
+                    return 122  # ERROR_INSUFFICIENT_BUFFER: here is the size
+                buffer.value = aumid
+                return 0
+
+        assert packaged_process_aumid(_Kernel32()) == aumid
+
+    def test_a_missing_api_is_not_an_error(self):
+        assert packaged_process_aumid(object()) == ""
+
+    def test_the_real_call_answers_a_string(self):
+        """Whatever interpreter runs the suite: "" or "<family>!<app>"."""
+        aumid = packaged_process_aumid()
+        assert isinstance(aumid, str)
+        assert aumid == "" or "!" in aumid
 
 
 class TestDispatchLatency:
@@ -509,6 +605,36 @@ class TestUnreadSuffix:
         mgr._dispatch("title", "body", "j@g.us")
 
         assert "230" in self._suffix_of(toaster)
+
+    def test_locked_chat_refreshes_private_count_and_has_no_quick_actions(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(
+            toaster, interactable=True,
+            chats={"j@g.us": _chat(unread=7, records=20)},
+            locked_jids={"j@g.us"},
+        )
+
+        mgr._dispatch("Contact name", "private message body", "j@g.us", {"id": "M1"})
+
+        toast = toaster.shown_toasts[0]
+        assert toast.text_fields == ["WinZapp", "7 [chat_lock_notification_plural]"]
+        assert toast.inputs == []
+        assert toast.actions == []
+
+    def test_locked_chat_count_uses_mapped_jid_chat(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        lid = "1234567890@lid"
+        phone_chat = _chat(unread=9, records=20)
+        mgr = _Stub(toaster, chats={"1234567890@s.whatsapp.net": phone_chat})
+        mgr.main_window.is_chat_locked = lambda jid: jid == lid
+        mgr.main_window.get_chat = lambda jid: phone_chat if jid == lid else None
+
+        mgr._dispatch("Contact name", "private message body", lid, {"id": "M1"})
+
+        toast = toaster.shown_toasts[0]
+        assert toast.text_fields == ["WinZapp", "9 [chat_lock_notification_plural]"]
 
 
 class TestInteractableAccessibility:
@@ -704,3 +830,55 @@ class TestDoNotDisturbSuppressesTheWholeNotification:
         notification there is — it must not be lost."""
         mgr = self._dispatch(monkeypatch, quiet=False)
         assert mgr.announced == [("Fulano", "oi")]
+
+
+class TestClearForChat:
+    """Reading a chat inside the app removes its toast from the notification area."""
+
+    class _Mgr(_Stub):
+        _chat_key = NotificationManager._chat_key
+        _note_clear = NotificationManager._note_clear
+        _remove_toast_for_chat = NotificationManager._remove_toast_for_chat
+        clear_for_chat = NotificationManager.clear_for_chat
+
+        def __init__(self):
+            super().__init__(toaster=_FakeToaster())
+            self._last_toast_jid = None
+
+    def test_removes_toast_of_the_read_chat(self):
+        mgr = self._Mgr()
+        mgr._last_toast, mgr._last_toast_jid = object(), "a@s.whatsapp.net"
+        mgr._remove_toast_for_chat("a@s.whatsapp.net")
+        assert mgr._toaster.removed_groups == [mgr.TOAST_GRP]
+        assert mgr._last_toast_jid is None
+
+    def test_keeps_toast_of_another_chat(self):
+        mgr = self._Mgr()
+        mgr._last_toast, mgr._last_toast_jid = object(), "b@s.whatsapp.net"
+        mgr._remove_toast_for_chat("a@s.whatsapp.net")
+        assert mgr._toaster.removed_groups == []
+        assert mgr._last_toast_jid == "b@s.whatsapp.net"
+
+    def test_clear_request_is_queued_and_never_replaces_a_toast(self):
+        mgr = self._Mgr()
+        mgr.clear_for_chat("a@s.whatsapp.net")
+        item, dropped = mgr._coalesce_pending(("Bia", "oi", "b@s.whatsapp.net"))
+        assert item == ("Bia", "oi", "b@s.whatsapp.net")
+        assert dropped == 0
+
+    def test_pending_toast_of_the_read_chat_is_skipped(self):
+        mgr = self._Mgr()
+        mgr._skip_jids = set()
+        mgr.clear_for_chat("a@s.whatsapp.net")
+        mgr._coalesce_pending(("Ana", "oi", "a@s.whatsapp.net"))
+        assert "a@s.whatsapp.net" in mgr._skip_jids
+
+    def test_toast_queued_after_the_read_is_not_skipped(self):
+        from core.notification_manager import _ClearRequest
+        mgr = self._Mgr()
+        mgr._skip_jids = set()
+        mgr._queue.put(_ClearRequest("a@s.whatsapp.net"))
+        mgr._queue.put(("Ana", "m2", "a@s.whatsapp.net"))
+        item, _ = mgr._coalesce_pending(("Ana", "m1", "a@s.whatsapp.net"))
+        assert item[1] == "m2"
+        assert "a@s.whatsapp.net" not in mgr._skip_jids

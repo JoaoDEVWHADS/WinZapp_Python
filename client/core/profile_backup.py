@@ -76,16 +76,38 @@ def close_snapshot_max_age(settings) -> int:
     return hours * 3600
 
 
+def snapshots_disabled(settings) -> bool:
+    """Whether the user chose to keep no restore point at all.
+
+    For someone who would rather re-pair after a broken profile than give a
+    copy of it ~1-2 GB of disk: no snapshot at a clean close, none while open
+    (live_snapshot_policy() reads as off), and Settings offers to delete the
+    ones already there. Off by default — the copy is what spares a re-pairing.
+    Only an explicit True turns it on, so a hand-edited value never deletes a
+    user's restore point by accident."""
+    return _section(settings).get("snapshots_disabled", False) is True
+
+
 def live_snapshot_policy(settings):
     """(enabled, interval in seconds, ask first) for the refresh while open.
 
     The interval has no 0 sentinel: 0 would close the session on every poll,
     so anything below one hour falls back to the default."""
     section = _section(settings)
-    enabled = section.get("live_snapshot_enabled", False) is True
+    enabled = (section.get("live_snapshot_enabled", False) is True
+               and not snapshots_disabled(settings))
     hours = stored_hours(section.get("live_snapshot_interval_hours"), DEFAULT_LIVE_HOURS, 1)
     confirm = section.get("live_snapshot_confirm", True) is not False
     return enabled, hours * 3600, confirm
+
+
+def size_text(num_bytes, decimal_separator=",") -> str:
+    """A restore point's size as Settings says it: "1,9 GB", "850 MB"."""
+    num_bytes = max(0, int(num_bytes or 0))
+    gb = num_bytes / 1024 ** 3
+    if gb >= 1:
+        return f"{gb:.1f}".replace(".", decimal_separator) + " GB"
+    return f"{round(num_bytes / 1024 ** 2)} MB"
 
 
 def live_snapshot_due(enabled, interval_seconds, since_last_attempt, snapshot_age) -> bool:

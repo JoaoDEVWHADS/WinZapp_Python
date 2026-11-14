@@ -62,6 +62,9 @@ class _Stub:
     _mention_identity = ConversationsPanel._mention_identity
     _raw_mentioned_jids = staticmethod(ConversationsPanel._raw_mentioned_jids)
     _extract_mentions = ConversationsPanel._extract_mentions
+    _mention_text = staticmethod(ConversationsPanel._mention_text)
+    _mention_all_keyword = ConversationsPanel._mention_all_keyword
+    _individually_named_mentions = ConversationsPanel._individually_named_mentions
     _build_mention_payload = ConversationsPanel._build_mention_payload
 
     def __init__(self, main_window, participants=None):
@@ -88,11 +91,11 @@ LID_TO_PHONE = {
 }
 
 
-def _text_msg(mentioned):
+def _text_msg(mentioned, text="@todos bom dia"):
     return {
         "key": {"id": "X", "fromMe": True},
         "messageType": "extendedTextMessage",
-        "message": {"extendedTextMessage": {"text": "@todos bom dia"}},
+        "message": {"extendedTextMessage": {"text": text}},
         "contextInfo": {"mentionedJid": list(mentioned)},
     }
 
@@ -160,6 +163,43 @@ class TestExtractMentionsCollapsesMentionAll:
         assert len(out) == 1
 
 
+class TestMentionAllNextToAnIndividualMention:
+    """"@todos ... @Ana ...": the list covers the whole group either way, so
+    only the text says Ana was also named. She keeps her link; "everyone" does
+    not get one per participant."""
+
+    def test_the_person_named_in_the_text_keeps_a_link(self):
+        s = _Stub(_FakeMainWindow(LID_TO_PHONE), PARTICIPANTS)
+        msg = _text_msg(LID_TO_PHONE.values(), "@todos, o @5522222222222 já sabe")
+        assert [jid for _, jid in s._extract_mentions(msg)] == ["5522222222222@s.whatsapp.net"]
+
+    def test_several_people_named_keep_their_links_in_list_order(self):
+        s = _Stub(_FakeMainWindow(LID_TO_PHONE), PARTICIPANTS)
+        msg = _text_msg(LID_TO_PHONE.values(), "@5533333333333 e @5511111111111 e @todos")
+        assert [jid for _, jid in s._extract_mentions(msg)] == [
+            "5511111111111@s.whatsapp.net", "5533333333333@s.whatsapp.net"]
+
+    def test_a_person_received_as_lid_is_matched_by_phone_digits(self):
+        s = _Stub(_FakeMainWindow(LID_TO_PHONE), PARTICIPANTS)
+        msg = _text_msg(LID_TO_PHONE.keys(), "@todos @5511111111111")
+        assert [jid for _, jid in s._extract_mentions(msg)] == ["111@lid"]
+
+    def test_only_at_todos_still_shows_no_links(self):
+        s = _Stub(_FakeMainWindow(LID_TO_PHONE), PARTICIPANTS)
+        assert s._extract_mentions(_text_msg(LID_TO_PHONE.values(), "@todos bom dia")) == []
+
+    def test_a_number_that_is_not_a_participant_is_ignored(self):
+        s = _Stub(_FakeMainWindow(LID_TO_PHONE), PARTICIPANTS)
+        msg = _text_msg(LID_TO_PHONE.values(), "@todos ligue para @5599999999999")
+        assert s._extract_mentions(msg) == []
+
+    def test_a_media_caption_counts_as_the_text(self):
+        s = _Stub(_FakeMainWindow(LID_TO_PHONE), PARTICIPANTS)
+        msg = {"key": {"id": "X"}, "contextInfo": {"mentionedJid": list(LID_TO_PHONE.values())},
+               "message": {"imageMessage": {"caption": "@todos vejam @5511111111111"}}}
+        assert [jid for _, jid in s._extract_mentions(msg)] == ["5511111111111@s.whatsapp.net"]
+
+
 class TestRawMentionedJids:
     def test_top_level_context_info(self):
         msg = {"contextInfo": {"mentionedJid": ["a@lid"]}}
@@ -217,3 +257,97 @@ class TestBuildMentionPayload:
         edit._pending_mention_display_names = {"333@lid": "Carla"}
 
         assert send._build_mention_payload("oi @Carla") == edit._build_mention_payload("oi @Carla")
+
+
+class TestMentionAllBeforeTheParticipantsArrive:
+    """The participant list is fetched in the background when the group opens
+    and can fail (a rate-limited group-info): the text's @todos is enough."""
+
+    PHONES = [f"55119000000{n:02d}@s.whatsapp.net" for n in range(10)]
+
+    def test_our_own_todos_with_no_participants_shows_no_links(self):
+        s = _Stub(_FakeMainWindow({}), [])
+        assert s._extract_mentions(_text_msg(self.PHONES, "@todos bom dia")) == []
+
+    def test_someone_named_next_to_todos_keeps_a_link(self):
+        s = _Stub(_FakeMainWindow({}), [])
+        msg = _text_msg(self.PHONES, "@todos, o @5511900000003 já sabe")
+        assert [jid for _, jid in s._extract_mentions(msg)] == [self.PHONES[3]]
+
+    def test_people_named_one_by_one_keep_every_link(self):
+        s = _Stub(_FakeMainWindow({}), [])
+        msg = _text_msg(self.PHONES[:2], "@5511900000000 e @5511900000001")
+        assert [jid for _, jid in s._extract_mentions(msg)] == self.PHONES[:2]
+
+    def test_the_locale_word_counts_too(self):
+        class _I18n:
+            @staticmethod
+            def t(key):
+                return "ognuno" if key == "mention_all_keyword" else key
+        mw = _FakeMainWindow({})
+        mw.i18n = _I18n()
+        s = _Stub(mw, [])
+        assert s._extract_mentions(_text_msg(self.PHONES, "@ognuno ciao")) == []
+
+
+class _ListStub:
+    def __init__(self, selected):
+        self.selected = selected
+
+    def GetFirstSelected(self):
+        return self.selected
+
+
+class _CacheStub(_Stub):
+    _set_group_participants_cache = ConversationsPanel._set_group_participants_cache
+    _refresh_selected_message_mentions = ConversationsPanel._refresh_selected_message_mentions
+
+    def __init__(self, main_window, messages, selected, group="g1@g.us"):
+        super().__init__(main_window, [])
+        self.conversation = {"remoteJid": group}
+        self.messages_list = _ListStub(selected)
+        self._sorted_messages = messages
+        self._mention_active = False
+        self.panels = []
+
+    @staticmethod
+    def _is_separator(msg):
+        return msg.get("separator", False)
+
+    def _update_mentions_panel(self, mentions):
+        self.panels.append(mentions)
+
+
+class TestParticipantsArrivingAfterTheMessageWasSelected:
+    """The race behind "Tab lists every member": the chat opens, the last
+    message is selected and its panel built, then the participants arrive."""
+
+    def test_the_selected_message_s_panel_is_rebuilt_with_them(self):
+        msg = _text_msg(LID_TO_PHONE.values(), "bom dia")
+        s = _CacheStub(_FakeMainWindow(LID_TO_PHONE), [msg], 0)
+        s._set_group_participants_cache(PARTICIPANTS, "g1@g.us")
+        assert s._group_participants_cache == PARTICIPANTS
+        assert s.panels == [[]]
+
+    def test_an_answer_for_a_group_no_longer_open_is_dropped(self):
+        msg = _text_msg(LID_TO_PHONE.values(), "bom dia")
+        s = _CacheStub(_FakeMainWindow(LID_TO_PHONE), [msg], 0, group="other@g.us")
+        s._set_group_participants_cache(PARTICIPANTS, "g1@g.us")
+        assert s._group_participants_cache == []
+        assert s.panels == []
+
+    def test_the_same_links_are_left_alone(self):
+        """A member joining or leaving the open group refreshes the cache: the
+        links did not change, and rebuilding them destroyed the focused one."""
+        msg = _text_msg(LID_TO_PHONE.values(), "bom dia")
+        s = _CacheStub(_FakeMainWindow(LID_TO_PHONE), [msg], 0)
+        s._set_group_participants_cache(PARTICIPANTS, "g1@g.us")
+        s._current_mentions = s.panels[-1]
+        s._set_group_participants_cache(PARTICIPANTS, "g1@g.us")
+        assert len(s.panels) == 1
+
+    def test_nothing_selected_or_a_separator_rebuilds_nothing(self):
+        for messages, selected in (([], -1), ([{"separator": True}], 0)):
+            s = _CacheStub(_FakeMainWindow(LID_TO_PHONE), messages, selected)
+            s._set_group_participants_cache(PARTICIPANTS, "g1@g.us")
+            assert s.panels == []

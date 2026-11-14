@@ -8,32 +8,67 @@
 # they disagree. This file still carries the test/build tools (pytest,
 # pyinstaller...) because scripts and forks install only it.
 accessible-output2==0.17
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.5
+aiosignal==1.4.0
+aiofiles==25.1.0
 aiosqlite==0.22.1
 altgraph==0.17.5
 annotated-doc==0.0.4
 annotated-types==0.7.0
 audioop-lts==0.2.1
+attrs==26.1.0
 anyio==4.12.0
+av==18.1.0
 bidict==0.23.1
 certifi==2025.11.12
 cffi==2.0.0
 charset-normalizer==3.4.4
-click==8.3.1
+# click 8.4.2+ is required by huggingface-hub 1.x (a faster-whisper
+# dependency); uvicorn, the only other user here, asks for >=7.0, so the
+# bump is safe and is what resolves the conflict with the old 8.3.1 pin.
+click==8.5.0
 comtypes==1.4.16
 colorama==0.4.6
 coverage==7.14.3
 cryptography==46.0.3
+ctranslate2==4.8.2
+execnet==2.1.2
+frozenlist==1.8.0
+multidict==7.2.1
+propcache==0.5.4
+yarl==1.25.1
 fastapi==0.123.4
+faster-whisper==1.2.1
+filelock==3.32.5
+flatbuffers==25.12.19
+fsspec==2026.7.0
 h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.30.0
 idna==3.11
 iniconfig==2.3.0
 libloader==1.4.2
-numpy==2.4.6
+# WebRTC's audio processing module (AEC3 echo cancellation and noise
+# suppression) for the call microphone -- core/call_audio_processing.py. Only
+# livekit.rtc.AudioProcessingModule is used; aiofiles and types-protobuf
+# below are its own requirements.
+livekit==1.1.20
+numpy==2.3.5
+# onnxruntime 1.29 has no macOS x86_64 wheel (1.23.2 is the last), so an Intel
+# Mac gets that one, pinned like every other dependency.
+onnxruntime==1.29.0; sys_platform != "darwin" or platform_machine != "x86_64"
+onnxruntime==1.23.2; sys_platform == "darwin" and platform_machine == "x86_64"
 packaging==25.0
 pefile==2024.8.26
+pillow==12.3.0
 platform_utils==1.6.0
 platformdirs==4.5.0
 pluggy==1.6.0
+polib==1.2.0
+protobuf==7.36.1
 PyAudio==0.2.14; python_version < "3.14"
 pycparser==2.23
 pydantic==2.12.5
@@ -45,11 +80,13 @@ pyperclip==1.11.0
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
+pytest-xdist==3.8.0
 python-dotenv==1.2.1
 python-engineio==4.12.3
 python-socketio==5.15.1
 pywin32==311
 pywin32-ctypes==0.2.3
+PyYAML==6.0.3
 requests==2.32.5
 setuptools==80.9.0
 simple-websocket==1.1.0
@@ -57,6 +94,15 @@ sound-lib==0.83
 sounddevice==0.5.5
 soundfile==0.13.1
 starlette==0.50.0
+tokenizers==0.23.2
+tqdm==4.70.0
+# Verifies HTTPS against the Windows certificate store instead of the
+# bundled CA list, which is what lets the model/Node/update downloads
+# work on a machine whose TLS is intercepted locally (antivirus, proxy).
+# Pure Python, needs 3.10+, and degrades to the old behaviour when
+# absent — see client/core/tls_trust.py.
+truststore==0.10.4
+types-protobuf==7.35.1.20260906
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.5.0

@@ -1277,6 +1277,25 @@ MANAGED_V233_CHECK_QR_CODE = (
 )
 
 
+# wppconnect 2.3.5's checkQrCode(): 2.3.3's, plus a `qrLoopCancelled`/closed-page
+# guard at the top and after each await (upstream's new cancelQrLoop()). The
+# auth-probe fix is still there, so it is RECOGNISED, never rewritten - see
+# MANAGED_V233_CHECK_QR_CODE for why.
+MANAGED_V235_CHECK_QR_CODE = (
+    "    async checkQrCode() {\n"
+    "        if (this.qrLoopCancelled || this.page.isClosed())\n"
+    "            return;\n"
+    "        const needScan = await (0, auth_1.needsToScan)(this.page).catch(() => null);\n"
+    "        if (this.qrLoopCancelled || this.page.isClosed())\n"
+    "            return;\n"
+    "        // A navigation can invalidate the execution context while waiting for QR.\n"
+    "        // An unknown result is not proof that the session has registered.\n"
+    "        if (needScan === null)\n"
+    "            return;\n"
+    "        this.isLogged = !needScan;\n"
+)
+
+
 MANAGED_ORIGINAL_LOGIN_BY_CODE = (
     "    async loginByCode(phone) {\n"
     "        await (0, helpers_1.evaluateAndReturn)(this.page, async ({ phone }) => {\n"
@@ -1613,6 +1632,19 @@ MANAGED_PATCHED_LINK_CODE_HOOKS = (
 )
 
 
+# wppconnect 2.3.6 stopped calling `this.page.exposeFunction(...)` directly and
+# routes every binding through `this.exposePageFunction(...)`, which drops a
+# stale binding left by a reused page first. The two hook lines are otherwise
+# identical, so the 2.3.6 forms are derived from the 2.3.5 ones rather than
+# restated: the patched hooks keep the same body and only change the call.
+MANAGED_V236_ORIGINAL_LINK_CODE_HOOKS = MANAGED_ORIGINAL_LINK_CODE_HOOKS.replace(
+    "this.page.exposeFunction(", "this.exposePageFunction("
+)
+MANAGED_V236_PATCHED_LINK_CODE_HOOKS = MANAGED_PATCHED_LINK_CODE_HOOKS.replace(
+    "this.page.exposeFunction(", "this.exposePageFunction("
+)
+
+
 MANAGED_ORIGINAL_LINK_CODE_LISTENER = (
     "                WPP.on('conn.link_code_error', (error) => window.onLinkCodeError(error.message));\n"
 )
@@ -1681,13 +1713,13 @@ def _patch_managed_link_flow(content: str, notes: list) -> str:
     starts it once. See the v9 entry in the module docstring."""
     if MANAGED_PATCHED_CHECK_QR_CODE in content:
         notes.append("checkQrCode: already carries the auth-probe fix.")
-    elif MANAGED_V233_CHECK_QR_CODE in content:
+    elif MANAGED_V233_CHECK_QR_CODE in content or MANAGED_V235_CHECK_QR_CODE in content:
         # Left as upstream ships it — see the v10 entry in the module
         # docstring. Recognised rather than ignored so this never reads as
         # DID NOT MATCH, which is the alarm meaning a pairing fix stopped
         # being applied.
         notes.append(
-            "checkQrCode: no patch needed — wppconnect 2.3.3 carries the "
+            "checkQrCode: no patch needed — wppconnect 2.3.3 and later carry the "
             "auth-probe fix upstream."
         )
     elif MANAGED_ORIGINAL_CHECK_QR_CODE in content:
@@ -1731,11 +1763,24 @@ def _patch_managed_link_flow(content: str, notes: list) -> str:
     else:
         notes.append("onLinkCode: DID NOT MATCH the known source text — left untouched.")
 
-    if MANAGED_PATCHED_LINK_CODE_HOOKS in content:
+    if (
+        MANAGED_PATCHED_LINK_CODE_HOOKS in content
+        or MANAGED_V236_PATCHED_LINK_CODE_HOOKS in content
+    ):
         notes.append("link-code hooks: already reported to the client.")
     elif MANAGED_ORIGINAL_LINK_CODE_HOOKS in content:
         content = content.replace(
             MANAGED_ORIGINAL_LINK_CODE_HOOKS, MANAGED_PATCHED_LINK_CODE_HOOKS, 1
+        )
+        notes.append(
+            "link-code hooks: patched — an expired code and a refresh failure "
+            "now reach the pairing dialog instead of only wppconnect.log."
+        )
+    elif MANAGED_V236_ORIGINAL_LINK_CODE_HOOKS in content:
+        content = content.replace(
+            MANAGED_V236_ORIGINAL_LINK_CODE_HOOKS,
+            MANAGED_V236_PATCHED_LINK_CODE_HOOKS,
+            1,
         )
         notes.append(
             "link-code hooks: patched — an expired code and a refresh failure "
@@ -1872,7 +1917,7 @@ def _patch_qr_reads(content: str, notes: list) -> str:
             V233_ORIGINAL_WAIT_FOR_QR_CODE_SCAN, PATCHED_WAIT_FOR_QR_CODE_SCAN, 1
         )
         notes.append(
-            "waitForQrCodeScan: patched — 2.3.3 stopped reading a failed auth "
+            "waitForQrCodeScan: patched — 2.3.3 and later stopped reading a failed auth "
             "probe as a login, but retries it forever and silently; this bounds "
             "the wait at 30s and logs why pairing stalled."
         )

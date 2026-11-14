@@ -1,6 +1,8 @@
 """Accessible, unified media viewer for conversation media and statuses."""
 
 from __future__ import annotations
+from ui.shortcut_bindings import command_key_event
+from ui.shortcut_bindings import make_shortcut_table
 
 import os
 import shutil
@@ -14,7 +16,7 @@ from core.save_location import resolve_save_dialog_folder
 from core.save_dialog_selection import schedule_deselect_extension
 from core.utils import is_voice_message
 from core.video_player import VideoPlayer
-from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs, AccessibleMediaViewerSeekBack, AccessibleMediaViewerSeekForward, AccessibleMediaBitmapPanel
+from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleSaveAs, AccessibleMediaViewerSeekBack, AccessibleMediaViewerSeekForward, AccessibleMediaBitmapPanel, AccessibleDescribeButton
 
 
 class CenteredBitmapPanel(wx.Panel):
@@ -130,6 +132,8 @@ class MediaViewerDialog(wx.Dialog):
         is_liked: Optional[Callable[[dict], bool]] = None,
         on_like: Optional[Callable[[dict, Callable[[bool], None]], None]] = None,
         on_reply: Optional[Callable[[dict, str, Callable[[bool], None]], None]] = None,
+        describe_label: Optional[Callable[[dict], str]] = None,
+        on_describe: Optional[Callable[[dict, "wx.Window"], None]] = None,
     ):
         self.main_window = main_window
         self.i18n = main_window.i18n
@@ -139,6 +143,11 @@ class MediaViewerDialog(wx.Dialog):
         self._is_liked_cb = is_liked
         self._on_like_cb = on_like
         self._on_reply_cb = on_reply
+        # Describe a picture or video with the AI providers the person set
+        # up: the opener says whether it is offered for an item (its label,
+        # "" when not) and runs it; this dialog is the parent of the window.
+        self._describe_label_cb = describe_label
+        self._on_describe_cb = on_describe
 
         super().__init__(
             parent,
@@ -298,6 +307,8 @@ class MediaViewerDialog(wx.Dialog):
         )
         self._reply_btn.Bind(wx.EVT_BUTTON, self._on_reply)
         self._reply_field.Bind(wx.EVT_TEXT_ENTER, self._on_reply)
+        from ui.shortcut_bindings import bind_enter_command
+        bind_enter_command(self, self._reply_field, 'status_reply.send', self._on_reply)
         status_sizer.Add(self._reply_btn, 0)
         self._status_actions.SetSizer(status_sizer)
         root.Add(self._status_actions, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
@@ -316,6 +327,13 @@ class MediaViewerDialog(wx.Dialog):
         self._save_btn.SetAccessible(AccessibleSaveAs())
         self._save_btn.Bind(wx.EVT_BUTTON, self._on_save)
         bottom.Add(self._save_btn, 0, wx.RIGHT, 8)
+        # Right after Save as, the same place the conversation's action row
+        # gives it (Ctrl+Shift+I, reported by its accessible object).
+        self._describe_btn = wx.Button(self, label=self.i18n.t("ai_describe_image_menu"))
+        self._describe_btn.SetAccessible(AccessibleDescribeButton())
+        self._describe_btn.Bind(wx.EVT_BUTTON, self._on_describe)
+        bottom.Add(self._describe_btn, 0, wx.RIGHT, 8)
+        self._describe_btn.Hide()
         self._close_btn = wx.Button(self, wx.ID_CANCEL, self.i18n.t("close"))
         self._close_btn.Bind(wx.EVT_BUTTON, self._on_close_button)
         bottom.Add(self._close_btn, 0)
@@ -335,7 +353,8 @@ class MediaViewerDialog(wx.Dialog):
         self.ID_CTRL_SHIFT_S = wx.NewIdRef()
         self.ID_ALT_V = wx.NewIdRef()  # seek back 10s
         self.ID_ALT_A = wx.NewIdRef()  # seek forward 10s
-        accel_tbl = wx.AcceleratorTable([
+        self.ID_CTRL_SHIFT_I = wx.NewIdRef()  # describe with AI
+        accel_tbl = make_shortcut_table(self, 'media', [
             (wx.ACCEL_CTRL, wx.WXK_LEFT, self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL, wx.WXK_RIGHT, self.ID_CTRL_RIGHT),
             # Same combo StatusPanel/ConversationsPanel already use for
@@ -344,6 +363,7 @@ class MediaViewerDialog(wx.Dialog):
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("S"), self.ID_CTRL_SHIFT_S),
             (wx.ACCEL_ALT, ord("V"), self.ID_ALT_V),
             (wx.ACCEL_ALT, ord("A"), self.ID_ALT_A),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("I"), self.ID_CTRL_SHIFT_I),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self._on_prev, id=self.ID_CTRL_LEFT)
@@ -351,6 +371,7 @@ class MediaViewerDialog(wx.Dialog):
         self.Bind(wx.EVT_MENU, self._on_save, id=self.ID_CTRL_SHIFT_S)
         self.Bind(wx.EVT_MENU, self._on_seek_back, id=self.ID_ALT_V)
         self.Bind(wx.EVT_MENU, self._on_seek_forward, id=self.ID_ALT_A)
+        self.Bind(wx.EVT_MENU, self._on_describe, id=self.ID_CTRL_SHIFT_I)
 
     # ── Item lifecycle ───────────────────────────────────────────────────
 
@@ -409,6 +430,7 @@ class MediaViewerDialog(wx.Dialog):
         self._prev_btn.Show(len(self.items) > 1)
         self._next_btn.Show(len(self.items) > 1)
         self._configure_status_actions(item)
+        self._update_describe_button(item)
 
         if self._current_kind == "text":
             self._bitmap_panel.Hide()
@@ -564,6 +586,29 @@ class MediaViewerDialog(wx.Dialog):
             self._like_btn.SetLabel(
                 self.i18n.t("status_unlike") if liked else self.i18n.t("status_like")
             )
+
+    def _describe_text(self, item: dict) -> str:
+        """Label of the Describe button for ``item``, "" when not offered."""
+        if self._describe_label_cb is None or self._on_describe_cb is None:
+            return ""
+        if str(item.get("kind") or "") not in ("image", "video"):
+            return ""
+        try:
+            return str(self._describe_label_cb(item) or "")
+        except Exception:
+            return ""
+
+    def _update_describe_button(self, item: dict):
+        label = self._describe_text(item)
+        if label:
+            self._describe_btn.SetLabel(label)
+        self._describe_btn.Show(bool(label))
+        self.Layout()
+
+    def _on_describe(self, event):
+        item = self._current_item()
+        if self._describe_text(item):
+            self._on_describe_cb(item, self)
 
     # ── Transport controls ───────────────────────────────────────────────
 
@@ -771,9 +816,12 @@ class MediaViewerDialog(wx.Dialog):
         try:
             shutil.copyfile(path, target)
         except Exception as exc:
-            wx.MessageBox(str(exc), self.main_window.app_name, wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(
+                self.i18n.t("media_viewer_save_failed").format(error=exc),
+                self.main_window.app_name, wx.OK | wx.ICON_ERROR)
 
     def _on_char_hook(self, event):
+        event = command_key_event(self, 'media', event)
         key = event.GetKeyCode()
         if key == wx.WXK_ESCAPE:
             self.EndModal(wx.ID_CANCEL)

@@ -35,6 +35,7 @@ import types
 import pytest
 
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 # ── One: the restart must wait for the profile, not just for CLOSED ─────────
@@ -72,6 +73,9 @@ class _RestartStub:
     def _apply_offline_state(self, *a, **kw):
         pass
 
+    def _probe_whatsapp_host(self):
+        return True
+
 
 @pytest.fixture
 def restart(monkeypatch):
@@ -83,7 +87,7 @@ def restart(monkeypatch):
             _stub = None
         return types.SimpleNamespace(status_code=200, text="{}")
 
-    monkeypatch.setattr("main.api_post", _post)
+    patch_main_global(monkeypatch, "api_post", _post)
     return posted
 
 

@@ -1,0 +1,208 @@
+# Builds WinZapp's neonize: official neonize at the release approved in
+# neonize_bridge/neonize_upstream.json, plus neonize_bridge/neonize_patches/,
+# compiled into the Windows DLL by neonize_bridge/build_neonize.py. The bridge's
+# tests then run against that package (ci.yml's bridge job builds and tests it
+# too, on every pull request; this workflow adds the export round-trip, the
+# artifact and the release).
+#
+# - pull_request / push to main that touch the patches, the manifest or the
+#   build: build, test, and keep dist/ as an artifact.
+# - workflow_dispatch with `release_tag`: the same, then a DRAFT release with
+#   the zip, SHA256SUMS.txt and BUILD_INFO.json. A maintainer publishes it and
+#   records tag, asset and sha256 in neonize_upstream.json's `release`, which
+#   is what prepare.py downloads (docs/reference/neonize-build.md).
+# - schedule (weekly) or workflow_dispatch with `check_ref`: tries the patches
+#   on upstream's newest code. Red here means "time to port the patches", not
+#   a broken WinZapp: nothing else depends on this job.
+name: Neonize DLL
+
+on:
+  pull_request:
+    paths:
+      - "neonize_bridge/neonize_patches/**"
+      - "neonize_bridge/neonize_upstream.json"
+      - "neonize_bridge/neonize_upstream.py"
+      - "neonize_bridge/build_neonize.py"
+      - "neonize_bridge/contact_events.py"
+      - ".github/workflows/neonize-dll.yml"
+  push:
+    branches: [main]
+    paths:
+      - "neonize_bridge/neonize_patches/**"
+      - "neonize_bridge/neonize_upstream.json"
+      - "neonize_bridge/build_neonize.py"
+      - ".github/workflows/neonize-dll.yml"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a draft release with this tag (e.g. neonize-0.6.0-winzapp.1); empty: build only"
+        required: false
+        default: ""
+      check_ref:
+        description: "Instead, check the patches against this upstream neonize ref (e.g. master or 0.6.1)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  GO_VERSION: "1.27.x"
+
+concurrency:
+  group: neonize-dll-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test the neonize DLL
+    if: github.event_name != 'schedule' && inputs.check_ref == ''
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up MSYS2 (64-bit GCC for cgo)
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add MSYS2 UCRT64 bin to Windows PATH
+        shell: msys2 {0}
+        run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
+
+      - name: Build (prepare, generate, build)
+        run: python neonize_bridge/build_neonize.py all
+
+      - name: Test native call lifecycle against the real package
+        working-directory: neonize_bridge/neonize_build/neonize/goneonize
+        env:
+          CGO_ENABLED: "1"
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: go test -p 1 -count=1 -run 'Test(CallLifecycle|IncomingAfterTerminal|IncomingBeforeTerminal|OldIncomingOwner|ConcurrentIncomingAndEnd|CallEventQueue)' .
+
+      - name: The patches round-trip (export reproduces them byte for byte)
+        run: |
+          python neonize_bridge/build_neonize.py export
+          git diff --exit-code -- neonize_bridge/neonize_patches
+
+      - name: Install the bridge's requirements and the built package into a venv
+        run: |
+          python -m venv venv
+          venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+          venv\Scripts\python.exe -m pip install --require-hashes -r neonize_bridge/requirements.lock --quiet
+          venv\Scripts\python.exe -m pip install -r requirements-dev.txt --quiet
+          python neonize_bridge/build_neonize.py install --venv venv
+
+      - name: Run the bridge's tests against the built package
+        run: venv\Scripts\python.exe -m pytest neonize_bridge -q
+
+      - name: Keep the build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: neonize-dll
+          path: |
+            neonize_bridge/neonize_build/dist/*.zip
+            neonize_bridge/neonize_build/dist/SHA256SUMS.txt
+            neonize_bridge/neonize_build/dist/BUILD_INFO.json
+          if-no-files-found: error
+
+  release:
+    name: Draft the neonize DLL release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # This repository's releases are also WinZapp's update channel: the
+      # updater ignores a tag that is not a WinZapp version, and "alpha" would
+      # put it on the alpha channel (tests/test_alpha_updates.py).
+      - name: The tag cannot be taken for a WinZapp release
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          case "$TAG" in
+            neonize-*) ;;
+            *) echo "release_tag must start with neonize- (got: $TAG)"; exit 1 ;;
+          esac
+          if echo "$TAG" | grep -qi alpha; then echo "release_tag must not contain alpha"; exit 1; fi
+
+      - name: Fetch the build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: neonize-dll
+          path: dist
+
+      # A draft: nothing reaches prepare.py until a maintainer publishes it and
+      # records it in neonize_upstream.json.
+      - name: Create the draft release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          draft: true
+          prerelease: true
+          fail_on_unmatched_files: true
+          body: |
+            WinZapp's build of neonize for the Neonize bridge (Windows x64): official
+            neonize at the release approved in neonize_bridge/neonize_upstream.json, plus
+            neonize_bridge/neonize_patches/. BUILD_INFO.json names the exact inputs.
+            Licences: neonize (Apache-2.0), whatsmeow (MPL-2.0), meowcaller (MIT).
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            dist/BUILD_INFO.json
+
+  upstream-check:
+    name: Do the patches still apply to upstream neonize?
+    if: github.event_name == 'schedule' || inputs.check_ref != ''
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up MSYS2 (64-bit GCC for cgo)
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add MSYS2 UCRT64 bin to Windows PATH
+        shell: msys2 {0}
+        run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
+
+      - name: Apply the patches and build on upstream's ref
+        env:
+          CHECK_REF: ${{ inputs.check_ref || 'master' }}
+        run: python neonize_bridge/build_neonize.py check --ref "$env:CHECK_REF"

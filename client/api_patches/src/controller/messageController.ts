@@ -17,6 +17,12 @@
 import { Request, Response } from 'express';
 
 import { unlinkAsync } from '../util/functions';
+import { writePinnedMessage } from '../util/pinnedMessagesRuntime';
+import { editChannelUpdate } from './channelsPanelController';
+import {
+  missingReplyQuoteResponse,
+  replyQuoteIsMissing,
+} from '../util/quotedMessagePreflight';
 
 function returnError(req: Request, res: Response, error: any) {
   req.logger.error(error);
@@ -294,6 +300,25 @@ export async function editMessage(req: Request, res: Response) {
 
   const options = req.body.options || {};
   try {
+    if (/@newsletter_/.test(String(id))) {
+      // A channel update goes through WhatsApp Web's own edit
+      // (editChannelUpdate): wa-js's is a chat's.
+      const page = (req.client as any).page;
+      const sent = page
+        ? await page.evaluate(editChannelUpdate, { id, text: newText })
+        : null;
+      if (!sent || (sent as any).refused) {
+        // Nothing was sent: the client rolls the row back on this message
+        // (MainWindow.edit_message), as on a chat's and on Neonize's refusal.
+        res.status(400).json({ status: 'error',
+          code: sent ? 'channel_edit_refused' : 'channel_edit_unsupported',
+          message: 'Cannot edit this message' });
+        return;
+      }
+      req.io.emit('edited-message', sent);
+      returnSucess(res, sent);
+      return;
+    }
     const edited = await (req.client as any).editMessage(id, newText, options);
 
     req.io.emit('edited-message', edited);
@@ -356,12 +381,18 @@ export async function sendFile(req: Request, res: Response) {
     quotedMessageId,
     type,
     uploadId,
+    isPtt,
   } = req.body;
 
   const options = req.body.options || {};
+  // multipart/form-data carries every field as a string, so a plain
+  // truthiness test would read WinZapp's "false" as true. Only an audio send
+  // gets the flag: an attached audio file is ordinary audio, not a voice note.
+  const pttOption =
+    type === 'audio' ? { isPtt: isPtt === true || isPtt === 'true' } : {};
 
   if (!path && !req.file && !base64)
-    res.status(401).send({
+    return res.status(401).send({
       message: 'Sending the file is mandatory',
     });
 
@@ -400,6 +431,7 @@ export async function sendFile(req: Request, res: Response) {
             // receiving end). multer already knows the real one from the
             // multipart upload's own Content-Type.
             mimetype: req.file?.mimetype,
+            ...pttOption,
             ...options,
           }),
           'send-file'
@@ -935,7 +967,7 @@ export async function sendOrderMessage(req: Request, res: Response) {
     }
 
     if (results.length === 0)
-      res.status(400).json('Error sending order message');
+      return res.status(400).json('Error sending order message');
     req.io.emit('mensagem-enviada', results);
     returnSucess(res, results);
   } catch (error) {
@@ -991,7 +1023,11 @@ export async function sendPollMessage(req: Request, res: Response) {
 
     for (const contact of phone) {
       results.push(
-        await req.client.sendPollMessage(contact, name, choices, options)
+        auditSendResult(
+          req,
+          await req.client.sendPollMessage(contact, name, choices, options),
+          'send-poll-message'
+        )
       );
     }
 
@@ -1312,8 +1348,34 @@ async function replyToStatusMessage(
         const quotedPayload = JSON.stringify(
           typeof quoted.toJSON === 'function' ? quoted.toJSON() : quoted
         );
+        // wa-js guards `canReplyMsg(quotedMsg)` with `quotedMsg.isStatusV3`
+        // because canReplyMsg reads the message's chat, and a status has
+        // none: getChat() is undefined, getIsBroadcast() throws "Getter was
+        // called with undefined data." Measured 2026-10-03 on the live page
+        // (wa-js 4.6.1, identical code path in 4.6.0): every StatusV3Store
+        // message has `isStatusV3 === undefined` on the current WhatsApp Web
+        // build, so wa-js took the canReplyMsg branch and the live-model rung
+        // died there, while msgContextInfo() on the same model worked and
+        // canReplyMsg() on ordinary messages returned true. The model is a
+        // status by definition (we found it in the status store), so say so
+        // through a read-through proxy rather than writing into the store's
+        // model: it still passes `instanceof MsgModel` and every other
+        // property and method is the live model's own.
+        const asStatusModel = (model: any) =>
+          new Proxy(model, {
+            get(target, prop) {
+              if (prop === 'isStatusV3') return true;
+              const value = Reflect.get(target, prop, target);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          });
         const strategies: { via: string; options: any }[] = [
-          { via: 'live-model', options: { quotedMsg: quoted } },
+          {
+            via: 'live-model',
+            options: {
+              quotedMsg: quoted.isStatusV3 ? quoted : asStatusModel(quoted),
+            },
+          },
           { via: 'payload', options: { quotedMsgPayload: quotedPayload } },
         ];
         let sendResult: any = null;
@@ -1508,6 +1570,14 @@ export async function replyMessage(req: Request, res: Response) {
   const { phone, message, messageId } = req.body;
 
   try {
+    if (
+      typeof messageId === 'string' &&
+      messageId &&
+      !messageId.includes('status@broadcast') &&
+      (await replyQuoteIsMissing(req.client, messageId))
+    ) {
+      return missingReplyQuoteResponse(res);
+    }
     const results: any = [];
     for (const contato of phone) {
       if (
@@ -1536,6 +1606,43 @@ export async function replyMessage(req: Request, res: Response) {
   }
 }
 
+/**
+ * WinZapp patch: an @mention reply keeps its quote.
+ *
+ * wppconnect's client.sendMentioned() passes only
+ * { detectMentioned, mentionedList } to WPP.chat.sendTextMessage, so a reply
+ * that also mentioned someone reached the recipients as an ORIGINAL message
+ * while WinZapp's own list showed it as a reply. wa-js's prepareRawMessage
+ * handles `mentionedList` and `quotedMsg` independently and merges both, so
+ * this makes the same call the library makes plus `quotedMsg`, and returns
+ * the sendTextMessage result as-is: the response shape (and what
+ * auditSendResult() reads from it) is exactly that of sendMentioned().
+ *
+ * A status quote is refused rather than degraded: replyToStatusMessage()
+ * has its own model lookup and ignores mentions, so combining them here
+ * would send a plain message.
+ */
+async function sendMentionedWithQuote(
+  req: Request,
+  contato: string,
+  message: string,
+  mentioned: string[],
+  messageId: string
+): Promise<any> {
+  if (messageId.includes('status@broadcast')) {
+    throw new Error('send-mentioned cannot quote a status; use send-reply');
+  }
+  return await req.client.page.evaluate(
+    ({ to, content, mentioned, quotedMsg }: any) =>
+      (window as any).WPP.chat.sendTextMessage(to, content, {
+        detectMentioned: true,
+        mentionedList: mentioned,
+        quotedMsg,
+      }),
+    { to: contato, content: message, mentioned, quotedMsg: messageId }
+  );
+}
+
 export async function sendMentioned(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]
@@ -1556,7 +1663,8 @@ export async function sendMentioned(req: Request, res: Response) {
           "phone": { type: "string" },
           "isGroup": { type: "boolean" },
           "message": { type: "string" },
-          "mentioned": { type: "array", items: { type: "string" } }
+          "mentioned": { type: "array", items: { type: "string" } },
+          "messageId": { type: "string" }
         },
         required: ["phone", "message", "mentioned"]
       },
@@ -1574,14 +1682,34 @@ export async function sendMentioned(req: Request, res: Response) {
   }
 }
    */
-  const { phone, message, mentioned } = req.body;
+  const { phone, message, mentioned, messageId } = req.body;
 
   try {
+    if (
+      typeof messageId === 'string' &&
+      messageId &&
+      !messageId.includes('status@broadcast') &&
+      (await replyQuoteIsMissing(req.client, messageId))
+    ) {
+      return missingReplyQuoteResponse(res);
+    }
     let response;
     for (const contato of phone) {
       response = auditSendResult(
         req,
-        await req.client.sendMentioned(`${contato}`, message, mentioned),
+        // Without a quote this is byte-for-byte the library call it always
+        // was. With one, the library's sendMentioned() has no quote
+        // parameter, so the same WPP.chat.sendTextMessage call is made here
+        // with both options.
+        typeof messageId === 'string' && messageId
+          ? await sendMentionedWithQuote(
+              req,
+              `${contato}`,
+              message,
+              mentioned,
+              messageId
+            )
+          : await req.client.sendMentioned(`${contato}`, message, mentioned),
         'send-mentioned'
       );
     }
@@ -1635,7 +1763,7 @@ export async function sendImageAsSticker(req: Request, res: Response) {
   const { phone, path } = req.body;
 
   if (!path && !req.file)
-    res.status(401).send({
+    return res.status(401).send({
       message: 'Sending the file is mandatory',
     });
 
@@ -1700,7 +1828,7 @@ export async function sendImageAsStickerGif(req: Request, res: Response) {
   const { phone, path } = req.body;
 
   if (!path && !req.file)
-    res.status(401).send({
+    return res.status(401).send({
       message: 'Sending the file is mandatory',
     });
 
@@ -1848,15 +1976,7 @@ export async function pinMessage(req: Request, res: Response) {
 
   try {
     const result = await page.evaluate(
-      async ({ messageId, pin }: { messageId: string; pin: boolean }) => {
-        try {
-          const wpp = (window as any).WPP;
-          const r = await wpp.chat.pinMsg(messageId, pin);
-          return { ok: true, pinned: r?.pinned ?? pin };
-        } catch (err: any) {
-          return { ok: false, error: err?.message || String(err) };
-        }
-      },
+      writePinnedMessage,
       { messageId, pin }
     );
 
@@ -1872,11 +1992,10 @@ export async function pinMessage(req: Request, res: Response) {
       response: { messageId, pinned: result.pinned },
     });
   } catch (error) {
-    req.logger.error(error);
+    req.logger.error('[pin-message] page operation failed');
     res.status(500).json({
       status: 'error',
       message: 'Error on pin message',
-      error,
     });
   }
 }

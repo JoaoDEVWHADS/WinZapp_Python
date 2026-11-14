@@ -27,6 +27,8 @@ from main import MainWindow
 class _Stub:
     on_chat_unread_update = MainWindow.on_chat_unread_update
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _note_server_unread = MainWindow._note_server_unread
+    _pop_server_unread = MainWindow._pop_server_unread
     _remote_read_confirmed = staticmethod(MainWindow._remote_read_confirmed)
     # Bridges the @lid / phone identities of the incoming event before the
     # handler looks the chat up — see tests/test_chats_update_lid_resolution.py.
@@ -456,10 +458,10 @@ class TestTheAnchorSurvivesTheHandlerConsumingItsOwnState:
 
     The end-to-end sequence, in one test rather than in three separate
     fixtures, because the whole risk is in the transitions: the handler pops
-    both _locally_read_at and _new_since_read once it has used them, and the
-    protection has to outlive that. It does, because only
-    mark_conversation_as_read() sets the anchor and only an explicit reversal
-    clears it.
+    _locally_read_at once it has used it, and the protection has to outlive
+    that. It does, because only mark_conversation_as_read() sets the anchor
+    and only an explicit reversal clears it — and _new_since_read, the ceiling
+    the anchor vouches for, keeps counting from that same read.
     """
 
     def test_a_read_then_two_arrivals_then_an_inflated_total_stays_clamped(self):
@@ -482,19 +484,68 @@ class TestTheAnchorSurvivesTheHandlerConsumingItsOwnState:
         stub.on_chat_unread_update(JID, 5, previous_unread=4)
         assert stub.chats[JID]["unreadCount"] == 1
         assert JID not in stub._locally_read_at      # ack consumed...
-        assert JID not in stub._new_since_read       # ...and counter popped
+        assert stub._new_since_read[JID] == 1        # ...the count since the read is not
 
-        # 4. A second message arrives — on_new_message recreates the counter.
+        # 4. A second message arrives — on_new_message counts it.
         chat["t"] = 3000
         chat["unreadCount"] = 2
-        stub._new_since_read[JID] = 1
+        stub._new_since_read[JID] += 1
 
         # 5. A later chats-update still counting the messages read in step 1.
         stub.on_chat_unread_update(JID, 6, previous_unread=5)
 
-        # One unread, not six: the anchor outlived both pops.
-        assert stub.chats[JID]["unreadCount"] == 1
+        # Two unread, not six — and not one: both arrivals since the read are
+        # real. This asserted 1 while the counter was popped in step 3 and
+        # restarted in step 4, which is how three documents became a badge of 2.
+        assert stub.chats[JID]["unreadCount"] == 2
         assert stub._unread_anchored_to_local_read(JID)
+
+    def test_whatsapp_announcing_each_total_before_the_message_loses_nothing(self):
+        """Measured 2026-09-27: three documents from one contact inside a
+        second, and WhatsApp Web emitted every chats-update BEFORE the
+        messages.upsert it counted. The badge ended on 2:
+
+            55.933  chats-update 1 (prev 0)  0 -> 0   (not newer than the read-ack)
+            56.560  upsert #1                0 -> 1
+            56.792  chats-update 2 (prev 1)  1 -> 1   (ack consumed, counter popped)
+            56.915  upsert #2                1 -> 2   (counter restarts at 1)
+            57.491  chats-update 3 (prev 2)  2 -> 1   (clamped to that 1)
+            57.746  upsert #3                1 -> 2
+        """
+        chat = _chat(t=1000)
+        stub = _Stub(chat)
+        stub._locally_read_at[JID] = 1000
+        stub.read_locally(JID)
+
+        def arrive(t):
+            """on_new_message() for a message in a chat that is not open."""
+            chat["t"] = t
+            chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+            stub._new_since_read[JID] = stub._new_since_read.get(JID, 0) + 1
+
+        stub.on_chat_unread_update(JID, 1, previous_unread=0)
+        arrive(2000)
+        stub.on_chat_unread_update(JID, 2, previous_unread=1)
+        arrive(2001)
+        stub.on_chat_unread_update(JID, 3, previous_unread=2)
+        arrive(2002)
+
+        assert stub.chats[JID]["unreadCount"] == 3
+
+    def test_a_read_on_another_device_still_starts_the_count_over(self):
+        """The one case that does reset the counter: the server's zero fell
+        from a positive count, so everything up to now was read elsewhere."""
+        chat = _chat(t=2000)
+        chat["unreadCount"] = 2
+        stub = _Stub(chat)
+        stub._locally_read_at[JID] = 1000
+        stub.read_locally(JID)
+        stub._new_since_read[JID] = 2
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=2)
+
+        assert stub.chats[JID]["unreadCount"] == 0
+        assert JID not in stub._new_since_read
 
 
 OTHER_JID = "5511888888888@s.whatsapp.net"

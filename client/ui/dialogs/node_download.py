@@ -20,8 +20,11 @@ import zipfile
 
 import requests
 import wx
+from ui.dialogs.error_details import show_error_details
 
 from app_paths import resource_path
+from core import tls_trust
+from ui.modal_utils import end_modal_if_running
 from node_download_config import (
     NODE_FILENAME,
     NODE_SHASUMS_URL,
@@ -123,23 +126,21 @@ class NodeDownloadDialog(wx.Dialog):
             return
         self._cancelled = True
         self._timer.Stop()
-        self.EndModal(wx.ID_CANCEL)
+        end_modal_if_running(self, wx.ID_CANCEL)
 
     def _finish_success(self):
         self._timer.Stop()
-        self.EndModal(wx.ID_OK)
+        end_modal_if_running(self, wx.ID_OK)
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
-        msg = self._i18n.t("node_download_error_generic")
-        if details:
-            msg = f"{msg}\n\n{details}"
-        wx.MessageBox(msg, self._i18n.t("node_download_error_title"), wx.OK | wx.ICON_ERROR, self)
-        self.EndModal(wx.ID_CANCEL)
+        show_error_details(self, self._i18n, self._i18n.t("node_download_error_generic"),
+                           self._i18n.t("node_download_error_title"), details)
+        end_modal_if_running(self, wx.ID_CANCEL)
 
     def _download_zip(self, url: str, dest_path: str) -> bool:
         try:
-            response = requests.get(url, stream=True, timeout=(30, 300))
+            response = tls_trust.get(url, stream=True, timeout=(30, 300))
             response.raise_for_status()
         except requests.RequestException as exc:
             if not self._cancelled:
@@ -181,7 +182,7 @@ class NodeDownloadDialog(wx.Dialog):
     def _verify_checksum(self, zip_path: str) -> bool:
         self._set_status(self._i18n.t("node_download_verifying"))
         try:
-            resp = requests.get(_NODE_SHASUMS_URL, timeout=15)
+            resp = tls_trust.get(_NODE_SHASUMS_URL, timeout=15)
             resp.raise_for_status()
         except Exception as exc:
             if not self._cancelled:

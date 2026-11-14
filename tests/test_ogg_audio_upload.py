@@ -16,7 +16,7 @@ def test_existing_ogg_opus_passes_through(tmp_path, monkeypatch):
     assert result == (str(source), "audio/ogg; codecs=opus")
 
 
-def test_ogg_vorbis_is_transcoded_to_opus(tmp_path, monkeypatch):
+def test_ogg_vorbis_is_transcoded_to_aac(tmp_path, monkeypatch):
     ffmpeg = tmp_path / "ffmpeg"
     ffmpeg.write_bytes(b"binary")
     source = tmp_path / "music.ogg"
@@ -25,16 +25,16 @@ def test_ogg_vorbis_is_transcoded_to_opus(tmp_path, monkeypatch):
     def fake_run(command, **kwargs):
         output = command[-1]
         with open(output, "wb") as target:
-            target.write(b"OggS" + b"OpusHead" + b"converted")
+            target.write(b"\x00\x00\x00\x20ftypM4A converted")
         return SimpleNamespace(returncode=0, stderr=b"")
 
     monkeypatch.setattr("core.audio_transcode.subprocess.run", fake_run)
 
     output, mime = prepare_audio_for_whatsapp(str(ffmpeg), str(source))
 
-    assert output.endswith(".opus.ogg")
+    assert output.endswith(".whatsapp.m4a")
     assert os.path.isfile(output)
-    assert mime == "audio/ogg; codecs=opus"
+    assert mime == "audio/mp4"
 
 
 def test_ogg_vorbis_without_ffmpeg_fails_instead_of_uploading_bad_codec(tmp_path):
@@ -44,7 +44,7 @@ def test_ogg_vorbis_without_ffmpeg_fails_instead_of_uploading_bad_codec(tmp_path
     assert prepare_audio_for_whatsapp("", str(source)) is None
 
 
-def test_wav_is_transcoded_to_opus(tmp_path, monkeypatch):
+def test_wav_is_transcoded_to_aac(tmp_path, monkeypatch):
     ffmpeg = tmp_path / "ffmpeg"
     ffmpeg.write_bytes(b"binary")
     source = tmp_path / "large-audio.wav"
@@ -56,13 +56,13 @@ def test_wav_is_transcoded_to_opus(tmp_path, monkeypatch):
 
     def fake_mkstemp(**kwargs):
         temp_kwargs.update(kwargs)
-        output = tmp_path / "writable-system-temp.whatsapp.opus.ogg"
+        output = tmp_path / "writable-system-temp.whatsapp.m4a"
         return os.open(output, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600), str(output)
 
     def fake_run(command, **kwargs):
         seen_command.extend(command)
         with open(command[-1], "wb") as target:
-            target.write(b"OggS" + b"OpusHead" + b"converted")
+            target.write(b"\x00\x00\x00\x20ftypM4A converted")
         return SimpleNamespace(returncode=0, stderr=b"")
 
     monkeypatch.setattr("core.audio_transcode.tempfile.mkstemp", fake_mkstemp)
@@ -70,9 +70,9 @@ def test_wav_is_transcoded_to_opus(tmp_path, monkeypatch):
 
     output, mime = prepare_audio_for_whatsapp(str(ffmpeg), str(source))
 
-    assert output.endswith(".whatsapp.opus.ogg")
-    assert mime == "audio/ogg; codecs=opus"
-    assert "libopus" in seen_command
+    assert output.endswith(".whatsapp.m4a")
+    assert mime == "audio/mp4"
+    assert seen_command[seen_command.index("-c:a") + 1] == "aac"
     assert str(source) in seen_command
     assert "dir" not in temp_kwargs
     assert source.read_bytes() == source_bytes

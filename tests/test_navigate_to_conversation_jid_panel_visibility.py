@@ -15,6 +15,9 @@ it touches.
 
 from unittest.mock import Mock
 
+from cryptography.fernet import Fernet
+
+from core.chat_lock_vault import ChatLockVault
 from main import MainWindow
 
 
@@ -26,15 +29,22 @@ class _Stub:
         self.restore_window = Mock()
         self.conversations_panel = Mock()
         self.conversations_panel.chats_list = []
+        # Explicit: the older tests take the early return because a row exists.
+        self.conversations_panel.navigate_to_jid = Mock(return_value=True)
         self.archived_conversations_panel = Mock()
         self.archived_conversations_panel.chats_list = []
         self.status_panel = Mock()
         self.content_panel = Mock()
         self.is_chat_archived = Mock(return_value=False)
+        self.chats = {}
+        self._lid_to_phone = {}
+        self._phone_to_lid = {}
         for key, value in kwargs.items():
             setattr(self, key, value)
 
     navigate_to_conversation_jid = MainWindow.navigate_to_conversation_jid
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    get_chat = MainWindow.get_chat
 
 
 def test_non_archived_jid_shows_conversations_panel():
@@ -64,7 +74,8 @@ def test_archived_jid_found_opens_via_archived_panel_dance():
 
     stub.navigate_to_conversation_jid(jid)
 
-    stub.conversations_panel.navigate_to_conversation.assert_called_once_with(chat)
+    stub.conversations_panel.navigate_to_conversation.assert_called_once_with(
+        chat, origin="archived")
     stub.conversations_panel.conversations_label.Hide.assert_called_once()
     stub.conversations_panel.conversations_list.Hide.assert_called_once()
     stub.archived_conversations_panel.Hide.assert_called_once()
@@ -93,3 +104,224 @@ def test_window_hidden_restores_before_anything_else():
 
     stub.restore_window.assert_called_once()
     stub.conversations_panel.navigate_to_jid.assert_called_once()
+
+
+# ── A person with no conversation yet (Enter on a group participant) ─────────
+#
+# Reported 2026-09-23: Enter on a group participant who was not a saved
+# contact (or was only a phone number) closed the dialog and left the user in
+# the group. navigate_to_jid() only opens a row that already exists under the
+# exact JID, and returned without a word when there was none.
+
+
+class _ChatStub(_Stub):
+    _chat_for_private_conversation = MainWindow._chat_for_private_conversation
+    _is_bad_contact_name = staticmethod(MainWindow._is_bad_contact_name)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._schedule_set_chats = Mock()
+        self.conversations_panel.navigate_to_jid = Mock(return_value=False)
+
+
+def test_a_participant_never_talked_to_gets_a_new_conversation():
+    jid = "5511912345678@s.whatsapp.net"
+    stub = _ChatStub()
+
+    stub.navigate_to_conversation_jid(jid, "Maria")
+
+    chat = stub.chats[jid]
+    assert chat == {"remoteJid": jid, "pushName": "Maria"}
+    stub._schedule_set_chats.assert_called_once()
+    stub.conversations_panel.navigate_to_conversation.assert_called_once_with(chat)
+
+
+def test_a_number_only_participant_is_named_by_the_formatted_number():
+    """Without a name the empty chat is dropped from the list, and Escape would
+    leave no row to come back to."""
+    from core.utils import format_number
+    jid = "5511912345678@s.whatsapp.net"
+    stub = _ChatStub()
+
+    stub.navigate_to_conversation_jid(jid, "")
+
+    assert stub.chats[jid] == {"remoteJid": jid, "pushName": format_number(jid)}
+
+
+def test_a_chat_under_an_equivalent_jid_is_reused_not_duplicated():
+    """The chat exists under the 8-digit form; the participant carries 9."""
+    existing_jid = "551112345678@s.whatsapp.net"
+    existing = {"remoteJid": existing_jid, "name": "Maria"}
+    stub = _ChatStub()
+    stub.chats = {existing_jid: existing}
+    stub.conversations_panel.navigate_to_jid = Mock(return_value=True)
+
+    stub.navigate_to_conversation_jid("5511912345678@s.whatsapp.net", "Maria")
+
+    assert list(stub.chats) == [existing_jid]
+    stub.conversations_panel.navigate_to_jid.assert_called_once_with(existing_jid)
+    stub._schedule_set_chats.assert_not_called()
+
+
+def test_a_c_us_participant_opens_the_existing_chat():
+    existing_jid = "5511912345678@s.whatsapp.net"
+    stub = _ChatStub()
+    stub.chats = {existing_jid: {"remoteJid": existing_jid, "name": "Maria"}}
+    stub.conversations_panel.navigate_to_jid = Mock(return_value=True)
+
+    stub.navigate_to_conversation_jid("5511912345678@c.us", "Maria")
+
+    assert list(stub.chats) == [existing_jid]
+    stub.conversations_panel.navigate_to_jid.assert_called_once_with(existing_jid)
+
+
+def test_a_bridged_lid_opens_the_phone_chat():
+    phone = "5511912345678@s.whatsapp.net"
+    lid = "123456789012345@lid"
+    stub = _ChatStub()
+    stub.chats = {phone: {"remoteJid": phone, "name": "Maria"}}
+    stub._lid_to_phone = {lid: phone}
+    stub._phone_to_lid = {phone: lid}
+    stub.conversations_panel.navigate_to_jid = Mock(return_value=True)
+
+    stub.navigate_to_conversation_jid(lid, "Maria")
+
+    assert list(stub.chats) == [phone]
+    stub.conversations_panel.navigate_to_jid.assert_called_once_with(phone)
+
+
+def test_an_archived_chat_reached_as_c_us_opens_in_the_archived_layout():
+    jid = "5511912345678@s.whatsapp.net"
+    chat = {"remoteJid": jid, "name": "Maria"}
+    stub = _ChatStub()
+    stub.chats = {jid: chat}
+    stub.is_chat_archived = Mock(return_value=True)
+    stub.archived_conversations_panel.chats_list = [chat]
+
+    stub.navigate_to_conversation_jid("5511912345678@c.us", "Maria")
+
+    stub.conversations_panel.conversations_label.Hide.assert_called_once()
+    stub.conversations_panel.conversations_label.Show.assert_not_called()
+    stub.conversations_panel.navigate_to_conversation.assert_called_once_with(
+        chat, origin="archived")
+
+
+def test_an_unbridged_lid_creates_nothing():
+    stub = _ChatStub()
+
+    stub.navigate_to_conversation_jid("123456789012345@lid", "Maria")
+
+    assert stub.chats == {}
+    stub.conversations_panel.navigate_to_conversation.assert_not_called()
+
+
+def test_a_group_jid_creates_nothing():
+    stub = _ChatStub()
+
+    stub.navigate_to_conversation_jid("120363000000000000@g.us")
+
+    assert stub.chats == {}
+    stub.conversations_panel.navigate_to_conversation.assert_not_called()
+
+
+def test_the_participant_dialog_passes_the_participants_name(monkeypatch):
+    import main
+    from ui.dialogs.conversation_data_dialog import ConversationDataDialog
+
+    calls = []
+    monkeypatch.setattr(main.wx, "CallAfter", lambda fn, *a: calls.append((fn, a)))
+
+    class _Dlg:
+        _on_participant_activated = ConversationDataDialog._on_participant_activated
+
+        def __init__(self):
+            self._participant_jids = ["5511912345678@s.whatsapp.net"]
+            self._participant_names = ["Maria"]
+            self._mw = Mock()
+            self.ended = None
+
+        def EndModal(self, code):
+            self.ended = code
+
+    class _Event:
+        def GetIndex(self):
+            return 0
+
+    dlg = _Dlg()
+    dlg._on_participant_activated(_Event())
+
+    assert calls == [(dlg._mw.navigate_to_conversation_jid,
+                      ("5511912345678@s.whatsapp.net", "Maria"))]
+    assert dlg.ended is not None
+
+
+# ── A locked chat ────────────────────────────────────────────────────────────
+#
+# The PIN is asked by is_chat_hidden_by_vault(), the rule lock_chat_vault() and
+# the transcription flow ask too, so the three cannot drift apart.
+
+
+class _LockedStub(_Stub):
+    _chat_lock_candidates = MainWindow._chat_lock_candidates
+    _chat_lock_vault_holds = MainWindow._chat_lock_vault_holds
+    is_chat_locked = MainWindow.is_chat_locked
+    is_chat_hidden_by_vault = MainWindow.is_chat_hidden_by_vault
+
+    def is_chat_phone_locked(self, jid):
+        # No chat under WhatsApp's own Chat Lock here; tests/test_phone_chat_lock.py
+        # covers that one.
+        return False
+
+    def __init__(self, jid, *, unlocked, pin_given=False):
+        super().__init__()
+        self.key = Fernet.generate_key()
+        self._chat_lock_vault = ChatLockVault(self.key)
+        self._chat_lock_vault.configure("246810", "codigo-secreto")
+        self._chat_lock_vault.lock_chat(jid)
+        self._chat_lock_fingerprints = set()
+        self._chat_lock_unlocked = unlocked
+        self.chats = {jid: {"remoteJid": jid, "name": "Maria"}}
+        self._pin_given = pin_given
+        self.pin_asked = []
+        self.opened_locked = []
+
+    def unlock_chat_lock_vault(self, *, show_panel=True):
+        self.pin_asked.append(show_panel)
+        if self._pin_given:
+            self._chat_lock_unlocked = True
+        return self._pin_given
+
+    def open_locked_conversation(self, chat):
+        self.opened_locked.append(chat)
+
+
+def test_a_locked_chat_with_the_vault_closed_asks_for_the_pin_first():
+    jid = "5511912345678@s.whatsapp.net"
+    stub = _LockedStub(jid, unlocked=False)
+
+    stub.navigate_to_conversation_jid(jid)
+
+    assert stub.pin_asked == [False]
+    assert stub.opened_locked == []
+    stub.conversations_panel.navigate_to_jid.assert_not_called()
+
+
+def test_a_locked_chat_opens_once_the_pin_is_given():
+    jid = "5511912345678@s.whatsapp.net"
+    stub = _LockedStub(jid, unlocked=False, pin_given=True)
+
+    stub.navigate_to_conversation_jid(jid)
+
+    assert stub.pin_asked == [False]
+    assert stub.opened_locked == [stub.chats[jid]]
+
+
+def test_a_locked_chat_with_the_vault_open_opens_without_the_pin():
+    jid = "5511912345678@s.whatsapp.net"
+    stub = _LockedStub(jid, unlocked=True)
+
+    stub.navigate_to_conversation_jid(jid)
+
+    assert stub.pin_asked == []
+    assert stub.opened_locked == [stub.chats[jid]]
+    stub.conversations_panel.navigate_to_jid.assert_not_called()

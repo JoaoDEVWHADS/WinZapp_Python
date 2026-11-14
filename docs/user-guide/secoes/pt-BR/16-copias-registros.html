@@ -1,0 +1,15 @@
+<!--nav: 💾 Cópias de segurança e registros-->
+<h3>Cópia de segurança do perfil</h3>
+<p>O perfil do navegador interno é onde fica a sua conexão com o WhatsApp. Em Configurações &gt; Armazenamento &gt; Cópia de segurança:</p>
+<ul>
+  <li>Defina de quanto em quanto tempo o WinZapp renova a cópia ao ser fechado (padrão: 24 horas; 0 faz a cada fechamento).</li>
+  <li>Ative a cópia também com o WinZapp aberto, no intervalo que escolher. O WhatsApp fica desconectado enquanto ela é feita, o que pode levar alguns minutos, e o WinZapp pode perguntar antes de cada vez. A nova cópia só substitui a anterior depois que o WhatsApp volta a conectar com ela.</li>
+  <li>"Não guardar cópias de segurança do perfil" economiza espaço, mas, se o perfil for danificado, será preciso parear de novo. Ao marcar, o WinZapp diz quanto espaço as cópias ocupam e pergunta se quer apagá-las.</li>
+</ul>
+<p>Com o motor Neonize, que não usa navegador interno, não existe perfil a copiar: a cópia de segurança do perfil não aparece em Configurações &gt; Armazenamento nem no gerenciador de armazenamento.</p>
+<p>Essas cópias são o que o WinZapp usa para se recuperar sozinho (veja a seção Contas, bandeja e sincronização). Para guardar o seu histórico de mensagens e mídias, copie a pasta <code>data</code>.</p>
+
+<h3>Registros (logs)</h3>
+<p>Os registros do WinZapp (<code>log.log</code>) e do servidor local (<code>wppconnect.log</code>) mascaram números de telefone, identificadores do WhatsApp e nomes de contatos, então podem ser enviados ao relatar um problema sem expor os seus contatos. Ficam em <code>data\accounts\&lt;id da conta&gt;\logs</code>, dentro da pasta do WinZapp. O <code>log.log</code> é substituído a cada abertura. Para problemas de pedir pareamento de novo ou perda de sessão, envie também o <code>shutdown_audit.log</code>.</p>
+<p>Em Avançadas, o botão "Exportar os logs desta conta..." salva, em segundo plano, um arquivo .zip com os registros da conta atual e os da ponte Neonize, e avisa quando termina.</p>
+<p>Relate problemas e peça recursos nas Issues do repositório (<code>github.com/gabrielhhaber/WinZapp_Python/issues</code>). Ajuda &gt; Sobre o programa mostra a versão, que o formulário de bug pede.</p>

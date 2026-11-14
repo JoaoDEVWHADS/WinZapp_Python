@@ -22,7 +22,8 @@ from core.i18n import I18n
 from core.sound_system import DEFAULT_PACK_ID
 from core.spell_checker import SPELL_CHECK_MODES
 from ui.dialogs.settings_dialog import SettingsDialog
-from tests.conftest import hidden_frame
+from tests.conftest import destroy_now, hidden_frame
+from tests.settings_dialog_frame import give_global_settings
 
 # Creates a REAL top-level wx dialog - see the wxgui marker in pytest.ini.
 pytestmark = pytest.mark.wxgui
@@ -45,6 +46,9 @@ class _FakeSoundSystem:
 def _make_dialog(wx_app, general=None):
     frame = hidden_frame()
     frame.settings = {"general": dict(general or {})}
+    # _apply_values() reports storage changes to the main window; the stub
+    # has no sweep to start.
+    frame._on_auto_download_settings_changed = lambda old, new: None
     frame.app_name = "WinZapp"
     frame.i18n = I18n(frame)
     frame.i18n.get_language()
@@ -54,6 +58,7 @@ def _make_dialog(wx_app, general=None):
     frame._default_sound_pack = {"name": "Default", "path": ""}
     frame.set_global_hotkey = lambda vk, mod: None
     frame.save_settings = lambda: None
+    give_global_settings(frame)
     frame.load_sounds = lambda: None
     frame.apply_language_changes = lambda: None
     frame.sound_system = _FakeSoundSystem()
@@ -76,7 +81,7 @@ class TestTheControlOffersAllThreeModes:
                 assert radio.GetString(index) == i18n.t(key) != key
             assert radio.GetLabel() == i18n.t("spell_check_label")
         finally:
-            dlg.Destroy()
+            destroy_now(dlg)
 
     def test_it_is_enabled(self, wx_app):
         """Nothing about Windows' setting disables this — following Windows
@@ -85,7 +90,7 @@ class TestTheControlOffersAllThreeModes:
         try:
             assert dlg._spell_check_radio.IsEnabled() is True
         finally:
-            dlg.Destroy()
+            destroy_now(dlg)
 
 
 class TestItShowsTheStoredChoice:
@@ -95,7 +100,7 @@ class TestItShowsTheStoredChoice:
             try:
                 assert dlg._spell_check_radio.GetSelection() == index, mode
             finally:
-                dlg.Destroy()
+                destroy_now(dlg)
 
     def test_nothing_stored_selects_follow_windows(self, wx_app):
         dlg = _make_dialog(wx_app)
@@ -104,7 +109,7 @@ class TestItShowsTheStoredChoice:
                 "windows"
             )
         finally:
-            dlg.Destroy()
+            destroy_now(dlg)
 
     def test_a_legacy_disabled_install_selects_off(self, wx_app):
         """The migration has to be visible in the dialog too, or a user who
@@ -116,7 +121,7 @@ class TestItShowsTheStoredChoice:
                 "off"
             )
         finally:
-            dlg.Destroy()
+            destroy_now(dlg)
 
 
 class TestSavingPersistsTheChoice:
@@ -128,7 +133,7 @@ class TestSavingPersistsTheChoice:
                 dlg._on_apply(None)
                 assert dlg.main_window.settings["general"]["spell_check_mode"] == mode
             finally:
-                dlg.Destroy()
+                destroy_now(dlg)
 
     def test_an_explicit_override_survives_being_reopened(self, wx_app):
         """The bug this control replaced: the stored value was overwritten
@@ -140,7 +145,7 @@ class TestSavingPersistsTheChoice:
             dlg._on_apply(None)
             saved = dict(dlg.main_window.settings["general"])
         finally:
-            dlg.Destroy()
+            destroy_now(dlg)
 
         reopened = _make_dialog(wx_app, saved)
         try:
@@ -148,4 +153,4 @@ class TestSavingPersistsTheChoice:
                 "on"
             )
         finally:
-            reopened.Destroy()
+            destroy_now(reopened)

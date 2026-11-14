@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from app_settings import _CONNECTION_GLOBAL
 from core import save_location
 from core.utils import DEFAULT_SETTINGS
 from tests.test_settings_checkboxes_wiring import checkbox_keys
@@ -41,6 +42,10 @@ SETTINGS_DIALOG = (
 
 #: Saved in _apply_values() but loaded somewhere other than _load_values().
 READ_ELSEWHERE = {
+    ("general", "notification_burst_limit"): "normalized by burst_limit(settings) in _load_values(); behavior covered by test_notification_burst_setting.py",
+    ("general", "voice_recording_bitrate"): "normalized by voice_bitrate_kbps(settings) in _load_voice_recording_options(); behavior covered by test_stereo_voice_messages.py",
+    ("general", "voice_recording_bitrate_stereo"): "normalized by stereo_voice_bitrate_kbps(settings) in _load_voice_recording_options(); behavior covered by test_stereo_voice_messages.py",
+    ("general", "voice_recording_mode"): "normalized by voice_recording_mode(settings) in _load_voice_recording_options(); behavior covered by test_voice_recording_mode.py",
     ("general", "spell_check_mode"): "loaded through spell_check_mode(general) in _apply_spell_check_mode()",
     ("connection", "wpp_port"): "the field shows main_window.wpp_port, the port this account's API is actually on",
     (None, "sound_events"): "per-pack event settings, loaded by _reload_sound_pack_choices()",
@@ -70,13 +75,39 @@ ROUNDTRIP_EXEMPT = {
 }
 
 
+#: Halves of _load_values()/_apply_values() pulled into methods of their own
+#: so a stub can drive them, walked as part of their caller. Each must still be
+#: called from it or from another of its halves
+#: (test_every_split_half_is_still_called), or it would count keys the dialog
+#: no longer loads or saves.
+SPLIT_HALVES = {
+    "_load_values": ("_load_install_wide_values", "_load_switch_behavior", "_load_voice_recording_options",
+                     "_load_open_position_options", "_load_bookmark_removal_options"),
+    "_apply_values": ("_apply_install_wide_values", "_apply_switch_behavior", "_save_voice_recording_options",
+                      "_save_open_position_options", "_save_bookmark_removal_options"),
+}
+
+
 def _class():
     tree = ast.parse(SETTINGS_DIALOG.read_text(encoding="utf-8"))
-    return next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SettingsDialog")
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SettingsDialog")
+    options = ast.parse(SETTINGS_DIALOG.with_name("voice_recording_options.py").read_text(encoding="utf-8"))
+    cls.body += next(n.body for n in options.body
+                     if isinstance(n, ast.ClassDef) and n.name == "VoiceRecordingOptionsMixin")
+    reading = ast.parse(SETTINGS_DIALOG.with_name("reading_position_options.py").read_text(encoding="utf-8"))
+    cls.body += next(n.body for n in reading.body
+                     if isinstance(n, ast.ClassDef) and n.name == "ReadingPositionOptionsMixin")
+    return cls
 
 
 def _method(cls, name):
     return next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def _walk_with_halves(cls, name):
+    """ast.walk() over `name` and the halves SPLIT_HALVES moved out of it."""
+    for method in (name,) + SPLIT_HALVES.get(name, ()):
+        yield from ast.walk(_method(cls, method))
 
 
 def _constant(node):
@@ -89,7 +120,11 @@ def _constant(node):
 
 
 def _is_settings(node):
-    """`self.main_window.settings`."""
+    """`self.main_window.settings`, or `install_wide`: the same sections as
+    the shared file holds them (MainWindow.install_wide_values()), which is
+    where _load_install_wide_values() reads the install-wide controls from."""
+    if isinstance(node, ast.Name) and node.id == "install_wide":
+        return True
     return (
         isinstance(node, ast.Attribute)
         and node.attr == "settings"
@@ -128,10 +163,11 @@ def _section_names(func):
 
 def _reads(cls):
     """{(section, key): [fallback node or None, ...]} loaded in _load_values()."""
-    func = _method(cls, "_load_values")
-    names = _section_names(func)
+    names = {}
+    for method in ("_load_values",) + SPLIT_HALVES["_load_values"]:
+        names.update(_section_names(_method(cls, method)))
     reads = {}
-    for node in ast.walk(func):
+    for node in _walk_with_halves(cls, "_load_values"):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"):
             continue
         section = _section(node.func.value, names)
@@ -147,10 +183,11 @@ def _reads(cls):
 
 def _writes(cls):
     """{(section, key)} saved in _apply_values(); section None = top level."""
-    func = _method(cls, "_apply_values")
-    names = _section_names(func)
+    names = {}
+    for method in ("_apply_values",) + SPLIT_HALVES["_apply_values"]:
+        names.update(_section_names(_method(cls, method)))
     writes = set()
-    for node in ast.walk(func):
+    for node in _walk_with_halves(cls, "_apply_values"):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
             target = node.targets[0]
             try:
@@ -160,6 +197,10 @@ def _writes(cls):
             section = _section(target.value, names)
             if section is not None:
                 writes.add((section, key))
+            elif isinstance(target.value, ast.Name) and target.value.id == "choices":
+                # An install-wide key handed to MainWindow.choose_global_
+                # settings(), which stores it under app_settings' section.
+                writes.add(("connection" if key in _CONNECTION_GLOBAL else "general", key))
             elif _is_settings(target.value):
                 if isinstance(node.value, ast.Dict):
                     for k in node.value.keys:
@@ -208,6 +249,26 @@ def test_the_parse_finds_the_whole_dialog():
         (None, "sound_events"),
     ):
         assert pair in WRITES, _label(pair)
+
+
+@pytest.mark.parametrize("caller", sorted(SPLIT_HALVES))
+def test_every_split_half_is_still_called(caller):
+    def _self_calls(method):
+        return {
+            node.func.attr for node in ast.walk(_method(CLASS, method))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+        }
+
+    # Each half from the caller or another half, never from itself.
+    missing = [
+        half for half in SPLIT_HALVES[caller]
+        if not any(half in _self_calls(m)
+                   for m in (caller,) + SPLIT_HALVES[caller] if m != half)
+    ]
+    assert missing == [], f"{caller}() no longer calls {missing}"
 
 
 def test_every_saved_key_is_loaded_when_the_dialog_opens():

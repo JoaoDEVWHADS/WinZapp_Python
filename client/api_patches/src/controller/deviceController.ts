@@ -16,6 +16,10 @@
 import { Chat } from '@wppconnect-team/wppconnect';
 import { Request, Response } from 'express';
 
+import { CONTACT_PRESENCE_SOURCE } from '../util/contactPresenceRuntime';
+import {
+  channelOlderPageIncomplete, pullChannelHistory, readNewestChannelUpdates,
+} from './channelsPanelController';
 import {
   countJidFallback,
   countStoreRecovery,
@@ -28,7 +32,19 @@ import {
   SyncMessageListSchema,
 } from '../dto/sync';
 import { contactToArray, unlinkAsync } from '../util/functions';
-import { clientsArray } from '../util/sessionUtil';
+import { readMyProfile } from '../util/profileRuntime';
+import { buildForwardRuntimeExpression } from '../util/forwardRuntime';
+import {
+  buildStatusReactionInstallExpression,
+  STATUS_REACTION_RUNTIME_GLOBAL,
+} from '../util/statusReactionRuntime';
+import {
+  buildDiag,
+  claimIdbCount,
+  diagStateFor,
+  formatDiagLine,
+  shouldLogDiag,
+} from '../util/listChatsDiag';
 
 function returnSucess(res: any, session: any, phone: any, data: any) {
   res.status(201).json({
@@ -107,7 +123,7 @@ export async function setProfileName(req: Request, res: Response) {
     res.status(500).json({
       status: 'error',
       message: 'Error on set profile name.',
-      error: error,
+      error: String((error as any)?.message || error),
     });
   }
 }
@@ -178,14 +194,33 @@ export async function getAllChats(req: Request, res: Response) {
  * the page so Python's retry loop cannot start several 900-chat recoveries at
  * once. The healthy path still performs one ordinary WPP.chat.list() call.
  */
-async function listChatsWithStoreRecovery(
+async function listChatsWithDiag(
   req: Request,
   options: Record<string, any>
-): Promise<any[]> {
+): Promise<{ chats: any[]; diag: Record<string, any> }> {
+  const startedAt = Date.now();
   const result: any = await observeEvaluate('list-chats', () =>
     req.client.page.evaluate(
     async ({ listOptions }) => {
       const root = globalThis as any;
+
+      // Diagnostics only (util/listChatsDiag.ts): read, never throw, change nothing.
+      const readStoreState = () => {
+        try {
+          const store = root.WPP?.whatsapp?.ChatStore;
+          const ready =
+            Boolean(root.WPP?.isReady) &&
+            Boolean(root.WPP?.conn?.isMainReady?.()) &&
+            Boolean(store);
+          const size = Number(store?.length);
+          return {
+            storeReady: ready,
+            storeChats: Number.isFinite(size) ? size : undefined,
+          };
+        } catch (_error) {
+          return { storeReady: false, storeChats: undefined };
+        }
+      };
 
       const serialise = async () => {
         try {
@@ -197,7 +232,15 @@ async function listChatsWithStoreRecovery(
           if (typeof serializer !== 'function') {
             return { chats: [], error: 'WAPI._serializeChatObj is unavailable' };
           }
-          return { chats: models.map((chat: any) => serializer(chat)) };
+          // WAPI can leave native models with toJSON hooks inside this graph.
+          // CDP's returnByValue does not invoke those hooks: a complete list
+          // then arrives in Node as undefined and looks like an empty store.
+          // Materialise the same JSON the HTTP response would send, while
+          // still inside the page, before crossing the Puppeteer boundary.
+          const chats = JSON.parse(
+            JSON.stringify(models.map((chat: any) => serializer(chat)))
+          );
+          return { chats };
         } catch (error: any) {
           return { chats: [], error: error?.message || String(error) };
         }
@@ -205,7 +248,11 @@ async function listChatsWithStoreRecovery(
 
       const first = await serialise();
       if (first.chats.length > 0) {
-        return { ...first, recovered: false };
+        return {
+          ...first,
+          recovered: false,
+          diag: { rawFirst: first.chats.length, ...readStoreState() },
+        };
       }
 
       // Every concurrent list-chats request awaits the same recovery, and a
@@ -320,6 +367,11 @@ async function listChatsWithStoreRecovery(
         recovered: true,
         firstError: first.error,
         recovery,
+        diag: {
+          rawFirst: first.chats.length,
+          rawSecond: second.chats.length,
+          ...readStoreState(),
+        },
       };
     },
     { listOptions: options }
@@ -339,7 +391,112 @@ async function listChatsWithStoreRecovery(
   if (result?.error && !result?.chats?.length) {
     req.logger.warn(`[listChats] ${result.error}`);
   }
-  return Array.isArray(result?.chats) ? result.chats : [];
+  return {
+    chats: Array.isArray(result?.chats) ? result.chats : [],
+    diag: {
+      ...(result?.diag || {}),
+      recovered: Boolean(result?.recovered),
+      firstError: result?.firstError,
+      ms: Date.now() - startedAt,
+    },
+  };
+}
+
+async function listChatsWithStoreRecovery(
+  req: Request,
+  options: Record<string, any>
+): Promise<any[]> {
+  return (await listChatsWithDiag(req, options)).chats;
+}
+
+/**
+ * Number of records in the `chat` store of the `model-storage` IndexedDB, via
+ * a read-only count(). Bounded twice (3 s in the page, 5 s here) because a
+ * hung IndexedDB must not hold anything up; it answers a word instead of
+ * throwing. Never creates the database: an upgrade is aborted.
+ */
+async function countIdbChats(req: Request): Promise<number | string> {
+  let timer: any;
+  try {
+    const evaluation = observeEvaluate('list-chats-idb-count', () =>
+      req.client.page.evaluate(
+        () =>
+          new Promise<number | string>((resolve) => {
+            const pageTimer = setTimeout(() => resolve('timeout'), 3000);
+            const done = (value: number | string) => {
+              clearTimeout(pageTimer);
+              resolve(value);
+            };
+            try {
+              const open = indexedDB.open('model-storage');
+              open.onupgradeneeded = () => open.transaction?.abort();
+              open.onerror = () => done('unavailable');
+              open.onsuccess = () => {
+                const db = open.result;
+                try {
+                  const counting = db
+                    .transaction('chat', 'readonly')
+                    .objectStore('chat')
+                    .count();
+                  counting.onsuccess = () => {
+                    db.close();
+                    done(counting.result);
+                  };
+                  counting.onerror = () => {
+                    db.close();
+                    done('unavailable');
+                  };
+                } catch (_error) {
+                  db.close();
+                  done('unavailable');
+                }
+              };
+            } catch (_error) {
+              done('unavailable');
+            }
+          })
+      )
+    );
+    // The race can be lost by the evaluate; its late rejection is not news.
+    evaluation.catch(() => undefined);
+    return await Promise.race([
+      evaluation,
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), 5000);
+      }),
+    ]);
+  } catch (_error) {
+    return 'unavailable';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * One counts-only line saying what the server saw (util/listChatsDiag.ts).
+ * Runs after the response is sent and swallows every error, so it can change
+ * neither the answer nor its timing.
+ */
+async function logListChatsDiag(
+  req: Request,
+  rawChats: any[],
+  visibleChats: any[],
+  pageDiag: Record<string, any>
+): Promise<void> {
+  try {
+    const counts = buildDiag(rawChats, visibleChats);
+    const now = Date.now();
+    const session = String(req.params?.session || req.session || '').split(':')[0];
+    const state = diagStateFor(session);
+    if (!shouldLogDiag(state, counts, now)) return;
+    const idbChats =
+      counts.visible === 0 && claimIdbCount(state, now)
+        ? await countIdbChats(req)
+        : 'skipped';
+    req.logger.info(formatDiagLine({ ...pageDiag, ...counts, idbChats }));
+  } catch (_error) {
+    // Diagnostics must never surface.
+  }
 }
 
 export async function listChats(req: Request, res: Response) {
@@ -365,6 +522,9 @@ export async function listChats(req: Request, res: Response) {
               direction: { type: "string" },
               onlyGroups: { type: "boolean" },
               onlyUsers: { type: "boolean" },
+              onlyNewsletter: { type: "boolean" },
+              onlyCommunities: { type: "boolean" },
+              onlyArchived: { type: "boolean" },
               onlyWithUnreadMessage: { type: "boolean" },
               withLabels: { type: "array" },
               ignoreGroupMetadata: { type: "boolean" },
@@ -416,6 +576,9 @@ export async function listChats(req: Request, res: Response) {
       direction,
       onlyGroups,
       onlyUsers,
+      onlyNewsletter,
+      onlyCommunities,
+      onlyArchived,
       onlyWithUnreadMessage,
       withLabels,
       ignoreGroupMetadata,
@@ -427,6 +590,10 @@ export async function listChats(req: Request, res: Response) {
     if (direction !== undefined) options.direction = direction;
     if (onlyGroups !== undefined) options.onlyGroups = onlyGroups;
     if (onlyUsers !== undefined) options.onlyUsers = onlyUsers;
+    if (onlyNewsletter !== undefined) options.onlyNewsletter = onlyNewsletter;
+    if (onlyCommunities !== undefined)
+      options.onlyCommunities = onlyCommunities;
+    if (onlyArchived !== undefined) options.onlyArchived = onlyArchived;
     if (onlyWithUnreadMessage !== undefined)
       options.onlyWithUnreadMessage = onlyWithUnreadMessage;
     if (withLabels !== undefined) options.withLabels = withLabels;
@@ -440,7 +607,7 @@ export async function listChats(req: Request, res: Response) {
     if (ignoreGroupMetadata !== undefined)
       options.ignoreGroupMetadata = ignoreGroupMetadata;
 
-    const chats = await listChatsWithStoreRecovery(req, options);
+    const { chats, diag } = await listChatsWithDiag(req, options);
 
     // WhatsApp Web creates one-to-one ChatStore entries for group participants
     // when it receives only an encryption-key notification from them. These are
@@ -464,6 +631,7 @@ export async function listChats(req: Request, res: Response) {
         endpoint: 'list-chats',
       })
     );
+    void logListChatsDiag(req, chats, visibleChats, diag);
   } catch (e) {
     req.logger.error(e);
     res
@@ -1114,6 +1282,31 @@ export async function deleteMessage(req: Request, res: Response) {
       .json({ status: 'error', message: 'Error on delete message', error: e });
   }
 }
+// The status-reaction Bootloader fallback runs from TWO page.evaluate calls:
+// reactMessage() (the real send) and getSendCapabilities() (the startup probe
+// that decides whether to warn the user). They must agree, or the probe tells
+// the user reacting to a status may not work while reacting works -- or the
+// reverse. The part that WILL need updating on the next WhatsApp rename is this
+// candidate list (see docs/traps/send-contract.md), so it lives here once and
+// is handed to both evaluates as an argument instead of being copied into each.
+//
+// budgetMs is a TOTAL for the whole candidate loop, not per candidate. Each
+// loadModules() attempt used to get its own 8 s, up to 6 candidates -- 48 s --
+// while the callers give up far sooner: main.py POSTs /react-message with a
+// 15 s timeout and GETs /send-capabilities with 10 s. A slow Bootloader then
+// made Python report a reaction as failed while the page went on to SEND it,
+// and the echo arrived as someone else's reaction to the user's own message;
+// and the startup probe simply never returned a verdict. Both budgets leave
+// the rest of each request comfortable room under its caller's timeout.
+const STATUS_REACTION_BOOTLOADER = {
+  tierSources: ['status.*reaction|reaction.*status', 'reaction'],
+  knownCandidates: ['WAWebStatusDrawerFlow.react', 'WAWebStatusQuotedFlow.react'],
+  maxCandidates: 6,
+  perCandidateMs: 8000,
+};
+const STATUS_REACTION_SEND_BUDGET_MS = 8000;
+const STATUS_REACTION_PROBE_BUDGET_MS = 5000;
+
 export async function reactMessage(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]
@@ -1182,8 +1375,9 @@ export async function reactMessage(req: Request, res: Response) {
       // exactly that poster JID. Store.Msg.models is kept as a fallback in
       // case a status is ever ALSO mirrored there on some WhatsApp Web
       // version.
+      await req.client.page.evaluate(buildStatusReactionInstallExpression());
       const outcome = await req.client.page.evaluate(
-        async ({ msgId, reaction }) => {
+        async ({ msgId, reaction, bootloaderPlan, budgetMs, runtimeGlobal }) => {
           const parts = msgId.split('_');
           const rawId = parts.length > 2 ? parts[2] : msgId;
           const posterJid = parts.length > 3 ? parts[3] : null;
@@ -1348,15 +1542,21 @@ export async function reactMessage(req: Request, res: Response) {
             }
           }
           if (typeof statusReactionAction?.sendStatusReaction !== 'function') {
-            // Last resort, and the one that matters on WhatsApp Web >= 2.3000:
-            // the module graph is split into bundles the Bootloader fetches on
+            // The module graph is split into bundles the Bootloader fetches on
             // demand, so a module whose bundle this session never needed is
             // absent from the registry entirely — moduleRequire, search and
             // window.require above can all only ever see what is registered.
             // ensureLazyModule() asks WhatsApp to fetch it the way the UI
-            // would. Best-effort by design: it answers false on the legacy
-            // webpack loader and for modules WA-JS does not list, in which
-            // case nothing changes and we fall through to the error below.
+            // would... but only for a module id listed in WA-JS's own private
+            // LAZY_MODULES table, which (confirmed by reading wa-js 4.6.0's
+            // compiled loader) has exactly two entries, both WA-JS's own
+            // forward-message feature (4.6.1 grew it to ten: group, community,
+            // privacy, profile and event modules, none of them ours).
+            // WAWebSendStatusReactionAction is
+            // WinZapp's own reverse-engineered id, absent from that table, so
+            // this call is a guaranteed no-op for it on every WhatsApp Web
+            // build — kept only because it is free and harmless if WA-JS ever
+            // adopts the id itself.
             try {
               await loader?.ensureLazyModule?.('WAWebSendStatusReactionAction');
               statusReactionAction = loader?.moduleRequire?.(
@@ -1374,6 +1574,151 @@ export async function reactMessage(req: Request, res: Response) {
             }
           }
           if (typeof statusReactionAction?.sendStatusReaction !== 'function') {
+            // The real lazy-load, done ourselves: fetch the Bootloader
+            // component the same way WA-JS's ensureLazyModule() does
+            // internally (moduleRequire('Bootloader').loadModules(...)), but
+            // pick our own candidate component name instead of consulting
+            // WA-JS's table, which was never going to list a module WA-JS
+            // does not own. Mirrored in getSendCapabilities() below — keep
+            // both in sync, the way the file's other lookup chains already
+            // are.
+            try {
+              const bootloaderCandidate = loader?.moduleRequire?.('Bootloader');
+              const Bootloader =
+                typeof bootloaderCandidate?.loadModules === 'function'
+                  ? bootloaderCandidate
+                  : bootloaderCandidate?.default;
+              const componentMap = Bootloader?.__debug?.componentMap;
+              if (
+                typeof Bootloader?.loadModules === 'function' &&
+                componentMap &&
+                typeof componentMap.keys === 'function'
+              ) {
+                // Tiered: try the specific combination first, then just
+                // "reaction" alone (2026-09-20 live test: zero of 520
+                // components matched the combined pattern, live-testing
+                // whether a status-only bundle also carries the reaction
+                // action). ".react" is a React component suffix WhatsApp
+                // uses on many unrelated names (e.g.
+                // "WAWebForwardMessageFlow.react", from WA-JS's own
+                // LAZY_MODULES) — "reaction" never collides with it, the
+                // word is four letters longer.
+                const tiers = bootloaderPlan.tierSources.map(
+                  (source: string) => new RegExp(source, 'i')
+                );
+                const allNames: string[] = [];
+                for (const name of componentMap.keys()) allNames.push(String(name));
+                // The bundles known to carry the action come first: the
+                // tiers are only a net for a rename. Live 2026-10-29, the
+                // "reaction" tier started matching an unrelated component
+                // (WAWebWrapperMessageDropdownMenuReactionsTray.react) and,
+                // being picked instead of the known ones, the status drawer
+                // bundle (which does carry WAWebSendStatusReactionAction) was
+                // never fetched: every like failed and startup warned that
+                // liking statuses may not work.
+                let candidates: string[] = bootloaderPlan.knownCandidates.filter(
+                  (name: string) => allNames.includes(name)
+                );
+                for (const pattern of tiers) {
+                  const matched = allNames.filter(
+                    (name) => pattern.test(name) && !candidates.includes(name)
+                  );
+                  if (matched.length > 0) {
+                    candidates = candidates.concat(matched);
+                    break;
+                  }
+                }
+                candidates = candidates.slice(0, bootloaderPlan.maxCandidates);
+                const deadline = Date.now() + budgetMs;
+                if (candidates.length === 0) {
+                  // Nothing matched even the loose tier. Dumping all ~500+
+                  // names blew past the 1500-char cap main.py's
+                  // send_reaction() applies to the whole HTTP response body
+                  // (response.text[:1500]) on the very first live test —
+                  // the list got cut off alphabetically before reaching
+                  // anything starting with "WAWebSta..." or "WAWebReact...".
+                  // Filter to a loose diagnostic sample instead of the full
+                  // list: still wide enough to catch a name we would not
+                  // have guessed, small enough to survive that cap. Bare
+                  // "react" was tried first and blew the sample up to 248/520
+                  // (live-confirmed 2026-09-20) — it matches the ".react"
+                  // suffix WhatsApp puts on every React component name (see
+                  // the tiers comment above), which is nearly everything in
+                  // this list. "reaction" (the full word) does not collide
+                  // with that suffix.
+                  const sample = allNames
+                    .filter((name) => /status|reaction|like|story|emoji|curtir/i.test(name))
+                    .sort();
+                  moduleErrors.push(
+                    'winzapp-bootloader=no-candidate-components; ' +
+                      `scanned=${allNames.length}; ` +
+                      `sample(${sample.length})=${sample.join(',')}`
+                  );
+                }
+                for (const component of candidates) {
+                  const remainingMs = deadline - Date.now();
+                  if (remainingMs <= 0) {
+                    moduleErrors.push('winzapp-bootloader=budget-exhausted');
+                    break;
+                  }
+                  try {
+                    await new Promise<void>((resolve, reject) => {
+                      let settled = false;
+                      const timer = setTimeout(() => {
+                        if (!settled) {
+                          settled = true;
+                          reject(new Error('bootloader-timeout'));
+                        }
+                      }, Math.min(bootloaderPlan.perCandidateMs, remainingMs));
+                      try {
+                        Bootloader.loadModules(
+                          [component],
+                          () => {
+                            if (!settled) {
+                              settled = true;
+                              clearTimeout(timer);
+                              resolve();
+                            }
+                          },
+                          'WinZapp'
+                        );
+                      } catch (error) {
+                        if (!settled) {
+                          settled = true;
+                          clearTimeout(timer);
+                          reject(error);
+                        }
+                      }
+                    });
+                  } catch (error) {
+                    moduleErrors.push(
+                      `winzapp-bootloader[${component}]=${String(
+                        (error as any)?.message || error
+                      )}`
+                    );
+                    continue;
+                  }
+                  statusReactionAction = loader?.moduleRequire?.(
+                    'WAWebSendStatusReactionAction'
+                  );
+                  if (
+                    typeof statusReactionAction?.sendStatusReaction ===
+                    'function'
+                  ) {
+                    moduleSource = `winzapp-bootloader[${component}]`;
+                    break;
+                  }
+                }
+              } else {
+                moduleErrors.push('winzapp-bootloader=unavailable');
+              }
+            } catch (error) {
+              moduleErrors.push(
+                `winzapp-bootloader=${String((error as any)?.message || error)}`
+              );
+            }
+          }
+          if (typeof statusReactionAction?.sendStatusReaction !== 'function') {
             return {
               ok: false,
               detail:
@@ -1383,59 +1728,42 @@ export async function reactMessage(req: Request, res: Response) {
                 `errors=${moduleErrors.join('|') || 'none'}`,
             };
           }
-          const reactionText = reaction || '';
-          const sendStatusReaction = statusReactionAction.sendStatusReaction;
-          const hasCurrentReactionCompanions =
-            typeof statusReactionAction.mintStatusReactionKey === 'function' &&
-            typeof statusReactionAction.applyOptimisticStatusReaction ===
-              'function';
-          let callShape = 'legacy-2';
-
-          // WhatsApp Web changed this private action from
-          // (status, reaction) to (status, reaction, reactionKey,
-          // previousOptimisticReaction). Calling the new form with two
-          // arguments fails inside msgKey.toString(). Build the two values
-          // through the companion exports from the same module, while keeping
-          // the legacy call for older web builds.
-          if (hasCurrentReactionCompanions || sendStatusReaction.length >= 3) {
-            if (!hasCurrentReactionCompanions) {
-              return {
-                ok: false,
-                detail:
-                  'native-status-reaction-signature-unsupported; ' +
-                  `arity=${sendStatusReaction.length}; ` +
-                  `mint=${typeof statusReactionAction.mintStatusReactionKey}; ` +
-                  `optimistic=${typeof statusReactionAction.applyOptimisticStatusReaction}`,
-              };
-            }
-            const reactionKey =
-              await statusReactionAction.mintStatusReactionKey(model);
-            const previousOptimisticReaction =
-              statusReactionAction.applyOptimisticStatusReaction(
-                model,
-                reactionText,
-                reactionKey
-              );
-            await sendStatusReaction(
-              model,
-              reactionText,
-              reactionKey,
-              previousOptimisticReaction
-            );
-            callShape = `current-${sendStatusReaction.length}`;
-          } else {
-            await sendStatusReaction(model, reactionText);
+          // How the module's exports are called changes between WhatsApp Web
+          // builds, so the call itself lives in util/statusReactionRuntime.ts,
+          // where both shapes are run by tests. It never throws.
+          const runtime = pageWindow[runtimeGlobal];
+          if (typeof runtime?.call !== 'function') {
+            return { ok: false, detail: 'status-reaction-runtime-not-installed' };
+          }
+          const sent = await runtime.call({
+            action: statusReactionAction,
+            model,
+            reactionText: reaction || '',
+          });
+          if (!sent?.ok) {
+            return {
+              ok: false,
+              detail:
+                `${String(sent?.detail || 'status-reaction-runtime-no-outcome')}; ` +
+                `module=${moduleSource}`,
+            };
           }
           return {
             ok: true,
             detail:
               `native-status-reaction-completed; author=${authorText}; ` +
-              `module=${moduleSource}; signature=${callShape}; loader=${String(
+              `module=${moduleSource}; ${sent.detail}; loader=${String(
                 loader?.loaderType || 'unknown'
               )}`,
           };
         },
-        { msgId, reaction }
+        {
+          msgId,
+          reaction,
+          bootloaderPlan: STATUS_REACTION_BOOTLOADER,
+          budgetMs: STATUS_REACTION_SEND_BUDGET_MS,
+          runtimeGlobal: STATUS_REACTION_RUNTIME_GLOBAL,
+        }
       );
       if (!outcome?.ok) {
         throw new Error(
@@ -1478,10 +1806,68 @@ export async function reactMessage(req: Request, res: Response) {
   }
 }
 
+// Meta AI refuses every message (ack -1, ackErrorCode 488) until the account
+// has accepted its terms of service. WhatsApp Web keeps that as a user notice
+// in TosManager; the master-bot notice id is asked of WAWebBotGating so a
+// renumbered notice is followed, with the id seen in production as fallback.
+// Measured 2026-09-25: getState('20250502') was NOT_ACCEPTED on the account
+// that got the 488, and WhatsApp Web's own sendTextMsgToChat failed the same.
+const META_AI_NOTICE_ID_FALLBACK = '20250502';
+
+export async function getMetaAiTerms(req: Request, res: Response) {
+  try {
+    const result = await req.client.page.evaluate((fallbackId: string) => {
+      const WPP = (window as any).WPP;
+      const gating = WPP?.loader?.moduleRequire?.('WAWebBotGating');
+      const tos = WPP?.loader?.moduleRequire?.('WAWebTos')?.TosManager;
+      const id = String(gating?.getMasterBotNoticeId?.() ?? fallbackId);
+      return { noticeId: id, state: tos ? tos.getState(id) : 'UNKNOWN' };
+    }, META_AI_NOTICE_ID_FALLBACK);
+    res.status(200).json({ status: 'success', response: result });
+  } catch (error: any) {
+    req.logger.error(`[meta-ai-terms] read failed: ${error?.message || error}`);
+    res.status(500).json({ status: 'error', message: error?.message || String(error) });
+  }
+}
+
+/** Record the user's acceptance of Meta AI's terms. Only called after the
+ * user ticked the checkbox in WinZapp's own dialog. */
+export async function acceptMetaAiTerms(req: Request, res: Response) {
+  try {
+    const result = await req.client.page.evaluate(async (fallbackId: string) => {
+      const WPP = (window as any).WPP;
+      const gating = WPP?.loader?.moduleRequire?.('WAWebBotGating');
+      const tos = WPP?.loader?.moduleRequire?.('WAWebTos')?.TosManager;
+      if (!tos) return { noticeId: fallbackId, state: 'UNKNOWN', error: 'tos-manager-missing' };
+      const id = String(gating?.getMasterBotNoticeId?.() ?? fallbackId);
+      tos.setState(id, 'ACCEPTED');
+      // Tell WhatsApp's server, the same call WhatsApp Web makes after its
+      // own accept button; the local state alone would not lift the refusal.
+      let serverError: string | undefined;
+      try {
+        await tos.maybeUpdateServer(id);
+      } catch (e: any) {
+        serverError = String(e?.message || e);
+      }
+      return { noticeId: id, state: tos.getState(id), serverError };
+    }, META_AI_NOTICE_ID_FALLBACK);
+    req.logger.info(`[meta-ai-terms] accept -> ${JSON.stringify(result)}`);
+    const accepted = result.state === 'ACCEPTED' && !result.serverError;
+    res.status(accepted ? 200 : 409).json({
+      status: accepted ? 'success' : 'error',
+      response: result,
+    });
+  } catch (error: any) {
+    req.logger.error(`[meta-ai-terms] accept failed: ${error?.message || error}`);
+    res.status(500).json({ status: 'error', message: error?.message || String(error) });
+  }
+}
+
 /** Read-only compatibility probe for every send primitive WinZapp uses. */
 export async function getSendCapabilities(req: Request, res: Response) {
   try {
-    const capabilities = await req.client.page.evaluate(async () => {
+    await req.client.page.evaluate(buildStatusReactionInstallExpression());
+    const capabilities = await req.client.page.evaluate(async ({ bootloaderPlan, budgetMs, runtimeGlobal }) => {
       const WPP = (window as any).WPP;
       const loader = WPP?.loader;
       const checks: Record<string, boolean> = {
@@ -1492,6 +1878,10 @@ export async function getSendCapabilities(req: Request, res: Response) {
         statusVideo: typeof WPP?.status?.sendVideoStatus === 'function',
       };
       let reactionModule: any = null;
+      // Set when the Bootloader fetch ran out of budget without finding the
+      // module. The send path has a longer budget than this probe, so that is
+      // "slow", not "incompatible" -- see the verdict at the end.
+      let bootloaderBudgetSpent = false;
       try {
         reactionModule = loader?.moduleRequire?.(
           'WAWebSendStatusReactionAction'
@@ -1519,28 +1909,153 @@ export async function getSendCapabilities(req: Request, res: Response) {
           );
         } catch (_) {}
       }
+      // ensureLazyModule() above is a guaranteed no-op for this module id —
+      // it is absent from WA-JS's own LAZY_MODULES table (which only lists
+      // WA-JS's own forward-message feature) — so do the Bootloader fetch
+      // ourselves, exactly as reactMessage() now does. Kept in sync with
+      // that copy; both must agree or the probe and the real send can
+      // disagree about whether a reaction will work.
+      if (typeof reactionModule?.sendStatusReaction !== 'function') {
+        try {
+          const bootloaderCandidate = loader?.moduleRequire?.('Bootloader');
+          const Bootloader =
+            typeof bootloaderCandidate?.loadModules === 'function'
+              ? bootloaderCandidate
+              : bootloaderCandidate?.default;
+          const componentMap = Bootloader?.__debug?.componentMap;
+          if (
+            typeof Bootloader?.loadModules === 'function' &&
+            componentMap &&
+            typeof componentMap.keys === 'function'
+          ) {
+            // Tiered the same way reactMessage()'s copy is — keep in sync.
+            const tiers = bootloaderPlan.tierSources.map(
+              (source: string) => new RegExp(source, 'i')
+            );
+            const allNames: string[] = [];
+            for (const name of componentMap.keys()) allNames.push(String(name));
+            // Known bundles first, the tiers after -- as reactMessage() does.
+            let candidates: string[] = bootloaderPlan.knownCandidates.filter(
+              (name: string) => allNames.includes(name)
+            );
+            for (const pattern of tiers) {
+              const matched = allNames.filter(
+                (name) => pattern.test(name) && !candidates.includes(name)
+              );
+              if (matched.length > 0) {
+                candidates = candidates.concat(matched);
+                break;
+              }
+            }
+            candidates = candidates.slice(0, bootloaderPlan.maxCandidates);
+            const deadline = Date.now() + budgetMs;
+            for (const component of candidates) {
+              const remainingMs = deadline - Date.now();
+              if (remainingMs <= 0) break;
+              try {
+                await new Promise<void>((resolve, reject) => {
+                  let settled = false;
+                  const timer = setTimeout(() => {
+                    if (!settled) {
+                      settled = true;
+                      reject(new Error('bootloader-timeout'));
+                    }
+                  }, Math.min(bootloaderPlan.perCandidateMs, remainingMs));
+                  try {
+                    Bootloader.loadModules(
+                      [component],
+                      () => {
+                        if (!settled) {
+                          settled = true;
+                          clearTimeout(timer);
+                          resolve();
+                        }
+                      },
+                      'WinZapp'
+                    );
+                  } catch (error) {
+                    if (!settled) {
+                      settled = true;
+                      clearTimeout(timer);
+                      reject(error);
+                    }
+                  }
+                });
+              } catch (_) {
+                continue;
+              }
+              reactionModule = loader?.moduleRequire?.(
+                'WAWebSendStatusReactionAction'
+              );
+              if (typeof reactionModule?.sendStatusReaction === 'function') {
+                break;
+              }
+            }
+            if (
+              typeof reactionModule?.sendStatusReaction !== 'function' &&
+              Date.now() >= deadline
+            ) {
+              bootloaderBudgetSpent = true;
+            }
+          }
+        } catch (_) {}
+      }
       const reactionArity = Number(
         reactionModule?.sendStatusReaction?.length ?? -1
       );
-      const hasCurrentReactionCompanions =
-        typeof reactionModule?.mintStatusReactionKey === 'function' &&
-        typeof reactionModule?.applyOptimisticStatusReaction === 'function';
-      checks.statusReaction =
-        typeof reactionModule?.sendStatusReaction === 'function' &&
-        (reactionArity < 3 || hasCurrentReactionCompanions);
+      // The verdict is the send path's own decision (plan() in
+      // util/statusReactionRuntime.ts), not a second copy of it: a probe that
+      // asks for more than the send needs warns about a like that would work.
+      const reactionShape =
+        (window as any)[runtimeGlobal]?.plan?.(reactionModule) ?? null;
+      checks.statusReaction = reactionShape?.supported === true;
       const missing = Object.entries(checks)
         .filter(([, available]) => !available)
         .map(([name]) => name);
+      // Out of budget with statusReaction the ONLY thing missing: no verdict.
+      // Answering "incompatible" here had Python speak "status reactions are
+      // not supported" for a reaction whose module was merely slow to load --
+      // and that the send path, with its longer budget, would have sent.
+      // Without `compatible`, Python treats the probe as unavailable and
+      // retries it later, when the bundle has usually arrived.
+      if (
+        bootloaderBudgetSpent &&
+        missing.length === 1 &&
+        missing[0] === 'statusReaction'
+      ) {
+        return {
+          inconclusive: 'status-reaction-bootloader-budget',
+          checks,
+          missing,
+          loaderType: String(loader?.loaderType || 'unknown'),
+          webVersion: String((window as any).WAPI?.getWAVersion?.() || 'unknown'),
+        };
+      }
       return {
         compatible: missing.length === 0,
         checks,
         missing,
         statusReactionArity: reactionArity,
+        // Name/arity of every export of the private module, so a WhatsApp Web
+        // build that changes them is visible in the log at startup.
+        statusReactionShape: reactionShape,
         loaderType: String(loader?.loaderType || 'unknown'),
         webVersion: String((window as any).WAPI?.getWAVersion?.() || 'unknown'),
       };
+    }, {
+      bootloaderPlan: STATUS_REACTION_BOOTLOADER,
+      budgetMs: STATUS_REACTION_PROBE_BUDGET_MS,
+      runtimeGlobal: STATUS_REACTION_RUNTIME_GLOBAL,
     });
     req.logger.info(`[send-capabilities] ${JSON.stringify(capabilities)}`);
+    if (capabilities.inconclusive) {
+      res.status(503).json({
+        status: 'inconclusive',
+        response: capabilities,
+        nodeVersion: process.version,
+      });
+      return;
+    }
     res.status(capabilities.compatible ? 200 : 409).json({
       status: capabilities.compatible ? 'success' : 'incompatible',
       response: capabilities,
@@ -1629,6 +2144,8 @@ export async function forwardMessages(req: Request, res: Response) {
               phone: { type: "string" },
               isGroup: { type: "boolean" },
               messageId: { type: "string" },
+              keepVoice: { type: "boolean" },
+              linkPreview: { type: "object" },
             }
           },
           examples: {
@@ -1644,23 +2161,52 @@ export async function forwardMessages(req: Request, res: Response) {
       }
      }
    */
-  const { phone, messageId, isGroup = false } = req.body;
+  const { phone, messageId, keepVoice, linkPreview } = req.body;
 
   try {
-    let response;
-
-    if (!isGroup) {
-      response = await req.client.forwardMessagesV2(`${phone[0]}`, messageId);
-    } else {
-      response = await req.client.forwardMessagesV2(`${phone[0]}`, messageId);
+    // wa-js's forwardMessages is unusable on builds whose forward module has
+    // unresolved dependencies (forward_messages_not_available), so the page
+    // heals that and forwards through WhatsApp's own function; see
+    // util/forwardRuntime.ts. A rejected forward propagates: never retried here.
+    const outcome: any = await req.client.page.evaluate(
+      buildForwardRuntimeExpression({
+        chatId: `${phone[0]}`,
+        messageIds: Array.isArray(messageId) ? messageId : [messageId],
+        // WinZapp patch: a forwarded voice message stays a voice message
+        // (util/forwardRuntime.ts). Only an explicit true asks for it.
+        keepVoice: keepVoice === true,
+        // WinZapp patch: the card of a forwarded link message is kept
+        // (util/forwardRuntime.ts). Only an object asks for it.
+        linkPreview:
+          linkPreview && typeof linkPreview === 'object' && !Array.isArray(linkPreview)
+            ? linkPreview
+            : undefined,
+      })
+    );
+    if (!outcome || outcome.ok !== true) {
+      throw new Error(outcome?.detail || 'forwardMessages returned no outcome');
     }
+    if (outcome.voice && outcome.voice.kept < outcome.voice.asked) {
+      // Sent, but as audio: WhatsApp Web no longer converts where the guard
+      // sits. Worth a line, since nothing else would ever say so.
+      req.logger.warn(
+        `[forward-messages] voice kept for ${outcome.voice.kept} of ` +
+          `${outcome.voice.asked} voice message(s); the rest went out as audio`
+      );
+    }
+    const response = outcome.response;
 
     res.status(201).json({ status: 'success', response: response });
   } catch (e) {
     req.logger.error(e);
     res
       .status(500)
-      .json({ status: 'error', message: 'Error forwarding message', error: e });
+      .json({
+        status: 'error',
+        message: 'Error forwarding message',
+        detail: String((e as any)?.message || '').slice(0, 500),
+        error: e,
+      });
   }
 }
 
@@ -1748,6 +2294,23 @@ export async function blockContact(req: Request, res: Response) {
   const { phone } = req.body;
 
   try {
+    // WhatsApp refuses to block a phone-number contact that has no chat
+    // ("trying to block a pn contact without a chat"), which is exactly the
+    // case for a number that is not saved and never wrote to us.
+    // WPP.chat.find() creates the chat when it does not exist yet.
+    const page = (req.client as any)?.waPage || (req.client as any)?.page;
+    if (page && typeof page.evaluate === 'function') {
+      try {
+        await page.evaluate(
+          (id: string) => (window as any).WPP.chat.find(id),
+          `${phone}`
+        );
+      } catch (findError) {
+        req.logger.warn(
+          `[block-contact] could not create the chat first: ${findError}`
+        );
+      }
+    }
     await req.client.blockContact(`${phone}`);
     res
       .status(200)
@@ -1907,7 +2470,7 @@ export async function setProfilePic(req: Request, res: Response) {
     res.status(500).json({
       status: 'error',
       message: 'Error changing profile photo',
-      error: e,
+      error: String((e as any)?.message || e),
     });
   }
 }
@@ -1979,9 +2542,23 @@ export async function getLastSeen(req: Request, res: Response) {
    */
   const { phone } = req.params;
   try {
-    const response = await req.client.getLastSeen(`${phone}@c.us`);
-
-    res.status(200).json({ status: 'success', response: response });
+    // This route is a private-contact query. Preserve LID and reject group,
+    // newsletter and arbitrary expressions before constructing an in-page call.
+    if (!/^\d+(?:@(?:c\.us|s\.whatsapp\.net|lid))?$/.test(phone)) {
+      res.status(400).json({ status: 'error', response: 'Invalid contact id' });
+      return;
+    }
+    const id = phone.includes('@') ? phone.replace('@s.whatsapp.net', '@c.us') : `${phone}@c.us`;
+    const page = (req.client as any).page;
+    const presence = page
+      ? await page.evaluate(`(${CONTACT_PRESENCE_SOURCE})(${JSON.stringify(id)})`)
+      : { status: 'unsupported' };
+    if (presence.status !== 'unsupported') {
+      res.status(200).json({ status: 'success', response: presence.lastSeen ?? false, presence });
+      return;
+    }
+    const response = await req.client.getLastSeen(id);
+    res.status(200).json({ status: 'success', response });
   } catch (error) {
     req.logger.error(error);
     res.status(500).json({
@@ -2090,6 +2667,31 @@ export async function getMessages(req: Request, res: Response) {
       req.logger.info(
         `Fetching older messages before ${id} for ${phone} using browser-side sync...`
       );
+      if (/@newsletter$/.test(String(phone))) {
+        // A channel's older updates come from WhatsApp's server first: see
+        // pullChannelHistory().
+        try {
+          const pulled = await req.client.page.evaluate(pullChannelHistory, {
+            chatId: phone, anchorId: String(id), targetCount,
+          });
+          req.logger.info(`[channel-history] ${pulled} update(s) loaded before the page`);
+        } catch (e: any) {
+          req.logger.warn(`[channel-history] could not load older updates: ${e?.message || e}`);
+        }
+        // A hole right below the anchor that could not be filled (offline):
+        // the old updates under it are not this page. 503, so the client
+        // asks again later instead of storing them and keeping the hole.
+        let incomplete = false;
+        try {
+          incomplete = !!(await req.client.page.evaluate(channelOlderPageIncomplete, { chatId: phone }));
+        } catch (_) {
+          incomplete = false;
+        }
+        if (incomplete) {
+          req.logger.warn('[channel-history] a hole below the page could not be filled');
+          return res.status(503).json({ status: 'error', code: 'channel_history_incomplete' });
+        }
+      }
       response = await req.client.page.evaluate(
         async ({ chatId, targetCount, id }) => {
           console.log(
@@ -2330,7 +2932,19 @@ export async function getMessages(req: Request, res: Response) {
       // _reconcile_active_conversation_with_remote(), and was reported live
       // as a group's entire history vanishing from the open conversation
       // mid-read, "recovering" only once a new live message forced a repaint.
-      response = await req.client.page.evaluate(
+      if (/@newsletter$/.test(String(phone))) {
+        // A channel's newest updates come from WhatsApp's server: see
+        // readNewestChannelUpdates().
+        try {
+          response = await req.client.page.evaluate(readNewestChannelUpdates, {
+            chatId: phone, targetCount,
+          });
+        } catch (e: any) {
+          req.logger.warn(`[channel-history] could not read the newest updates: ${e?.message || e}`);
+          response = null;
+        }
+      }
+      if (!Array.isArray(response)) response = await req.client.page.evaluate(
         async ({ chatId, targetCount }) => {
           const keyOf = (m: any) =>
             (m && m.id && (m.id._serialized || m.id)) || null;
@@ -2493,7 +3107,11 @@ export async function getMessages(req: Request, res: Response) {
  * took WhatsApp Web's message store from 1,526 to 6,014 rows in 40 seconds.
  * /unblock-history-sync below clears a queue that is already in that state.
  */
-export async function requestOlderMessages(req: Request, res: Response) {
+export async function requestOlderMessages(
+  req: Request,
+  res: Response,
+  probeOnly?: unknown
+) {
   /**
      #swagger.tags = ["Messages"]
      #swagger.autoBody=false
@@ -2508,9 +3126,11 @@ export async function requestOlderMessages(req: Request, res: Response) {
      }
    */
   const { phone } = req.params;
+  // Compared to `true` because Express hands a route handler `next` here.
+  const probe = probeOnly === true;
   try {
     const result = await req.client.page.evaluate(
-      async ({ chatId }) => {
+      async ({ chatId, probe }) => {
         const out: any = { chatId };
         const req_ = (window as any).require;
         if (typeof req_ !== 'function') {
@@ -2630,6 +3250,42 @@ export async function requestOlderMessages(req: Request, res: Response) {
           return out;
         }
 
+        // primaryHasMore answers "does the phone hold older messages", not
+        // "may this device ask for them", and for one state the two differ:
+        // COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY (4) is what a
+        // chat becomes once an on-demand sync has delivered all a linked
+        // device is given. WhatsApp Web's own banner
+        // (WAWebConversationLoadMoreMessagesHistorySync) offers no request
+        // there, only "Use WhatsApp on your phone to see older messages." The
+        // phone answers one with silence and tells its owner "Sync paused"
+        // (issue #220; measured on 2026-10-04, 5 of 569 chats sat in it).
+        //
+        // Read by name so a renumbering does not move the gate. The other
+        // states are left as they were: the verdict for those still comes
+        // from the outcome (see _retire_chat_without_older_history).
+        let phoneOnlyState = 4;
+        try {
+          const v =
+            req_('WAWebChatConstants')?.ConversationEndOfHistoryTransferModelPropType
+              ?.COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY;
+          if (typeof v === 'number') phoneOnlyState = v;
+        } catch (e) {
+          /* keep the literal */
+        }
+        out.phoneOnly = out.endOfHistoryTransferType === phoneOnlyState;
+        if (out.phoneOnly) {
+          out.error = 'older messages for this chat are only on the phone';
+          return out;
+        }
+
+        // A probe (olderHistoryState below) reads the verdicts above and
+        // stops: Python asks it for a chat it has already requested once,
+        // where sending again would be a second notification on the phone.
+        if (probe) {
+          out.probe = true;
+          return out;
+        }
+
         let wid;
         try {
           wid = (window as any).WPP.whatsapp.WidFactory.createWid(chatId);
@@ -2690,7 +3346,7 @@ export async function requestOlderMessages(req: Request, res: Response) {
         }
         return out;
       },
-      { chatId: phone }
+      { chatId: phone, probe }
     );
 
     req.logger.info(
@@ -2712,6 +3368,29 @@ export async function requestOlderMessages(req: Request, res: Response) {
       error: { message: e?.message || String(e) },
     });
   }
+}
+
+/**
+ * The verdicts requestOlderMessages reaches before sending, without the send:
+ * whether this chat's older history is only on the phone. A route of its own
+ * rather than a flag on the POST, so an API built before it existed answers
+ * 404 instead of sending a real request to the phone.
+ */
+export async function olderHistoryState(req: Request, res: Response) {
+  /**
+     #swagger.tags = ["Messages"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.parameters["phone"] = {
+      schema: '5521999999999@c.us'
+     }
+   */
+  return requestOlderMessages(req, res, true);
 }
 
 /**
@@ -3826,6 +4505,26 @@ export async function getStatus(req: Request, res: Response) {
   }
 }
 
+/**
+ * GET /api/:session/my-profile — the paired account's own display name, About
+ * text and whether it has a photo: `{ name, status, photo }`, each null when it
+ * could not be read (see util/profileRuntime.ts). Backs the Profile tab of
+ * File > WhatsApp settings, so it opens already showing what is set.
+ */
+export async function getMyProfile(req: Request, res: Response) {
+  const page = (req.client as any)?.page;
+  if (!page || page.isClosed()) {
+    return res.status(503).json({ status: 'error', code: 'profile_unavailable' });
+  }
+  try {
+    const response = await page.evaluate(readMyProfile);
+    return res.status(200).json({ status: 'success', response });
+  } catch (_) {
+    // Native errors can include phone numbers and contact names.
+    return res.status(503).json({ status: 'error', code: 'profile_unavailable' });
+  }
+}
+
 export async function setProfileStatus(req: Request, res: Response) {
   /**
      #swagger.tags = ["Profile"]
@@ -3871,9 +4570,11 @@ export async function setProfileStatus(req: Request, res: Response) {
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
     req.logger.error(e);
-    res
-      .status(500)
-      .json({ status: 'error', message: 'Error on set profile status' });
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on set profile status',
+      error: String((e as any)?.message || e),
+    });
   }
 }
 export async function rejectCall(req: Request, res: Response) {
@@ -3956,7 +4657,40 @@ export async function starMessage(req: Request, res: Response) {
    */
   const { messageId, star = true } = req.body;
   try {
-    const response = await req.client.starMessage(messageId, star);
+    // WA-JS (4.7.2) stars through Cmd.sendStarMsgs(), which only fires the UI
+    // event "send_star_msgs". Its one listener is a React ref
+    // (live 2026-10-29: `t.current == null ? void 0 : t.current(...)`) that is
+    // empty whenever the component behind it is not mounted, as in WinZapp's
+    // headless page: nothing was sent, and WA-JS answered the old state.
+    // WAWebChatSendMessages.sendStarMsgs(chat, msgs, star) is what that
+    // listener calls in the end (the toast aside), so call it directly; the
+    // WA-JS path stays for a build that renames it.
+    let response: any = await req.client.page.evaluate(
+      async ({ messageId, star }) => {
+        const WPP = (window as any).WPP;
+        let module: any = null;
+        try {
+          module = WPP?.loader?.moduleRequire?.('WAWebChatSendMessages');
+        } catch (_) {}
+        if (typeof module?.sendStarMsgs !== 'function') {
+          try {
+            module = (window as any).require?.('WAWebChatSendMessages');
+          } catch (_) {}
+        }
+        if (typeof module?.sendStarMsgs !== 'function') return null;
+        const msg = await WPP.chat.getMessageById(messageId);
+        const chat =
+          WPP.whatsapp.ChatStore.get(msg.id.remote) ||
+          WPP.chat.get?.(msg.id.remote.toString());
+        if (!chat) return null;
+        await module.sendStarMsgs(chat, [msg], Boolean(star));
+        return { id: msg.id.toString(), star: Boolean(msg.star) };
+      },
+      { messageId, star }
+    );
+    if (response == null) {
+      response = await req.client.starMessage(messageId, star);
+    }
 
     res.status(200).json({ status: 'success', response: response });
   } catch (error) {
@@ -4058,68 +4792,72 @@ export async function chatWoot(req: Request, res: Response): Promise<any> {
       }
      }
    */
-  const { session } = req.params;
-  const client: any = clientsArray[session];
-  if (client == null || client.status !== 'CONNECTED') return;
+  const client: any = req.client;
+  if (!client || client.status !== 'CONNECTED')
+    return res
+      .status(409)
+      .json({ status: 'error', message: 'Session is not connected' });
   try {
-    if (await client.isConnected()) {
-      const event = req.body.event;
-      const is_private = req.body.private || req.body.is_private;
+    if (!(await client.isConnected()))
+      return res
+        .status(409)
+        .json({ status: 'error', message: 'Session is not connected' });
+    const event = req.body.event;
+    const is_private = req.body.private || req.body.is_private;
 
-      if (
-        event == 'conversation_status_changed' ||
-        event == 'conversation_resolved' ||
-        is_private
-      ) {
-        return res
-          .status(200)
-          .json({ status: 'success', message: 'Success on receive chatwoot' });
-      }
+    if (
+      event == 'conversation_status_changed' ||
+      event == 'conversation_resolved' ||
+      is_private
+    ) {
+      return res
+        .status(200)
+        .json({ status: 'success', message: 'Success on receive chatwoot' });
+    }
 
-      const {
-        message_type,
-        phone = req.body.conversation.meta.sender.phone_number.replace('+', ''),
-        message = req.body.conversation.messages[0],
-      } = req.body;
+    const {
+      message_type,
+      phone = req.body.conversation.meta.sender.phone_number.replace('+', ''),
+      message = req.body.conversation.messages[0],
+    } = req.body;
 
-      if (event != 'message_created' && message_type != 'outgoing')
-        return res
-          .status(200)
-          .json({ status: 'success', message: 'Success on receive chatwoot' });
-      for (const contato of contactToArray(phone, false)) {
-        if (message_type == 'outgoing') {
-          if (message.attachments) {
-            const base_url = `${
-              client.config.chatWoot.baseURL
-            }/${message.attachments[0].data_url.substring(
-              message.attachments[0].data_url.indexOf('/rails/') + 1
-            )}`;
+    if (event !== 'message_created' || message_type !== 'outgoing')
+      return res
+        .status(200)
+        .json({ status: 'success', message: 'Success on receive chatwoot' });
+    for (const contato of contactToArray(phone, false)) {
+      if (message_type == 'outgoing') {
+        if (message.attachments) {
+          const base_url = `${
+            client.config.chatWoot.baseURL
+          }/${message.attachments[0].data_url.substring(
+            message.attachments[0].data_url.indexOf('/rails/') + 1
+          )}`;
 
-            // Check if attachments is Push-to-talk and send this
-            if (message.attachments[0].file_type === 'audio') {
-              await client.sendPtt(
-                `${contato}`,
-                base_url,
-                'Voice Audio',
-                message.content
-              );
-            } else {
-              await client.sendFile(
-                `${contato}`,
-                base_url,
-                'file',
-                message.content
-              );
-            }
+          // Check if attachments is Push-to-talk and send this
+          if (message.attachments[0].file_type === 'audio') {
+            await client.sendPtt(
+              `${contato}`,
+              base_url,
+              'Voice Audio',
+              message.content
+            );
           } else {
-            await client.sendText(contato, message.content);
+            await client.sendFile(
+              `${contato}`,
+              base_url,
+              'file',
+              message.content
+            );
           }
+        } else {
+          await client.sendText(contato, message.content);
         }
       }
-      res
-        .status(200)
-        .json({ status: 'success', message: 'Success on  receive chatwoot' });
     }
+    res
+      .status(200)
+      .json({ status: 'success', message: 'Success on  receive chatwoot' });
   } catch (e) {
     console.log(e);
     res.status(400).json({
@@ -4154,6 +4892,78 @@ export async function getPlatformFromMessage(req: Request, res: Response) {
       status: 'error',
       message: 'Error on get get platform from message',
       error: e,
+    });
+  }
+}
+
+export async function getMessageAck(req: Request, res: Response) {
+  /**
+   * #swagger.tags = ["Messages"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.requestBody = {
+      required: true,
+      "@content": {
+        "application/json": {
+          schema: {
+            type: "object",
+            properties: {
+              messageId: { type: "string", description: "Serialized message id, e.g. true_5511999999999@c.us_3EB0ABCDEF" },
+            }
+          },
+          examples: {
+            "Ack info of a sent message": {
+              value: { messageId: "true_5511999999999@c.us_3EB0ABCDEF" }
+            },
+          }
+        }
+      }
+     }
+   *
+   * Asks WhatsApp Web itself, through WPP.chat.getMessageACK(), when each
+   * recipient of one of OUR sent messages received, read and played it. The
+   * answer is phone-synced, so it includes receipts that arrived while this
+   * session was closed. @wppconnect-team/wppconnect has no wrapper for it.
+   *
+   * Answers {ack, fromMe, deliveryRemaining, readRemaining, playedRemaining,
+   * participants: [{id, deliveredAt?, readAt?, playedAt?}]}; the participant's
+   * Wid object is dropped, only the serializable fields are returned.
+   */
+  const { messageId } = req.body;
+  if (!messageId || typeof messageId !== 'string') {
+    return res
+      .status(400)
+      .json({ status: 'error', message: 'messageId is required' });
+  }
+  try {
+    const info = await req.client.page.evaluate(async (id: string) => {
+      const raw = await (window as any).WPP.chat.getMessageACK(id);
+      return {
+        ack: raw.ack,
+        fromMe: raw.fromMe,
+        deliveryRemaining: raw.deliveryRemaining,
+        readRemaining: raw.readRemaining,
+        playedRemaining: raw.playedRemaining,
+        participants: (raw.participants || []).map((p: any) => ({
+          id: p.id,
+          deliveredAt: p.deliveredAt,
+          readAt: p.readAt,
+          playedAt: p.playedAt,
+        })),
+      };
+    }, messageId);
+    return res.status(200).json({ status: 'success', response: info });
+  } catch (e) {
+    req.logger.error(e);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on get message ack',
+      error: String((e as any)?.message || e),
     });
   }
 }

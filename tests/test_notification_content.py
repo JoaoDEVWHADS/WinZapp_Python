@@ -26,6 +26,8 @@ _is_bad_contact_name() (tests/test_bad_contact_name.py):
 import pytest
 
 from core.notification_manager import format_notification_body, format_notification_title
+from main import MainWindow
+from main_window.contacts import ContactsMixin
 
 
 class _FakeI18n:
@@ -38,6 +40,7 @@ class _FakeI18n:
         "notif_poll": "[poll:{name}]",
         "notif_poll_no_name": "[poll-no-name]",
         "notif_template": "[template]",
+        "business_template_unavailable": "[business content unavailable]",
         "interactive_message": "[interactive]",
         "interactive_reply": "[interactive-reply]",
         "list_reply": "[list-reply]",
@@ -52,6 +55,13 @@ class _FakeI18n:
 
     def t(self, key):
         return self._STRINGS.get(key, f"[{key}]")
+
+
+class _WordsI18n:
+    _STRINGS = {"ui_self_reference_eu": "Eu", "ui_self_reference_voce": "Você"}
+
+    def t(self, key):
+        return self._STRINGS[key]
 
 
 def _msg(message_type, message=None, **extra):
@@ -92,7 +102,7 @@ class TestFormatNotificationBodyCoversRealContentTypes:
 
     def test_buttons_message_with_no_text_falls_back(self):
         msg = _msg("buttonsMessage", {"buttonsMessage": {}})
-        assert format_notification_body(msg, None, _FakeI18n()) == "[interactive]"
+        assert format_notification_body(msg, None, _FakeI18n()) == "[business content unavailable]"
 
     def test_list_message_shows_its_title(self):
         msg = _msg("listMessage", {"listMessage": {"title": "Cardápio"}})
@@ -100,7 +110,11 @@ class TestFormatNotificationBodyCoversRealContentTypes:
 
     def test_template_message(self):
         msg = _msg("templateMessage")
-        assert format_notification_body(msg, None, _FakeI18n()) == "[template]"
+        assert format_notification_body(msg, None, _FakeI18n()) == "[business content unavailable]"
+
+    def test_template_message_with_content(self):
+        msg = _msg("templateMessage", {"templateMessage": {"hydratedContentText": "Your ticket"}})
+        assert format_notification_body(msg, None, _FakeI18n()) == "Your ticket"
 
     def test_interactive_message_shows_body_text(self):
         msg = _msg("interactiveMessage", {"interactiveMessage": {"body": {"text": "Olá!"}}})
@@ -190,6 +204,40 @@ class TestExtendedTextMessageLinkPreviewInToastBody:
         assert body == "Exemplo. https://example.com"
 
 
+class TestMentionOfTheUserFollowsHowToReferToMe:
+    """Reported live: with "Como se referir a mim?" set to "Você" or a custom
+    word, the message list showed that word for a mention of the user but the
+    toast still said a fixed "eu"."""
+
+    class _MW:
+        _is_self_jid = staticmethod(lambda jid: jid == "5511@s.whatsapp.net")
+        _lid_to_phone = {}
+
+        def __init__(self, **ui):
+            self.settings = {"user_interface": ui}
+            self.i18n = _WordsI18n()
+
+        self_reference_label = ContactsMixin.self_reference_label
+
+    @staticmethod
+    def _toast(main_window):
+        msg = _msg("extendedTextMessage", {"extendedTextMessage": {
+            "text": "oi @5511 tudo bem?",
+            "contextInfo": {"mentionedJid": ["5511@s.whatsapp.net"]},
+        }})
+        return format_notification_body(msg, main_window, _FakeI18n())
+
+    def test_first_person_is_the_default(self):
+        assert self._toast(self._MW()) == "oi @Eu tudo bem?"
+
+    def test_voce_mode(self):
+        assert self._toast(self._MW(self_reference_mode="voce")) == "oi @Você tudo bem?"
+
+    def test_a_custom_word(self):
+        mw = self._MW(self_reference_mode="custom", self_reference_custom_word="Chefe")
+        assert self._toast(mw) == "oi @Chefe tudo bem?"
+
+
 class TestFormatNotificationTitleGroupName:
     def test_uses_chat_name_when_present(self):
         class _MW:
@@ -228,3 +276,45 @@ class TestFormatNotificationTitleGroupName:
         msg = _msg("conversation", key={"remoteJid": "g@g.us"})
         title = format_notification_title(msg, _MW(), _FakeI18n())
         assert "[unknown-group]" in title
+
+
+class TestChatListPreviewOfAMentionOfTheUser:
+    """The same fixed "eu" lived in the chat-list preview: with "Você" chosen
+    the toast said "@Você" and the row of the same message said "@eu"."""
+
+    class _MW:
+        _counts_as_last_message = classmethod(MainWindow._counts_as_last_message.__func__)
+        _last_msg_preview = MainWindow._last_msg_preview
+        _PREVIEW_MESSAGE_TYPES = MainWindow._PREVIEW_MESSAGE_TYPES
+        self_reference_label = ContactsMixin.self_reference_label
+        _is_self_jid = staticmethod(lambda jid: jid == "5511@s.whatsapp.net")
+        _lid_to_phone = {}
+
+        def __init__(self, **ui):
+            self.settings = {"user_interface": {
+                "show_delivery_status_in_chat_list": False, **ui}}
+            self.i18n = _WordsI18n()
+
+    @staticmethod
+    def _chat():
+        message = {
+            "key": {"fromMe": False, "id": "abc"},
+            "messageType": "extendedTextMessage",
+            "message": {"extendedTextMessage": {
+                "text": "oi @5511 tudo bem?",
+                "contextInfo": {"mentionedJid": ["5511@s.whatsapp.net"]}}},
+            "messageTimestamp": 1_700_000_000,
+        }
+        return {"remoteJid": "5522@s.whatsapp.net",
+                "messages": {"messages": {"records": [message]}}}
+
+    def test_first_person_is_the_default(self):
+        assert "oi @Eu tudo bem?" in self._MW()._last_msg_preview(self._chat())
+
+    def test_voce_mode(self):
+        preview = self._MW(self_reference_mode="voce")._last_msg_preview(self._chat())
+        assert "oi @Você tudo bem?" in preview
+
+    def test_a_custom_word(self):
+        mw = self._MW(self_reference_mode="custom", self_reference_custom_word="Chefe")
+        assert "oi @Chefe tudo bem?" in mw._last_msg_preview(self._chat())

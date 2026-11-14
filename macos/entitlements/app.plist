@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- ctypes/libffi callbacks (Carbon hotkey, pyobjc) need writable+executable memory -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <!-- bundled Python extension modules and dylibs are not all signed by one team -->
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <!-- voice messages, calls -->
+  <key>com.apple.security.device.audio-input</key><true/>
+  <!-- video calls -->
+  <key>com.apple.security.device.camera</key><true/>
+</dict>
+</plist>

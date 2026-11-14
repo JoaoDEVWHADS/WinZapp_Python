@@ -2,26 +2,114 @@ import os
 import sys
 import wx
 
+from ui.shortcut_bindings import accessible_shortcut
+
+
+def split_mnemonic(label):
+    """Split a locale label such as "&Answer" into ("Answer", "A").
+
+    The returned label has no `&`, so Windows creates no mnemonic for it: a
+    mnemonic also fires on the BARE letter while a button has focus (Win32's
+    IsDialogMessage), which is how a letter typed into the composer answered
+    or rejected a ringing call. The letter is handed back so the caller can
+    register it as an Alt+<letter> accelerator instead. `&&` is a literal `&`.
+    """
+    plain = []
+    letter = None
+    i = 0
+    while i < len(label):
+        char = label[i]
+        if char == "&" and i + 1 < len(label):
+            following = label[i + 1]
+            if following == "&":
+                plain.append("&")
+            else:
+                plain.append(following)
+                if letter is None:
+                    upper = following.upper()
+                    letter = upper if len(upper) == 1 else following
+            i += 2
+            continue
+        plain.append(char)
+        i += 1
+    return "".join(plain), letter
+
+
+def accelerator_keycode(letter):
+    """The key code to register for Alt+<letter>, or None if it cannot fire.
+
+    An accelerator entry on Windows takes a virtual-key code, which equals the
+    character only for ASCII letters and digits. Any other letter (Romanian
+    "Î") is resolved through the active keyboard layout; None when the layout
+    has no plain key for it.
+    """
+    if not letter or len(letter) != 1:
+        return None
+    if letter.isascii() and letter.isalnum():
+        return ord(letter.upper())
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    scan = ctypes.windll.user32.VkKeyScanW
+    scan.restype = ctypes.c_short
+    # Scan the lowercase form: an uppercase letter reports Shift in the high
+    # byte, which would wrongly read as "needs a modifier".
+    result = scan(ord(letter.lower()))
+    if result == -1 or (result >> 8) & 0xFF:  # unmapped, or needs Shift/Ctrl/Alt
+        return None
+    return result & 0xFF
+
+
+class AccessibleShortcutCapture(wx.Accessible):
+    """A native text field that announces a captured key rather than editable text."""
+
+    def __init__(self, control, name):
+        super().__init__()
+        self.control, self.name = control, name
+
+    def GetName(self, childId):
+        return wx.ACC_OK, self.name
+
+    def GetRole(self, childId):
+        return wx.ACC_OK, wx.ROLE_SYSTEM_HOTKEYFIELD
+
+    def GetValue(self, childId):
+        return wx.ACC_OK, self.control.GetValue()
+
+
+class AccessibleAltShortcutButton(wx.Accessible):
+    """Reports Alt+<letter> as the keyboard shortcut of a button whose
+    shortcut is an accelerator-table entry rather than a `&` mnemonic."""
+
+    def __init__(self, letter, shortcut=None):
+        super().__init__()
+        self._letter = letter
+        self._shortcut = shortcut
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, self._shortcut if self._shortcut is not None else f"Alt+{self._letter}")
+
 
 class AccessibleSearchInConversation(wx.Accessible):
     """Reports Ctrl+Shift+F as the keyboard shortcut for the search-in-conversation button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+F")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+F", ('messages.ID_CTRL_SHIFT_F',)))
 
 
 class AccessibleSearchNextResult(wx.Accessible):
-    """Reports Enter as the keyboard shortcut for the next-result button."""
+    """Reports F3 as the keyboard shortcut for the next-result button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Enter")
+        return (wx.ACC_OK, accessible_shortcut(self, "F3", ('messages.ID_F3',)))
 
 
 class AccessibleSearchPrevResult(wx.Accessible):
-    """Reports Shift+Enter as the keyboard shortcut for the previous-result button."""
+    """Reports Shift+F3 as the keyboard shortcut for the previous-result button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Shift+Enter")
+        return (wx.ACC_OK, accessible_shortcut(self, "Shift+F3", ('messages.ID_SHIFT_F3',)))
 
 
 class AccessibleStatusPrev(wx.Accessible):
@@ -39,7 +127,19 @@ class AccessibleStatusPrev(wx.Accessible):
         self.shortcut = shortcut
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, self.shortcut)
+        return (wx.ACC_OK, accessible_shortcut(self, self.shortcut, ('status.ID_CTRL_LEFT',)))
+
+
+class AccessibleStatusDelete(wx.Accessible):
+    """Reports the keyboard shortcut for My status's "Delete status" button,
+    as it is configured (Delete by default). See AccessibleStatusPrev."""
+
+    def __init__(self, shortcut="Delete"):
+        super().__init__()
+        self.shortcut = shortcut
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, self.shortcut, ('status.ID_DELETE',)))
 
 
 class AccessibleStatusNext(wx.Accessible):
@@ -53,7 +153,7 @@ class AccessibleStatusNext(wx.Accessible):
         self.shortcut = shortcut
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, self.shortcut)
+        return (wx.ACC_OK, accessible_shortcut(self, self.shortcut, ('status.ID_CTRL_RIGHT',)))
 
 
 class AccessibleSearchConversations(wx.Accessible):
@@ -62,65 +162,99 @@ class AccessibleSearchConversations(wx.Accessible):
         self.shortcut = shortcut
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, self.shortcut)
+        return (wx.ACC_OK, accessible_shortcut(self, self.shortcut, ('chats.ID_CTRL_F', 'archived.ID_CTRL_F')))
 
 
 class AccessibleRecordVoiceMessage(wx.Accessible):
-    def __init__(self, shortcut):
+    """A recording button. `candidates` are the ids of ITS shortcut: the one
+    the user configured is what is announced, and `shortcut` only when no
+    main window can say. The alternate-mode and computer-audio buttons each
+    pass their own; with the Ctrl+R ids for all three, every one of them
+    announced Ctrl+R while its real key went unsaid."""
+
+    def __init__(self, shortcut, candidates=('messages.ID_CTRL_R', 'status.ID_CTRL_R')):
         super().__init__()
         self.shortcut = shortcut
+        self.candidates = tuple(candidates)
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, self.shortcut)
+        return (wx.ACC_OK, accessible_shortcut(self, self.shortcut, self.candidates))
 
 
 class AccessibleSaveAs(wx.Accessible):
     """Reports Ctrl+Shift+S as the keyboard shortcut for the Save-As button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+S")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+S", ('messages.ID_CTRL_SHIFT_S', 'status.ID_CTRL_SHIFT_S', 'media.ID_CTRL_SHIFT_S')))
+
+
+class AccessibleDescribeButton(wx.Accessible):
+    """Reports Ctrl+Shift+I as the shortcut for the AI action button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+I", ('messages.ID_AI_ACTION', 'status.ID_CTRL_SHIFT_I', 'media.ID_CTRL_SHIFT_I')))
 
 
 class AccessibleShowInFolder(wx.Accessible):
     """Reports Ctrl+Enter as the shortcut for the Show-in-folder button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Enter")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Enter", ('message_list.show_folder',)))
 
 
 class AccessibleStatusCopyText(wx.Accessible):
     """Reports Ctrl+C as the keyboard shortcut for the status copy-text button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+C")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+C", ('status.ID_CTRL_C',)))
+
+
+class AccessibleAskQuestion(wx.Accessible):
+    """Reports Ctrl+Enter as the shortcut that sends the question in the AI
+    result window. Enter itself stays a newline in the question field, so the
+    shortcut is announced here and not written into the field's label."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Enter", ('ai_result.ask',)))
 
 
 class AccessibleReadMoreButton(wx.Accessible):
     """Reports Alt+L as the keyboard shortcut for the Read-more button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Alt+L")
+        return (wx.ACC_OK, accessible_shortcut(self, "Alt+L", ('messages.ID_ALT_L',)))
+
+
+class AccessibleReturnCallButton(wx.Accessible):
+    """Reports Ctrl+Shift+R as the shortcut for the Return-call button.
+
+    Shared with "react to message": the button only exists while a missed
+    call is focused, and a call record cannot be reacted to, so the two
+    never compete for the same row."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+R", ('messages.ID_CTRL_SHIFT_R', 'calls.ID_CTRL_SHIFT_R')))
 
 
 class AccessibleConversationDataButton(wx.Accessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the conversation-data button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+D")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+D", ('messages.ID_CTRL_SHIFT_D',)))
 
 
 class AccessibleVoiceCallButton(wx.Accessible):
     """Reports Ctrl+Shift+V as the keyboard shortcut for the Voice call button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+V")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+V", ('messages.ID_CTRL_SHIFT_V',)))
 
 
 class AccessibleVideoCallButton(wx.Accessible):
     """Reports Ctrl+Alt+Shift+V as the keyboard shortcut for the Video call button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Alt+Shift+V")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Alt+Shift+V", ('messages.ID_CTRL_ALT_SHIFT_V',)))
 
 
 class AccessibleCallEndButton(wx.Accessible):
@@ -128,7 +262,7 @@ class AccessibleCallEndButton(wx.Accessible):
     window's end-call button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+Q")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+Q", ('call.ID_CALL_END',)))
 
 
 class AccessibleCallMuteButton(wx.Accessible):
@@ -138,7 +272,23 @@ class AccessibleCallMuteButton(wx.Accessible):
     label swap."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+M")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+M", ('call.ID_CALL_MUTE',)))
+
+
+class AccessibleCallPromoteVideoButton(wx.Accessible):
+    """Reports Ctrl+P as the keyboard shortcut for the active-call window's
+    "switch to video" button, shown only while the call is voice."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+P", ('call.ID_CALL_PROMOTE',)))
+
+
+class AccessibleCallParticipantsButton(wx.Accessible):
+    """Reports Ctrl+Shift+P as the keyboard shortcut for the active-call
+    window's "Call participants" button (Ctrl+P is the switch to video)."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+P", ('call.ID_CALL_PARTICIPANTS',)))
 
 
 class AccessibleCallSettingsButton(wx.Accessible):
@@ -146,7 +296,7 @@ class AccessibleCallSettingsButton(wx.Accessible):
     settings button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+C")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+C", ('call.ID_CALL_SETTINGS',)))
 
 
 class AccessibleCallVideoToggleButton(wx.Accessible):
@@ -155,14 +305,14 @@ class AccessibleCallVideoToggleButton(wx.Accessible):
     it's in."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+V")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+V", ('call.ID_CALL_VIDEO',)))
 
 
 class AccessibleAddAttachmentButton(wx.Accessible):
     """Reports Ctrl+Shift+A as the keyboard shortcut for the Add Attachment button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+A")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+A", ('messages.ID_CTRL_SHIFT_A',)))
 
 
 class AccessibleEmojiButton(wx.Accessible):
@@ -176,7 +326,7 @@ class AccessibleEmojiButton(wx.Accessible):
     """
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+.")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+.", ('messages.ID_CTRL_PERIOD', 'status.ID_CTRL_PERIOD')))
 
 
 class _VoiceButtonAccessible(wx.Accessible):
@@ -209,7 +359,7 @@ class AccessibleDiscardVoiceMessage(_VoiceButtonAccessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+D")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+D", ('messages.ID_CTRL_SHIFT_D', 'status.ID_CTRL_SHIFT_D')))
 
 
 class AccessiblePauseResumeRecording(_VoiceButtonAccessible):
@@ -219,14 +369,14 @@ class AccessiblePauseResumeRecording(_VoiceButtonAccessible):
         super().__init__(main_window, window)
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+P")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+Shift+P", ('messages.ID_CTRL_SHIFT_P', 'status.ID_CTRL_SHIFT_P')))
 
 
 class AccessibleSendVoiceMessage(_VoiceButtonAccessible):
     """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+R")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+R", ('messages.ID_CTRL_R', 'status.ID_CTRL_R')))
 
 
 class AccessibleMediaViewerSeekBack(wx.Accessible):
@@ -236,7 +386,7 @@ class AccessibleMediaViewerSeekBack(wx.Accessible):
     MediaViewerDialog."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Alt+V")
+        return (wx.ACC_OK, accessible_shortcut(self, "Alt+V", ('media.ID_ALT_V',)))
 
 
 class AccessibleMediaViewerSeekForward(wx.Accessible):
@@ -246,7 +396,7 @@ class AccessibleMediaViewerSeekForward(wx.Accessible):
     MediaViewerDialog."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Alt+A")
+        return (wx.ACC_OK, accessible_shortcut(self, "Alt+A", ('media.ID_ALT_A',)))
 
 
 class AccessibleMediaBitmapPanel(wx.Accessible):
@@ -275,14 +425,21 @@ class AccessiblePlayRecordedAudio(wx.Accessible):
     label swap."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+P")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+P", ('chats.ID_PIN_LIST', 'status.ID_CTRL_P')))
 
 
 class AccessibleNewConversationButton(wx.Accessible):
     """Reports Ctrl+N as the keyboard shortcut for the New Conversation button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+N")
+        return (wx.ACC_OK, accessible_shortcut(self, "Ctrl+N", ('chats.ID_CTRL_N',)))
+
+
+class AccessibleConversationFilter(wx.Accessible):
+    """Reports Alt+Shift+F as the keyboard shortcut for the chat filter radio buttons."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, accessible_shortcut(self, "Alt+Shift+F", ('chats.ID_FILTER_FOCUS',)))
 
 
 class AccessibleMessagesList(wx.Accessible):
@@ -343,6 +500,22 @@ class AccessibleMessagesListControl(wx.Accessible):
         return (wx.ACC_NOT_IMPLEMENTED, 0)
 
 
+class AccessibleRecordingVolumeSlider(wx.Accessible):
+    """Name the trackbar explicitly; leave native role/value/state unchanged.
+
+    wx.SetName alone may not replace the native trackbar's inferred numeric
+    label. Read the current name so language and capture-mode changes survive.
+    """
+    def __init__(self, slider):
+        super().__init__()
+        self._slider = slider
+
+    def GetName(self, childId):
+        if childId == 0:
+            return (wx.ACC_OK, self._slider.GetName())
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
 class AccessibleAudioSlider(wx.Accessible):
     def __init__(self, conversations_panel):
         super().__init__()
@@ -391,6 +564,7 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
         super().__init__(parent, style=wx.LB_SINGLE)
         self._activated_handler = None
         self._key_down_handler = None
+        self._shortcut_handler = None
         # wx.ListBox has no built-in "activate" notification for Enter (only
         # EVT_LISTBOX_DCLICK, which is mouse-double-click only). A plain
         # EVT_KEY_DOWN binding is not reliable for Enter specifically:
@@ -405,8 +579,14 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
     def set_key_down_handler(self, handler):
         self._key_down_handler = handler
 
+    def set_shortcut_handler(self, handler):
+        self._shortcut_handler = handler
+
     def _on_char_hook(self, event):
         if self.HasFocus():
+            shortcut = getattr(self, "_shortcut_handler", None)
+            if shortcut is not None and shortcut(event):
+                return
             if (event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
                     and event.ControlDown()
                     and self._key_down_handler is not None):

@@ -7,15 +7,15 @@ was also always visible even while Classic mode was selected.
 
 import ast
 from pathlib import Path
+from tests.god_modules import conversations_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SETTINGS_SOURCE = (ROOT / "client" / "ui" / "dialogs" / "settings_dialog.py").read_text(
-    encoding="utf-8"
+SETTINGS_SOURCE = "\n".join(
+    (ROOT / "client" / "ui" / "dialogs" / name).read_text(encoding="utf-8")
+    for name in ("settings_dialog.py", "transcription_tab.py")
 )
-CONVERSATIONS_SOURCE = (ROOT / "client" / "ui" / "conversations.py").read_text(
-    encoding="utf-8"
-)
+CONVERSATIONS_SOURCE = conversations_source()
 
 
 def _method_source(source: str, class_name: str, method_name: str) -> str:
@@ -38,7 +38,7 @@ def test_listbox_count_option_is_visible_only_for_listbox_mode():
 
 
 def test_both_message_list_radios_refresh_the_listbox_only_option_visibility():
-    build = _method_source(SETTINGS_SOURCE, "SettingsDialog", "_build_ui")
+    build = _method_source(SETTINGS_SOURCE, "SettingsDialog", "_build_messages_controls")
     assert build.count("self._on_message_list_mode_toggle") >= 2
 
 

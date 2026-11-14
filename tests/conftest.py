@@ -1,15 +1,27 @@
 """Shared fixtures for all WinZapp tests — async edition."""
 
+# Before anything imports win32com.client or comtypes.client: one COM
+# wrapper cache per xdist worker, or two workers race on the same files
+# (tests/win32com_cache.py).
+from tests.win32com_cache import isolate_comtypes_gen, isolate_gen_py
+
+isolate_gen_py()
+isolate_comtypes_gen()
+
+import importlib.util
 import json
 import os
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
+
+from tests.ci_shards import WX_DESKTOP_GROUP, creates_real_windows, parse_shard, shard_of
 
 # ── Fixtures: wx ────────────────────────────────────────────────────────────
 
@@ -100,6 +112,28 @@ def pytest_addoption(parser):
              "nobody is using; on a developer's own desktop it can crash a "
              "running screen reader. CI passes this.",
     )
+    parser.addoption(
+        "--run-load",
+        action="store_true",
+        default=False,
+        help="Run the tests marked `load` (synthetic large-account scenarios, "
+             "~45 s). Skipped by default on a developer machine; always run "
+             "when the CI environment variable is set.",
+    )
+    parser.addoption(
+        "--shard",
+        default=None,
+        metavar="K/N",
+        help="Run only shard K of N: the test modules whose stable hash lands "
+             "on K (tests/ci_shards.py). CI runs every shard in its own job; "
+             "without this option every module runs, as always.",
+    )
+    # pytest.ini carries `--dist loadgroup` (only meaningful with -n). Without
+    # pytest-xdist installed — a stale venv, a bare `pip install pytest` — that
+    # option would not exist and even a plain `pytest` would refuse to start.
+    if importlib.util.find_spec("xdist") is None:
+        parser.addoption("--dist", default="no",
+                         help="Accepted and ignored: pytest-xdist is not installed.")
 
 
 def _wx_gui_requested(config) -> bool:
@@ -109,7 +143,58 @@ def _wx_gui_requested(config) -> bool:
     )
 
 
+def _load_requested(config) -> bool:
+    """The `load` tests cost ~45 s and guard scaling, not behaviour: CI runs
+    them (GitHub Actions sets CI), a developer opts in with --run-load."""
+    return bool(
+        config.getoption("--run-load")
+        or os.environ.get("CI", "").strip() not in ("", "0", "false", "False")
+    )
+
+
+def pytest_ignore_collect(collection_path, config):
+    """--shard K/N: a test module of another shard is never collected, so it
+    is not imported either — collection is split across the CI jobs, not only
+    the run. Everything that is not a tests/test_*.py module (conftest,
+    helpers, other folders) is left to pytest, as it always was."""
+    shard = parse_shard(config.getoption("--shard"))
+    if shard is None or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    index, count = shard
+    return True if shard_of(collection_path.name, count) != index else None
+
+
+_REAL_WINDOW_MODULES = {}
+
+
+def _module_creates_real_windows(path) -> bool:
+    key = str(path)
+    if key not in _REAL_WINDOW_MODULES:
+        try:
+            _REAL_WINDOW_MODULES[key] = creates_real_windows(Path(path).read_text(encoding="utf-8"))
+        except OSError:
+            _REAL_WINDOW_MODULES[key] = False
+    return _REAL_WINDOW_MODULES[key]
+
+
+# tryfirst: pytest-xdist reads the xdist_group marker in its own
+# collection_modifyitems, so the group has to be on the item before that runs.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
+    # With -n (CI only): every module that puts real wx windows up runs on one
+    # worker, one test after another (tests/ci_shards.py). Harmless without -n.
+    # It overrides a module's own group: both "clipboard" modules put windows
+    # up too, and they stay together, one after the other, in this one.
+    for item in items:
+        if _module_creates_real_windows(item.path):
+            item.add_marker(pytest.mark.xdist_group(WX_DESKTOP_GROUP))
+    if not _load_requested(config):
+        skip_load = pytest.mark.skip(
+            reason="synthetic load test - pass --run-load to run it (CI does)"
+        )
+        for item in items:
+            if "load" in item.keywords:
+                item.add_marker(skip_load)
     if _wx_gui_requested(config):
         return
     skip = pytest.mark.skip(
@@ -179,6 +264,20 @@ def _no_do_not_disturb(request, monkeypatch):
     # pytest raise "did not yield a value" for the exempt module.
     yield
     quiet_hours.invalidate_cache()
+
+
+@pytest.fixture(autouse=True)
+def _transcription_slot_of_this_process(monkeypatch):
+    """The machine-wide transcription slot is a named mutex shared with the
+    WinZapp the developer has running: a test transcription must never wait
+    for theirs, nor make theirs let its model go. Tests get a slot of their
+    own process only (test_transcription_machine_slot.py builds its own)."""
+    from core.transcription import machine_slot
+    monkeypatch.setattr(machine_slot, "slot",
+                        machine_slot.MachineSlot(native_factory=machine_slot._LocalNative))
+    # and no gap a connection test recorded reaches the age of another test's message
+    from core.transcription import auto_queue
+    monkeypatch.setattr(auto_queue, "listening_gaps", auto_queue.ListeningGaps())
 
 
 # ── Fixtures: Keys / Encryption ───────────────────────────────────────────────
@@ -328,6 +427,36 @@ def warm_cached_chat(jid: str, t: int = 100, records: int = 1) -> dict:
             "messageTimestamp": t,
         } for n in range(records)]}},
     }
+
+
+# ── Helpers: a forbidden word in a translated sentence ───────────────────────
+
+
+def _fold_for_word_search(text: str) -> str:
+    # casefold() alone is not enough: "İndirildi".casefold() is "i̇ndirildi",
+    # with a combining dot above that no stem written "indir" contains. Dropping
+    # every combining mark after NFKD removes it — and every other accent with
+    # it, so a stem is written the same way with or without its diacritics.
+    # Dotless ı is folded into i for the same consistency: casefold() already
+    # turns the Turkish capital I, whose lowercase is ı, into a plain i.
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return stripped.replace("ı", "i")
+
+
+def words_found_in(text: str, words) -> list:
+    """The entries of `words` that occur in `text`, compared case- and
+    accent-insensitively.
+
+    Shared by the transcription tests that assert a sentence does *not* use a
+    word in any of the app's languages (tests/test_transcription_management.py,
+    tests/test_transcription_narration.py). A plain `.lower()` let a Turkish
+    sentence opening with "İndir…" slip past the stem "indir", and a check that
+    can only fail in the languages whose capitals behave is a check that the
+    locales added last never really had.
+    """
+    folded = _fold_for_word_search(text)
+    return [word for word in words if _fold_for_word_search(word) in folded]
 
 
 # ── Fixtures: Temporary files / directories ───────────────────────────────────

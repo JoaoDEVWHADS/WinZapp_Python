@@ -15,7 +15,15 @@ reverts to defaults — and the same backfill then writes that to disk.
 
 import inspect
 
-from core.utils import backfill_missing_defaults
+from core.utils import (
+    DEFAULT_SETTINGS,
+    ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG,
+    TYPING_ROW_DEFAULT_MIGRATION_FLAG,
+    backfill_missing_defaults,
+    migrate_call_exclusive_mode_split,
+    migrate_echo_cancellation_default,
+    migrate_typing_row_default,
+)
 from main import MainWindow
 
 
@@ -88,3 +96,171 @@ class TestItPersistsThroughTheLock:
         # recovery earlier in this method legitimately writes the freshly
         # seeded fallback with a plain dump, before _save_lock is meaningful.
         assert "json.dump(self.settings" not in tail
+
+
+# ── call_audio_devices.exclusive_mode -> exclusive_input + exclusive_output ──
+#
+# One checkbox governed both directions. Holding the MICROPHONE exclusively
+# takes a device nothing else is using mid-call; holding the SPEAKER
+# exclusively silences every other application on it -- the screen reader
+# included, for the whole call, which for WinZapp's users means losing the
+# call window's own spoken controls. Only the output one now carries a warning.
+
+def test_a_legacy_exclusive_choice_reaches_the_microphone_but_never_the_speaker():
+    """The old checkbox never did anything: exclusive mode could not engage at
+    all until this release made WASAPI reachable. Carrying it onto the SPEAKER
+    would turn a dead flag into a live one in the same update -- so a user who
+    ticked it months ago would answer their first call and lose the screen
+    reader for the whole of it, never having seen the warning, which only
+    fires when the box is ticked in Settings."""
+    settings = {"call_audio_devices": {"exclusive_mode": True}}
+
+    assert migrate_call_exclusive_mode_split(settings) is True
+
+    section = settings["call_audio_devices"]
+    assert section["exclusive_input"] is True
+    assert section["exclusive_output"] is False
+    # The old key is gone, so a later build cannot read a stale value that no
+    # longer governs anything.
+    assert "exclusive_mode" not in section
+
+
+def test_the_migration_is_one_shot_and_does_not_undo_a_later_choice():
+    """Without the flag, a user who unticks the speaker box would find it back
+    on at the next launch -- and that is exactly the user who cares."""
+    settings = {"call_audio_devices": {"exclusive_mode": True}}
+    migrate_call_exclusive_mode_split(settings)
+
+    settings["call_audio_devices"]["exclusive_output"] = False
+    assert migrate_call_exclusive_mode_split(settings) is False
+    assert settings["call_audio_devices"]["exclusive_output"] is False
+
+
+def test_an_install_without_the_legacy_key_is_left_to_the_backfill():
+    """A missing old key is not invented here: backfill_missing_defaults()
+    puts both new keys in at their False defaults straight after."""
+    settings = {"call_audio_devices": {"input_device_name": "Mic"}}
+
+    assert migrate_call_exclusive_mode_split(settings) is True
+
+    section = settings["call_audio_devices"]
+    assert "exclusive_input" not in section
+    assert "exclusive_output" not in section
+
+
+def test_the_migration_runs_before_the_backfill_that_would_invent_the_value():
+    """Same ordering rule the other migrations rely on: run after the backfill
+    and it operates on a value it just made up."""
+    source = inspect.getsource(MainWindow._migrate_settings)
+    assert "migrate_call_exclusive_mode_split" in source
+    # and load_settings() calls _migrate_settings() before it backfills
+    loader = inspect.getsource(MainWindow.load_settings)
+    assert loader.index("self._migrate_settings()") < loader.index(
+        "backfill_missing_defaults("
+    )
+
+
+# ── show_typing_row default: on -> off ───────────────────────────────────────
+# The 2.1.0.0 alphas shipped the "is typing..." row on, and the backfill wrote
+# that True into every alpha settings.json, so the new default reaches them
+# only through migrate_typing_row_default().
+
+
+def test_the_typing_row_ships_off():
+    assert DEFAULT_SETTINGS["user_interface"]["show_typing_row"] is False
+
+
+def test_an_alpha_install_with_the_old_default_is_switched_off_once():
+    settings = {"user_interface": {"show_typing_row": True}}
+
+    assert migrate_typing_row_default(settings) is True
+    assert settings["user_interface"]["show_typing_row"] is False
+    assert settings["general"][TYPING_ROW_DEFAULT_MIGRATION_FLAG] is True
+
+    # The user turns it back on: the next launch must not undo that.
+    settings["user_interface"]["show_typing_row"] = True
+    assert migrate_typing_row_default(settings) is False
+    assert settings["user_interface"]["show_typing_row"] is True
+
+
+def test_an_install_without_the_key_is_left_to_the_backfill():
+    settings = {"user_interface": {"page_up_down_step": 15}}
+
+    assert migrate_typing_row_default(settings) is True
+    assert "show_typing_row" not in settings["user_interface"]
+
+    backfill_missing_defaults(settings, DEFAULT_SETTINGS)
+    assert settings["user_interface"]["show_typing_row"] is False
+
+
+def test_an_install_already_off_only_gains_the_flag():
+    settings = {"user_interface": {"show_typing_row": False}, "general": {}}
+
+    assert migrate_typing_row_default(settings) is True
+    assert settings["user_interface"]["show_typing_row"] is False
+    assert settings["general"][TYPING_ROW_DEFAULT_MIGRATION_FLAG] is True
+
+
+def test_migrate_settings_switches_the_typing_row_off():
+    """_migrate_settings() itself runs the migration (and load_settings()
+    runs it before the backfill: see the ordering test above)."""
+    saved = []
+
+    class _Stub:
+        settings = {"user_interface": {"show_typing_row": True}}
+
+        def save_settings(self):
+            saved.append(True)
+
+    stub = _Stub()
+    MainWindow._migrate_settings(stub)
+
+    assert stub.settings["user_interface"]["show_typing_row"] is False
+    assert stub.settings["general"][TYPING_ROW_DEFAULT_MIGRATION_FLAG] is True
+    assert saved
+
+
+# ── call echo_cancellation default: off -> on ───────────────────────────────
+# Every settings.json was seeded with echo_cancellation False, so the new
+# default reaches existing installs only through
+# migrate_echo_cancellation_default().
+
+
+def test_echo_cancellation_ships_on():
+    assert DEFAULT_SETTINGS["call_audio_devices"]["echo_cancellation"] is True
+
+
+def test_an_install_with_echo_cancellation_off_is_switched_on_once():
+    settings = {"call_audio_devices": {"echo_cancellation": False}}
+
+    assert migrate_echo_cancellation_default(settings) is True
+    assert settings["call_audio_devices"]["echo_cancellation"] is True
+    assert settings["general"][ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG] is True
+
+    # The user turns it back off: the next launch must not undo that.
+    settings["call_audio_devices"]["echo_cancellation"] = False
+    assert migrate_echo_cancellation_default(settings) is False
+    assert settings["call_audio_devices"]["echo_cancellation"] is False
+
+
+def test_an_install_without_echo_cancellation_is_left_to_the_backfill():
+    settings = {"call_audio_devices": {"input_device_name": ""}}
+
+    assert migrate_echo_cancellation_default(settings) is True
+    assert "echo_cancellation" not in settings["call_audio_devices"]
+
+    backfill_missing_defaults(settings, DEFAULT_SETTINGS)
+    assert settings["call_audio_devices"]["echo_cancellation"] is True
+
+
+def test_migrate_settings_switches_echo_cancellation_on():
+    class _Stub:
+        settings = {"call_audio_devices": {"echo_cancellation": False}}
+
+        def save_settings(self):
+            pass
+
+    stub = _Stub()
+    MainWindow._migrate_settings(stub)
+
+    assert stub.settings["call_audio_devices"]["echo_cancellation"] is True

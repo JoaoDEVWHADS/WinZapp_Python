@@ -24,6 +24,11 @@ import wx
 from core.utils import normalize_line_separators
 from tests.conftest import hidden_frame, set_clipboard_text
 from ui.conversations import ConversationsPanel
+from tests.god_modules import conversations_source, status_panel_source
+
+# The system clipboard is one shared resource: in a parallel run these tests
+# must share a worker with the other clipboard file.
+pytestmark = pytest.mark.xdist_group("clipboard")
 
 
 class TestNormalizeLineSeparators:
@@ -195,7 +200,7 @@ class TestEveryOtherFieldThatReachesWhatsApp:
         import inspect
         from status_panel import StatusPanel
 
-        src = inspect.getsource(StatusPanel)
+        src = status_panel_source()
         assert "normalize_line_separators(self._media_caption_field.GetValue())" in src
 
 
@@ -223,5 +228,5 @@ class TestPasteHandlerIsGeneric:
         aloud) a single run-on line while composing."""
         import inspect
 
-        src = inspect.getsource(ConversationsPanel)
+        src = conversations_source()
         assert "self._caption_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)" in src

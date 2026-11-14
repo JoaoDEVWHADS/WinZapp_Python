@@ -607,10 +607,9 @@ class TestTheToastFollowsTheSameSetting:
         """A key missing from a language file renders as the raw key name in
         the UI, so "notif_audio" would be read aloud verbatim."""
         import json
-        import pathlib
-        langs = pathlib.Path("client/languages")
+        from tests.locales import load_strings
         for code in ("pt-BR", "pt-PT", "en-US", "es-ES", "pl"):
-            data = json.loads((langs / f"{code}.json").read_text(encoding="utf-8"))
+            data = load_strings(code)
             assert data.get("notif_audio"), f"notif_audio missing from {code}"
             assert data["notif_audio"] != data["notif_voice_message"], (
                 f"{code} gives the audio and voice toasts the same text, "

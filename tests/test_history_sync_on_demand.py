@@ -30,6 +30,7 @@ import logging
 import pytest
 
 from main import MainWindow
+from tests.god_modules import main_window_source
 
 
 class _Response:
@@ -191,6 +192,22 @@ class TestRequestOlderMessages:
         assert stub.request_older_messages("5535999999999@s.whatsapp.net") is True
         assert seen["url"].endswith("/request-older-messages/5535999999999@c.us")
 
+    def test_only_the_users_home_says_the_user_asked(self, monkeypatch):
+        """The Neonize bridge asks the phone for a chat whose history ends on
+        the phone (types 2/3) only when the user pressed Home, never for the
+        backfill (older_history.py)."""
+        stub = _Stub()
+        bodies = []
+
+        def _post(url, **kwargs):
+            bodies.append(kwargs.get("json"))
+            return _Response(200, {"status": "success", "response": {"requested": True}})
+
+        monkeypatch.setattr("main.requests.post", _post)
+        stub.request_older_messages("5535999999999@s.whatsapp.net", user_asked=True)
+        stub.request_older_messages("5535999999999@s.whatsapp.net")
+        assert bodies == [{"userAsked": True}, None]
+
     def test_prefers_the_lid_form_when_one_is_mapped(self, monkeypatch):
         """Same addressing rule sync_chat_messages() uses."""
         stub = _Stub()
@@ -229,7 +246,7 @@ class TestRequestOlderMessages:
                 {"status": "error", "response": {"error": "on-demand requests disabled"}},
             ),
         )
-        assert stub.request_older_messages("120363000000000000@g.us") is False
+        assert stub.request_older_messages("120363000000000000@g.us") is None
 
     def test_200_without_requested_flag_is_not_a_success(self, monkeypatch):
         stub = _Stub()
@@ -237,7 +254,7 @@ class TestRequestOlderMessages:
             "main.requests.post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {"requested": False}}),
         )
-        assert stub.request_older_messages("120363000000000000@g.us") is False
+        assert stub.request_older_messages("120363000000000000@g.us") is None
 
     def test_disconnected_session_never_calls_the_api(self, monkeypatch):
         stub = _Stub(connected=False)
@@ -246,7 +263,7 @@ class TestRequestOlderMessages:
             raise AssertionError("must not hit the API while disconnected")
 
         monkeypatch.setattr("main.requests.post", _boom)
-        assert stub.request_older_messages("120363000000000000@g.us") is False
+        assert stub.request_older_messages("120363000000000000@g.us") is None
 
     def test_transport_error_is_swallowed(self, monkeypatch):
         stub = _Stub()
@@ -608,7 +625,8 @@ class _FetchStub:
         self._request_succeeds = request_succeeds
         self.requested_for = []
 
-    def request_older_messages(self, jid, timeout=60):
+    def request_older_messages(self, jid, timeout=60, outcome_out=None, expected_context=None,
+                               user_asked=False):
         self.requested_for.append(jid)
         return self._request_succeeds
 
@@ -750,9 +768,9 @@ class TestRoutesArePatched:
         import pathlib
 
         root = pathlib.Path(__file__).resolve().parents[1]
-        main = (root / "client" / "main.py").read_text(encoding="utf-8")
+        main = main_window_source()
         retry = main.index("An unchanged short page is not proof")
-        request = main.index("self.request_older_messages(jid)", retry)
+        request = main.index("self.request_older_messages(", retry)
         keep = main.index("self._keep_backfill_pending(jid, now)", retry)
         completed = main.index("self._completed_backfill_targets(window)", retry)
         assert retry < keep < request < completed
@@ -828,7 +846,7 @@ class _InteractiveWaitStub:
         self._responder = responder
 
     def fetch_older_messages(
-        self, jid, oldest, store_only=False, allow_phone_request=True
+        self, jid, oldest, store_only=False, allow_phone_request=True, expected_context=None
     ):
         self.calls.append(allow_phone_request)
         return self._responder(allow_phone_request, len(self.calls))
@@ -919,6 +937,23 @@ class TestAPhoneWithNothingOlderIsNotAsked:
         with caplog.at_level("INFO"):
             stub.request_older_messages("120363000000000000@g.us")
         assert any("no older messages" in r.message for r in caplog.records)
+        assert not any("did not go out" in r.message for r in caplog.records)
+
+    def test_phone_only_history_is_terminal_and_logged_as_such(self, monkeypatch, caplog):
+        """State 4 reports primaryHasMore=true, yet Web cannot fetch more."""
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.requests.post",
+            lambda *a, **k: _Response(500, {"status": "error", "response": {
+                "primaryHasMore": True,
+                "endOfHistoryTransferType": 4,
+                "phoneOnly": True,
+                "error": "older messages are only available on the phone for this chat",
+            }}),
+        )
+        with caplog.at_level("INFO"):
+            assert stub.request_older_messages("5535999999999@s.whatsapp.net") is False
+        assert any("only on the phone" in r.message for r in caplog.records)
         assert not any("did not go out" in r.message for r in caplog.records)
 
     def test_an_unknown_answer_is_not_read_as_nothing_older(self, monkeypatch):

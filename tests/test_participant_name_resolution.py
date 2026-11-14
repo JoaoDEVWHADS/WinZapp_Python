@@ -49,6 +49,7 @@ class _FakeMainWindow:
 class _PanelStub:
     _get_participant_name = ConversationsPanel._get_participant_name
     _sender_label         = ConversationsPanel._sender_label
+    _saved_contact_name  = ConversationsPanel._saved_contact_name
 
     def __init__(self, main_window):
         self.main_window = main_window

@@ -2,11 +2,16 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.god_modules import conversations_method_source, status_panel_method_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _method_source(relative: str, class_name: str, method_name: str) -> str:
+    if class_name == "ConversationsPanel":
+        return conversations_method_source(method_name)
+    if class_name == "StatusPanel":
+        return status_panel_method_source(method_name)
     source = (ROOT / relative).read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in tree.body:

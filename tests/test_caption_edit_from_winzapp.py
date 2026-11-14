@@ -20,6 +20,7 @@ import pytest
 
 from core.message_edit import edit_kind
 from ui.conversations import ConversationsPanel
+from tests.god_modules import patch_conversations_global
 
 
 def _media(kind="imageMessage", caption="legenda", from_me=True, age=60, **extra):
@@ -198,7 +199,7 @@ class _InlineThread:
 def _inline(monkeypatch):
     monkeypatch.setattr("ui.conversations.threading.Thread", _InlineThread)
     monkeypatch.setattr("ui.conversations.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
-    monkeypatch.setattr("ui.conversations.to_editor_line_endings", lambda s: s)
+    patch_conversations_global(monkeypatch, "to_editor_line_endings", lambda s: s)
 
 
 class TestAltEOnACaption:

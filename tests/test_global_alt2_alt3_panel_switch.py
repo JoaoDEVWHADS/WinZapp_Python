@@ -39,8 +39,21 @@ class _FakeConversationsPanel(_FakeWidget):
     def __init__(self, conversation=None, shown=False):
         super().__init__(shown=shown)
         self.conversation = conversation
+        # Detail pane: shown together with the panel in these scenarios; the
+        # conversation belongs to the main panel.
+        self.conversation_panel = _FakeWidget(shown=shown)
+        self._conversation_origin = "main"
         self.jump_last_calls   = 0
         self.jump_unread_calls = 0
+
+    siblings = ()
+
+    def reveal_open_conversation(self):
+        # Real behaviour: test_panel_switch_wiring.py.
+        for other in self.siblings:
+            other.Hide()
+        self.Show()
+        self.conversation_panel.Show()
 
     def _on_accel_jump_last(self, event):
         self.jump_last_calls += 1
@@ -61,6 +74,8 @@ class _Stub:
         self.archived_conversations_panel = _FakeWidget(shown=False)
         self.status_panel = _FakeWidget(shown=True)
         self.content_panel = _FakeWidget()
+        self.conversations_panel.siblings = (
+            self.archived_conversations_panel, self.status_panel)
 
 
 class TestAlt2BringsConversationsPanelToFront:

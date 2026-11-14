@@ -51,6 +51,7 @@ import pytest
 
 from core.utils import expanded_min_visible, history_window, paginated_window
 from ui.conversations import ConversationsPanel
+from ui.conversation_panel.reading_position import ReadingPositionMixin
 
 JID = "1234567890@s.whatsapp.net"
 OTHER_JID = "1098765432@s.whatsapp.net"
@@ -140,7 +141,7 @@ class _FakeMainWindow:
         return bool(left_forms and right_forms and (left_forms & right_forms))
 
 
-class _Stub:
+class _Stub(ReadingPositionMixin):
     """Minimal stand-in for ConversationsPanel for the history-load paths."""
 
     def __init__(self, conversation=None, main_window=None, sorted_messages=None,
@@ -160,6 +161,11 @@ class _Stub:
         self._expanded_oldest_msg_id = ""
         self._server_history_anchor = {}
         self.server_fetch_calls = 0
+
+    def _sync_message_rows(self, old_rows, new_rows):
+        # Stand-in for the per-row write (tests/test_message_rows_in_place.py
+        # covers the real one): the fake list just ends up holding new_rows.
+        self.messages_list.rows = [(self._render_message_line(m),) for m in new_rows]
 
     # Real implementations under test.
     _merge_history_into_records = ConversationsPanel._merge_history_into_records
@@ -669,5 +675,5 @@ class TestTheWindowIsReadFromTheScreenBeforeEachRebuild:
     def test_populate_messages_rereads_before_it_clears_the_list(self):
         src = inspect.getsource(ConversationsPanel.populate_messages)
         assert src.index("self._refresh_expanded_window_before_rebuild()") < src.index(
-            "self.messages_list.DeleteAllItems()"
+            "self._sync_message_rows("
         )

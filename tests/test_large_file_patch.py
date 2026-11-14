@@ -8,6 +8,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "client"))
 
 from core import wppconnect_sender_layer_patch as sender_patch
+from tests.god_modules import main_window_source, conversations_source
 
 
 def test_sender_patch_migrates_vanilla_and_legacy_sources():
@@ -175,10 +176,8 @@ def test_document_limits_match_whatsapps_2gb_document_ceiling():
     """WhatsApp allows 2 GB for documents. WinZapp capped them at 1 GB for no
     reason other than sharing one constant with photos/videos/audio, which do
     stop at 1 GB."""
-    conversations = (ROOT / "client" / "ui" / "conversations.py").read_text(
-        encoding="utf-8"
-    )
-    main = (ROOT / "client" / "main.py").read_text(encoding="utf-8")
+    conversations = conversations_source()
+    main = main_window_source()
 
     assert "_MAX_DOCUMENT_BYTES = 2 * 1024 * 1024 * 1024" in conversations
     assert "_MAX_DOCUMENT_MB    = 2048" in conversations
@@ -191,9 +190,7 @@ def test_media_ceilings_stay_at_1gb():
     actually move (see wppconnect_sender_layer_patch.py) — that gap is what
     used to force a 500 for any media send past 70MB. 1 GB is WhatsApp's own
     limit for them, and raising documents to 2 GB must not drag these up too."""
-    conversations = (ROOT / "client" / "ui" / "conversations.py").read_text(
-        encoding="utf-8"
-    )
+    conversations = conversations_source()
 
     assert "_MAX_MEDIA_BYTES    = 1 * 1024 * 1024 * 1024" in conversations
     assert "_MAX_MEDIA_MB       = 1024" in conversations
@@ -204,10 +201,8 @@ def test_every_gate_a_large_document_passes_agrees_on_2gb():
     """A document between 1 and 2 GB crosses four independent ceilings. If any
     one of them is still 1 GB the send fails somewhere the user cannot see, so
     they are pinned together rather than one by one."""
-    conversations = (ROOT / "client" / "ui" / "conversations.py").read_text(
-        encoding="utf-8"
-    )
-    main = (ROOT / "client" / "main.py").read_text(encoding="utf-8")
+    conversations = conversations_source()
+    main = main_window_source()
     websocket_client = (ROOT / "client" / "core" / "websocket_client.py").read_text(
         encoding="utf-8"
     )

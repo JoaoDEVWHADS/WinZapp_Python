@@ -10,4 +10,99 @@
 
 `client/core/focus_cloak.py` is the actual mechanism. NVDA decides whether a focus event is worth speaking *before* speaking it, in `IAccessibleHandler.processFocusNVDAEvent()` → `IAccessible._get_shouldAllowIAccessibleFocusEvent`, which walks the object and its ancestors for `State.FOCUSED` and discards the event when none has it — and never recovers it, because NVDA reacts to events and does not poll the system focus. So a `wx.Accessible` on the button briefly reports its MSAA state without `STATE_SYSTEM_FOCUSED` and the announcement is never produced. Three things keep it safe, and each is load-bearing: the shim answers `wx.ACC_NOT_IMPLEMENTED` whenever it is not armed (wx then falls back to the standard MSAA object, so the control is untouched the rest of the time); it is installed **once per window and reused** via a flag, because `SetAccessible()` hands ownership to C++; and it disarms after ~500 ms, because it must hide only the focus move *WinZapp* performs — swallowing the announcement of a Tab the user pressed themselves would be far worse than the noise being removed. The `silence()` burst stays behind it as the weaker fallback (a control read over UIA rather than MSAA), no longer as the mechanism. `ConversationsPanel` and `StatusPanel` each keep their own copy of `_voice_recording_silence_enabled()` / `_focus_recording_button_silently()` / `_silence_send_voice_focus_if_enabled()`; they must stay in step, and both key on the silence toggle **alone** — `extended_sr_compat_enabled` being off means "stop talking to my screen reader", never "start interrupting it".
 
-**The same lesson, one control over: a list row must never be rewritten while focus is moving off it.** A wx.ListCtrl row is a single MSAA object whose *name* is the whole rendered line, and NVDA's `NVDAObject.event_nameChange` speaks it only `if self is api.getFocusObject()` — so marking a finished voice note "reproduzido" makes NVDA read the **entire row** back, ahead of the newly focused one, whenever it lands while NVDA still believes the finished row has focus. Two successive attempts to fix this by *ordering* the two events failed, and both are measurable on the real code path (`tests/test_audio_chain_played_repaint_hold.py`): `refresh_message_status()` does not write anything, it queues the row behind a 120 ms coalescing timer, so the write landed 142 ms after the focus move — a margin, not a guarantee; and `mark_audio_message_played()`'s own played receipt echoes back from WhatsApp onto `on_message_status_update()` with `skip_panel_refresh=False`, repainting the row without passing through the chain at all — measured writing it **95 ms before** the focus move. `ConversationsPanel._release_chain_held_repaints()` is the actual fix: while the chain is moving focus, `_flush_status_repaints()` writes nothing at all and parks every queued row, releasing them when the sequence ends — at which point focus is on the last voice note and every held row is an earlier one, so NVDA is silent by its own rule rather than by timing. The hold is armed in `on_audio_timer()` *before* `mark_audio_message_played()` runs, which is what catches the echo. If you add another place that can end a sequence, call the release there too; it is idempotent but does not itself check whether the chain is still running.
+**The same lesson, one control over: a list row must never be rewritten while focus is moving off it.** A wx.ListCtrl row is a single MSAA object whose *name* is the whole rendered line, and NVDA's `NVDAObject.event_nameChange` speaks it only `if self is api.getFocusObject()` — so marking a finished voice note "reproduzido" makes NVDA read the **entire row** back, ahead of the newly focused one, whenever it lands while NVDA still believes the finished row has focus. Two successive attempts to fix this by *ordering* the two events failed, and both are measurable on the real code path (`tests/test_audio_chain_played_repaint_hold.py`): `refresh_message_status()` does not write anything, it queues the row behind a 120 ms coalescing timer, so the write landed 142 ms after the focus move — a margin, not a guarantee; and `mark_audio_message_played()`'s own played receipt echoes back from WhatsApp onto `on_message_status_update()` with `skip_panel_refresh=False`, repainting the row without passing through the chain at all — measured writing it **95 ms before** the focus move. `ConversationsPanel._release_chain_held_repaints()` is the actual fix: while the chain is moving focus, `_flush_status_repaints()` parks the row the chain is leaving and releases it when the sequence ends — at which point focus is on the last voice note and every held row is an earlier one, so NVDA is silent by its own rule rather than by timing. The hold is armed in `on_audio_timer()` *before* `mark_audio_message_played()` runs, which is what catches the echo. If you add another place that can end a sequence, call the release there too; it is idempotent but does not itself check whether the chain is still running.
+
+**Only the focused row and the row the chain leaves are parked, never the conversation (2026-10-12).** The first version of the hold parked *every* queued row for as long as a sequence was alive, and a sequence stays alive while its audio is paused. Measured in a session log: a chain armed at 23:27:41, its third voice note paused at 23:29:01 to record a reply, and the receipts of the two replies sent next (`status=2`, `status=4` within a second of each send) written to no row until a later playback ended the sequence — the row showed no status at all while the message data window, which asks WhatsApp directly, said "read". The rule now lives in `client/core/chain_repaint_guard.py` (`ChainRepaintGuard`), and it asks one thing of a row about to be rewritten while a sequence runs: **does it have list focus?** Which message is playing does not matter — the user can leave the audio playing and walk the list, and Settings > Interface can stop the chain from moving focus at all, so the focused row may be the voice note playing, one that already played, or a message of their own; it is the row the screen reader would read over the audio either way. One row is parked without focus: the one the chain has just moved focus off (`_chain_moving_focus_off()`, called *before* `Focus()`), kept until the release because NVDA handles a batch's name changes before that batch's focus change, so "written after the focus move" is still a bet. Every other row is written when its receipt arrives. A row parked for having focus gets a second look when focus moves (`_on_message_focused()` → `_recheck_parked_chain_repaints()`, through the coalescing timer, never written on top of the move) and on every later repaint pass. Pausing releases: a paused sequence plays nothing a row read aloud could talk over, and the next voice note to end arms the hold again. `_auto_chain_next_audio()`'s early exits (conversation changed, finished message gone, not a voice note) also release, or the hold would outlive a sequence the user walked away from.
+
+## The message list is never cleared (2026-10-01)
+
+`messages_list` is written only through `MessageRowsMixin._sync_message_rows()`
+(`ui/conversation_panel/message_rows.py`, planner in `core/list_row_diff.py`):
+it deletes and inserts only the rows whose identity differs and rewrites a
+row's text only when the text differs. A `DeleteAllItems()` + re-`Append()` —
+even followed by a careful re-`Focus()` — re-announces the focused row, and
+`populate_messages()` used to run it whenever the 60 s poll found a live message
+and a reaction record together (neither the tail-append nor the in-place repaint
+accepted the mix), or after the user's own send (a pending row with no id is
+"not comparable"). Measured in a 11 h log: 81 rebuilds, none of them caused by
+typing/recording presence. A structural test fails if a new
+`messages_list.DeleteAllItems` appears in the panel's modules. Focus is restored
+only when the control does not already hold it on the right row.
+
+The control may hold one row past `_sorted_messages`: the temporary
+"X is typing..." row (`ui/conversation_panel/typing_row.py`), always last and
+never a message. Count the control's message rows with `message_row_count()`
+and add a message row with `append_message_row()`, never
+`messages_list.Append()` (a structural test guards it), or a message row lands
+below the typing row and the row's removal deletes that message instead.
+
+## Switching to a chat panel: hidden conversation, chat list focus, no work (2026-10-02)
+
+PR #339 made an open conversation visible only in the panel it was opened
+from and showed it again when its panel came back; #346 made that cheap. The
+maintainer still heard a delay on every Alt+1 <-> Alt+4 with a conversation
+open in the other list (the pane re-shown, a displaced conversation reopened),
+so the rule went back: **a plain panel switch never makes the conversation
+pane visible and never loads anything.**
+
+- **The rule.** Alt+1, Alt+4, the navigation list, the locked panel and the
+  vault close all go through `ConversationPanelVisibilityMixin.show_chat_panel()`
+  (`ui/conversation_panel/panel_visibility.py`). It hides every other panel
+  *and the detail pane*, and focuses that panel's **chat list**, never a
+  message list (#339's regression: Alt+4 landed in the archived chat's
+  messages). The open conversation stays open (`conversation` set, message
+  list untouched) but hidden, so `conversation_in_view()` is false and it stays
+  out of mark-as-read, sounds, notifications and typing announcements. A switch
+  is Show/Hide + `restore_selection()` + the `[panel-switch]` log line: no
+  `populate_messages`, no `navigate_to_conversation`, no request, no thread, no
+  `wx.CallAfter`. Do not add one: that is the delay.
+- **Staying is not switching.** Alt+1 inside a main conversation, Alt+4 inside
+  an archived one (and the locked panel's own entry, and choosing the panel you
+  are in from the navigation list) change no panel, so they must not hide the
+  pane: the focus goes to that chat list and the conversation stays on screen.
+  `show_chat_panel()` reads `_detail_on_screen()` *before* anything is hidden
+  and `panel_layout(..., keep=True)` keeps the pane only in the panel the
+  conversation belongs to; the navigation list hides the content panels first,
+  so it reads it before and passes `keep=`. Coming from Status or Calls, or
+  from the other chat panel, is a real switch and hides it as above.
+- **Explicit reveal.** The conversation comes back only on an explicit ask:
+  Alt+M, Alt+2, Alt+3 (frame-level `_on_global_*`, the chat list's
+  `_on_list_*` handlers, the archived and locked lists' Alt+M), all through
+  `reveal_open_conversation()` -> `show_chat_panel(origin, focus=False,
+  reveal=True)`. It shows the pane in the panel the conversation **belongs
+  to** (`_conversation_origin`), so Alt+M on Alt+4 with a main chat open goes to
+  the main panel; an archived chat's explicit reveal switches to the archived
+  panel, list and pane together. The handler then moves focus itself. Opening a
+  chat from a list (Enter, notification, tray, open-by-JID) is a fresh open and
+  composes its own Show/Hide as before. The native mnemonic of the messages
+  label inside the hidden pane cannot do this, which is why the main, archived
+  and locked list tables bind Alt+M explicitly
+  (`tests/test_alt_m_reveal_accelerators.py`).
+- **No parked conversations.** The `_parked_by_origin` / `_finish_panel_reopen`
+  / `resume=True` machinery existed only to bring a displaced conversation back
+  on a switch. Nothing asks for the displaced one explicitly (an explicit
+  command always means the open conversation), so it was deleted. Archived X
+  open, then main Y opened: Y is the conversation; X returns by being opened
+  from its list again, paying the open cost then.
+- **One function.** Do not hand-roll a Show/Hide sequence for a new switch.
+  Panel **opens** (`ArchivedConversationsPanel.on_conversation_selected`,
+  `chat_list.py`'s open-by-JID, `open_locked_conversation`, the
+  `_restore_to_*_list` Esc paths) still compose their own Show/Hide: an open
+  puts the conversation alone in the place of its list and focus follows the
+  user's setting. `lock_chat_vault` moves the user to the main list only when
+  the locked list or a locked chat was on screen. Each switch logs one
+  `[panel-switch]` line (panel, origin, layout flags, what `IsShown()` really
+  reports; no JIDs). `tests/test_panel_switch_wiring.py` runs the real
+  entry-point methods against recording widgets over origin x target and every
+  explicit command, `tests/test_panel_switch_wx_semantics.py` repeats the key
+  sequences with wx parent/child visibility.
+
+## What an open costs
+
+- **Where the time goes on an open** (UI thread): the DB read of up to 200
+  messages plus `populate_messages` (log: "rebuilt 200 row(s) in ~90-160 ms").
+  The serial `GET /reactions/<id>` calls (up to 40, ~41 ms each, one per
+  message) are a background thread that predates #339 (commit 040b589b) with a
+  five-minute per-chat cooldown; they do not block the UI but each applied
+  batch triggers one more `populate_messages`. `/group-info` was fetched by two
+  threads at once; both now go through `get_group_info_recent()`.

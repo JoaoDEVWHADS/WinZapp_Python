@@ -76,11 +76,81 @@ class TestMultiAccountShortcutVisibility:
         assert "shortcut_ctrl_alt_num_label" in text
 
 
+class _FakeVault:
+    def __init__(self, configured, hide=True):
+        self.configured = configured
+        self.hide_navigation = hide
+
+
+class _FakeMainWindowNoVault:
+    account_id = None
+    registry = None
+
+
+class _FakeMainWindowUnconfiguredVault:
+    account_id = None
+    registry = None
+    _chat_lock_vault = _FakeVault(configured=False)
+
+
+class _FakeMainWindowConfiguredVault:
+    account_id = None
+    registry = None
+    _chat_lock_vault = _FakeVault(configured=True)
+
+
+class TestChatLockShortcutVisibility:
+    """Alt+7 opens the locked-chats vault. Listing it unconditionally would
+    itself tell anyone reading this help text that a vault exists — exactly
+    what the vault's own hidden-navigation option is meant to prevent — so
+    it must only appear once a vault has actually been configured."""
+
+    def test_hidden_without_a_main_window(self):
+        text = ShortcutsDialog._build_text(_FakeI18n())
+        assert "shortcut_alt7_label" not in text
+
+    def test_hidden_when_no_vault_was_ever_loaded(self):
+        text = ShortcutsDialog._build_text(_FakeI18n(), _FakeMainWindowNoVault())
+        assert "shortcut_alt7_label" not in text
+
+    def test_shown_while_the_vault_was_never_configured(self):
+        """Its navigation row is visible then, so nothing is being hidden."""
+        text = ShortcutsDialog._build_text(_FakeI18n(), _FakeMainWindowUnconfiguredVault())
+        assert "shortcut_alt7_label" in text
+
+    def test_hidden_once_the_user_hid_the_vault(self):
+        text = ShortcutsDialog._build_text(_FakeI18n(), _FakeMainWindowConfiguredVault())
+        assert "shortcut_alt7_label" not in text
+
+    def test_shown_when_the_configured_vault_is_not_hidden(self):
+        window = _FakeMainWindowConfiguredVault()
+        window._chat_lock_vault = _FakeVault(configured=True, hide=False)
+        text = ShortcutsDialog._build_text(_FakeI18n(), window)
+        assert "shortcut_alt7_label" in text
+        assert "shortcut_ctrl_shift_k_vault_label" in text
+
+    def test_emergency_close_shortcut_does_not_reveal_a_hidden_vault(self):
+        text = ShortcutsDialog._build_text(
+            _FakeI18n(), _FakeMainWindowConfiguredVault()
+        )
+        assert "shortcut_ctrl_shift_k_vault_label" not in text
+
+
 class TestNewAppLevelShortcutsAreDocumented:
     def test_disconnect_and_exit_are_present(self):
         text = ShortcutsDialog._build_text(_FakeI18n())
         assert "shortcut_ctrl_alt_shift_d_label" in text
         assert "shortcut_ctrl_alt_shift_q_label" in text
+
+
+class TestMentionsShortcutIsDocumented:
+    """Alt+Shift+M jumps to the previous message mentioning the user
+    (ConversationsPanel._on_accel_mentions) — GitHub issue: it had no F1
+    entry even though every other bound accelerator does."""
+
+    def test_shortcut_alt_shift_m_label_is_present(self):
+        text = ShortcutsDialog._build_text(_FakeI18n())
+        assert "shortcut_alt_shift_m_label" in text
 
 
 class TestBulkActionShortcutsAreDocumented:
@@ -106,3 +176,27 @@ class TestBulkActionShortcutsAreDocumented:
         ):
             assert key in text
         assert "shortcut_bulk_override_note" in text
+
+
+class TestConversationFilterShortcutsAreDocumented:
+    def test_every_filter_shortcut_is_listed(self):
+        text = ShortcutsDialog._build_text(_FakeI18n())
+        for key in (
+            "shortcut_alt_shift_f_filter_label",
+            "shortcut_filter_all_label",
+            "shortcut_filter_unread_label",
+            "shortcut_filter_groups_label",
+            "shortcut_filter_individual_label",
+        ):
+            assert key in text
+
+
+class TestQuickChatAndBookmarkLines:
+    def test_conversation_section_lists_bookmark_removal_and_quick_chats(self):
+        text = ShortcutsDialog._build_text(_FakeI18n())
+        for key in (
+            "shortcut_ctrl_shift_num_label",
+            "shortcut_quick_chat_open_label",
+            "shortcut_quick_chat_assign_label",
+        ):
+            assert key in text

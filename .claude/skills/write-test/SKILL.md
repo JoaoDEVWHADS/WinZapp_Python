@@ -5,117 +5,89 @@ description: Write a test for WinZapp in the style the repository already uses. 
 
 # Writing a test
 
-## Why the tests look the way they do
+`MainWindow` (`wx.Frame`) and `ConversationsPanel` (`wx.Panel`) cannot be
+instantiated without a `wx.App`, so tests never construct them. `pytest.ini`
+sets `pythonpath = client` (write `from main import MainWindow`,
+`from core.database import ...`) and `asyncio_mode = auto`.
 
-`MainWindow` is a `wx.Frame` and `ConversationsPanel` is a `wx.Panel`. Neither
-can be instantiated without a running `wx.App`, so the suite never constructs
-them. Instead it reaches the logic by one of two routes — and picking the wrong
-one is what stalls people who have only read a single test file.
+## Test behaviour, not source text
 
-`pytest.ini` sets `pythonpath = client`, so imports are written as if from
-inside `client/`: `from main import MainWindow`, `from core.database import
-_delivery_status`. It also sets `asyncio_mode = auto`.
+Call the code and assert on what it returns or does. Do **not** add tests that
+read a source file and assert a string is in it (`assert "x" in source`): they
+break on every refactor and prove nothing about behaviour. A source-text
+assertion is acceptable only as a structural guard with no behaviour to call
+(a workflow file, a patch constant, "no module imports `main`").
 
 ## Route 1 — extract the pure logic (prefer this)
 
-If the behaviour can live as a module-level function, move it there and test it
-directly. `ack_to_status()` and `_delivery_status()` are module-level for
-exactly this reason, and `tests/test_delivery_status.py` just imports and calls
-them. No stub, no wx, nothing to keep in sync.
-
-This is the better outcome even ignoring tests: it shrinks `main.py`, which is
-~26,900 lines and where most logic ends up by default.
+Move the logic to a module-level function and test it directly, as
+`tests/test_delivery_status.py` does. It goes in a plain-function module next
+to its responsibility (`client/main_window/message_rules.py`,
+`client/ui/conversation_panel/media_paths.py`, `client/core/`).
 
 ## Route 2 — unbound method against a stub
 
-For logic that genuinely has to stay on the class (it reads a lot of instance
-state, or calls siblings through `self`), bind the real method onto a plain
-stub. About 100 of the 286 test files do this. The canonical example is
-`tests/test_sender_names.py`:
+For logic that must stay on the class. Canonical example:
+`tests/test_sender_names.py`.
 
 ```python
 from main import MainWindow
 
 
 class _Stub:
-    """Minimal stand-in for MainWindow for name-resolution methods."""
-
     def __init__(self, **kwargs):
         self.contacts = {}
         self._lid_to_phone = {}
-        self._phone_to_lid = {}
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-    # Assigning the function as a CLASS attribute is what makes it a bound
-    # method on instances — this is the whole trick.
+    # A function assigned as a CLASS attribute becomes a bound method.
     _learn_sender_name = MainWindow._learn_sender_name
-    _learn_sender_names_bulk = MainWindow._learn_sender_names_bulk
-
-    # A method that is genuinely a @staticmethod has to be re-wrapped, or it
-    # would receive the stub as its first argument.
+    # A real @staticmethod must be re-wrapped.
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
 ```
 
-Rules that make this work and keep it honest:
+- The stub carries only the attributes the method touches.
+- Bind sibling methods under their real names.
+- Patch a module global with `tests/god_modules.py`
+  (`patch_main_global(monkeypatch, "api_post", fake)`,
+  `patch_conversations_global(...)`), never `monkeypatch.setattr(main, ...)`:
+  a method looks a global up in the mixin module it is defined in.
+- For a raw member use `inspect.getattr_static(MainWindow, name)`, not
+  `MainWindow.__dict__[name]`.
+- Build message dicts through a small local factory (`_group_msg(...)`).
 
-- **The stub carries only the attributes the method under test actually
-  touches.** That is not laziness — it documents exactly which state the method
-  depends on, and a method that needs twenty attributes is telling you
-  something about its design.
-- **Bind siblings under their real names.** If `_learn_sender_names_bulk` calls
-  `self._learn_sender_name`, that name must exist on the stub. Short aliases for
-  the tests' own convenience come *in addition*, never instead.
-- **Build message dicts through a small local factory** (`_group_msg(...)`)
-  rather than repeating the canonical shape — `{"key": {"remoteJid", "fromMe",
-  "id", "participant"}, "message", "messageType", "messageTimestamp",
-  "pushName"}` — in every test.
+## Never wait for real time
+
+A test that sleeps through a timeout, or joins every live thread, costs the
+whole suite seconds. Shrink the timeout on the stub, replace the module's
+`time` with a fake clock, and join only the threads the call started.
 
 ## Shared fixtures (`tests/conftest.py`)
 
-Check here before building your own:
-
 | fixture | what it gives |
 | --- | --- |
-| `wx_app` | a single session-scoped `wx.App`, for the few tests that need real wx objects |
-| `fernet_key`, `fernet` | encryption key / cipher matching the DB layer |
-| `sample_chat`, `sample_contact`, `sample_message`, `sample_data` | canonical payload shapes |
+| `wx_app` | the single session-scoped `wx.App` — never construct a second one |
+| `fernet_key`, `fernet` | key / cipher matching the DB layer |
+| `sample_chat`, `sample_contact`, `sample_message`, `sample_data` | canonical payloads |
 | `tmp_dir` | temporary directory |
-| `in_memory_db`, `db_with_data` | async `DatabaseManager` against an in-memory SQLite |
+| `in_memory_db`, `db_with_data` | async `DatabaseManager` on in-memory SQLite |
 
-`wx_app` is session-scoped on purpose: wxWidgets supports exactly one `App` per
-process, and two test files each building their own used to kill the whole
-pytest process on the headless CI runner — no traceback, no output, just a
-non-zero exit after the "N passed" line had already printed. Two release builds
-died that way. Never construct a second `wx.App`.
+A frame goes through `hidden_frame()`; a module that builds a real `Dialog`
+carries the `wxgui` marker (see `docs/traps/tests-never-open-windows.md`).
+An async test is a plain `async def test_...`, no `@pytest.mark.asyncio`.
 
-## Async tests
+## Naming and running
 
-`asyncio_mode = auto`, so an async test is just `async def test_...` — **no
-`@pytest.mark.asyncio` decorator**, which is the reflex to unlearn. Used mainly
-for `core/database.py` and `core/database_bridge.py`.
-
-## The docstring earns its place
-
-House style is a module docstring that names the *bug family* the file pins,
-with the mechanism spelled out — see `test_delivery_status.py` ("WinZapp says
-sent, the message never arrived", then the three specific defects). A test
-whose docstring only says "tests for X" makes the suite a net, but not
-documentation.
-
-## Naming and verification
-
-Files are `tests/test_<subject>.py`, grouped into `class Test<Behaviour>` when
-a file covers more than one. Then:
+Files are `tests/test_<subject>.py`, grouped into `class Test<Behaviour>`.
+The module docstring names the bug the file pins and its mechanism.
 
 ```
-pytest tests/test_<subject>.py
-pytest
+uv run pytest tests/test_<subject>.py
 ```
 
-Run the whole suite before committing: `pythonpath = client` means a test can
-import from anywhere in the client and break something unrelated.
-
-Note that `pytest.ini` declares `slow`, `integration` and `load` markers that
-nothing currently uses — tests needing real wx take the `wx_app` fixture
-instead. Don't reach for the markers expecting them to select anything.
+Run the files for what you touched. CI runs the whole suite on every PR; in a
+local session run `uv run pytest` serially, at most once, only for a
+cross-cutting change (`tests/conftest.py`, a shared helper, a module split),
+never with `-n`. A cloud session may run in parallel (`-n auto`,
+`--shard K/N`; CLAUDE.md, rule 7). Never pass `--run-wx-gui`.

@@ -19,6 +19,7 @@ from ui.conversations import (
     reveal_file_in_folder,
     saved_media_path,
 )
+from tests.god_modules import patch_conversations_global
 
 
 @pytest.fixture(autouse=True)
@@ -43,9 +44,7 @@ class TestSavedMediaPath:
         saved = tmp_path / "Desktop" / "video.mp4"
         saved.parent.mkdir()
         saved.write_bytes(b"video")
-        monkeypatch.setattr(
-            conversations,
-            "cached_media_path",
+        patch_conversations_global(monkeypatch, "cached_media_path",
             lambda *_: pytest.fail("cache consulted after Save As"),
         )
 
@@ -71,9 +70,7 @@ class TestSavedMediaPath:
     def test_a_downloaded_internal_cache_is_not_user_visible(self, tmp_path, monkeypatch):
         cached = tmp_path / "ABC123.wzmedia"
         cached.write_bytes(b"encrypted")
-        monkeypatch.setattr(
-            conversations,
-            "cached_media_path",
+        patch_conversations_global(monkeypatch, "cached_media_path",
             lambda *_: str(cached),
         )
 
@@ -81,9 +78,7 @@ class TestSavedMediaPath:
 
     @pytest.mark.parametrize("msg_type", ["conversation", "contactMessage", "locationMessage"])
     def test_non_file_messages_are_never_available(self, msg_type, monkeypatch):
-        monkeypatch.setattr(
-            conversations,
-            "cached_media_path",
+        patch_conversations_global(monkeypatch, "cached_media_path",
             lambda *_: pytest.fail("non-file message consulted the cache"),
         )
 
@@ -158,8 +153,8 @@ class TestAction:
         msg = _message()
         panel = _ActionPanel([msg])
         calls = []
-        monkeypatch.setattr(conversations, "saved_media_path", lambda value: "C:\\Saved\\video.mp4")
-        monkeypatch.setattr(conversations, "reveal_file_in_folder", lambda path: calls.append(path) or True)
+        patch_conversations_global(monkeypatch, "saved_media_path", lambda value: "C:\\Saved\\video.mp4")
+        patch_conversations_global(monkeypatch, "reveal_file_in_folder", lambda path: calls.append(path) or True)
 
         panel._on_action_show_in_folder(None)
 
@@ -168,7 +163,7 @@ class TestAction:
 
     def test_unsaved_file_tells_the_user_to_save_as_first(self, monkeypatch):
         panel = _ActionPanel([_message()])
-        monkeypatch.setattr(conversations, "saved_media_path", lambda value: "")
+        patch_conversations_global(monkeypatch, "saved_media_path", lambda value: "")
 
         assert panel.show_message_in_folder(panel._sorted_messages[0]) is False
         assert panel.main_window.outputs == [
@@ -177,7 +172,7 @@ class TestAction:
 
     def test_deleted_saved_copy_is_announced(self, monkeypatch):
         panel = _ActionPanel([_message(_saved_media_path="C:\\gone.mp4")])
-        monkeypatch.setattr(conversations, "saved_media_path", lambda value: "")
+        patch_conversations_global(monkeypatch, "saved_media_path", lambda value: "")
 
         assert panel.show_message_in_folder(panel._sorted_messages[0]) is False
         assert panel.main_window.outputs == [
@@ -186,12 +181,12 @@ class TestAction:
 
     def test_explorer_failure_is_announced(self, monkeypatch):
         panel = _ActionPanel([_message()])
-        monkeypatch.setattr(conversations, "saved_media_path", lambda value: "C:\\Saved\\video.mp4")
+        patch_conversations_global(monkeypatch, "saved_media_path", lambda value: "C:\\Saved\\video.mp4")
 
         def fail(_path):
             raise OSError("Explorer unavailable")
 
-        monkeypatch.setattr(conversations, "reveal_file_in_folder", fail)
+        patch_conversations_global(monkeypatch, "reveal_file_in_folder", fail)
 
         assert panel.show_message_in_folder(panel._sorted_messages[0]) is False
         assert panel.main_window.outputs == [
@@ -368,8 +363,8 @@ def test_successful_save_as_becomes_the_reveal_target(tmp_path, monkeypatch):
     panel = type("_SaveWorkerPanel", (), {})()
     panel.main_window = type("_MW", (), {"key": b"unused"})()
     panel._on_media_saved_as = lambda value: None
-    monkeypatch.setattr(conversations, "cached_media_path", lambda *_: str(cached))
-    monkeypatch.setattr(conversations, "decrypt_bytes", lambda content, key: content)
+    patch_conversations_global(monkeypatch, "cached_media_path", lambda *_: str(cached))
+    patch_conversations_global(monkeypatch, "decrypt_bytes", lambda content, key: content)
     monkeypatch.setattr(wx, "CallAfter", lambda callback, *args: callback(*args))
 
     ConversationsPanel._save_message_media(panel, msg, str(saved))

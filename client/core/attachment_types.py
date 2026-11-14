@@ -115,6 +115,23 @@ def _sniff_media_type(path: str) -> str | None:
     return None
 
 
+#: What an audio file pasted into the message field (Ctrl+V) is sent as:
+#: "audio" (default) or "document". general.pasted_audio_as.
+PASTED_AUDIO_MODES = ("audio", "document")
+DEFAULT_PASTED_AUDIO_AS = "audio"
+
+
+def pasted_attachment_media_type(path: str | os.PathLike[str], pasted_audio_as: str) -> str:
+    """The media type a pasted file is staged with: its classification, except
+    that an audio file follows the user's choice. Anything but "document"
+    reads as the default, so a hand-edited value never turns audio into
+    documents by accident."""
+    media_type = classify_attachment_media_type(path)
+    if media_type == "audio" and pasted_audio_as == "document":
+        return "document"
+    return media_type
+
+
 def classify_attachment_media_type(path: str | os.PathLike[str]) -> str:
     """Return ``image``, ``video``, ``audio`` or ``document`` for *path*.
 

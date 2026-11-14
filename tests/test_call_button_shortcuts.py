@@ -19,28 +19,27 @@ are verified against the source text, matching the existing pattern in
 test_call_video.py's test_video_button_is_restricted_to_individual_chats.
 """
 
-import json
-from pathlib import Path
+from tests.locales import load_strings, registered_locale_codes
 
 import wx
+
+from ui.conversations import ConversationsPanel
 
 from ui.accessible import (
     AccessibleVoiceCallButton,
     AccessibleVideoCallButton,
     AccessibleCallEndButton,
     AccessibleCallMuteButton,
+    AccessibleCallParticipantsButton,
     AccessibleCallSettingsButton,
     AccessibleCallVideoToggleButton,
 )
+from tests.god_modules import main_window_source, conversations_source
 
 
-_CONVERSATIONS_SRC = (
-    Path(__file__).parents[1] / "client" / "ui" / "conversations.py"
-).read_text(encoding="utf-8")
+_CONVERSATIONS_SRC = conversations_source()
 
-_MAIN_SRC = (
-    Path(__file__).parents[1] / "client" / "main.py"
-).read_text(encoding="utf-8")
+_MAIN_SRC = main_window_source()
 
 
 def test_accessible_call_button_classes_report_expected_shortcuts():
@@ -89,13 +88,10 @@ def test_call_buttons_have_dedicated_accessible_objects_set():
 
 
 def test_call_button_labels_have_no_mnemonic_in_any_language():
-    languages = Path(__file__).parents[1] / "client" / "languages"
-    for path in languages.glob("*.json"):
-        if path.name == "language_map.json":
-            continue
-        entries = json.loads(path.read_text(encoding="utf-8"))
-        assert "&" not in entries["voice_call_button"], path.name
-        assert "&" not in entries["video_call_button"], path.name
+    for locale in registered_locale_codes():
+        entries = load_strings(locale)
+        assert "&" not in entries["voice_call_button"], locale
+        assert "&" not in entries["video_call_button"], locale
 
 
 # ── Active-call window (self.voice_call_window in MainWindow) ──────────────
@@ -162,7 +158,6 @@ def test_active_call_window_accessible_objects_set_on_buttons_regardless_of_togg
 
 
 def test_active_call_window_button_labels_have_no_mnemonic_in_any_language():
-    languages = Path(__file__).parents[1] / "client" / "languages"
     keys = (
         "voice_call_end_button",
         "voice_call_settings_button",
@@ -171,9 +166,78 @@ def test_active_call_window_button_labels_have_no_mnemonic_in_any_language():
         "voice_call_video_off_button",
         "voice_call_video_on_button",
     )
-    for path in languages.glob("*.json"):
-        if path.name == "language_map.json":
-            continue
-        entries = json.loads(path.read_text(encoding="utf-8"))
+    for locale in registered_locale_codes():
+        entries = load_strings(locale)
         for key in keys:
-            assert "&" not in entries[key], (path.name, key)
+            assert "&" not in entries[key], (locale, key)
+
+
+def test_call_accelerators_are_not_guarded_by_the_text_field_focus():
+    """wx has no "paste without formatting", so Ctrl+Shift+V and
+    Ctrl+Alt+Shift+V must place the call even from the message field."""
+    assert "_on_accel_voice_call" not in _CONVERSATIONS_SRC
+    assert "_on_accel_video_call" not in _CONVERSATIONS_SRC
+    assert "_focus_is_in_a_text_entry" not in _CONVERSATIONS_SRC
+
+
+def _mnemonic(label):
+    """The Alt+<letter> wx derives from an `&` in a button label, if any."""
+    index = label.find("&")
+    while index >= 0 and index + 1 < len(label):
+        following = label[index + 1]
+        if following == "&":  # literal "&&", not a mnemonic
+            index = label.find("&", index + 2)
+            continue
+        return following.upper()
+    return None
+
+
+def test_incoming_call_dialog_mnemonics_are_unique_in_every_language():
+    """REGRESSION (es-ES): "&Contestar con vídeo" and "&Cerrar ventana" both
+    claimed Alt+C in the same IncomingCallDialog. In wx/Windows two identical
+    mnemonics do not activate -- they only cycle focus between the candidates.
+    A screen-reader user who heard "Contestar con vídeo, Alt+C" and pressed it
+    landed on "Cerrar ventana" instead of answering, and a second Alt+C closed
+    the window on a ringing call.
+
+    The answer button shows exactly one of its two labels at a time, so each
+    is checked against the other simultaneously-visible buttons separately.
+    """
+    always_visible = (
+        "incoming_call_reject_button",
+        "incoming_call_silence_button",
+        "incoming_call_close_button",
+    )
+    layouts = (
+        # voice offer: the plain Answer button
+        ("incoming_call_answer_button",),
+        # video offer: "answer with video" plus "answer without video"
+        (
+            "incoming_call_answer_with_video_button",
+            "incoming_call_answer_without_video_button",
+        ),
+    )
+    for locale in registered_locale_codes():
+        entries = load_strings(locale)
+        for layout in layouts:
+            seen = {}
+            for key in layout + always_visible:
+                letter = _mnemonic(entries[key])
+                if letter is None:
+                    continue
+                assert letter not in seen, (
+                    path.name, letter, seen.get(letter), key,
+                )
+                seen[letter] = key
+
+
+def test_call_participants_button_reports_ctrl_shift_p_and_is_bound():
+    # Ctrl+P is taken by the switch to video, so participants use Ctrl+Shift+P.
+    assert AccessibleCallParticipantsButton().GetKeyboardShortcut(0) == (wx.ACC_OK, "Ctrl+Shift+P")
+    assert '(wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("P"), self.ID_CALL_PARTICIPANTS),' in _MAIN_SRC
+    assert "id=self.ID_CALL_PARTICIPANTS)" in _MAIN_SRC
+    assert "self._show_active_call_participants, id=self.ID_CALL_PARTICIPANTS" in _MAIN_SRC
+    assert (
+        "self.voice_call_window_participants_button.SetAccessible(AccessibleCallParticipantsButton())"
+        in _MAIN_SRC
+    )

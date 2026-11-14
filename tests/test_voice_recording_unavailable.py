@@ -11,6 +11,7 @@ attributes it touches, matching the pattern used throughout this test suite
 
 import ui.conversations as conversations_module
 from ui.conversations import ConversationsPanel
+from tests.god_modules import patch_conversations_global
 
 
 class _FakeI18n:
@@ -43,7 +44,7 @@ def test_no_op_when_no_conversation_is_open():
 
 
 def test_reports_unavailable_message_when_pyaudio_missing(monkeypatch):
-    monkeypatch.setattr(conversations_module, "pyaudio", None)
+    patch_conversations_global(monkeypatch, "pyaudio", None)
     stub = _Stub()
     stub._start_voice_recording()
     assert stub.main_window.output_calls == ["voice_recording_unavailable"]

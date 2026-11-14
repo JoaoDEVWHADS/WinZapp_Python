@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: WinZapp build <build@winzapp.invalid>
+Date: Thu, 29 Oct 2026 14:44:07 -0300
+Subject: [PATCH] appstate: send under appStateSyncLock, as fetch does
+
+sendAppState read the stored version and hash, encoded, sent and applied
+409 conflicts without the lock fetchAppState holds. Two sends together, or
+a send and a fetch started by a server notification, read the same
+version; the loser applied the conflicting patches on top of a version the
+other had already moved past, and the collection's LTHash stopped matching
+(seen on a real account: regular_low broke again right after every
+recovery). The read-encode-send-apply now holds the lock; the fetch after
+a successful send takes it itself, as before.
+---
+ appstate.go | 38 +++++++++++++++++++++++++++-----------
+ 1 file changed, 27 insertions(+), 11 deletions(-)
+
+diff --git a/appstate.go b/appstate.go
+index 9a4011d..0a41969 100644
+--- a/appstate.go
++++ b/appstate.go
+@@ -555,6 +555,32 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
+ 	if cli == nil {
+ 		return ErrClientIsNil
+ 	}
++	// The read-encode-send-apply below works on the stored version and hash, so
++	// it holds the same lock fetchAppState does. Without it, two sends (or a
++	// send and a fetch started by a server notification) read the same version;
++	// the loser got 409 and applied the conflicting patches on top of a version
++	// the other had already moved past, leaving a mismatching LTHash.
++	cli.appStateSyncLock.Lock()
++	err := cli.sendAppStateLocked(ctx, patch, allowRetry)
++	cli.appStateSyncLock.Unlock()
++	if err != nil {
++		return err
++	}
++	eventsToDispatch, err := cli.fetchAppState(ctx, patch.Type, false, false)
++	if err != nil {
++		return fmt.Errorf("failed to fetch app state after sending update: %w", err)
++	}
++	go func() {
++		for _, evt := range eventsToDispatch {
++			cli.dispatchEvent(evt)
++		}
++	}()
++
++	return nil
++}
++
++// sendAppStateLocked sends the patch; the caller holds appStateSyncLock.
++func (cli *Client) sendAppStateLocked(ctx context.Context, patch appstate.PatchInfo, allowRetry bool) error {
+ 	version, hash, err := cli.Store.AppState.GetAppStateVersion(ctx, string(patch.Type))
+ 	if err != nil {
+ 		return err
+@@ -625,21 +651,11 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
+ 						cli.dispatchEvent(evt)
+ 					}
+ 				}()
+-				return cli.sendAppState(ctx, patch, false)
++				return cli.sendAppStateLocked(ctx, patch, false)
+ 			}
+ 		}
+ 		return mainErr
+ 	}
+-	eventsToDispatch, err := cli.fetchAppState(ctx, patch.Type, false, false)
+-	if err != nil {
+-		return fmt.Errorf("failed to fetch app state after sending update: %w", err)
+-	}
+-	go func() {
+-		for _, evt := range eventsToDispatch {
+-			cli.dispatchEvent(evt)
+-		}
+-	}()
+-
+ 	return nil
+ }
+ 

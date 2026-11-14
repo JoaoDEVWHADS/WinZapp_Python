@@ -56,6 +56,9 @@ class _Stub:
     export_settings_to_file = MainWindow.export_settings_to_file
     import_settings_from_file = MainWindow.import_settings_from_file
     apply_settings_live = MainWindow.apply_settings_live
+    # The real one: with no `_app_settings` (no shared file here) it returns
+    # at once. tests/test_global_settings_reconcile.py drives it for real.
+    _persist_global_settings = MainWindow._persist_global_settings
 
     def __init__(self, settings=None):
         self.settings = settings if settings is not None else _settings()
@@ -101,7 +104,7 @@ class _Stub:
     def _sync_incoming_call_bar(self, message=""):
         self.steps.append("call bar")
 
-    def add_chats_to_ui(self):
+    def _schedule_set_chats(self):
         self.steps.append("chat list")
 
     def save_settings(self):
@@ -111,7 +114,7 @@ class _Stub:
 class _ImportStub(_Stub):
     """Separates "was it applied" from "what did applying do"."""
 
-    def apply_settings_live(self):
+    def apply_settings_live(self, imported_global=None):
         self.applied_live += 1
 
 
@@ -352,6 +355,15 @@ class TestImporting:
 
 
 class TestTakingEffect:
+    def test_an_import_recomputes_chat_order_instead_of_reusing_sorted_rows(self):
+        stub = _Stub()
+        calls = []
+        stub._schedule_set_chats = lambda: calls.append("recompute")
+        stub.settings["user_interface"]["keep_pinned_chat_order"] = True
+        stub.apply_settings_live()
+        assert calls == ["recompute"]
+        assert "chat list" not in stub.steps
+
     def test_every_part_of_the_app_is_told(self):
         stub = _Stub()
         stub.settings["general"]["global_hotkey"] = {"vk": 0x4B, "mod": 3}
@@ -428,6 +440,50 @@ class TestTakingEffect:
         stub.apply_settings_live()
 
         assert "language" in stub.steps and "chat list" in stub.steps
+
+    def test_an_import_moves_only_the_api_keys_it_carried(self):
+        """The import's reconciliation has just pulled the install-wide keys
+        the file did not carry, so they hold another account's choice: a file
+        with only sounds in it must not move this process onto that API (its
+        attributes are the API it uses until the next start)."""
+        stub = _Stub()
+        stub.settings["connection"].update({"wpp_server": "http://192.0.2.10",
+                                            "wpp_ws_server": "ws://192.0.2.10",
+                                            "wpp_custom_api": True,
+                                            "wpp_api_key": "outra-conta"})
+
+        stub.apply_settings_live(imported_global=[])
+
+        assert stub.wpp_server == "http://127.0.0.1"
+        assert stub.wpp_ws_server == "ws://127.0.0.1"
+        assert stub.wpp_custom_api is False
+        assert stub.wpp_api_key == "install-key"
+
+    def test_and_those_it_carried_move_together(self):
+        stub = _Stub()
+        stub.settings["connection"].update({"wpp_server": "https://api.exemplo.com",
+                                            "wpp_ws_server": "wss://api.exemplo.com",
+                                            "wpp_custom_api": True,
+                                            "wpp_api_key": "minha-chave"})
+
+        stub.apply_settings_live(imported_global=[
+            "wpp_server", "wpp_ws_server", "wpp_custom_api", "wpp_api_key"])
+
+        assert stub.wpp_server == "https://api.exemplo.com"
+        assert stub.wpp_custom_api is True
+        assert stub.wpp_api_key == "minha-chave"
+
+    def test_an_import_without_a_language_does_not_switch_the_window(self):
+        """A language pulled from another account goes through
+        MainWindow._apply_pending_language_switch(), which waits for the
+        window to lose focus; the import must not switch it under the user."""
+        stub = _Stub()
+
+        stub.apply_settings_live(imported_global=["show_tray_icon"])
+        assert "language" not in stub.steps
+
+        stub.apply_settings_live(imported_global=["language"])
+        assert "language" in stub.steps
 
     def test_it_works_before_the_window_has_a_conversation_panel(self):
         stub = _Stub()

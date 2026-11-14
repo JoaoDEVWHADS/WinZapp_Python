@@ -28,6 +28,7 @@ import wx
 
 from main import MainWindow
 from tests.conftest import hidden_frame
+from tests.god_modules import patch_main_global
 
 
 class _I18n:
@@ -74,6 +75,12 @@ class _CallSettingsMainWindow:
     def _start_call_camera(self):
         self.camera_starts += 1
 
+    def _resume_call_camera(self):
+        # apply() reopens the camera through the same guarded path as the
+        # video-on button (see _call_camera_resuming).
+        self._start_call_camera()
+        self._call_camera_resuming = False
+
 
 def _click_apply_and_close(dialog):
     """Fire the dialog's own Apply handler without pumping a real modal loop."""
@@ -89,7 +96,7 @@ def _click_apply_and_close(dialog):
 
 @pytest.fixture(autouse=True)
 def _stub_device_enumeration(monkeypatch):
-    monkeypatch.setattr("main.enumerate_input_devices", lambda: [(0, "Mic A")])
+    patch_main_global(monkeypatch, "enumerate_input_devices", lambda: [(0, "Mic A")])
     monkeypatch.setattr(
         "sounddevice.query_devices",
         lambda: [{"name": "Speaker A", "max_output_channels": 2}],

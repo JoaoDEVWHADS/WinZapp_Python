@@ -8,7 +8,7 @@ dict order (pt-BR, pt-PT, en-US, es-ES, pl) with pt-BR always pre-selected —
 none of that had anything to do with the user's actual Windows settings.
 
 _load_bootstrap_strings() now sources this dialog's own UI text from the
-matching languages/<code>.json file (the same files core.i18n.I18n reads),
+matching gettext catalog (the same loader core.i18n.I18n uses),
 _detect_system_language() picks that code from the real Windows UI/display
 language (falling back to English when it isn't one of ours or can't be
 detected), and _load_language_choices() sorts the picker's own list

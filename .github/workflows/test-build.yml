@@ -52,21 +52,31 @@ jobs:
   # minutes of build. Skippable only through an explicit input, for the case
   # where you are deliberately building a branch with a known-red suite to look
   # at the UI.
-  test:
-    name: Run test suite
+  # The suite in 4 jobs at once, each with one pytest worker per vCPU
+  # (-n auto). Every test module lands in exactly one shard, and the modules
+  # that put real wx windows up run one after another on a single worker
+  # (tests/ci_shards.py). --durations lists each shard's slowest tests, so
+  # the next slowdown has a name. One job ran ~22,000 tests in ~25 minutes.
+  test-shard:
+    name: Run test suite (shard ${{ matrix.shard }}/4)
     if: inputs.run_tests
+    strategy:
+      # Every shard to the end: one run reports every failure, not the first.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # uv itself, pinned like every action: "latest" would let a release
           # build change toolchains on the day uv ships.
@@ -76,7 +86,18 @@ jobs:
         run: uv sync --locked
 
       - name: Run pytest
-        run: uv run pytest --run-wx-gui
+        run: uv run pytest --run-wx-gui -n auto --shard ${{ matrix.shard }}/4 --durations=20
+
+  # The suite's single verdict, under the name every `needs: test` and the
+  # branch ruleset already use: it fails when any shard did not pass.
+  test:
+    name: Run test suite
+    needs: test-shard
+    if: ${{ always() && inputs.run_tests }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        run: test "${{ needs.test-shard.result }}" = "success"
 
   build:
     # always() so the build still runs when `test` was skipped by run_tests

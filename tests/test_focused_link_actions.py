@@ -268,12 +268,9 @@ class TestTheContextMenuOfAFocusedLink:
 def test_every_locale_carries_the_three_strings():
     """The address is interpolated, so a locale missing the placeholder would
     announce a link without saying which one."""
-    import json
-    from pathlib import Path
-
-    languages = Path(__file__).resolve().parents[1] / "client" / "languages"
+    from tests.locales import load_strings
     for locale in ("pt-BR", "pt-PT", "en-US", "es-ES", "pl"):
-        data = json.loads((languages / f"{locale}.json").read_text(encoding="utf-8"))
+        data = load_strings(locale)
         for key in ("link_copied", "open_link", "copy_link"):
             assert data.get(key), f"{locale} is missing {key}"
         assert "{url}" in data["link_copied"], (

@@ -25,6 +25,7 @@ MainWindow is a wx.Frame and cannot be instantiated without a running wx.App,
 so the method is bound to a plain stub, as elsewhere in this suite.
 """
 
+import inspect
 import types
 
 import pytest
@@ -71,7 +72,8 @@ class _Stub:
         self._ask_succeeds = ask_succeeds
         self.asks = []
 
-    def request_older_messages(self, jid, timeout=60):
+    def request_older_messages(self, jid, timeout=60, outcome_out=None, expected_context=None,
+                               user_asked=False):
         self.asks.append(jid)
         return self._ask_succeeds
 
@@ -87,7 +89,7 @@ def _make(ask_succeeds=True):
     for name in ("fetch_older_messages", "_persist_exhausted_chats",
                  "_persist_older_requested", "_forget_history_exhaustion",
                  "_normalize_jid"):
-        raw = MainWindow.__dict__[name]
+        raw = inspect.getattr_static(MainWindow, name)
         if isinstance(raw, (staticmethod, classmethod)):
             setattr(stub, name, getattr(MainWindow, name))
         else:
@@ -185,7 +187,9 @@ class TestAFailedAskIsNotDurableEvidenceEither:
         """request_older_messages() returning False covers a 60 s timeout and a
         dropped connection. Its own docstring calls this out as writing off
         exactly the chats that still have history coming."""
-        stub = _make(ask_succeeds=False)
+        # A temporary no-send answer is unknown, whereas False is now the
+        # provider's explicit terminal no-more-history verdict.
+        stub = _make(ask_succeeds=None)
         assert stub.fetch_older_messages(JID, ANCHOR) is None
         assert JID not in stub._exhausted_chats
         assert "exhausted_chats" not in stub.db.metadata
@@ -267,3 +271,11 @@ class TestTheGraceIsNotSoLongItStopsPersistingAtAll:
             j: t - (GRACE + 60) for j, t in stub._older_requested_chats.items()}
         reborn.fetch_older_messages(JID, ANCHOR)
         assert reborn.db.metadata["exhausted_chats"] == [JID]
+
+
+def test_a_channels_end_is_never_kept_across_launches():
+    """A channel's end is the server's answer for this session: scrolling up
+    after a restart asks again (it used to be written with the others)."""
+    from main_window.history import persisted_exhausted_chats
+    chats = {"5511999999999@s.whatsapp.net", "120363000000000001@newsletter", "1-2@g.us"}
+    assert persisted_exhausted_chats(chats) == ["1-2@g.us", "5511999999999@s.whatsapp.net"]

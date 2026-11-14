@@ -76,6 +76,24 @@ _TRANSIENT_ENTRIES = frozenset({
 })
 
 
+def profile_is_local(owner) -> bool:
+    """Is this session's Chrome profile on this machine, for WinZapp to
+    inspect, copy, restore and wait on? `owner` is the MainWindow.
+
+    Only with the bundled WPPConnect. With a custom API ("Use custom API
+    (remote server)", `connection.wpp_custom_api`) the browser, its
+    `userDataDir` and any lock on it belong to that server — usually another
+    machine, and even on this one a server WinZapp did not start keeps its
+    profiles in its own folder, not under `<global_dir>/api`. Reading the local
+    folder there finds nothing, and every conclusion drawn from it is false:
+    issue #414 got "the profile is damaged and there is no saved copy" for an
+    intact 25 MB profile on a Linux server, because the empty local folder
+    read as `verdict=missing`. Read live, so switching the setting at runtime
+    takes effect at once; an owner without the attribute is a local install.
+    """
+    return not getattr(owner, "wpp_custom_api", False)
+
+
 def profile_dir(global_dir, session_name):
     """Where WPPConnect keeps this session's Chrome profile.
 
@@ -427,6 +445,92 @@ def _replace_directory(staged, final):
 def pending_snapshot_dir(global_dir, session_name):
     """A complete copy waiting to be promoted — see capture_snapshot(stage_only=True)."""
     return snapshot_dir(global_dir, session_name) + ".pending"
+
+
+#: Every directory a restore point of this session can occupy: the snapshot,
+#: the generation it replaced, a copy staged by a backup with WinZapp open, a
+#: copy caught half-way, and what _replace_directory() moves aside (`.old`)
+#: and leaves behind if the process dies before sweeping it.
+_GENERATION_SUFFIXES = ("", ".prev", ".pending", ".partial", ".old", ".pending.old")
+#: delete_snapshots() moves a generation to this name before deleting it.
+_DELETING = ".deleting"
+
+
+def _snapshot_generations(global_dir, session_name):
+    """The directories in _GENERATION_SUFFIXES, then any delete_snapshots()
+    left half-deleted when the process ended."""
+    base = snapshot_dir(global_dir, session_name)
+    live = [base + suffix for suffix in _GENERATION_SUFFIXES]
+    return live + [directory + _DELETING for directory in live]
+
+
+def _tree_size(path):
+    total = 0
+    for folder, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(folder, name))
+            except OSError:
+                pass
+    return total
+
+
+def snapshots_size_bytes(global_dir, session_name) -> int:
+    """How much disk this session's restore points take, all generations."""
+    if not global_dir or not session_name:
+        return 0
+    return sum(_tree_size(d) for d in _snapshot_generations(global_dir, session_name)
+               if os.path.isdir(d))
+
+
+def delete_snapshots(global_dir, session_name, lock_wait=60.0):
+    """Remove every restore point of this session; return the bytes freed,
+    or None when a copy in progress kept the lock for `lock_wait` seconds.
+
+    For Settings > Cópia de segurança's "do not keep copies": the user trades
+    the recovery for the disk space, so the space has to come back — not
+    stopping new copies alone, which would leave ~1-2 GB behind for good.
+    Only this session's generations: the snapshot directory is shared by
+    every account on the install. Under the capture lock, so a copy running
+    at that moment (a clean close, a backup with WinZapp open) is never
+    deleted from under itself or recreated half-way after the delete.
+    """
+    if not global_dir or not session_name:
+        return 0
+    if not _CAPTURE_LOCK.acquire(timeout=lock_wait):
+        return None
+    try:
+        generations = _snapshot_generations(global_dir, session_name)
+        doomed = [d for d in generations if d.endswith(_DELETING) and os.path.isdir(d)]
+        for directory in generations:
+            if directory.endswith(_DELETING) or not os.path.isdir(directory):
+                continue
+            # Renamed first, all of them, then deleted. An rmtree of 1-2 GB
+            # stopped half-way (WinZapp closed during it) would otherwise leave
+            # a partial snapshot under the real name, recent enough for
+            # snapshot_is_fresh() to offer it as a restore point.
+            aside = directory + _DELETING
+            if aside in doomed:
+                shutil.rmtree(aside, ignore_errors=True)
+            try:
+                os.replace(directory, aside)
+            except OSError:
+                aside = directory
+            doomed.append(aside)
+        freed = 0
+        for directory in dict.fromkeys(doomed):
+            if not os.path.isdir(directory):
+                continue
+            size = _tree_size(directory)
+            shutil.rmtree(directory, ignore_errors=True)
+            if not os.path.exists(directory):
+                freed += size
+        logging.info("[profile-snapshot] restore points of session %s deleted "
+                     "(%d bytes freed) — copies turned off in Settings.",
+                     session_name[:12], freed)
+        return freed
+    finally:
+        _CAPTURE_LOCK.release()
 
 
 def capture_snapshot(global_dir, session_name, budget=SNAPSHOT_BUDGET_SECONDS,

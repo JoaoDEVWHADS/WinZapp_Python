@@ -95,3 +95,99 @@ def test_atomic_write_leaves_no_partial(tmp_path):
     s.set("language", "es")
     # no .tmp left behind
     assert not any(f.endswith(".tmp") for f in os.listdir(gd))
+
+
+def test_update_writes_what_the_change_returns(tmp_path):
+    gd = _gd(tmp_path)
+    s = aset.AppSettings(gd)
+    seen = []
+    written = s.update("transcription_external_models",
+                       lambda current: seen.append(current) or current + [{"id": "a"}])
+    assert seen == [[]]  # the default, when nothing is stored
+    assert written == [{"id": "a"}]
+    assert aset.AppSettings(gd).get("transcription_external_models") == [{"id": "a"}]
+
+
+def test_update_refuses_a_per_account_key(tmp_path):
+    s = aset.AppSettings(_gd(tmp_path))
+    with pytest.raises(KeyError):
+        s.update("notifications_enabled", lambda current: current)
+
+
+def test_update_is_one_step_so_two_writers_both_land(tmp_path):
+    """The reason update() exists: get() then set() takes the lock twice, and
+    two account processes appending to one list in that gap each write back
+    their own addition over the other's. The change function sleeps to hold
+    the gap open; each writer uses its own AppSettings, as two processes do."""
+    import threading
+    import time
+
+    gd = _gd(tmp_path)
+
+    def append(tag):
+        def change(current):
+            time.sleep(0.05)
+            return current + [tag]
+        aset.AppSettings(gd).update("transcription_external_models", change)
+
+    threads = [threading.Thread(target=append, args=(f"t{n}",)) for n in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    stored = aset.AppSettings(gd).get("transcription_external_models")
+    assert sorted(stored) == ["t0", "t1", "t2", "t3"]
+
+
+def test_the_default_list_is_handed_out_as_a_copy(tmp_path):
+    """get(), update() and all() each hand a caller the default when nothing
+    is stored; if that were _DEFAULTS' own list, appending to it would change
+    the default for every later reader in the process."""
+    s = aset.AppSettings(_gd(tmp_path))
+    s.get("transcription_external_models").append("leaked by get")
+    s.all()["transcription_external_models"].append("leaked by all")
+    s.update("transcription_external_models",
+             lambda current: current.append("leaked by update") or [])
+    assert aset._DEFAULTS["transcription_external_models"] == []
+    assert s.get("transcription_external_models") == []
+
+
+def test_the_external_models_list_is_never_mirrored_per_account():
+    """_GENERAL_GLOBAL/_CONNECTION_GLOBAL keys are copied into each account's
+    settings and written back whole by _persist_global_settings() when that
+    copy differs from the account's snapshot, the later write winning. A list
+    two accounts add to cannot go that way: each would write back its own list,
+    and the later one would drop the other's addition. It is read and written
+    only through AppSettings.update()."""
+    assert "transcription_external_models" not in aset._GENERAL_GLOBAL
+    assert "transcription_external_models" not in aset._CONNECTION_GLOBAL
+
+
+def test_get_strict_reads_an_absent_file_as_the_defaults(tmp_path):
+    s = aset.AppSettings(_gd(tmp_path))
+    assert s.get_strict("transcription_external_models") == []
+
+
+def test_get_strict_reads_what_is_stored(tmp_path):
+    s = aset.AppSettings(_gd(tmp_path))
+    s.set("transcription_external_models", [{"id": "r1"}])
+    assert s.get_strict("transcription_external_models") == [{"id": "r1"}]
+
+
+@pytest.mark.parametrize("content", ["{ broken", "[1, 2]"])
+def test_get_strict_says_so_when_the_file_is_there_and_unreadable(tmp_path, content):
+    """get() reads it as the defaults; a caller acting on what is absent
+    from a list must be able to tell that from "nothing stored"."""
+    gd = _gd(tmp_path)
+    with open(os.path.join(gd, "app.json"), "w", encoding="utf-8") as f:
+        f.write(content)
+    s = aset.AppSettings(gd)
+    assert s.get("transcription_external_models") == []
+    with pytest.raises(ValueError):
+        s.get_strict("transcription_external_models")
+
+
+def test_get_strict_refuses_a_per_account_key(tmp_path):
+    with pytest.raises(KeyError):
+        aset.AppSettings(_gd(tmp_path)).get_strict("audio_default_speed")

@@ -29,6 +29,9 @@ simply was not wired into the update path.
 import inspect
 
 import pytest
+import wx
+
+from tests.test_wpp_update_not_on_main_thread import TAG, _Stub, threads
 
 from connection_state import chrome_cmdline_owns_session
 from main import MainWindow
@@ -42,7 +45,7 @@ class TestTheUpdateReleasesTheProfile:
     def _source():
         return inspect.getsource(MainWindow._update_wpp_server)
 
-    def test_the_profile_is_released_during_the_update(self):
+    def test_the_profile_is_released_during_the_update(self, threads):
         """Through wait_for_profile_release(), not a bare kill.
 
         The invariant is unchanged — nothing may still hold the profile when
@@ -56,30 +59,27 @@ class TestTheUpdateReleasesTheProfile:
         accepted. wait_for_profile_release() waits for the release and kills
         only what never lets go — which is the case this test was written for.
         """
-        assert "self.wait_for_profile_release(" in self._source()
+        stub = _Stub()
+        calls = []
+        stub.wait_for_profile_release = lambda session, timeout=None: calls.append((session, timeout)) or True
+        stub._update_wpp_server(TAG)
+        threads.run_next()
+        assert calls == [("", 10.0)]
 
-    def test_it_runs_after_the_stop_and_before_the_restart(self):
-        """Clearing before the server is stopped would race the shutdown;
-        clearing after it is back up is too late — start-session has already
-        failed by then."""
-        source = self._source()
-        stop = source.index("self._stop_wpp_server()")
-        release = source.index("self.wait_for_profile_release(")
-        restart = source.index("self.ensure_wpp_running()")
-        assert stop < release < restart
+    @pytest.mark.parametrize("dialog_result", [wx.ID_OK, wx.ID_CANCEL])
+    def test_it_releases_after_stop_before_restart_even_when_cancelled(
+        self, threads, dialog_result
+    ):
+        """Both installation and cancellation must release the old profile
+        before starting the server again. Use the captured worker so no real
+        server, browser or dialog is started."""
+        stub = _Stub(dialog_result=dialog_result)
+        stub._update_wpp_server(TAG)
+        assert stub.events == []
 
-    def test_it_covers_the_failed_update_path_too(self):
-        """_update_wpp_server restarts the server on BOTH branches — a
-        cancelled or failed reinstall still calls ensure_wpp_running(). A lock
-        left over there strands the user just as badly."""
-        source = self._source()
-        release = source.index("self.wait_for_profile_release(")
-        restarts = [
-            i for i in range(len(source))
-            if source.startswith("self.ensure_wpp_running()", i)
-        ]
-        assert len(restarts) >= 2
-        assert all(i > release for i in restarts)
+        threads.run_next()
+
+        assert stub.events == ["stop", "kill", "restart"]
 
     def test_the_release_still_kills_a_profile_nothing_lets_go_of(self):
         """The escape hatch the bare kill existed for is intact: a suspended

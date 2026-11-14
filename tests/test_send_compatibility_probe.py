@@ -24,6 +24,7 @@ import pytest
 
 import main
 from main import MainWindow
+from tests.god_modules import main_window_method_source, patch_main_global, main_window_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,14 +43,116 @@ def test_probe_covers_every_send_primitive_and_reaction_signature():
         "sendImageStatus",
         "sendVideoStatus",
         "sendStatusReaction",
-        "mintStatusReactionKey",
-        "applyOptimisticStatusReaction",
     ):
         assert capability in probe
+    # Which companion exports a like needs, and in which call shape, is decided
+    # once, by the runtime the send itself uses (statusReactionRuntime.ts).
+    assert "[runtimeGlobal]?.plan?.(reactionModule)" in probe
     # A probe that gives up on the reaction module earlier than reactMessage()
     # does reports "incompatible" for a like that would have worked.
     assert "ensureLazyModule" in probe
     assert "'/api/:session/send-capabilities'" in ROUTES.read_text(encoding="utf-8")
+
+
+def test_status_reaction_bootloader_fallback_is_mirrored_in_both_lookups():
+    """WA-JS's ensureLazyModule() is a guaranteed no-op for
+    WAWebSendStatusReactionAction: its own LAZY_MODULES table (read from the
+    compiled 4.6.0 loader) only lists WA-JS's own forward-message feature, so
+    the candidate-component list it builds for any other module id is always
+    empty and the Bootloader fetch it wraps never runs. reactMessage() and
+    getSendCapabilities() therefore fetch the Bootloader component
+    themselves; both copies must agree or the probe and the real send can
+    disagree about whether a reaction will work.
+    """
+    source = DEVICE.read_text(encoding="utf-8")
+    react = source[
+        source.index("export async function reactMessage") :
+        source.index("export async function getSendCapabilities")
+    ]
+    probe = source[source.index("export async function getSendCapabilities") :]
+    for section, name in ((react, "reactMessage"), (probe, "getSendCapabilities")):
+        for marker in (
+            "moduleRequire?.('Bootloader')",
+            "componentMap",
+            "loadModules",
+            # Both lookups read the SAME plan, handed in as an argument.
+            "bootloaderPlan: STATUS_REACTION_BOOTLOADER",
+            "bootloaderPlan.knownCandidates",
+            "bootloaderPlan.tierSources",
+            # A total deadline for the loop, never a flat per-candidate wait.
+            "const deadline = Date.now() + budgetMs;",
+            "Math.min(bootloaderPlan.perCandidateMs, remainingMs)",
+        ):
+            assert marker in section, f"{marker!r} missing from {name}"
+
+
+def test_the_known_status_bundles_are_fetched_before_the_tier_matches():
+    """REGRESSION (live 2026-10-29): the tiers were tried first and the known
+    bundles only when no tier matched. The "reaction" tier then matched an
+    unrelated component (WAWebWrapperMessageDropdownMenuReactionsTray.react),
+    so the status drawer bundle, which carries WAWebSendStatusReactionAction,
+    was never fetched: liking a status failed, and startup said it might not
+    work on this connection."""
+    source = DEVICE.read_text(encoding="utf-8")
+    react = source[
+        source.index("export async function reactMessage") :
+        source.index("export async function getSendCapabilities")
+    ]
+    probe = source[source.index("export async function getSendCapabilities") :]
+    for section, name in ((react, "reactMessage"), (probe, "getSendCapabilities")):
+        known = section.index("let candidates: string[] = bootloaderPlan.knownCandidates")
+        tiers = section.index("for (const pattern of tiers)")
+        assert known < tiers, f"{name} tries the tiers before the known bundles"
+        assert "candidates = candidates.concat(matched);" in section, name
+    plan = source[source.index("const STATUS_REACTION_BOOTLOADER"):]
+    assert plan.index("'WAWebStatusDrawerFlow.react'") < plan.index("maxCandidates")
+
+
+def test_the_status_reaction_candidate_list_exists_exactly_once():
+    """REGRESSION: the list the next WhatsApp rename will need updated was
+    copied literally into both page.evaluate calls, guarded only by a test that
+    checked four markers were present in each. Updating one copy left the
+    startup probe warning that reacting to a status may not work while
+    reacting worked -- or the reverse."""
+    source = DEVICE.read_text(encoding="utf-8")
+    assert source.count("'WAWebStatusDrawerFlow.react'") == 1
+    assert source.count("'WAWebStatusQuotedFlow.react'") == 1
+    assert "/status.*reaction|reaction.*status/i" not in source
+
+
+def _ts_number(source, name):
+    import re
+    match = re.search(rf"const {name} = (\d+);", source)
+    assert match, f"{name} not found"
+    return int(match.group(1))
+
+
+def test_the_bootloader_budgets_fit_inside_the_callers_timeouts():
+    """REGRESSION: each loadModules() attempt had its own 8 s, up to six
+    candidates -- 48 s -- while main.py gives up on /react-message after 15 s
+    and on /send-capabilities after 10 s. A slow Bootloader then made Python
+    report a reaction as failed while the page went on to SEND it (and the echo
+    arrived as someone else's reaction to the user's own message), and the
+    startup probe never returned a verdict at all.
+
+    Checked across the language boundary: the Node budgets are read from the
+    patched source and the Python timeouts from main.py, so tightening either
+    side without the other fails here."""
+    import re
+    source = DEVICE.read_text(encoding="utf-8")
+    main_py = main_window_source()
+
+    react_call = main_py[main_py.index('/react-message"'):]
+    react_timeout = int(re.search(r"timeout=(\d+)", react_call).group(1))
+    probe_call = main_py[main_py.index('"/send-capabilities"'):]
+    probe_timeout = int(re.search(r"timeout=(\d+)", probe_call).group(1))
+
+    send_budget = _ts_number(source, "STATUS_REACTION_SEND_BUDGET_MS")
+    probe_budget = _ts_number(source, "STATUS_REACTION_PROBE_BUDGET_MS")
+
+    # Leave at least a few seconds for everything else each request does.
+    assert send_budget <= react_timeout * 1000 - 5000
+    assert probe_budget <= probe_timeout * 1000 - 3000
 
 
 def test_no_send_handler_turns_a_post_send_verdict_into_a_500():
@@ -123,8 +226,7 @@ def stub(monkeypatch):
 
 
 def _answer(monkeypatch, status_code, body):
-    monkeypatch.setattr(
-        main, "api_get", lambda *a, **k: _Response(status_code, body)
+    patch_main_global(monkeypatch, "api_get", lambda *a, **k: _Response(status_code, body)
     )
 
 
@@ -148,7 +250,7 @@ class TestAnUnavailableProbeSaysNothing:
         def _boom(*args, **kwargs):
             raise OSError("connection refused")
 
-        monkeypatch.setattr(main, "api_get", _boom)
+        patch_main_global(monkeypatch, "api_get", _boom)
 
         stub._check_send_capabilities()
 
@@ -180,7 +282,7 @@ class TestAnUnansweredProbeIsAskedAgain:
         def _boom(*args, **kwargs):
             raise OSError("timed out")
 
-        monkeypatch.setattr(main, "api_get", _boom)
+        patch_main_global(monkeypatch, "api_get", _boom)
 
         stub._check_send_capabilities()
 
@@ -242,7 +344,7 @@ class TestTheRetryInsideOneConnection:
             calls.append(kwargs)
             return queue.pop(0) if len(queue) > 1 else queue[0]
 
-        monkeypatch.setattr(main, "api_get", _fake_get)
+        patch_main_global(monkeypatch, "api_get", _fake_get)
         return calls
 
     def test_an_unanswered_probe_is_asked_again_without_a_reconnection(
@@ -327,7 +429,46 @@ class TestOnlyARealVerdictIsAnnounced:
         _answer(
             monkeypatch,
             409,
+            {"response": {"compatible": False, "missing": ["text"]}},
+        )
+
+        stub._check_send_capabilities()
+
+        assert [text for text, _, _ in stub.spoken] == [
+            "<send_capabilities_incompatible>"
+        ]
+
+    def test_statusreaction_alone_gets_its_own_narrower_warning(
+        self, stub, monkeypatch
+    ):
+        """statusReaction is a private, reverse-engineered lookup that breaks
+        on its own schedule (see deviceController.ts's getSendCapabilities);
+        when it is the only thing missing, real sending still works and the
+        generic warning was a chronic false positive."""
+        _answer(
+            monkeypatch,
+            409,
             {"response": {"compatible": False, "missing": ["statusReaction"]}},
+        )
+
+        stub._check_send_capabilities()
+
+        assert [text for text, _, _ in stub.spoken] == [
+            "<status_reaction_capability_incompatible>"
+        ]
+
+    def test_statusreaction_plus_a_real_gap_keeps_the_generic_warning(
+        self, stub, monkeypatch
+    ):
+        _answer(
+            monkeypatch,
+            409,
+            {
+                "response": {
+                    "compatible": False,
+                    "missing": ["text", "statusReaction"],
+                }
+            },
         )
 
         stub._check_send_capabilities()
@@ -362,10 +503,9 @@ class TestOnlyARealVerdictIsAnnounced:
 def test_the_probe_runs_from_the_first_confirmed_connection():
     """Not from _check_wpp_version_pin(): ensure_wpp_running() calls that from
     MainWindow.__init__, before init_UI and before the session is paired."""
-    source = (ROOT / "client/main.py").read_text(encoding="utf-8")
+    source = main_window_source()
 
-    pin = source[source.index("    def _check_wpp_version_pin(") :]
-    pin = pin[: pin.index("\n    def _check_send_capabilities(")]
+    pin = main_window_method_source("_check_wpp_version_pin")
     assert "_check_send_capabilities" not in pin
 
     connect = source[
@@ -375,3 +515,126 @@ def test_the_probe_runs_from_the_first_confirmed_connection():
     assert "self._check_send_capabilities" in connect
     # Its own latch, not the one that also gates the connected sound.
     assert "if not self._send_capabilities_checked:" in connect
+
+
+class TestASlowReactionModuleIsNotCalledIncompatible:
+    """Review finding: the probe's Bootloader budget (5 s) is shorter than the
+    send path's (8 s), so a reaction module that took 5-8 s to load was
+    reported "incompatible" -- and that verdict is SPOKEN -- although the real
+    send would have succeeded. Out of budget with statusReaction the only
+    thing missing, the probe now gives no verdict and Python asks again."""
+
+    def test_the_node_probe_answers_without_a_verdict_when_out_of_budget(self):
+        source = DEVICE.read_text(encoding="utf-8")
+        probe = source[source.index("export async function getSendCapabilities"):]
+        spent = probe.index("bootloaderBudgetSpent = true;")
+        deadline_check = probe.index("Date.now() >= deadline")
+        assert deadline_check < spent
+        verdict = probe[probe.index("if (\n        bootloaderBudgetSpent &&"):]
+        early_return = verdict[:verdict.index("return {\n        compatible:")]
+        assert "missing[0] === 'statusReaction'" in early_return
+        # no `compatible` key in the inconclusive answer, and not a 409
+        assert "compatible:" not in early_return
+        assert "res.status(503)" in probe
+
+    def test_python_treats_it_as_unavailable_and_says_nothing(
+        self, stub, monkeypatch
+    ):
+        _answer(monkeypatch, 503, {
+            "status": "inconclusive",
+            "response": {
+                "inconclusive": "status-reaction-bootloader-budget",
+                "missing": ["statusReaction"],
+            },
+        })
+
+        stub._check_send_capabilities()
+
+        assert stub.spoken == []
+        assert stub._send_capabilities_checked is False
+
+
+class TestTheNeonizeBridgeSaysWhetherItCarriesCalls:
+    """The bridge answers `calls: true` when its neonize build has the call
+    layer (neonize_bridge/call_media.py); the call buttons follow it."""
+
+    def test_a_bridge_with_calls(self, stub, monkeypatch):
+        _answer(monkeypatch, 200, {"response": {"compatible": True, "calls": True}})
+        stub._check_send_capabilities()
+        assert stub._neonize_calls is True
+
+    def test_wppconnect_never_sends_the_key(self, stub, monkeypatch):
+        _answer(monkeypatch, 200, {"response": {"compatible": True, "missing": []}})
+        stub._check_send_capabilities()
+        assert stub._neonize_calls is False
+        assert stub._neonize_video_calls is False and stub._neonize_group_calls is False
+
+    def test_a_bridge_with_video_and_group_calls(self, stub, monkeypatch):
+        _answer(monkeypatch, 200, {"response": {"compatible": True, "calls": True,
+                                                "videoCalls": True, "groupCalls": True}})
+        stub._check_send_capabilities()
+        assert stub._neonize_video_calls is True and stub._neonize_group_calls is True
+
+
+class TestCallControlsRefreshAfterTheVerdict:
+    @pytest.mark.parametrize("compatible", [True, False])
+    def test_refresh_is_queued_for_the_ui_thread_and_uses_the_current_chat(
+        self, stub, monkeypatch, compatible
+    ):
+        from tests.test_call_capability_ui import Panel, GROUP, PERSON
+
+        panel = Panel(GROUP)
+        panel.main_window = stub
+        stub._uses_neonize = lambda: True
+        stub._is_self_jid = lambda jid: False
+        stub._allow_ui_focus_changes = lambda: True
+        stub.conversations_panel = panel
+        queued = []
+        monkeypatch.setattr(main.wx, "CallAfter", lambda fn, *a: queued.append((fn, a)))
+        _answer(monkeypatch, 200, {"response": {
+            "compatible": compatible, "calls": True, "videoCalls": True,
+            "groupCalls": False,
+        }})
+        stub._check_send_capabilities()
+        assert not panel._voice_call_btn.shown  # no worker-thread widget calls
+        panel.conversation = {"remoteJid": PERSON}
+        assert queued
+        for fn, args in queued:
+            fn(*args)
+        assert panel._voice_call_btn.shown and panel._video_call_btn.shown
+        panel.conversation = {"remoteJid": GROUP}
+        panel._show_ongoing_group_call(None)
+        assert not panel._voice_call_btn.shown and not panel._video_call_btn.shown
+
+    @pytest.mark.parametrize("state", ["shutdown", "destroyed", "no-panel"])
+    def test_late_refresh_is_harmless_after_close(self, stub, monkeypatch, state):
+        from tests.test_call_capability_ui import Panel
+
+        panel = Panel()
+        panel.main_window = stub
+        stub._uses_neonize = lambda: True
+        stub._is_self_jid = lambda jid: False
+        stub.conversations_panel = panel
+        queued = []
+        monkeypatch.setattr(main.wx, "CallAfter", lambda fn, *a: queued.append((fn, a)))
+        _answer(monkeypatch, 200, {"response": {"compatible": True, "calls": True}})
+        stub._check_send_capabilities()
+        assert queued
+        if state == "shutdown":
+            stub._shutting_down = True
+        elif state == "no-panel":
+            stub.conversations_panel = None
+        else:
+            def destroyed(*args):
+                raise RuntimeError("wrapped C/C++ object has been deleted")
+            panel._show_ongoing_group_call = destroyed
+        for fn, args in queued:
+            fn(*args)
+        assert panel.layouts == 0
+
+    def test_unavailable_probe_preserves_the_previous_capabilities(self, stub, monkeypatch):
+        stub._neonize_calls = stub._neonize_video_calls = stub._neonize_group_calls = True
+        _answer(monkeypatch, 404, {"response": None, "status": "Disconnected"})
+        stub._check_send_capabilities()
+        assert stub._neonize_calls and stub._neonize_video_calls and stub._neonize_group_calls
+        assert stub._send_capabilities_checked is False

@@ -17,6 +17,7 @@ import { Message, Whatsapp } from '@wppconnect-team/wppconnect';
 import { Request, Response } from 'express';
 import fs from 'fs';
 import mime from 'mime-types';
+import path from 'path';
 import QRCode from 'qrcode';
 import { Logger } from 'winston';
 
@@ -28,6 +29,7 @@ import {
   observeEvaluate,
 } from '../middleware/instrumentation';
 import { resolveMessageForMedia } from '../services/messageResolver';
+import { hasAdminSecret } from '../util/adminSecret';
 import CreateSessionUtil from '../util/createSessionUtil';
 import {
   callWebHook,
@@ -35,9 +37,20 @@ import {
   probeIsConnected,
 } from '../util/functions';
 import getAllTokens from '../util/getAllTokens';
-import { clientsArray, deleteSessionOnArray } from '../util/sessionUtil';
+import { beginOnlinePresenceDiagnostic, finishOnlinePresenceDiagnostic } from '../util/onlinePresenceDiagnostics';
+import { isSessionMaintenanceActive } from '../util/sessionMaintenance';
+import { cleanupSession, clientsArray } from '../util/sessionUtil';
 
 const SessionUtil = new CreateSessionUtil();
+
+function rejectStartDuringMaintenance(res: Response): boolean {
+  if (!isSessionMaintenanceActive()) return false;
+  res.status(503).json({
+    status: false,
+    message: 'Session backup or restore is in progress. Try again later.',
+  });
+  return true;
+}
 
 async function downloadFileFunction(
   message: Message,
@@ -132,19 +145,21 @@ export async function startAllSessions(
   let tokenDecrypt = '';
 
   if (secretkey === undefined) {
-    tokenDecrypt = (token as any).split(' ')[0];
+    tokenDecrypt = token?.split(' ')[0] ?? '';
   } else {
     tokenDecrypt = secretkey;
   }
 
-  const allSessions = await getAllTokens(req);
-
   if (tokenDecrypt !== req.serverOptions.secretKey) {
-    res.status(400).json({
+    return res.status(400).json({
       response: 'error',
       message: 'The token is incorrect',
     });
   }
+
+  if (rejectStartDuringMaintenance(res)) return;
+  const allSessions = await getAllTokens(req);
+  if (rejectStartDuringMaintenance(res)) return;
 
   allSessions.map(async (session: string) => {
     const util = new CreateSessionUtil();
@@ -166,36 +181,17 @@ export async function showAllSessions(
      #swagger.operationId = 'showAllSessions'
      #swagger.autoQuery=false
      #swagger.autoHeaders=false
-     #swagger.security = [{
-            "bearerAuth": []
-     }]
-     #swagger.parameters["secretkey"] = {
-      schema: 'THISISMYSECURETOKEN'
+     #swagger.security = []
+     #swagger.parameters["x-secret-key"] = {
+      in: 'header', required: true, type: 'string'
      }
    */
-  const { secretkey } = req.params;
-  const { authorization: token } = req.headers;
-
-  let tokenDecrypt: any = '';
-
-  if (secretkey === undefined) {
-    tokenDecrypt = token?.split(' ')[0];
-  } else {
-    tokenDecrypt = secretkey;
-  }
-
-  const arr: any = [];
-
-  if (tokenDecrypt !== req.serverOptions.secretKey) {
-    res.status(400).json({
+  if (!hasAdminSecret(req, req.serverOptions.secretKey)) {
+    return res.status(400).json({
       response: false,
       message: 'The token is incorrect',
     });
   }
-
-  Object.keys(clientsArray).forEach((item) => {
-    arr.push({ session: item });
-  });
 
   res.status(200).json({ response: await getAllTokens(req) });
 }
@@ -246,6 +242,7 @@ export async function startSession(req: Request, res: Response): Promise<any> {
   const session = req.session;
   const { waitQrCode = false } = req.body;
 
+  if (rejectStartDuringMaintenance(res)) return;
   await getSessionState(req, res);
   await SessionUtil.opendata(req, session, waitQrCode ? res : null);
 }
@@ -417,12 +414,26 @@ export async function logOutSession(req: Request, res: Response): Promise<any> {
    */
   try {
     const session = req.session;
-    await req.client.logout();
-    deleteSessionOnArray(req.session);
-
-    setTimeout(async () => {
-      const pathUserData = config.customUserDataDir + req.session;
-      const pathTokens = __dirname + `../../../tokens/${req.session}.data.json`;
+    if (!/^[A-Za-z0-9_-]+$/.test(session)) {
+      return res
+        .status(400)
+        .json({ status: false, message: 'Invalid session name' });
+    }
+    await cleanupSession(session, async (client) => {
+      const userDataRoot = path.resolve(config.customUserDataDir);
+      const tokenRoot = path.resolve(process.cwd(), 'tokens');
+      const pathUserData = path.resolve(userDataRoot, session);
+      const pathTokens = path.resolve(tokenRoot, `${session}.data.json`);
+      if (
+        !pathUserData.startsWith(path.join(userDataRoot, path.sep)) ||
+        !pathTokens.startsWith(path.join(tokenRoot, path.sep))
+      ) {
+        throw new Error('Invalid session path');
+      }
+      if (typeof client?.logout === 'function') {
+        await client.logout();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
 
       if (fs.existsSync(pathUserData)) {
         await fs.promises.rm(pathUserData, {
@@ -440,20 +451,15 @@ export async function logOutSession(req: Request, res: Response): Promise<any> {
           retryDelay: 1000,
         });
       }
-
-      req.io.emit('whatsapp-status', false);
-      callWebHook(req.client, req, 'logoutsession', {
-        message: `Session: ${session} logged out`,
-        connected: false,
-      });
-
-      return await res
-        .status(200)
-        .json({ status: true, message: 'Session successfully closed' });
-    }, 500);
-    /*try {
-      await req.client.close();
-    } catch (error) {}*/
+    });
+    req.io.emit('whatsapp-status', false);
+    callWebHook(req.client, req, 'logoutsession', {
+      message: `Session: ${session} logged out`,
+      connected: false,
+    });
+    return res
+      .status(200)
+      .json({ status: true, message: 'Session successfully closed' });
   } catch (error) {
     req.logger.error(error);
     res
@@ -627,13 +633,13 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
     }
 
     if (!message)
-      res.status(400).json({
+      return res.status(400).json({
         status: 'error',
         message: 'Message not found',
       });
 
     if (!(message['mimetype'] || message.isMedia || message.isMMS))
-      res.status(400).json({
+      return res.status(400).json({
         status: 'error',
         message: 'Message does not contain media',
       });
@@ -1114,6 +1120,9 @@ export async function getSessionState(req: Request, res: Response) {
           StatusSessionSchema,
           {
             status: client.status,
+            syncing:
+              client.status === 'INITIALIZING' &&
+              (client as any).syncing === true,
             qrcode: qr,
             urlcode: client.urlcode,
             version: version,
@@ -1278,28 +1287,26 @@ export async function subscribePresence(req: Request, res: Response) {
       // WPP API is not available.
       const page = (req.client as any).page;
       if (page) {
-        try {
-          await page.evaluate((id: string) => {
-            const wpp = (window as any).WPP;
-            if (
-              wpp &&
-              wpp.contact &&
-              typeof wpp.contact.subscribePresence === 'function'
-            ) {
-              return wpp.contact.subscribePresence(id);
-            }
-            // Fallback to WPP.whatsapp.PresenceUtils if available
-            if (wpp && wpp.whatsapp && wpp.whatsapp.PresenceUtils) {
-              return wpp.whatsapp.PresenceUtils.subscribeToPresence(id);
-            }
-            throw new Error('WPP.contact.subscribePresence not available');
-          }, contato);
-          req.logger.info(`[subscribePresence] WPP subscribed: ${contato}`);
+        const result = await page.evaluate(async (id: string) => {
+          const wpp = (window as any).WPP;
+          if (
+            wpp &&
+            wpp.contact &&
+            typeof wpp.contact.subscribePresence === 'function'
+          ) {
+            const subscribed = await wpp.contact.subscribePresence(id);
+            return {
+              supported: true,
+              ok: Array.isArray(subscribed) && subscribed.length > 0,
+            };
+          }
+          // Only unsupported providers may use the legacy fallback.
+          return { supported: false, ok: false };
+        }, contato);
+        if (result.supported) {
+          if (!result.ok) throw new Error('Presence subscription unconfirmed');
+          req.logger.info('[subscribePresence] WPP subscription confirmed');
           return;
-        } catch (wppErr) {
-          req.logger.warn(
-            `[subscribePresence] WPP fallback for ${contato}: ${wppErr}`
-          );
         }
       }
       // Legacy fallback
@@ -1488,16 +1495,20 @@ export async function setOnlinePresence(req: Request, res: Response) {
       }
      }
    */
+  const trace = beginOnlinePresenceDiagnostic(req);
   try {
     const { isOnline = true } = req.body;
 
-    await req.client.setOnlinePresence(isOnline);
+    const native = await req.client.setOnlinePresence(isOnline);
+    const diagnostic = await finishOnlinePresenceDiagnostic(req, trace, native);
 
     res.status(200).json({
       status: 'success',
       response: { message: 'Set Online Presence Successfully' },
+      ...(diagnostic ? { diagnostic } : {}),
     });
   } catch (error) {
+    await finishOnlinePresenceDiagnostic(req, trace, undefined, true);
     res.status(500).json({
       status: 'error',
       message: 'Error on set online presence',

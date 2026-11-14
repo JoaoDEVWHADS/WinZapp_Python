@@ -2,15 +2,21 @@
 
 import ast
 from pathlib import Path
+from tests.god_modules import status_panel_method_source, status_panel_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _source(relative: str) -> str:
+    if relative == "client/status_panel.py":
+        # StatusPanel is split over client/status_tab/ now.
+        return status_panel_source()
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
 def _method(relative: str, class_name: str, method_name: str) -> str:
+    if class_name == "StatusPanel":
+        return status_panel_method_source(method_name)
     source = _source(relative)
     tree = ast.parse(source)
     lines = source.splitlines()

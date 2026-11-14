@@ -35,6 +35,7 @@ from core.utils import (
     DEFAULT_SETTINGS, SPELL_CHECK_MODE_MIGRATION_FLAG,
     backfill_missing_defaults, migrate_spell_check_mode,
 )
+from tests.god_modules import patch_conversations_global
 
 
 _CLIENT = pathlib.Path(__file__).resolve().parents[1] / "client"
@@ -70,8 +71,7 @@ def _windows_setting_unreadable(monkeypatch):
     """Pin Windows' reading to "unknown" by default, so a test that does not
     say otherwise cannot have its result decided by the spelling setting of
     whatever machine happens to run the suite."""
-    monkeypatch.setattr(
-        conversations_module, "windows_spellcheck_enabled", lambda: None
+    patch_conversations_global(monkeypatch, "windows_spellcheck_enabled", lambda: None
     )
 
 
@@ -213,16 +213,14 @@ class TestThePanelReadsItLive:
         assert _Panel({"spell_check_mode": "off"})._spell_check_enabled() is False
 
     def test_windows_off_reaches_the_panel(self, monkeypatch):
-        monkeypatch.setattr(
-            conversations_module, "windows_spellcheck_enabled", lambda: False
+        patch_conversations_global(monkeypatch, "windows_spellcheck_enabled", lambda: False
         )
         assert _Panel({"spell_check_mode": "windows"})._spell_check_enabled() is False
 
     def test_an_explicit_on_survives_windows_saying_off(self, monkeypatch):
         """The whole point of keeping the override: Windows' setting is the
         default, not a veto."""
-        monkeypatch.setattr(
-            conversations_module, "windows_spellcheck_enabled", lambda: False
+        patch_conversations_global(monkeypatch, "windows_spellcheck_enabled", lambda: False
         )
         assert _Panel({"spell_check_mode": "on"})._spell_check_enabled() is True
 
@@ -266,13 +264,9 @@ class TestTheShippedDefaults:
 
 class TestEveryLocaleLabelsTheControl:
     def test_the_group_label_and_all_three_options_are_translated(self):
-        language_map = json.loads(
-            (_CLIENT / "languages" / "language_map.json").read_text(encoding="utf-8")
-        )
-        for code in language_map:
-            translations = json.loads(
-                (_CLIENT / "languages" / f"{code}.json").read_text(encoding="utf-8")
-            )
+        from tests.locales import load_strings, registered_locale_codes
+        for code in registered_locale_codes():
+            translations = load_strings(code)
             label = translations.get("spell_check_label", "")
             assert label, code
             # The Geral tab labels all carry a mnemonic; a control without
@@ -286,13 +280,9 @@ class TestEveryLocaleLabelsTheControl:
                 assert "&" not in option, (code, mode)
 
     def test_the_retired_checkbox_key_is_gone(self):
-        language_map = json.loads(
-            (_CLIENT / "languages" / "language_map.json").read_text(encoding="utf-8")
-        )
-        for code in language_map:
-            translations = json.loads(
-                (_CLIENT / "languages" / f"{code}.json").read_text(encoding="utf-8")
-            )
+        from tests.locales import load_strings, registered_locale_codes
+        for code in registered_locale_codes():
+            translations = load_strings(code)
             assert "spell_check_enabled_label" not in translations, code
 
 

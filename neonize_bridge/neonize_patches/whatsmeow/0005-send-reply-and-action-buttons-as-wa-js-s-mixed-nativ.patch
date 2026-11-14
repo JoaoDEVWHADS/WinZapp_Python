@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
+Date: Mon, 26 Oct 2026 15:42:11 -0300
+Subject: [PATCH] send: reply and action buttons as wa-js's mixed native flow
+
+wa-js (WPPConnect) sends quick_reply and cta_* buttons with
+<native_flow v="9" name="mixed"/> (applyNativeFlowBiz), the form phones
+show; payment info keeps its name.
+---
+ send.go                 | 13 ++++++++-
+ send_nativeflow_test.go | 61 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 73 insertions(+), 1 deletion(-)
+ create mode 100644 send_nativeflow_test.go
+
+diff --git a/send.go b/send.go
+index 95078d9..8526bbc 100644
+--- a/send.go
++++ b/send.go
+@@ -1232,12 +1232,23 @@ func getNativeFlowBizNode(msg *waE2E.Message) *waBinary.Node {
+ 			Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+ 			Content: []waBinary.Node{{
+ 				Tag:   "native_flow",
+-				Attrs: waBinary.Attrs{"name": name},
++				Attrs: nativeFlowAttrs(name),
+ 			}},
+ 		}},
+ 	}
+ }
+ 
++// nativeFlowAttrs are the attributes of <native_flow>: payment info keeps its
++// name; every other flow, reply and action buttons included, goes as
++// v="9" name="mixed", which is what wa-js (WPPConnect) sends and phones show
++// (applyNativeFlowBiz).
++func nativeFlowAttrs(name string) waBinary.Attrs {
++	if name == "payment_info" {
++		return waBinary.Attrs{"name": name}
++	}
++	return waBinary.Attrs{"v": "9", "name": "mixed"}
++}
++
+ func (cli *Client) prepareMessageNode(
+ 	ctx context.Context,
+ 	to types.JID,
+diff --git a/send_nativeflow_test.go b/send_nativeflow_test.go
+new file mode 100644
+index 0000000..4293d82
+--- /dev/null
++++ b/send_nativeflow_test.go
+@@ -0,0 +1,61 @@
++package whatsmeow
++
++import (
++	"testing"
++
++	"google.golang.org/protobuf/proto"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++)
++
++func nativeFlow(button string) *waE2E.Message {
++	return &waE2E.Message{InteractiveMessage: &waE2E.InteractiveMessage{
++		InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
++			NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
++				Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
++					{Name: proto.String(button)},
++				},
++			},
++		},
++	}}
++}
++
++func flowAttrs(t *testing.T, msg *waE2E.Message) waBinary.Attrs {
++	t.Helper()
++	biz := getNativeFlowBizNode(msg)
++	if biz == nil {
++		t.Fatal("no biz node")
++	}
++	interactive := biz.GetChildByTag("interactive")
++	if interactive.AttrGetter().String("type") != "native_flow" {
++		t.Fatalf("unexpected biz node %s", biz.String())
++	}
++	return interactive.GetChildByTag("native_flow").Attrs
++}
++
++func TestReplyAndActionButtonsAreMixed(t *testing.T) {
++	for _, button := range []string{"quick_reply", "cta_url", "cta_call", "cta_copy"} {
++		attrs := flowAttrs(t, nativeFlow(button))
++		if attrs["v"] != "9" || attrs["name"] != "mixed" {
++			t.Errorf("%s: %v", button, attrs)
++		}
++	}
++}
++
++func TestPaymentInfoKeepsItsName(t *testing.T) {
++	attrs := flowAttrs(t, nativeFlow("payment_info"))
++	if len(attrs) != 1 || attrs["name"] != "payment_info" {
++		t.Errorf("%v", attrs)
++	}
++}
++
++func TestOrderUpdatesAreAnAttribute(t *testing.T) {
++	biz := getNativeFlowBizNode(nativeFlow("review_and_pay"))
++	if biz.Attrs["native_flow_name"] != "order_details" || len(biz.GetChildren()) != 0 {
++		t.Errorf("%s", biz.String())
++	}
++	if getNativeFlowBizNode(&waE2E.Message{Conversation: proto.String("oi")}) != nil {
++		t.Error("a text has no biz node")
++	}
++}

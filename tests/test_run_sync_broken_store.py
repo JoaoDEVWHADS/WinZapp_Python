@@ -17,6 +17,7 @@ so the method is bound to a plain object — the same pattern the other main.py
 tests use.
 """
 
+import inspect
 import threading
 import time
 import types
@@ -136,7 +137,7 @@ class _Stub:
         self.restarted = True
 
     def sync_remote_chats(self, target_chats=None, incremental=False,
-                          expected_run_id=None):
+                          expected_run_id=None, progress=None):
         self.message_sync_ran += 1
 
     def _chats_needing_deep_history(self):
@@ -154,7 +155,7 @@ class _Stub:
     def resolve_lid_jids_via_api(self, jids):
         self.lid_batches.append(len(jids))
 
-    def _backfill_empty_chats(self):
+    def _backfill_empty_chats(self, expected_context=None):
         self.backfill_started = True
 
     # ── collaborators whose return value the loop uses ───────────────
@@ -201,7 +202,7 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
                  "_server_claims_content",
                  "_capture_chat_sync_baseline", "_baseline_marker_for_jid",
                  "_plan_message_sync"):
-        raw = MainWindow.__dict__[name]
+        raw = inspect.getattr_static(MainWindow, name)
         if isinstance(raw, (staticmethod, classmethod)):
             setattr(stub, name, getattr(MainWindow, name))
         else:

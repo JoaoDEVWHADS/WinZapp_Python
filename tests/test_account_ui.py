@@ -9,6 +9,7 @@ from account_ui import (
     can_archive,
     can_hard_delete,
     build_accounts_menu,
+    account_to_foreground_after_close,
 )
 
 
@@ -175,6 +176,40 @@ def test_build_accounts_menu_uses_factory_ids_verbatim(monkeypatch):
     assert all(isinstance(k, _Ref) for k in id_map)
 
 
+def test_build_accounts_menu_localizes_generated_default_name(monkeypatch):
+    import account_ui
+
+    class _Item:
+        def Check(self, *a):
+            pass
+
+    labels = []
+
+    class _FakeMenu:
+        def AppendRadioItem(self, item_id, label):
+            labels.append(label)
+            return _Item()
+
+        def Append(self, item_id, label):
+            labels.append(label)
+            return _Item()
+
+        def AppendSeparator(self):
+            pass
+
+    monkeypatch.setattr(account_ui, "_wx", lambda: object())
+
+    class _I18n:
+        def t(self, key):
+            return "Conta padrão" if key == "acc_default_name" else key
+
+    build_accounts_menu(
+        _FakeMenu(), [_acc(A, "paired", 1, name="default")], A,
+        _I18n(), lambda: object(),
+    )
+    assert labels[0].startswith("&1 Conta padrão")
+
+
 def test_hard_delete_removes_dir_and_entry(tmp_path):
     """_hard_delete_account marks deleting, rmtrees the data dir, removes entry."""
     import os
@@ -192,3 +227,60 @@ def test_hard_delete_removes_dir_and_entry(tmp_path):
     _hard_delete_account(reg, gd, acc["id"])
     assert reg.get(acc["id"]) is None
     assert not os.path.exists(data_dir)
+
+
+# ── Accounts > Close current account (Ctrl+F4) ────────────────────────────────
+
+
+def test_close_current_hands_over_to_a_running_account_in_menu_order():
+    accts = [_acc(A, order=1), _acc(B, order=3), _acc(C, order=2)]
+    assert account_to_foreground_after_close(accts, [B, C], A) == C
+
+
+def test_close_current_never_picks_itself_or_a_closed_account():
+    """A closed account is not started just to receive focus: that would spend
+    the resources closing is meant to free."""
+    accts = [_acc(A, order=1), _acc(B, order=2)]
+    assert account_to_foreground_after_close(accts, [A], A) is None
+    assert account_to_foreground_after_close(accts, [], A) is None
+    assert account_to_foreground_after_close(accts, [None, ""], A) is None
+
+
+def test_close_current_still_lands_on_a_running_account_the_registry_lacks():
+    accts = [_acc(A, order=1)]
+    assert account_to_foreground_after_close(accts, [B], A) == B
+    accts = [_acc(A, order=1), _acc(C, order=5)]
+    assert account_to_foreground_after_close(accts, [B, C], A) == C
+
+
+def test_build_accounts_menu_ends_with_close_current_on_ctrl_f4(monkeypatch):
+    import account_ui
+
+    labels = []
+
+    class _Item:
+        def Check(self, *a):
+            pass
+
+    class _FakeMenu:
+        def AppendRadioItem(self, item_id, label):
+            labels.append((item_id, label))
+            return _Item()
+
+        def Append(self, item_id, label):
+            labels.append((item_id, label))
+            return _Item()
+
+        def AppendSeparator(self):
+            pass
+
+    class _I18n:
+        def t(self, k):
+            return k
+
+    monkeypatch.setattr(account_ui, "_wx", lambda: object())
+    ids = iter(range(100, 200))
+    id_map = build_accounts_menu(_FakeMenu(), [_acc(A)], A, _I18n(), lambda: next(ids))
+    last_id, last_label = labels[-1]
+    assert last_label == "acc_menu_close_current\tCtrl+F4"
+    assert id_map[last_id] == {"close_current": True}

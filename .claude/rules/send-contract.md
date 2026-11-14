@@ -2,6 +2,8 @@
 paths:
   - "client/api_patches/src/controller/messageController.ts"
   - "client/core/send_contract.py"
+  - "client/main_window/sending.py"
+  - "client/main_window/message_actions.py"
 ---
 
 # Send contract

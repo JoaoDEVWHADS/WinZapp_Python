@@ -350,6 +350,7 @@ class _FocusStub(_Stub):
     a base continuar carregando só o que a manutenção do separador usa."""
 
     _on_message_focused = ConversationsPanel._on_message_focused
+    _update_focused_row_controls = ConversationsPanel._update_focused_row_controls
     _should_dismiss_unread_separator = staticmethod(
         ConversationsPanel._should_dismiss_unread_separator
     )
@@ -370,6 +371,12 @@ class _FocusStub(_Stub):
         self._read_more_calls.append(idx)
 
     def _update_reactions_button(self, idx):
+        pass
+
+    def _update_inline_poll(self, idx):
+        pass
+
+    def _update_return_call_button(self, idx):
         pass
 
 

@@ -31,10 +31,10 @@ Design decisions:
     toaster is created in one thread and show_toast() called in another.
 """
 
+import ctypes
 import logging
 import os
 import queue
-import re as _re
 import sys
 import threading
 import time
@@ -42,8 +42,11 @@ import uuid
 import wx
 from app_paths import _is_frozen
 from core.i18n import I18n
+from core.mention_all import says_everyone
+from core.view_once import VIEW_ONCE_UNAVAILABLE_TYPE
+from core.commerce import message_label as commerce_message_label
 from core.message_queue import PendingMessage
-from core.utils import looks_like_binary_blob, link_preview_text, is_voice_message
+from core.utils import looks_like_binary_blob, link_preview_text, is_voice_message, video_label
 
 
 def _notif_duration(seconds) -> str:
@@ -145,7 +148,7 @@ def _build_notif_prefix(msg: dict, main_window, i18n) -> str:
 
     # @all / @todos / @everyone — check text for the keyword
     text = _extract_msg_text(msg)
-    if _re.search(r"@(all|todos|everyone)\b", text, _re.IGNORECASE):
+    if says_everyone(text, i18n.t("mention_all_keyword")):
         return i18n.t("notif_mentioned_all")
 
     # Direct @mention of the user
@@ -166,9 +169,17 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
     msg_type = msg.get("messageType", "conversation")
     msg_obj  = msg.get("message") or {}
     sep      = i18n.t("decimal_separator")
+    from core.business_message_content import TYPES, business_message_text
+    if msg_type in TYPES:
+        return business_message_text(msg, i18n)
 
     if not isinstance(msg_obj, dict):
         return i18n.t("notif_unsupported")
+
+    # ── Order, or a seller's follow-up to one (core/commerce.py) ──────────────
+    commerce_text = commerce_message_label(msg, i18n)
+    if commerce_text is not None:
+        return commerce_text
 
     # ── Text ──────────────────────────────────────────────────────────────────
     if msg_type == "conversation":
@@ -188,7 +199,9 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         )
         for jid in mentioned:
             if main_window and main_window._is_self_jid(jid):
-                name = "eu"
+                # "Como se referir a mim?": the same word the message list
+                # shows, not a fixed "eu" that ignored the setting.
+                name = main_window.self_reference_label()
             else:
                 name = _resolve_participant_name(jid, "", main_window)
             
@@ -250,9 +263,10 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         if video.get("gifPlayback"):
             return i18n.t("sticker")
         dur = _notif_duration(video.get("seconds"))
+        vlabel = video_label(video, i18n)
         if dur and dur != "0:00":
-            return f"{i18n.t('video')} ({dur})"
-        return i18n.t("video")
+            return f"{vlabel} ({dur})"
+        return vlabel
 
     # ── Image ─────────────────────────────────────────────────────────────────
     if msg_type == "imageMessage":
@@ -274,6 +288,15 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
     # ── Sticker ───────────────────────────────────────────────────────────────
     if msg_type == "stickerMessage":
         return i18n.t("sticker")
+
+    # ── View once (only on the phone — core/view_once.py) ─────────────────────
+    if msg_type == VIEW_ONCE_UNAVAILABLE_TYPE:
+        return i18n.t("view_once_message")
+
+    # ── Channel invitation ────────────────────────────────────────────────────
+    from core import channel_invites
+    if msg_type in channel_invites.INVITE_TYPES:
+        return channel_invites.row_text(i18n, msg)
 
     # ── Contact ───────────────────────────────────────────────────────────────
     if msg_type == "contactMessage":
@@ -304,6 +327,11 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
     if msg_type in ("locationMessage", "liveLocationMessage"):
         return i18n.t("notif_location")
 
+    # ── Event (core/events.py) ─────────────────────────────────────────────────
+    if msg_type == "eventMessage":
+        name = ((msg_obj.get("eventMessage") or {}).get("name") or "").strip()
+        return i18n.t("notif_event").format(name=name) if name else i18n.t("event_label")
+
     # ── Poll ──────────────────────────────────────────────────────────────────
     if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
         poll = (
@@ -315,23 +343,7 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         name = (poll.get("name") or "").strip()
         return i18n.t("notif_poll").format(name=name) if name else i18n.t("notif_poll_no_name")
 
-    # ── Buttons / list (message with selectable options) ────────────────────────
-    if msg_type == "buttonsMessage":
-        btns_msg = msg_obj.get("buttonsMessage") or {}
-        return (btns_msg.get("contentText") or btns_msg.get("text") or "").strip() or i18n.t("interactive_message")
-
-    if msg_type == "listMessage":
-        list_msg = msg_obj.get("listMessage") or {}
-        return (list_msg.get("title") or list_msg.get("description") or "").strip() or i18n.t("interactive_message")
-
-    if msg_type == "templateMessage":
-        return i18n.t("notif_template")
-
-    if msg_type == "interactiveMessage":
-        inter = msg_obj.get("interactiveMessage") or {}
-        body = (inter.get("body") or {}).get("text", "")
-        return body or i18n.t("interactive_message")
-
+    # ── Replies to business messages ──────────────────────────────────────────
     if msg_type == "buttonsResponseMessage":
         btn = msg_obj.get("buttonsResponseMessage") or {}
         return btn.get("selectedDisplayText") or i18n.t("interactive_reply")
@@ -425,6 +437,7 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
     Group message → participant name only (no group name).
     """
     from core.utils import format_number
+    from core.message_sender_labels import message_sender_label
     key        = msg.get("key", {})
     remote_jid = key.get("remoteJid", "")
     push_name  = msg.get("pushName", "")
@@ -433,14 +446,26 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
         p_jid = key.get("participant") or msg.get("participant") or ""
         if (not p_jid or p_jid.endswith("@g.us")) and push_name and push_name.isdigit():
             p_jid = f"{push_name}@s.whatsapp.net"
-        return _resolve_participant_name(p_jid, push_name, main_window) or i18n.t("unnamed_participant") or "Participante sem nome"
+        label = _resolve_participant_name(p_jid, push_name, main_window) or i18n.t("unnamed_participant") or "Participante sem nome"
+        return message_sender_label(label, msg, main_window, i18n)
 
     chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
-    return (
+    label = (
         main_window._resolve_contact_name(chat)
         or _resolve_participant_name(remote_jid, push_name, main_window)
         or format_number(remote_jid)
     )
+    return message_sender_label(label, msg, main_window, i18n)
+
+
+def format_foreground_message(msg: dict, main_window, i18n, body: str) -> str:
+    """Open-chat announcement, without punctuation for a hidden sender."""
+    sender = format_foreground_sender(msg, main_window, i18n)
+    from core.message_sender_labels import hide_unnamed_sender_numbers_enabled
+    hidden = not sender and hide_unnamed_sender_numbers_enabled(
+        getattr(main_window, "settings", None)
+    )
+    return body if hidden else f"{sender}: {body}"
 
 
 def format_toast_unread_suffix(unread_count: int, i18n) -> str:
@@ -466,12 +491,67 @@ def format_toast_unread_suffix(unread_count: int, i18n) -> str:
     return f"✉️ {text}"
 
 
-def format_notification_title(msg: dict, main_window, i18n) -> str:
+def format_locked_notification(unread_count: int, i18n, app_name="WinZapp") -> tuple[str, str]:
+    """Privacy-preserving title/body for a locked conversation.
+
+    The count belongs to the originating chat, not the account-wide total.
+    Contact/group names and message content deliberately never enter either
+    returned string.
+    """
+    count = max(1, int(unread_count or 0))
+    if count == 1:
+        body = i18n.t("chat_lock_notification_singular")
+    else:
+        body = i18n.t("chat_lock_notification_plural").format(count=count)
+    return app_name or "WinZapp", body
+
+
+# The SOUND_EVENTS key a reaction to one of your messages queues with.
+REACTION_SOUND_EVENT = "reaction_received"
+
+
+def reaction_silenced_now(main_window, remote_jid: str) -> bool:
+    """Whether a queued reaction's chat was locked, muted or archived while
+    it waited. The predicates only read dicts, so this runs off the wx thread
+    too; Windows' and the Mac's _dispatch share it so they cannot drift."""
+    return any(
+        getattr(main_window, check, lambda _jid: False)(remote_jid)
+        for check in ("is_chat_locked", "is_chat_muted", "is_chat_archived")
+    )
+
+
+#: Which name a group toast leads with (Settings > General > Notifications):
+#: "participant" — "Gustavo in WinZapp Developers" (what WinZapp always did);
+#: "group" — "WinZapp Developers, Gustavo" (the official WhatsApp Desktop
+#: order). It shapes the text of a toast only, never what the screen reader
+#: announces while the window is active.
+GROUP_TOAST_ORDERS = ("participant", "group")
+DEFAULT_GROUP_TOAST_ORDER = "participant"
+
+
+def group_toast_order(settings) -> str:
+    """The configured order; anything unknown reads as the default."""
+    value = ((settings or {}).get("general") or {}).get("group_toast_order")
+    return value if value in GROUP_TOAST_ORDERS else DEFAULT_GROUP_TOAST_ORDER
+
+
+def format_group_notification_base(participant: str, group: str, order: str,
+                                   i18n) -> str:
+    """'Participant in Group', or 'Group, Participant' for order "group"."""
+    template = (i18n.t("notif_in_group_group_first") if order == "group"
+                else i18n.t("notif_in_group"))
+    return template.format(participant=participant, group=group)
+
+
+def format_notification_title(msg: dict, main_window, i18n,
+                              toast: bool = False) -> str:
     """
     Build the notification title for a toast notification.
 
     Private chat  → [prefix] sender name
-    Group message → [prefix] 'Participant em GroupName'
+    Group message → [prefix] 'Participant em GroupName' (or 'GroupName,
+    Participant' when *toast* is True and the user picked group first; the
+    spoken announcement of a message never changes order).
 
     prefix is one of notif_replied_to_you / notif_mentioned_you /
     notif_mentioned_all, or absent when none of those conditions apply.
@@ -508,9 +588,10 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         participant_name = _resolve_participant_name(p_jid, push_name, main_window)
         if not participant_name:
             participant_name = i18n.t("unnamed_participant") or "Participante sem nome"
-        base = i18n.t("notif_in_group").format(
-            participant=participant_name, group=group_name
-        )
+        order = (group_toast_order(getattr(main_window, "settings", None))
+                 if toast else DEFAULT_GROUP_TOAST_ORDER)
+        base = format_group_notification_base(
+            participant_name, group_name, order, i18n)
     else:
         chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
         # format_number(remote_jid) must NEVER run on a bare, unresolved
@@ -547,6 +628,33 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
             and getattr(main_window, "_is_multi_account", lambda: False)()):
         title = f"[{acc_name}] {title}"
     return title
+
+
+#: How much a background notification says (Settings > General, issue #258):
+#: "full" — chat or group name and the message (what WinZapp always did);
+#: "name" — the name only, the text replaced by a neutral line;
+#: "sound" — the sound alone, no banner and nothing spoken.
+NOTIFICATION_CONTENT_LEVELS = ("full", "name", "sound")
+DEFAULT_NOTIFICATION_CONTENT = "full"
+
+
+def notification_content_level(settings) -> str:
+    """The configured level; anything unknown reads as the default, so a
+    hand-edited or future value never silences notifications by accident."""
+    value = ((settings or {}).get("general") or {}).get("notification_content")
+    return value if value in NOTIFICATION_CONTENT_LEVELS else DEFAULT_NOTIFICATION_CONTENT
+
+
+def background_notification_content(level: str, title: str, body: str,
+                                    hidden_body: str):
+    """The (title, body) a background notification carries at *level*, or
+    None when it is sound only. *hidden_body* is the neutral line ("New
+    message", "New reaction") that stands in for the text at "name"."""
+    if level == "sound":
+        return None
+    if level == "name":
+        return title, hidden_body
+    return title, body
 
 
 def should_speak_background_message(settings, has_notification_manager: bool) -> bool:
@@ -606,10 +714,66 @@ def announce_background_message(main_window, i18n, title: str, body: str) -> Non
         speech = getattr(main_window, "settings", {}).get("speech_content", {})
         if not speech.get("speak_other_conv_messages", True):
             return
-        spoken = i18n.t("fg_new_msg").format(name=title) + f": {body}"
+        spoken = i18n.t("fg_new_msg").format(name=title)
+        if body:
+            spoken += f": {body}"
         wx.CallAfter(main_window.output, spoken)
     except Exception as e:
         print(f"[NotificationManager] fallback announcement failed: {e}")
+
+
+_ERROR_INSUFFICIENT_BUFFER = 122
+
+
+def packaged_process_aumid(kernel32=None) -> str:
+    """The AUMID Windows gave this process when it runs inside a package, or "".
+
+    Python from the Microsoft Store is an MSIX package, and so is every venv
+    created from it: the process carries the package's identity. A toast
+    notifier created for "WinZapp" there becomes "<package>!WinZapp", an app
+    the package's manifest does not declare -- Windows accepts every toast
+    and shows none. Measured 2026-09-23 running from source: the sound played,
+    show_toast() returned in ~15 ms with no error, no banner ever appeared, and
+    the notification settings held a "PythonSoftwareFoundation.Python.3.13_
+    qbz5n2kfra8p0!WinZapp" entry. The process's own AUMID ("...!Python") is a
+    declared app, so its toasts are shown.
+    """
+    try:
+        from ctypes import wintypes
+        get_aumid = (kernel32 or ctypes.WinDLL("kernel32")).GetCurrentApplicationUserModelId
+        length = wintypes.UINT(0)
+        # Unpackaged processes answer APPMODEL_ERROR_NO_APPLICATION (15703).
+        if get_aumid(ctypes.byref(length), None) != _ERROR_INSUFFICIENT_BUFFER:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length.value)
+        if get_aumid(ctypes.byref(length), buffer) != 0:
+            return ""
+        return buffer.value
+    except Exception:
+        return ""
+
+
+def toaster_aumid_candidates(app_id: str, fallback: str, packaged_aumid: str = "") -> list:
+    """AUMIDs to build the toaster with, in order of preference.
+
+    Creating a notifier for an AUMID Windows will never display succeeds just
+    the same, so the list cannot rely on failures to fall through: a packaged
+    process has to START with its own AUMID (see packaged_process_aumid()).
+    """
+    candidates = [packaged_aumid] if packaged_aumid else []
+    for aumid in (app_id, fallback):
+        if aumid and aumid not in candidates:
+            candidates.append(aumid)
+    return candidates
+
+
+class _ClearRequest:
+    """Queue item: remove the toast shown for ``jid`` (its chat was read)."""
+
+    __slots__ = ("jid",)
+
+    def __init__(self, jid: str):
+        self.jid = jid
 
 
 class NotificationManager:
@@ -649,6 +813,11 @@ class NotificationManager:
         # next one is shown (see _clear_active_toasts).  Touched only by the
         # worker thread.
         self._last_toast   = None
+        # Chat the toast above was shown for, so reading that chat in the app
+        # can take its banner out of the notification area (clear_for_chat).
+        self._last_toast_jid = None
+        # Chats read while their toast still waited in the queue (worker only).
+        self._skip_jids = set()
         # monotonic() timestamp of the last show_toast() call, or None.  Lets
         # _dispatch() skip _clear_active_toasts()'s blocking WinRT/COM
         # round-trip when the previous toast has almost certainly already
@@ -677,15 +846,23 @@ class NotificationManager:
             item = self._queue.get()
             if item is None:
                 break
+            if isinstance(item, _ClearRequest):
+                self._remove_toast_for_chat(item.jid)
+                continue
+            self._skip_jids = set()
             item, dropped = self._coalesce_pending(item)
             if item is None:
                 break
+            if self._chat_key(item[2]) in self._skip_jids:
+                # Its chat was read while it waited in the queue.
+                continue
             if dropped:
                 print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
-            title, body, remote_jid, msg_key, queued_at = item
+            title, body, remote_jid, msg_key, queued_at, *sound_events = item
             waited = time.monotonic() - queued_at
             started = time.monotonic()
-            self._dispatch(title, body, remote_jid, msg_key)
+            self._dispatch(title, body, remote_jid, msg_key,
+                           sound_event=sound_events[0] if sound_events else None)
             logging.info(
                 "[notif-timing] %s: %.0fms queued + %.0fms dispatch = %.0fms "
                 "from send() to on screen.",
@@ -722,7 +899,12 @@ class NotificationManager:
             if newer is None:
                 # Shutdown signal arrived mid-burst: honour it.
                 return None, dropped
+            if isinstance(newer, _ClearRequest):
+                self._note_clear(item, newer)
+                continue
             item = newer
+            # A toast queued after the read is a genuinely new message.
+            getattr(self, "_skip_jids", set()).discard(self._chat_key(item[2]))
             dropped += 1
 
         deadline = time.monotonic() + self._COALESCE_SETTLE_SECONDS
@@ -736,7 +918,12 @@ class NotificationManager:
                 return item, dropped
             if newer is None:
                 return None, dropped
+            if isinstance(newer, _ClearRequest):
+                self._note_clear(item, newer)
+                continue
             item = newer
+            # A toast queued after the read is a genuinely new message.
+            getattr(self, "_skip_jids", set()).discard(self._chat_key(item[2]))
             dropped += 1
 
     @staticmethod
@@ -799,7 +986,11 @@ class NotificationManager:
             fallback = self._outer_exe_path()
         else:
             fallback = sys.executable
-        candidates = [self.APP_ID, fallback]
+        packaged = packaged_process_aumid()
+        if packaged:
+            logging.info("[NotificationManager] running inside a package; toasts "
+                         "use its AUMID %s", packaged)
+        candidates = toaster_aumid_candidates(self.APP_ID, fallback, packaged)
 
         for app_id in candidates:
             # Try interactable first (supports inline reply text box).
@@ -824,6 +1015,38 @@ class NotificationManager:
                 print(f"[NotificationManager] WindowsToaster({app_id!r}) failed: {e}")
 
         print("[NotificationManager] toast system unavailable — all candidates failed")
+
+    def _chat_key(self, jid) -> str:
+        normalize = getattr(self.main_window, "_normalize_jid", None)
+        try:
+            return normalize(jid) if normalize and jid else (jid or "")
+        except Exception:
+            return jid or ""
+
+    def _note_clear(self, held_item, request: "_ClearRequest"):
+        """A chat was read while ``held_item`` is still waiting to be shown:
+        remove what is on screen for it now and drop the held toast if it is
+        for that same chat (called from _coalesce_pending, worker thread)."""
+        self._remove_toast_for_chat(request.jid)
+        skip = getattr(self, "_skip_jids", None)
+        if skip is None:
+            skip = self._skip_jids = set()
+        key = self._chat_key(request.jid)
+        if self._chat_key(held_item[2]) == key:
+            skip.add(key)
+
+    def _remove_toast_for_chat(self, jid: str):
+        """Take the banner shown for ``jid`` out of the notification area.
+
+        Worker thread only. Does nothing when the last toast belongs to another
+        chat, so reading one chat never discards a different chat's alert.
+        """
+        last_jid = self._last_toast_jid
+        if last_jid is None or self._chat_key(last_jid) != self._chat_key(jid):
+            return
+        self._clear_active_toasts()
+        self._last_toast = None
+        self._last_toast_jid = None
 
     def _clear_active_toasts(self):
         """Remove any WinZapp toast currently displayed or pending.
@@ -868,9 +1091,16 @@ class NotificationManager:
         *instead of* the toast, never alongside it.
         """
         self.i18n.get_language()
+        # At the "name" level the body is only the neutral line, and the
+        # announcement already starts "New message from <name>". Only the
+        # message line: a hidden reaction keeps "New reaction", or it would
+        # be announced as a message that is not there.
+        if body == self.i18n.t("notif_hidden_message"):
+            body = ""
         announce_background_message(self.main_window, self.i18n, title, body)
 
-    def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
+    def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None,
+                  *, sound_event: str = None):
         # Do Not Disturb suppresses the whole background notification — banner,
         # sound and spoken announcement alike. Gating only the sound left the
         # banner popping up during a Do Not Disturb the user had deliberately
@@ -888,10 +1118,40 @@ class NotificationManager:
             )
             return
 
+        main_window = getattr(self, "main_window", None)
+        if sound_event == REACTION_SOUND_EVENT and reaction_silenced_now(main_window, remote_jid):
+            # Preferences or the vault can change while the reaction is queued.
+            return
+        sound_args = (remote_jid,) if sound_event is None else (remote_jid, sound_event)
+        if title is None:
+            # send_sound_only(): the "sound only" notification level. No
+            # banner, so nothing for _announce_unshown() to stand in for.
+            wx.CallAfter(self._play_sound, *sound_args)
+            return
+
+        get_chat = getattr(main_window, "get_chat", None)
+        if callable(get_chat):
+            chat = get_chat(remote_jid)
+        else:
+            chat = getattr(main_window, "chats", {}).get(remote_jid)
+        locked = bool(
+            getattr(main_window, "is_chat_locked", lambda _jid: False)(remote_jid)
+        )
+        if locked:
+            from core.utils import effective_unread_count
+            title, body = format_locked_notification(
+                effective_unread_count(chat or {}), self.i18n,
+                getattr(main_window, "app_name", "WinZapp"),
+            )
+
         if not self._toaster:
             # _setup_toaster() exhausted every AUMID candidate (or
             # windows_toasts is not importable at all): there will be no
             # banner for the screen reader to read, so announce it ourselves.
+            # A reaction keeps its own sound here: speech alone would not
+            # tell it apart from an ordinary message.
+            if sound_event == REACTION_SOUND_EVENT:
+                wx.CallAfter(self._play_sound, *sound_args)
             self._announce_unshown(title, body)
             return
         try:
@@ -903,7 +1163,6 @@ class NotificationManager:
             self.i18n.get_language()
             reply_hint = self.i18n.t("notif_reply_hint")
 
-            chat = self.main_window.chats.get(remote_jid)
             # A chat WinZapp just discovered via this very live message (see
             # on_new_message()) starts its local unreadCount at an assumed 0
             # and counts up from there — the phone may already have a much
@@ -918,7 +1177,8 @@ class NotificationManager:
             # Alt+3/the chat itself shows moments later; there is no single
             # later point to re-sample from once the banner is already up.
             unread_suffix = ""
-            if chat is not None and not chat.get("_unread_count_unsynced"):
+            if (not locked and chat is not None
+                    and not chat.get("_unread_count_unsynced")):
                 unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
 
             # Fire the custom sound BEFORE any of the WinRT/COM work below
@@ -931,7 +1191,7 @@ class NotificationManager:
             # between hearing the notification and seeing the banner. Not
             # perfect — Windows' own toast pipeline still isn't instant — but
             # this removes the part of the delay that was our own doing.
-            wx.CallAfter(self._play_sound, remote_jid)
+            wx.CallAfter(self._play_sound, *sound_args)
 
             # Clear whatever WinZapp notification is currently on screen (or
             # waiting to be shown) before posting the new one.  This is what
@@ -978,7 +1238,7 @@ class NotificationManager:
             jid_snapshot = remote_jid
             msg_key_snapshot = msg_key
 
-            if self._interactable:
+            if self._interactable and not locked:
                 # `caption` (-> the toast XML's `title` attribute) renders as
                 # its own visible line ABOVE the field — setting it to the
                 # same text as `placeholder` (-> `placeHolderContent`, the
@@ -1047,6 +1307,7 @@ class NotificationManager:
 
             self._toaster.show_toast(toast)
             self._last_toast    = toast
+            self._last_toast_jid = remote_jid
             self._last_shown_at = time.monotonic()
 
         except Exception as e:
@@ -1058,12 +1319,15 @@ class NotificationManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def send(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
+    def send(self, title: str, body: str, remote_jid: str, msg_key: dict = None,
+             *, sound_event: str = None):
         """Enqueue a toast notification (non-blocking).
 
         msg_key: the triggering message's `key` dict, if available — lets the
         toast's "Reagir" action react to that specific message instead of
         needing to look one up later.
+        sound_event: a reaction carries its own Sound Events choice through
+        coalescing; None keeps the usual per-conversation message tone.
         """
         # Stamped here so _dispatch() can say how long the toast waited behind
         # the worker versus how long Windows itself took to put it on screen.
@@ -1071,17 +1335,42 @@ class NotificationManager:
         # ler". Nothing on this path measured anything, so there was no way to
         # tell our own queue from the Windows notification pipeline from the
         # screen reader's own queue — three suspects, no evidence.
-        self._queue.put((title, body, remote_jid, msg_key, time.monotonic()))
+        item = (title, body, remote_jid, msg_key, time.monotonic())
+        if sound_event is not None:
+            item += (sound_event,)
+        self._queue.put(item)
+
+    def clear_for_chat(self, remote_jid: str):
+        """Remove this chat's toast from the notification area (non-blocking).
+
+        Called when the chat is read inside WinZapp, so a notification the user
+        no longer needs does not linger, as in the official WhatsApp.
+        """
+        if remote_jid:
+            self._queue.put(_ClearRequest(remote_jid))
+
+    def send_sound_only(self, remote_jid: str, *, sound_event: str = None):
+        """The "sound only" notification level: the background sound, and no
+        banner or speech. Queued like a toast, so it is coalesced with a burst
+        and waits behind any toast still being shown, and _dispatch() applies
+        Do Not Disturb to it exactly as to the sound of a full notification."""
+        item = (None, None, remote_jid, None, time.monotonic())
+        if sound_event is not None:
+            item += (sound_event,)
+        self._queue.put(item)
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
-    def _play_sound(self, remote_jid: str = ""):
+    def _play_sound(self, remote_jid: str = "", sound_event: str = None):
         # WinZapp plays this itself, outside the Windows toast audio pipeline,
         # so nothing else honours Do Not Disturb for it. Single decision point
         # for the sound half of a background notification — see
         # announce_background_message() for the spoken half.
         from core.quiet_hours import is_quiet_hours_active
         if is_quiet_hours_active():
+            return
+        if sound_event == REACTION_SOUND_EVENT:
+            self.main_window.reaction_received_sound.play()
             return
         if hasattr(self.main_window, "play_background_notification_sound"):
             self.main_window.play_background_notification_sound(remote_jid)

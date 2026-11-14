@@ -21,6 +21,7 @@ MainWindow is a wx.Frame, so the methods are bound to a stub carrying only
 what they touch — the pattern the rest of this suite uses.
 """
 
+import inspect
 import types
 
 import pytest
@@ -83,7 +84,7 @@ class _Stub:
         self.requested = []
 
     def fetch_older_messages(
-        self, jid, anchor, store_only=False, allow_phone_request=True
+        self, jid, anchor, store_only=False, allow_phone_request=True, expected_context=None
     ):
         self.calls.append({
             "jid": jid,
@@ -103,7 +104,8 @@ class _Stub:
             self._exhausted_chats.add(jid)
         return page
 
-    def request_older_messages(self, jid):
+    def request_older_messages(self, jid, outcome_out=None, expected_context=None,
+                               user_asked=False):
         self.requested.append(jid)
         return True
 
@@ -118,7 +120,7 @@ def _make(pages, oldest=None, advances=True):
                  "_chats_needing_deep_history", "history_page_target",
                  "_persist_exhausted_chats", "_anchor_identity",
                  "_voice_call_in_progress"):
-        raw = MainWindow.__dict__[name]
+        raw = inspect.getattr_static(MainWindow, name)
         if isinstance(raw, (staticmethod, classmethod)):
             setattr(stub, name, getattr(MainWindow, name))
         else:
@@ -321,7 +323,8 @@ class _LoopStub:
     def _chats_needing_deep_history(self):
         return list(self._deep_pending)
 
-    def deep_backfill_chat(self, jid):
+    def deep_backfill_chat(self, jid, expected_context=None):
+        assert expected_context.run == self._sync_run_id
         self.walked.append(jid)
         # One pass is enough; stop the loop the way a shutdown would.
         self._ui_ready_event.clear()
@@ -350,9 +353,9 @@ def _loop(deep_pending, pending=(), names=()):
                  # elapses, which is how one guard turned this file into a
                  # multi-hour CI run.
                  "_voice_call_in_progress"):
-        setattr(stub, name, types.MethodType(MainWindow.__dict__[name], stub))
+        setattr(stub, name, types.MethodType(inspect.getattr_static(MainWindow, name), stub))
     for name in ("_initial_backfill_delay", "_background_backfill_work_allowed",
-                 "_backfill_short_queue_delays"):
+                 "_chats_blocking_background_work", "_backfill_short_queue_delays"):
         setattr(stub, name, getattr(MainWindow, name))
     for const in ("_BACKFILL_BUDGET", "_BACKFILL_LANDING_BUDGET",
                   "_BACKFILL_FIRST_DELAY", "_BACKFILL_CHUNK_DELAY",
@@ -441,7 +444,7 @@ def _fetch_stub(monkeypatch, returned):
     stub = _FetchStub(returned)
     stub.db = _FetchStub._DB2(stub)
     stub.fetch_older_messages = types.MethodType(
-        MainWindow.__dict__["fetch_older_messages"], stub)
+        inspect.getattr_static(MainWindow, "fetch_older_messages"), stub)
 
     class _Resp:
         status_code = 200
@@ -453,6 +456,17 @@ def _fetch_stub(monkeypatch, returned):
 
     monkeypatch.setattr(main.requests, "get", lambda *a, **kw: _Resp())
     return stub
+
+
+class TestHistoryPageKeepsStoredStars:
+    def test_old_local_star_survives_history_page_before_it_enters_memory(self, monkeypatch):
+        from core.message_stars import merge_star_state, remote_star_state
+        incoming = {**_msg(1), **remote_star_state({"star": False}, 10)}
+        stub = _fetch_stub(monkeypatch, [incoming])
+        stub.db.merge_message_star_states = lambda jid, rows: [merge_star_state(m, {"starred": True}) for m in rows]
+        got = stub.fetch_older_messages("chat@g.us", _msg(5))
+        assert got[0]["starred"] is True
+        assert stub.chats["chat@g.us"]["messages"]["messages"]["records"][0]["starred"] is True
 
 
 class TestStoreOnlyKeepsNothingResident:
@@ -616,3 +630,29 @@ class TestOlderHistoryIsToldApartFromANewMessage:
     def test_an_empty_chat_has_a_stable_anchor(self):
         stub = self._stub(None)
         assert self._anchor(stub) == self._anchor(stub)
+
+
+class TestAnEmptyButReQueryablePageMovesTheChatBack:
+    """Issue #766 (Neonize): an empty page that leaves the chat re-queryable
+    (the background walk never asks the phone) kept the chat in front of the
+    queue, so the same first 8 chats were walked on every pass and the other
+    144 never were."""
+
+    def _chat(self, n):
+        return {"messages": {"messages": {"records": [_msg(i) for i in range(n)]}}}
+
+    def test_the_chat_waits_behind_those_that_can_still_progress(self):
+        stub = _make([[]], oldest=_msg(1))
+        # the real fetch leaves a chat at the bridge's edge re-queryable
+        stub.fetch_older_messages = lambda jid, anchor, **kw: []
+        stub.chats = {"chat@g.us": self._chat(200), "b@g.us": self._chat(200), "c@g.us": self._chat(200)}
+        assert stub._chats_needing_deep_history()[0] == "chat@g.us"
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+        assert "chat@g.us" not in stub._exhausted_chats
+        assert stub._chats_needing_deep_history() == ["b@g.us", "c@g.us", "chat@g.us"]
+
+    def test_an_exhausted_chat_is_not_parked(self):
+        stub = _make([[]], oldest=_msg(1))
+        stub.deep_backfill_chat("chat@g.us")          # this stub exhausts on empty
+        assert "chat@g.us" in stub._exhausted_chats
+        assert "chat@g.us" not in getattr(stub, "_deep_stalled_anchors", {})

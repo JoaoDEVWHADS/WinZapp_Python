@@ -25,6 +25,8 @@ import pytest
 import wx
 
 from ui.conversations import ConversationsPanel, _SAVEABLE_MESSAGE_TYPES
+from ui.conversation_panel.pinned_messages import PinnedMessagesMixin
+from tests.god_modules import patch_conversations_global
 
 
 class _FakeI18n:
@@ -113,8 +115,8 @@ class _FakeMainWindow:
     def delete_chat(self, jid):
         self.deleted.append(jid)
 
-    def archive_chat(self, jid, archived):
-        self.archived.append((jid, archived))
+    def archive_chat(self, jid):
+        self.archived.append(jid)
 
     def mark_conversations_as_read(self, jids, force=False):
         self.marked_read.extend((jid, force) for jid in jids)
@@ -122,12 +124,15 @@ class _FakeMainWindow:
     def mark_conversation_as_unread(self, jid):
         self.marked_unread.append(jid)
 
-    def delete_message_for_me(self, jid, key):
+    def delete_message_for_me(self, jid, key, delete_media=True):
         self.deleted_messages.append((jid, key))
 
-    def delete_message_for_everyone(self, jid, key):
+    def delete_message_for_everyone(self, jid, key, delete_media=True):
         self.deleted_for_everyone.append((jid, key))
-        return True
+        # Overridable so a test can exercise the partial/total-failure path:
+        # a refused revoke leaves the row on screen, which is where the stale
+        # ", selected" marker used to survive.
+        return getattr(self, "delete_for_everyone_result", True)
 
     def _apply_remote_revoke(self, existing, incoming, jid):
         existing["messageType"] = incoming["messageType"]
@@ -174,12 +179,16 @@ class _FakeEvent:
         self.skipped = True
 
 
-class _Panel:
+class _Panel(PinnedMessagesMixin):
     """Stub carrying exactly what the handlers under test touch."""
 
     _is_separator = ConversationsPanel._is_separator
     _on_messages_list_key_down = ConversationsPanel._on_messages_list_key_down
     _on_conv_list_key_down = ConversationsPanel._on_conv_list_key_down
+    _handle_chat_selection_key = ConversationsPanel._handle_chat_selection_key
+    _repaint_chat_selection = ConversationsPanel._repaint_chat_selection
+    _announce_chat_selected = ConversationsPanel._announce_chat_selected
+    _reset_after_chat_cleared = ConversationsPanel._reset_after_chat_cleared
     _on_mass_clear_chats = ConversationsPanel._on_mass_clear_chats
     _reset_view_after_chat_cleared = ConversationsPanel._reset_view_after_chat_cleared
     _on_mass_delete_chats = ConversationsPanel._on_mass_delete_chats
@@ -192,8 +201,13 @@ class _Panel:
     _apply_confirmed_revoke = ConversationsPanel._apply_confirmed_revoke
     _on_bulk_delete_for_everyone_done = ConversationsPanel._on_bulk_delete_for_everyone_done
     _confirm_local_only_delete = ConversationsPanel._confirm_local_only_delete
+    _confirm_local_delete = ConversationsPanel._confirm_local_delete
+    _add_delete_media_checkbox = ConversationsPanel._add_delete_media_checkbox
     _delete_target_jid = ConversationsPanel._delete_target_jid
     _on_mass_copy_messages = ConversationsPanel._on_mass_copy_messages
+    _message_text_with_names = ConversationsPanel._message_text_with_names
+    _message_mentioned_jids = staticmethod(ConversationsPanel._message_mentioned_jids)
+    _resolve_mentions_in_text = ConversationsPanel._resolve_mentions_in_text
     _on_mass_star_messages = ConversationsPanel._on_mass_star_messages
     _on_mass_pin_messages = ConversationsPanel._on_mass_pin_messages
     _on_mass_pin_failed = ConversationsPanel._on_mass_pin_failed
@@ -260,6 +274,10 @@ class _Panel:
         self.repainted = []
         self.repaint_ok = True
         self.persisted = []
+        self.star_jobs = []
+
+    def _sync_message_stars(self, jid, messages, star):
+        self.star_jobs.append((jid, [m["key"]["id"] for m in messages], star))
 
     # Plain Space only reaches these for an audio/video row; every message
     # this file builds is a text one, so they just record.
@@ -635,7 +653,8 @@ def confirm_yes(monkeypatch):
     monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: wx.YES)
     # Clearing asks through its own dialog (it carries the "keep starred
     # messages" checkbox); answer yes with the checkbox at its default.
-    monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: (True, True))
+    patch_conversations_global(monkeypatch, "confirm_clear_chat", lambda *a, **k: (True, True))
+    patch_conversations_global(monkeypatch, "confirm_delete_chat", lambda *a, **k: True)
 
 
 @pytest.fixture
@@ -655,14 +674,21 @@ def confirm_yes_capture(monkeypatch):
         calls.append((message, title))
         return True, True
 
-    monkeypatch.setattr("ui.conversations.confirm_clear_chat", _fake_clear_confirm)
+    patch_conversations_global(monkeypatch, "confirm_clear_chat", _fake_clear_confirm)
+
+    def _fake_delete_confirm(parent, main_window, message, title, *a, **kw):
+        calls.append((message, title))
+        return True
+
+    patch_conversations_global(monkeypatch, "confirm_delete_chat", _fake_delete_confirm)
     return calls
 
 
 @pytest.fixture
 def confirm_no(monkeypatch):
     monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: wx.NO)
-    monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: (False, True))
+    patch_conversations_global(monkeypatch, "confirm_clear_chat", lambda *a, **k: (False, True))
+    patch_conversations_global(monkeypatch, "confirm_delete_chat", lambda *a, **k: False)
 
 
 @pytest.fixture
@@ -840,7 +866,7 @@ class TestMassChatActions:
         assert panel.main_window.announced == ["success_clear"]
 
     def test_unticking_keep_starred_applies_to_every_selected_chat(self, monkeypatch):
-        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: (True, False))
+        patch_conversations_global(monkeypatch, "confirm_clear_chat", lambda *a, **k: (True, False))
         panel = _Panel()
         panel.selected_chats = {"a@s.whatsapp.net", "b@s.whatsapp.net"}
         panel._on_mass_clear_chats(None)
@@ -897,7 +923,7 @@ class TestMassChatActions:
         panel = _Panel()
         panel.selected_chats = {"a@s.whatsapp.net"}
         panel._on_mass_archive_chats(None)
-        assert panel.main_window.archived == [("a@s.whatsapp.net", True)]
+        assert panel.main_window.archived == ["a@s.whatsapp.net"]
         assert panel.main_window.announced == ["success_archive"]
 
     def test_marking_read_applies_to_every_selected_chat(self):
@@ -924,7 +950,7 @@ class TestMassChatActions:
         """Not even a confirmation dialog — the submenu is only built while a
         selection exists, but the handlers are reachable after it is cleared."""
         monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: pytest.fail("asked"))
-        monkeypatch.setattr("ui.conversations.confirm_clear_chat", lambda *a, **k: pytest.fail("asked"))
+        patch_conversations_global(monkeypatch, "confirm_clear_chat", lambda *a, **k: pytest.fail("asked"))
         panel = _Panel()
         getattr(panel, handler)(None)
         assert panel.main_window.cleared == []
@@ -1113,6 +1139,35 @@ class TestMassMessageActions:
         (removed, _focus), = panel.removed_locally
         assert removed == {"m2"}
 
+    def test_rows_that_stay_on_screen_lose_their_selected_marker(
+        self, fake_delete_dialog, run_threads_inline
+    ):
+        """REGRESSION: the ", selected" suffix lives in the ROW TEXT
+        (append_selected_marker()), so clearing selected_messages does not
+        rewrite it. Only rows whose revoke SUCCEEDED were repainted, by the
+        protocolMessage coming back through _apply_confirmed_revoke(); a row
+        whose revoke failed stayed on screen still reading ", selected" while
+        selected_messages was empty. A screen reader then announced it as
+        selected and every mass-action shortcut answered "nothing selected".
+        """
+        fake_delete_dialog["everyone"] = True
+        panel = _Panel(messages=[_msg("m1", from_me=True), _msg("m2", from_me=True)])
+        panel.selected_messages = {"m1", "m2"}
+        # Both revokes fail, so neither row is removed and neither is
+        # repainted by the confirmed-revoke path.
+        panel.main_window.delete_for_everyone_result = False
+        refreshed = []
+        panel._refresh_message_rows_by_ids = refreshed.extend
+        # The failure report is its own wx.MessageBox and its own concern
+        # (test_bulk_delete_reports_partial_failure covers it); stub it out so
+        # this test does not need a wx.App.
+        panel._on_bulk_delete_for_everyone_done = lambda failed_count: None
+
+        panel._on_mass_delete_messages(None)
+
+        assert panel.selected_messages == set()
+        assert sorted(refreshed) == ["m1", "m2"]
+
     def test_a_group_admin_can_delete_for_everyone_even_a_message_not_their_own(
         self, fake_delete_dialog, run_threads_inline
     ):
@@ -1289,8 +1344,7 @@ def fixed_datetime_format(monkeypatch):
     the real machine's Windows regional settings) to a fixed pattern, so
     _on_mass_copy_messages's output doesn't depend on the test runner's
     locale."""
-    monkeypatch.setattr(
-        "ui.conversations.get_datetime_format", lambda fallback: "%d/%m/%Y %H:%M"
+    patch_conversations_global(monkeypatch, "get_datetime_format", lambda fallback: "%d/%m/%Y %H:%M"
     )
 
 
@@ -1396,10 +1450,11 @@ class TestMassStarAndPinMessages:
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_star_messages(None)
-        assert msgs[0]["starred"] is True
-        assert panel.persisted == [("grupo@g.us", ["m1"])]  # m2 skipped, already starred
+        assert not msgs[0].get("starred")  # verification worker owns the update
+        assert panel.star_jobs == [("grupo@g.us", ["m1"], True)]
+        assert panel.persisted == []
         assert panel.selected_messages == set()
-        assert panel.main_window.announced == ["success_star_bulk"]
+        assert panel.main_window.announced == []  # no premature success
 
     def test_pins_every_selected_message_not_already_pinned(self, run_threads):
         msgs = [_msg("m1"), _msg("m2")]
@@ -1429,11 +1484,12 @@ class TestMassStarAndPinAreBatched:
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2", "m3"}
         panel._on_mass_star_messages(None)
-        assert all(m["starred"] for m in msgs)
+        assert not any(m.get("starred") for m in msgs)
         assert panel.repainted == [["m1", "m2", "m3"]]
         assert panel.populate_calls == 0, "the affected rows are repainted, not the whole list"
-        assert panel.persisted == [("grupo@g.us", ["m1", "m2", "m3"])]
-        assert panel.main_window.saves == 1
+        assert panel.star_jobs == [("grupo@g.us", ["m1", "m2", "m3"], True)]
+        assert panel.persisted == []
+        assert panel.main_window.saves == 0
 
     def test_starring_repaints_the_whole_selection_not_just_the_changed_rows(self):
         """Clearing selected_messages drops the " selecionado" marker from
@@ -1555,3 +1611,28 @@ class TestMassStarAndPinAnnounceHonestly:
         panel.selected_messages = {"m1"}
         getattr(panel, handler)(None)
         assert getattr(panel, recorder) == []
+
+
+class TestMassArchiveMatchesTheRealMainWindowSignature:
+    """The stub's archive_chat() used to take (jid, archived) while the real
+    MainWindow.archive_chat(jid) takes only the jid, so "Arquivar conversas
+    selecionadas" raised TypeError on the first chat in the real app and every
+    test still passed. The stub now enforces the real signature."""
+
+    def test_the_handler_calls_archive_chat_the_way_mainwindow_accepts(self):
+        import inspect
+        from main import MainWindow
+
+        real = inspect.signature(MainWindow.archive_chat)
+        panel = _Panel()
+        calls = []
+
+        def archive_chat(*args, **kwargs):
+            real.bind(object(), *args, **kwargs)  # TypeError if the shape is wrong
+            calls.append(args)
+
+        panel.main_window.archive_chat = archive_chat
+        panel.selected_chats = {"a@s.whatsapp.net", "b@s.whatsapp.net"}
+        panel._on_mass_archive_chats(None)
+
+        assert sorted(a[0] for a in calls) == ["a@s.whatsapp.net", "b@s.whatsapp.net"]

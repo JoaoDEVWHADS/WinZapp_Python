@@ -18,9 +18,13 @@ tests/test_reported_bugfixes.py.
 
 from main import MainWindow
 from core.sound_system import DEFAULT_PACK_ID
-from core.utils import (SPELL_CHECK_MODE_MIGRATION_FLAG,
+from core.utils import (CALL_EXCLUSIVE_SPLIT_MIGRATION_FLAG,
+                        ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG,
+                        SPELL_CHECK_MODE_MIGRATION_FLAG,
+                        TYPING_ROW_DEFAULT_MIGRATION_FLAG,
                         VOICE_MEDIA_TYPE_MIGRATION_FLAG,
-                        VOICE_MESSAGE_MODE_MIGRATION_FLAG)
+                        VOICE_MESSAGE_MODE_MIGRATION_FLAG,
+                        WPP_REINSTALL_NOTICE_MIGRATION_FLAG)
 
 
 class _MainWindowStub:
@@ -37,6 +41,10 @@ class _MainWindowStub:
             VOICE_MEDIA_TYPE_MIGRATION_FLAG: True,
             VOICE_MESSAGE_MODE_MIGRATION_FLAG: True,
             SPELL_CHECK_MODE_MIGRATION_FLAG: True,
+            CALL_EXCLUSIVE_SPLIT_MIGRATION_FLAG: True,
+            WPP_REINSTALL_NOTICE_MIGRATION_FLAG: True,
+            TYPING_ROW_DEFAULT_MIGRATION_FLAG: True,
+            ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG: True,
         })
         self.save_calls = 0
 

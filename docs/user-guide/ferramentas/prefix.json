@@ -1,0 +1,92 @@
+{
+ "Baixar atualizações e downloads da transcrição em segundo plano, sem a janela de progresso": {
+  "pt-BR": "Baixar atualizações e downloads da transcrição em segundo plano, sem a janela de progresso (o WinZapp avisa antes de instalar uma atualização e quando um download termina)",
+  "pt-PT": "Descarregar atualizações e transferências da transcrição em segundo plano, sem a janela de progresso (o WinZapp avisa antes de instalar uma atualização e quando uma transferência termina)",
+  "en-US": "Download updates and transcription downloads in the background, without the progress window (WinZapp tells you before installing an update and when a download finishes)",
+  "es-ES": "Descargar las actualizaciones y las descargas de la transcripción en segundo plano, sin la ventana de progreso (WinZapp avisa antes de instalar una actualización y cuando termina una descarga)",
+  "pl": "Pobieraj aktualizacje i pliki potrzebne do transkrypcji w tle, bez okna postępu (WinZapp powiadomi przed instalacją aktualizacji i po zakończeniu pobierania)",
+  "tr-TR": "Güncellemeleri ve yazıya döküm indirmelerini ilerleme penceresi olmadan arka planda indir (WinZapp bir güncellemeyi yüklemeden önce ve bir indirme bittiğinde haber verir)",
+  "ro": "Descărcați actualizările și descărcările transcrierii în fundal, fără fereastra de progres (WinZapp vă anunță înainte de instalarea unei actualizări și când se termină o descărcare)",
+  "key": "background_updates_label"
+ },
+ "Encaminhar mensagens de voz como mensagens de voz, em vez de áudio": {
+  "pt-BR": "Encaminhar mensagens de voz como mensagens de voz, em vez de áudio (continuam marcadas como encaminhadas)",
+  "pt-PT": "Reencaminhar mensagens de voz como mensagens de voz, em vez de áudio (continuam marcadas como reencaminhadas)",
+  "en-US": "Forward voice messages as voice messages instead of audio (they are still marked as forwarded)",
+  "es-ES": "Reenviar los mensajes de voz como mensajes de voz, en lugar de audio (siguen marcados como reenviados)",
+  "pl": "Przekazuj wiadomości głosowe jako wiadomości głosowe, a nie jako audio (nadal są oznaczane jako „Przekazano”)",
+  "tr-TR": "Sesli mesajları ses dosyası yerine sesli mesaj olarak ilet (yine iletildi olarak işaretlenir)",
+  "ro": "Redirecționați mesajele vocale ca mesaje vocale, nu ca audio (rămân marcate ca redirecționate)",
+  "key": "ui_forward_voice_as_voice"
+ },
+ "Enter e Espaço em uma mensagem de voz ou vídeo a transcrevem na linha dela na lista em vez de reproduzi-la...": {
+  "pt-BR": "Enter e Espaço em uma mensagem de voz ou vídeo a transcrevem na linha dela na lista em vez de reproduzi-la (Alt+Shift+N a reproduz ou abre); desmarcado, Enter e Espaço a reproduzem ou abrem e Alt+Shift+N a transcreve na linha",
+  "pt-PT": "Enter e Espaço numa mensagem de voz ou vídeo transcrevem-na na linha dela na lista em vez de a reproduzir (Alt+Shift+N reproduz ou abre); desmarcado, Enter e Espaço reproduzem-na ou abrem-na e Alt+Shift+N transcreve-a na linha",
+  "en-US": "Enter and Space on a voice message or video transcribe it into its line in the list instead of playing it (Alt+Shift+N plays or opens it); turned off, Enter and Space play or open it and Alt+Shift+N transcribes it into its line",
+  "es-ES": "Enter y Espacio en un mensaje de voz o un vídeo lo transcriben en su línea de la lista en lugar de reproducirlo (Alt+Shift+N lo reproduce o lo abre); desactivado, Enter y Espacio lo reproducen o lo abren y Alt+Shift+N lo transcribe en su línea",
+  "pl": "Enter i Spacja uruchamiają transkrypcję wiadomości głosowej lub wideo i wyświetlają tekst w jej wierszu na liście. Alt+Shift+N odtwarza lub otwiera wiadomość. Gdy opcja jest wyłączona, Enter i Spacja odtwarzają lub otwierają wiadomość, a Alt+Shift+N uruchamia transkrypcję.",
+  "tr-TR": "Sesli mesajda veya videoda Enter ve Boşluk, onu oynatmak yerine listedeki satırına yazıya döker (Alt+Shift+N oynatır veya açar); kapalıyken Enter ve Boşluk oynatır veya açar, Alt+Shift+N satıra yazıya döker",
+  "ro": "Enter și Spațiu pe un mesaj vocal sau video îl transcriu în linia lui din listă în loc să îl redea (Alt+Shift+N îl redă sau îl deschide); dezactivat, Enter și Spațiu îl redau sau îl deschid, iar Alt+Shift+N îl transcrie în linie",
+  "key": "ui_enter_transcribes_voice"
+ },
+ "Manter a pesquisa de conversas ao abrir uma conversa": {
+  "pt-BR": "Manter a pesquisa de conversas ao abrir uma conversa, para o Esc voltar aos resultados em vez da lista completa",
+  "pt-PT": "Manter a pesquisa de conversas ao abrir uma conversa, para o Esc voltar aos resultados em vez da lista completa",
+  "en-US": "Keep the chat search when opening a chat, so Esc returns to the results instead of the full list",
+  "es-ES": "Mantener la búsqueda de conversaciones al abrir una conversación, para que Esc vuelva a los resultados en lugar de a la lista completa",
+  "pl": "Zachowaj wyszukiwanie czatów po otwarciu czatu, aby Esc wracał do wyników zamiast do pełnej listy",
+  "tr-TR": "Bir sohbet açıldığında sohbet aramasını koru; böylece Esc tam liste yerine sonuçlara döner",
+  "ro": "Păstrați căutarea conversațiilor la deschiderea unei conversații, pentru ca Esc să revină la rezultate, nu la lista completă",
+  "key": "ui_keep_search_after_open"
+ },
+ "Não guardar cópias de segurança do perfil": {
+  "pt-BR": "Não guardar cópias de segurança do perfil (economiza espaço, mas se o perfil for danificado será necessário parear novamente)",
+  "pt-PT": "Não guardar cópias de segurança do perfil (poupa espaço, mas se o perfil for danificado será necessário emparelhar novamente)",
+  "en-US": "Don't keep profile backups (saves space, but if the profile is damaged you will need to pair again)",
+  "es-ES": "No guardar copias de seguridad del perfil (ahorra espacio, pero si el perfil se daña tendrás que vincular de nuevo)",
+  "pl": "Nie przechowuj kopii zapasowych profilu (oszczędza miejsce, ale jeśli profil zostanie uszkodzony, trzeba będzie sparować ponownie)",
+  "tr-TR": "Profil yedeklerini saklama (yer kazandırır, ancak profil hasar görürse tekrar eşlemeniz gerekir)",
+  "ro": "Nu păstrați copii de siguranță ale profilului (economisește spațiu, dar dacă profilul se deteriorează va trebui să efectuați din nou asocierea)",
+  "key": "profile_backup_disabled_label"
+ },
+ "Precisão de cálculo": {
+  "pt-BR": "Precisão de cálculo: {precision}.",
+  "pt-PT": "Precisão de cálculo: {precision}.",
+  "en-US": "Calculation precision: {precision}.",
+  "es-ES": "Precisión de cálculo: {precision}.",
+  "pl": "Precyzja obliczeń: {precision}.",
+  "tr-TR": "Hesaplama hassasiyeti: {precision}.",
+  "ro": "Precizia calculelor: {precision}.",
+  "key": "transcription_note_precision_used"
+ },
+ "Transcrever sem a janela de progresso...": {
+  "pt-BR": "Transcrever sem a janela de progresso: continuar nas mensagens ou nos status até o texto ficar pronto (o mesmo atalho cancela)",
+  "pt-PT": "Transcrever sem a janela de progresso: continuar nas mensagens ou nos estados até o texto ficar pronto (o mesmo atalho cancela)",
+  "en-US": "Transcribe without the progress window: stay on the messages or statuses until the text is ready (the same shortcut cancels)",
+  "es-ES": "Transcribir sin la ventana de progreso: seguir en los mensajes o en los estados hasta que el texto esté listo (el mismo atajo cancela)",
+  "pl": "Transkrybuj bez okna postępu: pozostań na wiadomościach lub statusach, aż tekst będzie gotowy (ten sam skrót anuluje)",
+  "tr-TR": "İlerleme penceresi olmadan döküm yap: metin hazır olana kadar mesajlarda veya durumlarda kal (aynı kısayol iptal eder)",
+  "ro": "Transcrieți fără fereastra de progres: rămâneți la mesaje sau la stări până când textul este gata (aceeași scurtătură anulează)",
+  "key": "transcription_no_dialog_check"
+ },
+ "Usar reações rápidas fixas": {
+  "pt-BR": "Usar reações rápidas fixas: escolher o emoji de cada uma das 12 posições, em vez de ordenar pelas mais usadas",
+  "pt-PT": "Usar reações rápidas fixas: escolher o emoji de cada uma das 12 posições, em vez de ordenar pelas mais utilizadas",
+  "en-US": "Use fixed quick reactions: choose the emoji for each of the 12 positions instead of sorting by most used",
+  "es-ES": "Usar reacciones rápidas fijas: elegir el emoji de cada una de las 12 posiciones, en lugar de ordenarlas por las más usadas",
+  "pl": "Używaj stałych szybkich reakcji: wybierz emoji dla każdej z 12 pozycji zamiast sortować je według najczęściej używanych",
+  "tr-TR": "Sabit hızlı tepkiler kullan: tepkileri en çok kullanılana göre sıralamak yerine 12 konumun her biri için emojiyi seç",
+  "ro": "Folosiți reacții rapide fixe: alegeți emoji-ul pentru fiecare dintre cele 12 poziții, în loc să le ordonați după cele mai utilizate",
+  "key": "reactions_fixed_label"
+ },
+ "ontem": {
+  "pt-BR": "Ontem às {time}",
+  "pt-PT": "Ontem às {time}",
+  "en-US": "Yesterday at {time}",
+  "es-ES": "Ayer a las {time}",
+  "pl": "Wczoraj o {time}",
+  "tr-TR": "Dün {time}",
+  "ro": "Ieri la {time}",
+  "key": "yesterday_at"
+ }
+}

@@ -308,6 +308,11 @@ __HELPER_SOURCE__
 GOOD_HTML = "<!doctype html>" + ("x" * 2000) + "web.whatsapp.com"
 
 
+#: The budget the harness gives fetchLiveWhatsappDocument(), in place of the
+#: shipped 10 s.
+HARNESS_FETCH_TIMEOUT_MS = 400
+
+
 def _helper_source():
     """The real shipped source of fetchLiveWhatsappDocument(), plus the timeout
     constant it reads.
@@ -318,7 +323,13 @@ def _helper_source():
     source = START_JS.read_text(encoding="utf-8")
     start = source.index("const LIVE_DOCUMENT_FETCH_TIMEOUT_MS")
     end = source.index("const whatsappVersion = resolveWhatsappVersion();", start)
-    return source[start:end]
+    helper = source[start:end]
+    # The shipped budget is 10 s; waiting it out for real cost the suite 20 s.
+    # The harness runs the same code against a short budget instead.
+    shipped = "const LIVE_DOCUMENT_FETCH_TIMEOUT_MS = 10000;"
+    assert shipped in helper, "the live-fetch budget moved or changed; update this harness"
+    return helper.replace(
+        shipped, f"const LIVE_DOCUMENT_FETCH_TIMEOUT_MS = {HARNESS_FETCH_TIMEOUT_MS};")
 
 
 def _fetch_live(tmp_path, mode="ok", html=None, channels=None):
@@ -371,7 +382,7 @@ class TestTheLiveDocumentFallback:
         """Pairing cannot be held hostage by a fetch that never answers."""
         result = _fetch_live(tmp_path, mode="hangs")
         assert result["ok"] is False
-        assert result["elapsed"] < 30000, "the timeout did not fire"
+        assert result["elapsed"] < 3 * HARNESS_FETCH_TIMEOUT_MS, "the timeout did not fire"
 
     def test_an_older_wa_version_without_the_method_is_not_a_crash(self, tmp_path):
         """fetchLatestAlpha is not in every published copy of the package."""
@@ -433,14 +444,14 @@ class TestTheLiveFetchAsksTheStableChannelFirst:
         assert result["called"] == ["fetchLatest", "fetchLatestAlpha"]
 
     def test_two_channels_do_not_mean_two_timeout_windows(self, tmp_path):
-        """The 10 s budget covers the SET. A user on a dead network must not
+        """The budget covers the SET. A user on a dead network must not
         wait twice as long for pairing now that there are two channels."""
         result = _fetch_live(tmp_path, channels={
             "fetchLatest": {"mode": "hangs", "html": None},
             "fetchLatestAlpha": {"mode": "hangs", "html": None},
         })
         assert result["ok"] is False
-        assert result["elapsed"] < 15000, "the budget was spent per channel"
+        assert result["elapsed"] < 1.5 * HARNESS_FETCH_TIMEOUT_MS, "the budget was spent per channel"
 
     def test_the_source_asks_for_the_stable_channel(self):
         source = START_JS.read_text(encoding="utf-8")

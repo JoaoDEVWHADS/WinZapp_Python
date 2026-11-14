@@ -16,24 +16,21 @@ Only literal calls are checked (``i18n.t("some_key")``). Keys built at runtime
 scope — the same limit any static check of this shape has.
 """
 
-import json
 import pathlib
 import re
 
 import pytest
 
 _CLIENT = pathlib.Path(__file__).resolve().parents[1] / "client"
-_LANGUAGES = _CLIENT / "languages"
+from tests.locales import load_strings, registered_locale_codes
 
 #: Read from language_map.json — the same source tests/test_language_files_in_sync.py
 #: uses — rather than hardcoded here. The set of locales is data, not code: a
-#: locale is added by dropping in `<code>.json` plus an entry in that map, with
+#: locale is added by a PO catalog plus an entry in that map, with
 #: no rebuild. A list repeated in this file would leave a locale added that way
 #: checked against the other locales but never against the keys the code
 #: actually asks for, which is the one gap this test exists to close.
-_LOCALES = tuple(
-    sorted(json.loads((_LANGUAGES / "language_map.json").read_text(encoding="utf-8")))
-)
+_LOCALES = registered_locale_codes()
 
 #: `i18n.t("key")`, `self.i18n.t("key")`, `mw.i18n.t("key")` — the literal
 #: forms. Deliberately anchored on `i18n.t(` so unrelated `.t(` calls and
@@ -62,7 +59,7 @@ def _used_keys() -> dict[str, set[str]]:
 
 
 def _locale(code: str) -> dict:
-    return json.loads((_LANGUAGES / f"{code}.json").read_text(encoding="utf-8"))
+    return load_strings(code)
 
 
 def test_the_locale_list_comes_from_the_language_map():
@@ -91,7 +88,7 @@ def test_every_key_the_code_uses_exists_in_the_locale(code):
         if key not in translations
     }
     assert not missing, (
-        f"{code}.json is missing keys the code asks for — I18n.t() renders the "
+        f"{code} is missing keys the code asks for — I18n.t() renders the "
         f"raw key name in the UI (and the screen reader reads it): "
         + "; ".join(f"{k} (used in {', '.join(f)})" for k, f in missing.items())
     )
@@ -102,7 +99,7 @@ def test_the_two_keys_that_motivated_this_check_are_present():
     for code in _LOCALES:
         translations = _locale(code)
         for key in ("voice_recording", "recording_paused"):
-            assert key in translations, f"{key} missing from {code}.json"
+            assert key in translations, f"{key} missing from {code}"
             assert translations[key] != key, (
-                f"{key} in {code}.json is just the key name again"
+                f"{key} in {code} is just the key name again"
             )

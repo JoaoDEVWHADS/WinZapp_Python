@@ -18,6 +18,7 @@ throughout this test suite (see test_sender_names.py).
 """
 
 from ui.conversations import ConversationsPanel
+from ui.conversation_panel.reading_position import ReadingPositionMixin
 
 
 class _FakeWidget:
@@ -49,11 +50,28 @@ class _FakeMainWindow:
         return False
 
 
-class _Stub:
+class _FakeTimer:
+    def __init__(self):
+        self.stopped = False
+
+    def Stop(self):
+        self.stopped = True
+
+
+class _Stub(ReadingPositionMixin):
     _close_conversation_core = ConversationsPanel._close_conversation_core
+
+    def _stash_message_draft(self):
+        # The draft itself is tests/test_message_drafts.py's.
+        self.draft_stashed = True
     close_conversation = ConversationsPanel.close_conversation
     close_conversation_for_panel_switch = ConversationsPanel.close_conversation_for_panel_switch
     _stop_typing_for_current_conversation = ConversationsPanel._stop_typing_for_current_conversation
+    _stop_contact_presence = ConversationsPanel._stop_contact_presence
+    _stop_group_call_watch = ConversationsPanel._stop_group_call_watch
+
+    def _show_ongoing_group_call(self, call):
+        self._ongoing_group_call = call
     # Closing the conversation also drops the expanded history window, so the
     # next chat opens at the configured page size instead of inheriting this
     # one's thousands of rows.
@@ -65,6 +83,8 @@ class _Stub:
         self._last_open_jid = conversation.get("remoteJid", "") if conversation else ""
         self._is_typing = True
         self._is_recording = True
+        self._contact_presence_visit = 1
+        self._contact_presence_timer = _FakeTimer()
         self._editing_message_id = None
         self._quoted_message = None
         self._search_results = []
@@ -93,6 +113,9 @@ class _Stub:
     def _hide_audio_controls(self):
         pass
 
+    def _hide_inline_poll(self):
+        pass
+
     def _hide_all_media_controls(self):
         pass
 
@@ -119,11 +142,15 @@ def _conv(jid="5511999999999@s.whatsapp.net"):
 class TestCloseConversationForPanelSwitch:
     def test_stops_typing_and_recording(self):
         stub = _Stub(_conv())
+        timer = stub._contact_presence_timer
 
         stub.close_conversation_for_panel_switch()
 
         assert stub.main_window.typing_calls == [("5511999999999@s.whatsapp.net", False)]
         assert stub.main_window.recording_calls == [("5511999999999@s.whatsapp.net", False)]
+        assert timer.stopped is True
+        assert stub._contact_presence_timer is None
+        assert stub._contact_presence_visit == 2
 
     def test_clears_and_hides_the_conversation(self):
         stub = _Stub(_conv())

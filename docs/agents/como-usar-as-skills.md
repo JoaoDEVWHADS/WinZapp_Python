@@ -8,7 +8,7 @@ Existem skills que **entram sozinhas** e skills que **você chama**.
 
 - **Automáticas** — o agente carrega quando a tarefa bate com a descrição.
   Você não digita nada. Exemplos: mexeu em texto da interface, a
-  `i18n-ui-string` entra e ele já sabe dos cinco idiomas; escreveu um teste, a
+  `i18n-ui-string` entra e ele já sabe de todos os idiomas registrados; escreveu um teste, a
   `write-test` entra. Todas as cinco skills do projeto são assim, e várias do
   Matt Pocock também (`tdd`, `code-review`, `diagnosing-bugs`, `prototype`,
   `research`, `domain-modeling`, `codebase-design`,
@@ -75,7 +75,7 @@ publicar.
 ### 3. `/to-tickets` — a divisão em partes
 
 **O que faz:** quebra o spec em tickets pequenos. Cada ticket é uma **fatia
-vertical**: tela + lógica + dados + teste + os cinco idiomas, entregável e
+vertical**: tela + lógica + dados + teste + todos os idiomas, entregável e
 testável sozinha. Nunca "camada de dados" num ticket e "tela" em outro. Cada
 ticket declara quais outros o bloqueiam. Publica um issue por ticket, em
 ordem de dependência.
@@ -95,12 +95,17 @@ ou apontando para um spec já existente:
 ### 4. `/implement` — a construção
 
 **O que faz:** implementa **um** ticket. Escreve o teste antes do código
-(`tdd` entra sozinha), roda testes de arquivo durante o trabalho e a suíte
-completa no fim, e chama o `code-review` antes de terminar.
+(`tdd` entra sozinha), roda os testes dos arquivos afetados (a suíte completa
+roda no CI do PR) e chama o `code-review` antes de terminar.
 
 **Regras do WinZapp que valem aqui** (estão no `CLAUDE.md`, mas vale repetir):
-- "Suíte completa" é `pytest` puro. **Nunca** `--run-wx-gui` — isso abre
-  janela na tela de quem está usando leitor de tela.
+- Numa sessão **local**, "suíte completa" é `uv run pytest` puro, serial, uma
+  execução por vez, e **nunca** `-n auto`: a máquina também roda o WinZapp, e
+  execuções em paralelo já a travaram. Numa sessão **na nuvem** (Claude Code na
+  web) isso não vale: rode em paralelo (`-n auto`, `--shard K/N`) para ir mais
+  rápido.
+- **Nunca** `--run-wx-gui`, em lugar nenhum: abre janela na tela de quem está
+  usando leitor de tela.
 - Ele **não commita** sem você pedir, mesmo a skill dizendo o contrário.
 
 **Como usar:** uma sessão por ticket. Antes de cada um, `/clear`.
@@ -114,7 +119,9 @@ completa no fim, e chama o `code-review` antes de terminar.
 branch) em dois eixos, cada um num sub-agente sem o viés de quem escreveu:
 **Standards** (smells de código do livro *Refactoring*, mais os padrões
 documentados do repo — aqui, `CLAUDE.md` e `docs/traps/`) e **Spec** (o
-código faz o que a issue pediu?).
+código faz o que a issue pediu?). Numa sessão local do WinZapp, execute esses
+agentes em sequência, nunca simultaneamente: `CLAUDE.md` exige um agente por
+vez na máquina do mantenedor. Numa sessão na nuvem eles podem rodar juntos.
 
 **Como usar:**
 ```
@@ -125,7 +132,7 @@ mão antes de abrir PR.
 
 **Rode o `winzapp-reviewer` depois.** O `/code-review` do Matt olha
 estrutura e spec; o nosso agente olha o que quebra *este* repositório (JID,
-sync, echo matching, cinco idiomas, leitor de tela, patches). Não são
+sync, echo matching, todos os idiomas, leitor de tela, patches). Não são
 alternativos:
 ```
 usa o winzapp-reviewer pra revisar minha branch contra origin/main
@@ -196,9 +203,11 @@ protótipo e voltar.
 encontra módulos rasos que valeriam virar módulos profundos, e mostra um
 relatório HTML. Você escolhe um e ele entrevista sobre esse.
 
-**No WinZapp:** vai apontar para o `main.py` e o `conversations.py`. Achou o
-candidato, a execução é o nosso `extract-from-god-file` (automático) ou o
-agente `refactor-extractor`.
+**No WinZapp:** o `main.py` e o `conversations.py` já foram divididos em
+mixins (`client/main_window/`, `client/ui/conversation_panel/`); o candidato
+agora costuma ser um mixin que cresceu demais ou lógica pura presa num mixin,
+inclusive no pacote `client/status_tab/`. Achou o candidato, a execução é o nosso
+`extract-from-god-file` (automático) ou o agente `refactor-extractor`.
 
 ### `/wait-what` — não entendi
 

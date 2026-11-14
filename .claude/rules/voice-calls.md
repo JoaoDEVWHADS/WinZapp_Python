@@ -6,6 +6,7 @@ paths:
   - "client/api_patches/src/controller/callController.ts"
   - "client/api_patches/src/middleware/socketAuth.ts"
   - "pulse_audio_lifecycle.py"
+  - "client/main_window/calls.py"
 ---
 
 # Voice calls

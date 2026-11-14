@@ -36,12 +36,14 @@ the attributes they touch — the same pattern the other main.py tests use.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import wx
 
 import main
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 # The two bodies statusConnection.ts really writes. `reason` is absent from the
@@ -120,6 +122,16 @@ def _synchronous_call_after(monkeypatch):
     """Run wx.CallAfter(fn, *args) immediately instead of queuing it onto a
     (nonexistent, in these tests) wx event loop."""
     monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+    from core import connection_lifecycle
+    class InlineWorker:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(connection_lifecycle, "threading", SimpleNamespace(
+        Thread=InlineWorker, Lock=connection_lifecycle.threading.Lock))
 
 
 def _answer(monkeypatch, response):
@@ -130,7 +142,7 @@ def _answer(monkeypatch, response):
         calls.append((url, kwargs))
         return response
 
-    monkeypatch.setattr(main, "api_post", _fake_api_post)
+    patch_main_global(monkeypatch, "api_post", _fake_api_post)
     return calls
 
 

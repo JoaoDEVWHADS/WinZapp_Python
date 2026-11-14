@@ -23,16 +23,17 @@
 #     Settings > General. It is also a real, parseable WinZapp version
 #     (parse_version() in updater.py accepts a dev/alpha/beta suffix), so an
 #     alpha still compares correctly against stable versions.
-#   - No bump-version job: client/version.py in main must keep tracking the
-#     stable release line. Committing an alpha version back to main would
-#     also push to main, which is what triggers this workflow.
+#   - No bump-version job: client/version.py in main is changed by hand, only
+#     when the maintainers want main's version to move. Committing an alpha
+#     version back to main would also push to main, which is what triggers
+#     this workflow. Publishing a stable release never touches main.
 name: Alpha Build
 
 on:
   push:
     branches: [main]
-    # version.py-only commits come from release-published.yml's bump-version job (which
-    # already marks them [skip ci]); nothing in a docs/CI-only change alters
+    # A version.py-only commit changes nothing that gets compiled, and nothing
+    # in a docs/CI-only change alters
     # what gets compiled, so don't burn a ~15 minute build and a release on it.
     paths-ignore:
       - "client/version.py"
@@ -64,20 +65,30 @@ jobs:
   # Same gate as release.yml: cheap, fails fast, and stops the ~10+ minute
   # build job before it ever starts. Here it also means a red commit simply
   # never produces an alpha release at all.
-  test:
-    name: Run test suite
+  # The suite in 4 jobs at once, each with one pytest worker per vCPU
+  # (-n auto). Every test module lands in exactly one shard, and the modules
+  # that put real wx windows up run one after another on a single worker
+  # (tests/ci_shards.py). --durations lists each shard's slowest tests, so
+  # the next slowdown has a name. One job ran ~22,000 tests in ~25 minutes.
+  test-shard:
+    name: Run test suite (shard ${{ matrix.shard }}/4)
+    strategy:
+      # Every shard to the end: one run reports every failure, not the first.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # uv itself, pinned like every action: "latest" would let a release
           # build change toolchains on the day uv ships.
@@ -87,7 +98,18 @@ jobs:
         run: uv sync --locked
 
       - name: Run pytest
-        run: uv run pytest --run-wx-gui
+        run: uv run pytest --run-wx-gui -n auto --shard ${{ matrix.shard }}/4 --durations=20
+
+  # The suite's single verdict, under the name every `needs: test` and the
+  # branch ruleset already use: it fails when any shard did not pass.
+  test:
+    name: Run test suite
+    needs: test-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        run: test "${{ needs.test-shard.result }}" = "success"
 
   # ── ALPHA-SPECIFIC ────────────────────────────────────────────────────────
   # A job of its own because build-windows.yml takes the version as an input,
@@ -100,8 +122,8 @@ jobs:
   # two channels stop ordering against each other. updater.py compares
   # ((major, minor, patch, build), pre_order) with alpha < beta < final, so:
   #
-  #   base 0.25.0.0beta (client/version.py, kept current by
-  #   release-published.yml's bump-version job) + commit count N  ->  0.25.0.<N>alpha
+  #   base 0.25.0.0beta (client/version.py, changed by hand
+  #   when main's line moves) + commit count N  ->  0.25.0.<N>alpha
   #
   # The suffix on the base is irrelevant to all of this — only major.minor.
   # patch are read off it — so the scheme keeps working unchanged when the
@@ -207,7 +229,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download the built assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: winzapp-alpha
           path: dist
@@ -222,7 +244,7 @@ jobs:
           done
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -264,8 +286,8 @@ jobs:
       # Uses the default GITHUB_TOKEN deliberately: GitHub does not re-trigger
       # workflows for events raised by GITHUB_TOKEN, so publishing this release
       # (and the tag GitHub creates for it) does NOT fire release.yml's tag
-      # push trigger or release-published.yml (both also skip alpha tags
-      # outright, as a second line of defence).
+      # push trigger (which also skips alpha tags outright, as a second
+      # line of defence).
       # A run cancelled partway through the upload below leaves its draft
       # behind, and cancellation is routine here (a newer commit supersedes an
       # in-flight build). Nothing ever collects those, so they'd pile up on the

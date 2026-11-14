@@ -24,15 +24,15 @@ actually taking the lock and not merely to being safe once someone does.
 tests/test_local_auth_rejected_logout_gate.py.)
 """
 
-import json
 import threading
 import time
 
 import pytest
 
 import connection_state as cs
-from app_paths import resource_path
 from main import MainWindow
+from tests.god_modules import patch_main_global, main_window_source
+from tests.locales import load_strings
 
 
 class _Recorder:
@@ -48,8 +48,7 @@ def _real_translations():
     tests/test_local_auth_rejected_logout_gate.py for why a `lambda key: key`
     stub is not good enough: it hides a wrong .format() call on any string
     with a named placeholder, which is what t("error") is."""
-    with open(resource_path("languages", "pt-BR.json"), "r", encoding="utf-8") as f:
-        return json.load(f)
+    return load_strings("pt-BR")
 
 
 _TRANSLATIONS = _real_translations()
@@ -72,6 +71,9 @@ class _Stub:
         self.profile_health_readings.append(status)
 
     def __init__(self, *, probe=cs.LINK_PROBE_UNLINKED):
+        self.token = "synthetic-session:key"
+        self.wpp_server = "http://synthetic.invalid"
+        self.wpp_port = 6300
         self.profile_health_readings = []
         self._unlink_decision_lock = threading.Lock()
         self._probe = probe
@@ -206,7 +208,7 @@ class TestTheStatusStringCallSiteTakesTheLock:
             def json():
                 return {"status": "notLogged"}
 
-        monkeypatch.setattr("main.api_get", lambda *a, **kw: _Resp())
+        patch_main_global(monkeypatch, "api_get", lambda *a, **kw: _Resp())
         # Every reading must count, or the 20s strike interval collapses all
         # 25 concurrent readings into one and nothing ever overlaps inside
         # the decision — the region under test would go unexercised.
@@ -251,7 +253,7 @@ class TestTheStatusStringCallSiteTakesTheLock:
             def json():
                 return {"status": "INITIALIZING"}
 
-        monkeypatch.setattr("main.api_get", lambda *a, **kw: _Connected())
+        patch_main_global(monkeypatch, "api_get", lambda *a, **kw: _Connected())
         _run_concurrently(stub.check_wa_connection_http, n=25)
 
         assert stub._logout_strikes == 0
@@ -315,8 +317,7 @@ def test_the_tally_is_written_only_under_the_lock(function_name):
     import ast
     import pathlib
 
-    source = (pathlib.Path(__file__).resolve().parents[1]
-              / "client" / "main.py").read_text(encoding="utf-8")
+    source = main_window_source()
     function = next(
         node for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.FunctionDef)

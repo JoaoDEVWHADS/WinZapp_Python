@@ -17,7 +17,9 @@ start the next audio) resolves synchronously within one call.
 
 import pytest
 
+from core.chain_repaint_guard import ChainRepaintGuard
 from ui.conversations import ConversationsPanel
+from tests.god_modules import patch_conversations_global
 
 
 class _FakeMessagesList:
@@ -60,11 +62,13 @@ def _voice_msg(msg_id):
 
 class _Stub:
     _auto_chain_next_audio = ConversationsPanel._auto_chain_next_audio
+    _voice_sequence_enabled = ConversationsPanel._voice_sequence_enabled
     _cancel_pending_chain_timers = ConversationsPanel._cancel_pending_chain_timers
     _hold_status_repaints_until_chain_ends = (
         ConversationsPanel._hold_status_repaints_until_chain_ends
     )
     _release_chain_held_repaints = ConversationsPanel._release_chain_held_repaints
+    _chain_moving_focus_off = ConversationsPanel._chain_moving_focus_off
     _flush_status_repaints = ConversationsPanel._flush_status_repaints
     _is_separator = ConversationsPanel._is_separator
     _is_voice_message = ConversationsPanel._is_voice_message
@@ -82,8 +86,7 @@ class _Stub:
         self._chain_start_timer = None
         self._chain_end_timer = None
         self._pending_played_refresh_id = None
-        self._hold_status_repaints_for_chain = False
-        self._chain_held_status_repaints = set()
+        self._chain_repaint_guard = ChainRepaintGuard()
         self._pending_status_repaints = set()
         self._status_repaint_timer = None
         self.toggle_calls = []
@@ -116,7 +119,7 @@ def call_later_now(monkeypatch):
     # _start_audio() (inside the chain) builds a voice_messages/ path via
     # data_path(), which needs an active multi-account context this test
     # never sets up — irrelevant to what's under test here (focus movement).
-    monkeypatch.setattr("ui.conversations.data_path", lambda *a, **k: "unused.msv")
+    patch_conversations_global(monkeypatch, "data_path", lambda *a, **k: "unused.msv")
 
 
 class TestAutoFocusNextAudioEnabled:

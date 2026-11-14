@@ -26,6 +26,7 @@ def _settings():
     settings["cleared_chats"] = {"5511@s.whatsapp.net": 1789000000}
     settings["cleared_starred_chats"] = {"5511@s.whatsapp.net": True}
     settings["conversation_sounds"] = {"5511@s.whatsapp.net": "ding.wav"}
+    settings["quick_chats"] = {"1": "5511@s.whatsapp.net"}
     settings["connection"].update({"wpp_port": 6412, "wpp_api_key": "install-key"})
     settings["general"].update({
         "language": "pt-BR", "first_run": False, "autostart": True,
@@ -46,6 +47,16 @@ class TestWhatStaysBehind:
         exported = transfer.build_export(_settings())
         assert "secret" not in repr(exported)
 
+    def test_quick_chat_contacts_stay_with_the_current_account(self):
+        current = _settings()
+        exported = transfer.build_export(current)
+        assert "quick_chats" not in exported["settings"]
+        assert "5511@s.whatsapp.net" not in repr(exported)
+        merged, applied, ignored = transfer.merge_settings(
+            current, {"quick_chats": {"1": "someone-else@s.whatsapp.net"}})
+        assert merged["quick_chats"] == current["quick_chats"]
+        assert applied == 0 and ignored == ["quick_chats"]
+
     @pytest.mark.parametrize("section, key", sorted(transfer.EXCLUDED_KEYS))
     def test_no_key_of_this_install_is_exported(self, section, key):
         exported = transfer.exportable_settings(_settings())
@@ -61,7 +72,7 @@ class TestWhatStaysBehind:
         assert exported["general"]["language"] == "pt-BR"
         assert exported["user_interface"]["messages_page_size"] == 200
         # The bundled API's address is this install's own (CUSTOM_API_KEYS).
-        assert "wpp_server" not in exported["connection"]
+        assert "wpp_server" not in exported.get("connection", {})
         assert exported["profile_backup"]["close_snapshot_min_hours"] == 24
 
     def test_a_section_this_build_never_declared_is_not_exported(self):
@@ -91,21 +102,21 @@ class TestTheApiThisAccountTalksTo:
         settings["connection"].update({
             "wpp_custom_api": True, "wpp_server": "https://api.exemplo.com",
             "wpp_ws_server": "wss://api.exemplo.com", "wpp_port": 8443,
-            "wpp_api_key": "minha-chave",
+            "wpp_api_key": "minha-chave", "wpp_engine": "custom",
         })
         return settings
 
     def test_the_bundled_api_keeps_its_port_and_key_here(self):
         exported = transfer.exportable_settings(_settings())
-        assert "wpp_port" not in exported["connection"]
-        assert "wpp_api_key" not in exported["connection"]
+        assert "wpp_port" not in exported.get("connection", {})
+        assert "wpp_api_key" not in exported.get("connection", {})
 
     def test_a_custom_api_travels_whole(self):
         exported = transfer.exportable_settings(self._custom())
         assert exported["connection"] == {
             "wpp_custom_api": True, "wpp_server": "https://api.exemplo.com",
             "wpp_ws_server": "wss://api.exemplo.com", "wpp_port": 8443,
-            "wpp_api_key": "minha-chave",
+            "wpp_api_key": "minha-chave", "wpp_engine": "custom",
         }
 
     def test_importing_one_points_this_install_at_the_same_server(self):
@@ -127,8 +138,9 @@ class TestTheApiThisAccountTalksTo:
         merged, applied, ignored = transfer.merge_settings(current, incoming)
         assert merged["connection"]["wpp_port"] == current["connection"]["wpp_port"]
         assert merged["connection"]["wpp_api_key"] == current["connection"]["wpp_api_key"]
-        assert applied == 1        # only wpp_custom_api itself
-        assert sorted(ignored) == ["connection.wpp_api_key", "connection.wpp_port"]
+        assert sorted(ignored) == ["connection.wpp_api_key", "connection.wpp_custom_api",
+                                   "connection.wpp_port"]
+        assert applied == 0
 
     def test_a_file_on_the_bundled_api_cannot_set_the_server_either(self):
         """Every request carries the session token to wpp_server. A file that
@@ -146,8 +158,8 @@ class TestTheApiThisAccountTalksTo:
 
     def test_the_bundled_api_exports_no_address(self):
         exported = transfer.exportable_settings(_settings())
-        assert "wpp_server" not in exported["connection"]
-        assert "wpp_ws_server" not in exported["connection"]
+        assert "wpp_server" not in exported.get("connection", {})
+        assert "wpp_ws_server" not in exported.get("connection", {})
 
     def test_api_change_names_both_addresses_the_token_goes_to(self):
         """REST calls carry the token to wpp_server; Socket.IO sends it as
@@ -395,6 +407,61 @@ class TestImporting:
         else:
             assert merged["general"]["global_hotkey"] == {"vk": 65, "mod": 0x0002}
             assert "general.global_hotkey" in ignored
+
+    @pytest.mark.parametrize("key", ["call_answer_hotkey", "call_end_hotkey"])
+    @pytest.mark.parametrize("hotkey, kept", [
+        ({"vk": 87, "mod": 0x0002}, True),           # Ctrl+W
+        ({"vk": 0, "mod": 0}, True),                 # removed by the user
+        ({"vk": 87, "mod": 0}, False),               # bare W, system-wide
+        ({"vk": 87, "mod": 0x0004}, False),          # Shift only
+        ({"vk": 0, "mod": 0x0002}, False),
+        ({"vk": True, "mod": 0x0002}, False),
+        (None, False),                               # null is not "removed" here
+        ("Ctrl+W", False),
+    ])
+    def test_a_call_hotkey_obeys_the_capture_rule(self, key, hotkey, kept):
+        current = _settings()
+        current["general"][key] = {"vk": 65, "mod": 0x0002}
+        merged, _applied, ignored = transfer.merge_settings(
+            current, {"general": {key: hotkey}})
+        if kept:
+            assert merged["general"][key] == hotkey
+        else:
+            assert merged["general"][key] == {"vk": 65, "mod": 0x0002}
+            assert f"general.{key}" in ignored
+
+    def test_a_call_key_on_the_show_winzapp_key_is_not_imported(self):
+        """Windows gives a combination to one registration: it would never work."""
+        current = _settings()
+        current["general"]["call_answer_hotkey"] = {"vk": 65, "mod": 0x0002}
+        merged, _applied, ignored = transfer.merge_settings(current, {"general": {
+            "global_hotkey": {"vk": 87, "mod": 0x0003},
+            "call_answer_hotkey": {"vk": 87, "mod": 0x0003},
+        }})
+        assert merged["general"]["global_hotkey"] == {"vk": 87, "mod": 0x0003}
+        assert merged["general"]["call_answer_hotkey"] == {"vk": 65, "mod": 0x0002}
+        assert "general.call_answer_hotkey" in ignored
+
+    def test_the_two_call_keys_on_one_combination_keep_only_the_first(self):
+        current = _settings()
+        current["general"].pop("call_end_hotkey", None)
+        merged, _applied, ignored = transfer.merge_settings(current, {"general": {
+            "call_answer_hotkey": {"vk": 87, "mod": 0x0003},
+            "call_end_hotkey": {"vk": 87, "mod": 0x0003},
+        }})
+        assert merged["general"]["call_answer_hotkey"] == {"vk": 87, "mod": 0x0003}
+        assert "call_end_hotkey" not in merged["general"]     # the shipped key
+        assert ignored == ["general.call_end_hotkey"]
+
+    def test_call_keys_on_their_own_combinations_are_imported(self):
+        merged, _applied, ignored = transfer.merge_settings(_settings(), {"general": {
+            "global_hotkey": {"vk": 87, "mod": 0x0003},
+            "call_answer_hotkey": {"vk": 65, "mod": 0x0003},
+            "call_end_hotkey": {"vk": 0, "mod": 0},
+        }})
+        assert merged["general"]["call_answer_hotkey"] == {"vk": 65, "mod": 0x0003}
+        assert merged["general"]["call_end_hotkey"] == {"vk": 0, "mod": 0}
+        assert ignored == []
 
     @pytest.mark.parametrize("language, kept", [
         ("pl", True), ("en-US", True), ("xx-YY", False), ("", False),

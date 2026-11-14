@@ -23,6 +23,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.13"
+  GO_VERSION: "1.27.x"
 
 # Um push novo no PR cancela a execução anterior: só o último commit interessa.
 concurrency:
@@ -30,20 +31,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Run test suite
+  # The suite in 4 jobs at once, each with one pytest worker per vCPU
+  # (-n auto). Every test module lands in exactly one shard, and the modules
+  # that put real wx windows up run one after another on a single worker
+  # (tests/ci_shards.py). --durations lists each shard's slowest tests, so
+  # the next slowdown has a name. One job ran ~22,000 tests in ~25 minutes.
+  test-shard:
+    name: Run test suite (shard ${{ matrix.shard }}/4)
+    strategy:
+      # Every shard to the end: one run reports every failure, not the first.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # uv itself, pinned like every action: "latest" would let a release
           # build change toolchains on the day uv ships.
@@ -56,8 +67,23 @@ jobs:
       # WPPConnect), então os testes que comparam as duas cópias dos patches se
       # pulam sozinhos — vide test_api_patches_in_sync.py. Isso é esperado: a
       # deriva que eles pegam só é detectável numa máquina de dev.
+      # O comtypes cria o próprio cache no primeiro import; com -n auto vários
+      # workers corriam para criar a mesma pasta (FileExistsError na coleta).
+      - name: Warm the comtypes cache
+        run: uv run python -c "import comtypes.client"
       - name: Run pytest
-        run: uv run pytest --run-wx-gui
+        run: uv run pytest --run-wx-gui -n auto --shard ${{ matrix.shard }}/4 --durations=20
+
+  # The suite's single verdict, under the name every `needs: test` and the
+  # branch ruleset already use: it fails when any shard did not pass.
+  test:
+    name: Run test suite
+    needs: test-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        run: test "${{ needs.test-shard.result }}" = "success"
 
   # O fluxo venv + pip continua suportado ao lado do uv: checkouts antigos,
   # forks e scripts instalam só `requirements.txt`. O job `test` acima usa uv,
@@ -75,7 +101,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -90,3 +116,80 @@ jobs:
 
       - name: Run the dependency and build-environment checks under the venv
         run: venv\Scripts\python.exe -m pytest tests/test_requirements_in_sync.py tests/test_uv_build_architecture.py --run-wx-gui -q
+
+  # The Neonize bridge (neonize_bridge/) has its own suite, its own
+  # pytest.ini and its own dependencies; the root `pytest` only collects
+  # `tests/`, so none of the other jobs runs it. That suite holds the tests of
+  # the local port's authentication (neonize_bridge/test_authentication*.py),
+  # of the extraction of the prepare.py zip and of the one-handler-per-event rule
+  # of neonize: without this job, a regression in them would go green.
+  # It runs against the neonize the bridge runs every day: WinZapp's build
+  # (official neonize plus neonize_patches/, compiled by build_neonize.py), never
+  # PyPI's, which lacks the events and functions the bridge relies on.
+  # Only on PR CI, like pip-compat. To block the merge, an admin has to mark
+  # "Neonize bridge tests" in the ruleset (the `Run test suite` aggregate does not
+  # include this job on purpose: whoever does not use the bridge should not depend on it).
+  neonize-bridge:
+    name: Neonize bridge tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up MSYS2 (64-bit GCC for cgo)
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add MSYS2 UCRT64 bin to Windows PATH
+        shell: msys2 {0}
+        run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
+
+      - name: Build WinZapp's neonize (the one the bridge runs)
+        run: python neonize_bridge/build_neonize.py all
+
+      - name: Run synthetic native call-audio regressions
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          Push-Location neonize_bridge/neonize_build/neonize/goneonize
+          go test -p 1 -count=1 calls_pcm.go calls_audio_format.go calls_pcm_test.go calls_audio_format_test.go
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -p 1 -count=1 mediaretry_decrypt.go mediaretry_decrypt_test.go
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          Push-Location neonize_bridge/neonize_build/meowcaller
+          go test -p 1 -count=1 -run 'Test(PCM48|NegotiatedCall|OpusCall|LateCallCodec|AudioReorder|OpusTimestamp|ReceiveAudio|ConfigureCodec|Participant|AudioPlayout|MediaPipeline)' .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          # whatsmeow patches 0010 (the status recipients go by number: a LID
+          # among them made the server refuse every status with 400) and 0011
+          # (a channel update this account posted says so)
+          Push-Location neonize_bridge/neonize_build/whatsmeow
+          go test -p 1 -count=1 -run 'Test(StatusRecipients|ABlacklistedContactStoredUnderItsLID|NewsletterUpdatePostedByThisAccountSaysSo)' .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+
+      - name: Install the bridge's requirements, the test tooling and that neonize into a venv
+        run: |
+          python -m venv venv
+          venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+          venv\Scripts\python.exe -m pip install --require-hashes -r neonize_bridge/requirements.lock --quiet
+          venv\Scripts\python.exe -m pip install -r requirements-dev.txt --quiet
+          python neonize_bridge/build_neonize.py install --venv venv
+
+      - name: Run the bridge's tests
+        run: venv\Scripts\python.exe -m pytest neonize_bridge -q

@@ -8,9 +8,140 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "resource.h"
+#include "lang.h"
 
 #define REGKEY_UNINSTALL \
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WinZapp"
+
+/* ── Localised UI strings ─────────────────────────────────────────────────
+   Same language rule as the installer (lang.h): the app's seven languages,
+   en-US for anything else. Wide strings only — nothing localised ever
+   reaches the temporary .bat, see schedule_self_delete().                 */
+
+typedef struct {
+    const wchar_t *title;          /* dialog caption                  */
+    const wchar_t *prompt;         /* "Are you sure ...?" label       */
+    const wchar_t *uninstall;      /* "Uninstall" button              */
+    const wchar_t *cancel;         /* "Cancel" button                 */
+    const wchar_t *not_found;      /* install dir missing in registry */
+    const wchar_t *done_msg;       /* success message                 */
+    const wchar_t *done_title;     /* success message-box title       */
+} UninstallStrings;
+
+static const UninstallStrings STR_PT_BR = {
+    L"Desinstalar WinZapp",
+    L"Tem certeza que deseja desinstalar o WinZapp?",
+    L"Desinstalar",
+    L"Cancelar",
+    L"Não foi possível encontrar o diretório de instalação do WinZapp.\n"
+    L"O programa pode já ter sido desinstalado.",
+    L"WinZapp foi desinstalado com sucesso.",
+    L"Desinstalação concluída",
+};
+
+static const UninstallStrings STR_PT_PT = {
+    L"Desinstalar o WinZapp",
+    L"Tem a certeza de que pretende desinstalar o WinZapp?",
+    L"Desinstalar",
+    L"Cancelar",
+    L"Não foi possível encontrar a pasta de instalação do WinZapp.\n"
+    L"O programa pode já ter sido desinstalado.",
+    L"O WinZapp foi desinstalado com sucesso.",
+    L"Desinstalação concluída",
+};
+
+static const UninstallStrings STR_PL = {
+    L"Odinstaluj WinZapp",
+    L"Czy na pewno chcesz odinstalować WinZapp?",
+    L"Odinstaluj",
+    L"Anuluj",
+    L"Nie można znaleźć folderu instalacji WinZapp.\n"
+    L"Program mógł zostać już odinstalowany.",
+    L"WinZapp został pomyślnie odinstalowany.",
+    L"Odinstalowywanie ukończone",
+};
+
+static const UninstallStrings STR_RO = {
+    L"Dezinstalare WinZapp",
+    L"Sigur doriți să dezinstalați WinZapp?",
+    L"Dezinstalează",
+    L"Anulează",
+    L"Folderul de instalare WinZapp nu a fost găsit.\n"
+    L"Este posibil ca programul să fi fost deja dezinstalat.",
+    L"WinZapp a fost dezinstalat cu succes.",
+    L"Dezinstalare finalizată",
+};
+
+static const UninstallStrings STR_TR = {
+    L"WinZapp'i Kaldır",
+    L"WinZapp'i kaldırmak istediğinizden emin misiniz?",
+    L"Kaldır",
+    L"İptal",
+    L"WinZapp kurulum klasörü bulunamadı.\n"
+    L"Program zaten kaldırılmış olabilir.",
+    L"WinZapp başarıyla kaldırıldı.",
+    L"Kaldırma tamamlandı",
+};
+
+static const UninstallStrings STR_ES = {
+    L"Desinstalar WinZapp",
+    L"¿Está seguro de que desea desinstalar WinZapp?",
+    L"Desinstalar",
+    L"Cancelar",
+    L"No se pudo encontrar la carpeta de instalación de WinZapp.\n"
+    L"Es posible que el programa ya se haya desinstalado.",
+    L"WinZapp se desinstaló correctamente.",
+    L"Desinstalación completada",
+};
+
+static const UninstallStrings STR_AR = {
+    L"إزالة WinZapp",
+    L"هل تريد بالتأكيد إزالة WinZapp؟",
+    L"إزالة",
+    L"إلغاء",
+    L"لم يُعثر على مجلد تثبيت WinZapp.\nربما أُزيل البرنامج بالفعل.",
+    L"تمت إزالة WinZapp بنجاح.",
+    L"اكتملت الإزالة",
+};
+
+static const UninstallStrings STR_EN = {
+    L"Uninstall WinZapp",
+    L"Are you sure you want to uninstall WinZapp?",
+    L"Uninstall",
+    L"Cancel",
+    L"The WinZapp installation folder could not be found.\n"
+    L"The program may already have been uninstalled.",
+    L"WinZapp was uninstalled successfully.",
+    L"Uninstall complete",
+};
+
+static const UninstallStrings STR_IT = {
+    L"Disinstalla WinZapp",
+    L"Vuoi davvero disinstallare WinZapp?",
+    L"Disinstalla",
+    L"Annulla",
+    L"Impossibile trovare la cartella di installazione di WinZapp.\n"
+    L"Il programma potrebbe essere già stato disinstallato.",
+    L"WinZapp è stato disinstallato correttamente.",
+    L"Disinstallazione completata",
+};
+
+static const UninstallStrings *g_str = &STR_EN;
+
+static void select_language(void)
+{
+    switch (winzapp_ui_lang()) {
+    case WINZAPP_LANG_PT_BR: g_str = &STR_PT_BR; break;
+    case WINZAPP_LANG_PT_PT: g_str = &STR_PT_PT; break;
+    case WINZAPP_LANG_ES:    g_str = &STR_ES;    break;
+    case WINZAPP_LANG_PL:    g_str = &STR_PL;    break;
+    case WINZAPP_LANG_RO:    g_str = &STR_RO;    break;
+    case WINZAPP_LANG_TR:    g_str = &STR_TR;    break;
+    case WINZAPP_LANG_AR:    g_str = &STR_AR;    break;
+    case WINZAPP_LANG_IT:    g_str = &STR_IT;    break;
+    default:                 g_str = &STR_EN;    break;
+    }
+}
 
 /* ── Read install directory from registry ─────────────────────────────── */
 
@@ -138,6 +269,29 @@ static void remove_registry_entry(void)
      * didn't use (see get_install_dir()). */
     RegDeleteKeyW(HKEY_LOCAL_MACHINE, REGKEY_UNINSTALL);
     RegDeleteKeyW(HKEY_CURRENT_USER, REGKEY_UNINSTALL);
+
+    /* The whatsapp: link registration WinZapp wrote under HKCU on first run
+     * (client/core/whatsapp_link_association.py): nothing may keep pointing at
+     * the deleted program. The scheme key itself only when WinZapp created it. */
+    HKEY scheme;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\whatsapp", 0,
+                      KEY_READ, &scheme) == ERROR_SUCCESS) {
+        DWORD type, size = 0;
+        BOOL ours = RegQueryValueExW(scheme, L"WinZappOwned", NULL, &type, NULL,
+                                     &size) == ERROR_SUCCESS;
+        RegCloseKey(scheme);
+        if (ours)
+            SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\whatsapp");
+    }
+    SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\WinZapp.WhatsAppLink");
+    SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\WinZapp\\Capabilities");
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\WinZapp");
+    HKEY apps;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", 0,
+                      KEY_SET_VALUE, &apps) == ERROR_SUCCESS) {
+        RegDeleteValueW(apps, L"WinZapp");
+        RegCloseKey(apps);
+    }
 }
 
 /* ── Schedule self-delete via temp batch file ─────────────────────────── */
@@ -280,11 +434,13 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
 {
     switch (msg) {
     case WM_INITDIALOG:
+        SetWindowTextW(hDlg, g_str->title);
+        SetDlgItemTextW(hDlg, IDC_UNINSTALL_PROMPT, g_str->prompt);
+        SetDlgItemTextW(hDlg, IDC_INSTALL,          g_str->uninstall);
+        SetDlgItemTextW(hDlg, IDC_CANCEL,           g_str->cancel);
         if (!get_install_dir(g_install_dir, MAX_PATH)) {
-            MessageBoxW(hDlg,
-                L"Não foi possível encontrar o diretório de instalação do WinZapp.\n"
-                L"O programa pode já ter sido desinstalado.",
-                L"WinZapp", MB_OK | MB_ICONWARNING);
+            MessageBoxW(hDlg, g_str->not_found,
+                        g_str->title, MB_OK | MB_ICONWARNING);
             EndDialog(hDlg, IDABORT);
             return TRUE;
         }
@@ -302,9 +458,8 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
             remove_registry_entry();
             schedule_self_delete(g_uninstall_exe, g_install_dir);
 
-            MessageBoxW(hDlg,
-                L"WinZapp foi desinstalado com sucesso.",
-                L"Desinstalação concluída", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(hDlg, g_str->done_msg,
+                        g_str->done_title, MB_OK | MB_ICONINFORMATION);
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -327,6 +482,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev,
                    LPSTR lpCmdLine, int nCmdShow)
 {
     (void)hPrev; (void)lpCmdLine; (void)nCmdShow;
+
+    select_language();
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);

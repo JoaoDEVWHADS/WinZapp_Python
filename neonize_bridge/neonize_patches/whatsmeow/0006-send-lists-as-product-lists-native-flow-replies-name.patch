@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
+Date: Mon, 26 Oct 2026 15:45:05 -0300
+Subject: [PATCH] send: lists as product lists, native flow replies name their
+ flow
+
+wa-js (WPPConnect) sends every list with <biz><list v="2"
+type="product_list"/></biz>; WhatsApp Web puts native_flow_name on each
+<enc> of a reply to a native flow message.
+---
+ send.go                 | 18 ++++++++++++++----
+ send_nativeflow_test.go | 26 ++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 4 deletions(-)
+
+diff --git a/send.go b/send.go
+index 8526bbc..5791c69 100644
+--- a/send.go
++++ b/send.go
+@@ -1026,10 +1026,10 @@ func getButtonAttributes(msg *waE2E.Message) waBinary.Attrs {
+ 	case msg.TemplateMessage != nil:
+ 		return waBinary.Attrs{}
+ 	case msg.ListMessage != nil:
+-		return waBinary.Attrs{
+-			"v":    "2",
+-			"type": strings.ToLower(waE2E.ListMessage_ListType_name[int32(msg.ListMessage.GetListType())]),
+-		}
++		// wa-js (WPPConnect) sends every list as a product list, the type
++		// phones show for a list that is not from an official business
++		// (createFanoutMsgStanza); WhatsApp Web itself adds no <list> node.
++		return waBinary.Attrs{"v": "2", "type": "product_list"}
+ 	default:
+ 		return waBinary.Attrs{}
+ 	}
+@@ -1238,6 +1238,13 @@ func getNativeFlowBizNode(msg *waE2E.Message) *waBinary.Node {
+ 	}
+ }
+ 
++// nativeFlowResponseName is the flow a reply to a native flow message answers;
++// WhatsApp Web puts it on each <enc> (WAWebBackendJobsCommon.
++// nativeFlowNameTypeFromProtobuf).
++func nativeFlowResponseName(msg *waE2E.Message) string {
++	return msg.GetInteractiveResponseMessage().GetNativeFlowResponseMessage().GetName()
++}
++
+ // nativeFlowAttrs are the attributes of <native_flow>: payment info keeps its
+ // name; every other flow, reply and action buttons included, goes as
+ // v="9" name="mixed", which is what wa-js (WPPConnect) sends and phones show
+@@ -1294,6 +1301,9 @@ func (cli *Client) prepareMessageNode(
+ 		attrs["edit"] = string(editAttr)
+ 		encAttrs["decrypt-fail"] = string(events.DecryptFailHide)
+ 	}
++	if flow := nativeFlowResponseName(message); flow != "" {
++		encAttrs["native_flow_name"] = flow
++	}
+ 	if msgType == "reaction" || message.GetPollUpdateMessage() != nil {
+ 		encAttrs["decrypt-fail"] = string(events.DecryptFailHide)
+ 	}
+diff --git a/send_nativeflow_test.go b/send_nativeflow_test.go
+index 4293d82..f3cf754 100644
+--- a/send_nativeflow_test.go
++++ b/send_nativeflow_test.go
+@@ -59,3 +59,29 @@ func TestOrderUpdatesAreAnAttribute(t *testing.T) {
+ 		t.Error("a text has no biz node")
+ 	}
+ }
++
++func TestListsAreProductLists(t *testing.T) {
++	msg := &waE2E.Message{ListMessage: &waE2E.ListMessage{
++		ListType: waE2E.ListMessage_SINGLE_SELECT.Enum(),
++	}}
++	attrs := getButtonAttributes(msg)
++	if attrs["v"] != "2" || attrs["type"] != "product_list" {
++		t.Errorf("%v", attrs)
++	}
++}
++
++func TestANativeFlowReplyNamesItsFlow(t *testing.T) {
++	reply := &waE2E.Message{InteractiveResponseMessage: &waE2E.InteractiveResponseMessage{
++		InteractiveResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage_{
++			NativeFlowResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage{
++				Name: proto.String("quick_reply"),
++			},
++		},
++	}}
++	if name := nativeFlowResponseName(reply); name != "quick_reply" {
++		t.Errorf("%q", name)
++	}
++	if name := nativeFlowResponseName(&waE2E.Message{Conversation: proto.String("oi")}); name != "" {
++		t.Errorf("%q", name)
++	}
++}

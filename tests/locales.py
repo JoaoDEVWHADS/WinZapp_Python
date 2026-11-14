@@ -1,10 +1,10 @@
-"""The registered locale set, read once from `languages/language_map.json`.
+"""The registered locale set and authoritative PO readers for tests.
 
 Not a test module — a helper the locale-parametrized tests derive from, so the
 derivation and the check that it produced anything live in one place.
 
 Why derive at all: the set of locales is data, not code. A locale is added by
-dropping in `<code>.json` plus an entry in that map, with no rebuild
+adding a PO catalog plus an entry in that map, with no rebuild
 (CLAUDE.md, "Paths, config, i18n"), so a list written out inside a test goes
 stale the moment one is added and silently stops checking it. That already
 happened — `pl` was missing from the hand-written lists in test_mute.py and
@@ -23,11 +23,15 @@ run: it surfaces as a collection error naming this file, before any test in
 any of those modules reports success.
 """
 
+import functools
 import json
 from pathlib import Path
 
+import polib
+
 LANGUAGES_DIR = Path(__file__).resolve().parents[1] / "client" / "languages"
 LANGUAGE_MAP = LANGUAGES_DIR / "language_map.json"
+CATALOGS_DIR = Path(__file__).resolve().parents[1] / "translations"
 
 #: The locale WinZapp falls back to, and the one guaranteed to be complete.
 #: Its presence doubles as a shape check: a map that parsed but lost its
@@ -57,6 +61,20 @@ def registered_locale_codes() -> tuple[str, ...]:
     return codes
 
 
-def registered_locale_files() -> tuple[str, ...]:
-    """`<code>.json` for every registered locale, in the same order."""
-    return tuple(f"{code}.json" for code in registered_locale_codes())
+def load_strings(locale: str) -> dict[str, str]:
+    """Active stable-key translations from the authoritative PO catalog.
+
+    A copy of one parse per locale: parsing a catalog takes a noticeable part
+    of a second, and many tests ask for one in every stub they build.
+    """
+    return dict(_parsed_strings(locale))
+
+
+@functools.lru_cache(maxsize=None)
+def _parsed_strings(locale: str) -> dict[str, str]:
+    path = CATALOGS_DIR / locale / "LC_MESSAGES" / "winzapp.po"
+    return {
+        entry.msgctxt: entry.msgstr
+        for entry in polib.pofile(str(path), encoding="utf-8", check_for_duplicates=True)
+        if entry.msgctxt and not entry.obsolete
+    }

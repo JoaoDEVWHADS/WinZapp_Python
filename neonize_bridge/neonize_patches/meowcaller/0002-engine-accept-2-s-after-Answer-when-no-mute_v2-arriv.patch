@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: reffehcsoibaf <290818442+reffehcsoibaf@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 01:15:45 -0300
+Subject: [PATCH] engine: accept 2 s after Answer when no mute_v2 arrives
+
+Another client running this code never sends the <mute_v2> that triggers
+the <accept>, so the caller never learned the call was answered and the
+media key did not move to the answering device.
+---
+ engine.go | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/engine.go b/engine.go
+index 94cd09e..ddca6f6 100644
+--- a/engine.go
++++ b/engine.go
+@@ -683,10 +683,28 @@ func (e *engine) answer(c *Call) error {
+ 	}
+ 	e.mu.Lock()
+ 	m.acceptPending = true
++	from, creator := m.from, m.creator
+ 	e.mu.Unlock()
+ 
+ 	c.setPhase(CallPhaseConnecting)
+ 	e.maybeStartMedia(c.id)
++	// WinZapp: a caller running this same code (another WinZapp) never sends
++	// the <mute_v2> that triggers the <accept>; without it the caller does not
++	// know we answered and the media key does not move to the answering
++	// device. If <mute_v2> does not arrive soon, accept anyway (sendAccept only
++	// sends once).
++	id := c.id
++	time.AfterFunc(2*time.Second, func() {
++		e.mu.Lock()
++		m := e.calls[id]
++		pending := m != nil && m.acceptPending
++		e.mu.Unlock()
++		if !pending {
++			return
++		}
++		e.c.log.Info().Str("call_id", id).Msg("no mute_v2 after Answer; sending accept anyway")
++		e.sendAccept(id, from, creator)
++	})
+ 	return nil
+ }
+ 

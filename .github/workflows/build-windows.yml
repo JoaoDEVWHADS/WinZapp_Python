@@ -88,13 +88,14 @@ jobs:
       # the C installer/uninstaller.  libopus-0.dll is committed to client/lib/
       # so no opus package is needed here.
       - name: Set up MSYS2 (GCC + windres)
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
           update: false
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-zlib
 
       # cygpath resolves /ucrt64/bin to the real Windows path regardless of
       # where the runner installed MSYS2 (avoids hard-coding C:\msys64).
@@ -103,12 +104,21 @@ jobs:
         run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # build.py compiles the Neonize bridge's neonize DLL from source
+      # (neonize_bridge/build_neonize.py, through prepare.py) with cgo: Go here,
+      # the 64-bit gcc from the MSYS2 step above.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.x"
+          cache: false
+
       - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # uv itself, pinned like every action: "latest" would let a release
           # build change toolchains on the day uv ships.
@@ -180,7 +190,7 @@ jobs:
       - name: Set up WPPConnect Server
         run: uv run python setup_api.py
 
-      # ensure_wpp_version() (client/main.py) compares an *installed*
+      # ensure_wpp_version() (client/main_window/wpp_server.py) compares an *installed*
       # api/package.json's version against the minimum baked into
       # client/wpp_minimum_version.txt, and prompts the user to update
       # WPPConnect Server when the installed copy is older than what this
@@ -254,15 +264,19 @@ jobs:
             $hasLib      = ($entries | Where-Object { $_ -like "WinZapp/lib/bass.dll" }).Count -gt 0
             $hasBassOpus = ($entries | Where-Object { $_ -like "WinZapp/lib/bassopus.dll" }).Count -gt 0
             $hasExe      = ($entries | Where-Object { $_ -eq   "WinZapp/WinZapp.exe" }).Count -gt 0
-            # These three are what actually let WinZapp start the local
-            # WPPConnect Server at runtime — without them the app launches
-            # but every WhatsApp feature is dead. None of the checks above
-            # would have caught a broken/missing node/ or api/dist/server.js,
-            # so a build that silently failed to bundle them would still have
-            # passed this gate and shipped a release that can't connect.
-            $hasNodeExe  = ($entries | Where-Object { $_ -eq   "WinZapp/node/node.exe" }).Count -gt 0
+            # api/dist/server.js is what lets WinZapp start the local WPPConnect
+            # Server at runtime, and the checks above would not have caught it
+            # missing. node/ is deliberately NOT in the build: it carries the
+            # Neonize bridge, and Node.js is downloaded (checksum-verified) the
+            # first time WPPConnect is chosen. A node/ in the zip means the
+            # staging step bundled it again.
+            $noNodeExe   = ($entries | Where-Object { $_ -eq   "WinZapp/node/node.exe" }).Count -eq 0
             $hasServerJs = ($entries | Where-Object { $_ -eq   "WinZapp/api/dist/server.js" }).Count -gt 0
             $hasFfmpeg   = ($entries | Where-Object { $_ -eq   "WinZapp/lib/ffmpeg.exe" }).Count -gt 0
+            # The frozen Neonize bridge and the neonize DLL inside it: a build that
+            # lost either would ship with the Neonize engine silently dead.
+            $hasBridge   = ($entries | Where-Object { $_ -eq   "WinZapp/neonize_bridge/neonize_bridge.exe" }).Count -gt 0
+            $hasNeonize  = ($entries | Where-Object { $_ -eq   "WinZapp/neonize_bridge/_internal/neonize/neonize-windows-amd64.dll" }).Count -gt 0
             # api_patches/ is the pristine reference copy of WinZapp's custom
             # wppconnect-server patches that ApiSetupDialog restores from on
             # every WPPConnect (re)install/update — without it, a reinstall
@@ -275,11 +289,13 @@ jobs:
             Write-Host "sounds/*           : $hasSounds"
             Write-Host "lib/bass.dll       : $hasLib"
             Write-Host "lib/bassopus       : $hasBassOpus"
-            Write-Host "node/node.exe      : $hasNodeExe"
+            Write-Host "no node/node.exe   : $noNodeExe"
             Write-Host "api/dist/server.js : $hasServerJs"
             Write-Host "ffmpeg             : $hasFfmpeg"
+            Write-Host "neonize_bridge.exe : $hasBridge"
+            Write-Host "neonize DLL        : $hasNeonize"
             Write-Host "api_patches/       : $hasApiPatches"
-            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe -and $hasNodeExe -and $hasServerJs -and $hasFfmpeg -and $hasApiPatches)) {
+            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe -and $noNodeExe -and $hasServerJs -and $hasFfmpeg -and $hasBridge -and $hasNeonize -and $hasApiPatches)) {
               Write-Error "dist/WinZapp.zip is missing required entries — build failed."
               exit 1
             }
@@ -321,7 +337,7 @@ jobs:
 
 
       - name: Upload dist as an artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact-name }}
           retention-days: ${{ inputs.retention-days }}

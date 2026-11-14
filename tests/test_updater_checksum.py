@@ -39,17 +39,30 @@ def test_find_sha256sums_asset_is_case_insensitive():
     assert updater._find_sha256sums_asset(assets) == "https://x/SHA256SUMS.txt"
 
 
-def test_find_sha256sums_asset_returns_empty_when_absent():
-    assert updater._find_sha256sums_asset([]) == ""
-    assert updater._find_sha256sums_asset(
-        [{"name": "WinZapp.zip", "browser_download_url": "https://x/WinZapp.zip"}]
-    ) == ""
+class TestVerifySha256sums:
+    """Exercises the plain checksum-only path — signing NOT configured — in
+    isolation, by passing empty key lists explicitly rather than relying on
+    _verify_sha256sums()'s defaults (core/release_keys.py's real committed
+    keys). Signature enforcement itself is covered separately, with its own
+    generated keys, by tests/test_release_signature.py; conflating the two
+    is what broke here once real keys were committed — see that module's own
+    docstring, and CLAUDE.md's "Release integrity" section, for why every
+    build made after the keys exist enforces them unconditionally.
+
+    The manifest fetch is patched on `updater.tls_trust`, not on `requests`.
+    updater.py stopped calling `requests.get` directly when the downloads moved
+    onto core/tls_trust.py (HTTPS verified against the Windows certificate
+    store, so a locally intercepted connection can still reach GitHub).
+    Patching `updater.requests` here would now patch nothing at all — and a
+    test that quietly starts talking to the real network is worse than one that
+    fails.
+    """
 
 
-def test_no_manifest_url_fails_open_for_legacy_releases(tmp_file):
-    ok, detail = updater._verify_sha256sums(tmp_file, "WinZapp.zip", "")
-    assert ok is True
-    assert detail == ""
+    def test_matching_checksum_passes(self, tmp_file, monkeypatch):
+        expected = _sha256_of(tmp_file)
+        manifest = f"{expected}  WinZapp.zip\nsomeotherhash  WinZappInstaller.exe\n"
+        monkeypatch.setattr(updater.tls_trust, "get", lambda *a, **kw: _FakeResponse(manifest))
 
 
 def test_matching_checksum_passes(tmp_file, monkeypatch):
@@ -59,9 +72,9 @@ def test_matching_checksum_passes(tmp_file, monkeypatch):
         updater.requests, "get", lambda *a, **kw: _FakeResponse(manifest)
     )
 
-    assert updater._verify_sha256sums(
-        tmp_file, "WinZapp.zip", "https://x/SHA256SUMS.txt"
-    ) == (True, "")
+    def test_mismatched_checksum_fails_closed(self, tmp_file, monkeypatch):
+        manifest = "0000000000000000000000000000000000000000000000000000000000000000  WinZapp.zip\n"
+        monkeypatch.setattr(updater.tls_trust, "get", lambda *a, **kw: _FakeResponse(manifest))
 
 
 def test_mismatched_checksum_fails_closed(tmp_file, monkeypatch):
@@ -70,20 +83,21 @@ def test_mismatched_checksum_fails_closed(tmp_file, monkeypatch):
         updater.requests, "get", lambda *a, **kw: _FakeResponse(manifest)
     )
 
-    ok, detail = updater._verify_sha256sums(
-        tmp_file, "WinZapp.zip", "https://x/SHA256SUMS.txt"
-    )
+    def test_missing_entry_for_filename_fails_closed(self, tmp_file, monkeypatch):
+        """The manifest exists (so this ISN'T an old pre-feature release)
+        but doesn't mention our filename at all — suspicious, not silently
+        accepted."""
+        manifest = "abc123  SomeOtherFile.zip\n"
+        monkeypatch.setattr(updater.tls_trust, "get", lambda *a, **kw: _FakeResponse(manifest))
 
     assert ok is False
     assert "mismatch" in detail.lower()
 
 
-def test_missing_entry_fails_closed(tmp_file, monkeypatch):
-    monkeypatch.setattr(
-        updater.requests,
-        "get",
-        lambda *a, **kw: _FakeResponse("abc123  SomeOtherFile.zip\n"),
-    )
+    def test_manifest_fetch_failure_fails_closed(self, tmp_file, monkeypatch):
+        def _raise(*a, **kw):
+            raise Exception("network error")
+        monkeypatch.setattr(updater.tls_trust, "get", _raise)
 
     ok, detail = updater._verify_sha256sums(
         tmp_file, "WinZapp.zip", "https://x/SHA256SUMS.txt"
@@ -92,6 +106,12 @@ def test_missing_entry_fails_closed(tmp_file, monkeypatch):
     assert ok is False
     assert "no checksum entry" in detail.lower()
 
+    def test_ignores_asterisk_binary_mode_marker(self, tmp_file, monkeypatch):
+        """sha256sum's own output format prefixes the filename with '*' for
+        binary mode (e.g. "<hash> *WinZapp.zip") — must still match."""
+        expected = _sha256_of(tmp_file)
+        manifest = f"{expected} *WinZapp.zip\n"
+        monkeypatch.setattr(updater.tls_trust, "get", lambda *a, **kw: _FakeResponse(manifest))
 
 def test_manifest_fetch_failure_fails_closed(tmp_file, monkeypatch):
     def fail(*a, **kw):
@@ -103,8 +123,8 @@ def test_manifest_fetch_failure_fails_closed(tmp_file, monkeypatch):
         tmp_file, "WinZapp.zip", "https://x/SHA256SUMS.txt"
     )
 
-    assert ok is False
-    assert "failed to download" in detail.lower()
+        manifest = "abc123  SomeOtherFile.zip\n"
+        monkeypatch.setattr(updater.tls_trust, "get", lambda *a, **kw: _FakeResponse(manifest))
 
 
 def test_binary_mode_marker_is_accepted(tmp_file, monkeypatch):

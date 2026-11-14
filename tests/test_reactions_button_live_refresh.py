@@ -23,6 +23,12 @@ class _FakeMessagesList:
     def __init__(self, focused_item=-1):
         self._focused_item = focused_item
 
+    def Freeze(self):
+        pass
+
+    def Thaw(self):
+        pass
+
     def SetItemText(self, pos, text):
         pass
 

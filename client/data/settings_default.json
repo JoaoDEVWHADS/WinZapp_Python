@@ -1,30 +1,53 @@
 {
+    "keyboard_shortcuts": {},
+    "quick_chats": {},
     "connection": {
         "wpp_server": "http://127.0.0.1",
         "wpp_port": 6300,
         "wpp_ws_server": "ws://127.0.0.1",
         "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
-        "wpp_custom_api": false
+        "wpp_custom_api": false,
+        "wpp_engine": ""
     },
     "general": {
         "language": "",
         "notifications_enabled": true,
+        "notification_content": "full",
+        "group_toast_order": "participant",
+        "pasted_audio_as": "audio",
         "keep_muted_chats_silent_when_open": true,
+        "notification_burst_limit": 3,
         "updates_enabled": true,
         "alpha_updates_enabled": false,
+        "background_update_downloads": false,
+        "update_on_exit": false,
+        "wpp_all_updates": false,
         "noise_reduction_enabled": false,
+        "noise_reduction_neural": true,
+        "noise_reduction_device": "cpu",
+        "voice_recording_mode": "auto",
+        "voice_recording_bitrate": 64,
+        "voice_recording_bitrate_stereo": 128,
+        "system_audio_recording_volume": 100,
+        "system_audio_recording_nvda_volume": 100,
         "spell_check_mode": "windows",
+        "convert_emoticons": true,
         "first_run": true,
         "api_type_first_run_asked": false,
+        "neonize_offer_asked": false,
         "hotkey_first_run_asked": false,
         "autostart": false,
         "show_tray_icon": true,
         "terms_alert_displayed": false,
         "quick_tip_shown": false,
         "global_hotkey": null,
+        "call_answer_hotkey": {"vk": 13, "mod": 7},
+        "call_end_hotkey": {"vk": 8, "mod": 7},
         "switch_behavior": "single",
         "announce_sync_events": true,
-        "search_normalization": "off"
+        "search_normalization": "off",
+        "wpp_reinstall_notice_migrated": true,
+        "wpp_reinstall_notice_pending": false
     },
     "status": {
         "messages_set_completed": false
@@ -35,35 +58,66 @@
     },
     "calls": {
         "alerts_enabled": true,
-        "popup_enabled": true
+        "popup_enabled": true,
+        "announce_participant_joined": true,
+        "announce_participant_left": true
     },
     "profile_backup": {
+        "snapshots_disabled": false,
         "close_snapshot_min_hours": 24,
         "live_snapshot_enabled": false,
         "live_snapshot_interval_hours": 24,
         "live_snapshot_confirm": true
     },
+    "reactions": {
+        "fixed_quick_reactions": false,
+        "quick_reaction_slots": ["\u2764\ufe0f", "\ud83d\udc4d", "\ud83d\udc4e", "\ud83d\ude02", "\ud83d\ude2e", "\ud83d\ude22", "\ud83d\ude4f", "\ud83d\udd25", "\ud83c\udf89", "\ud83d\udcaf", "\ud83d\ude0e", "\ud83e\udd70"]
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
         "focus_on_open": "message_field",
+        "message_list_open_position": "unread_or_last",
+        "remove_bookmarks_after_use": false,
+        "remove_temp_bookmarks_after_use": false,
         "voice_record_focus": "send",
         "message_list_mode": "classic",
         "show_listbox_item_count": false,
+        "show_typing_row": false,
         "page_up_down_step": 15,
         "self_reference_mode": "eu",
         "self_reference_custom_word": "",
+        "hide_own_sender_in_message_list": false,
+        "hide_unnamed_sender_numbers": false,
+        "mark_unsaved_contacts": true,
         "show_delivery_status_in_chat_list": true,
+        "keep_pinned_chat_order": false,
+        "show_channels_in_chat_list": false,
+        "message_draft_mode": "per_conversation",
         "preserve_typed_text_as_attachment_caption": true,
         "bulk_action_shortcuts": true,
         "confirm_mark_all_read": true,
+        "confirm_clear_chat": true,
+        "confirm_delete_chat": true,
+        "confirm_resync_all": true,
+        "confirm_resync_conversation": true,
+        "warn_system_audio_recording": true,
+        "system_audio_consent_revision": 0,
         "space_selects_in_selection_mode": true,
         "escape_clears_selection": true,
+        "keep_search_after_open": false,
+        "enter_transcribes_voice_messages": false,
+        "enter_transcribes_statuses": false,
+        "auto_play_voice_in_sequence": true,
         "auto_focus_next_audio": true,
         "selected_announcement_position": "end",
+        "unread_count_position": "after",
         "show_yesterday_label": true,
         "show_link_previews": true,
         "forwarded_prefix_enabled": false,
+        "delete_media_from_phone": true,
+        "forward_voice_as_voice": false,
+        "forward_keep_link_preview": true,
         "conversation_video_media_viewer_dialog": true,
         "status_media_viewer_dialog": true,
         "voice_message_mode": "voice_message",
@@ -71,7 +125,9 @@
     },
     "audio_playback": {
         "audio_default_speed": 1.0,
-        "mark_audio_played_in_list": true
+        "mark_audio_played_in_list": true,
+        "hide_speed_button": false,
+        "hide_progress_bar": false
     },
     "audio_devices": {
         "output_device_name": "",
@@ -81,7 +137,10 @@
     "call_audio_devices": {
         "output_device_name": "",
         "input_device_name": "",
-        "exclusive_mode": false
+        "exclusive_input": false,
+        "exclusive_output": false,
+        "echo_cancellation": true,
+        "noise_suppression": false
     },
     "call_video_devices": {
         "camera_name": ""
@@ -90,6 +149,23 @@
         "extended_sr_compat_enabled": true,
         "sapi_fallback_enabled": true
     },
+    "transcription": {
+        "backend": "auto",
+        "model": "auto",
+        "device": "auto",
+        "compute_type": "auto",
+        "language": "interface",
+        "auto_detect_language": true,
+        "keep_model_loaded": false,
+        "run_without_dialog": false,
+        "auto_transcribe_received": false,
+        "auto_max_age_minutes": 5,
+        "auto_any_age": false,
+        "cache_enabled": true,
+        "cache_by_model": {},
+        "auto_transcribe_statuses": false,
+        "status_cache_enabled": true
+    },
     "files": {
         "save_dialog_folder_mode": "last",
         "save_dialog_custom_folder": "",
@@ -97,9 +173,15 @@
     },
     "speech_content": {
         "announce_typing": true,
+        "typing_sound": false,
+        "typing_sound_interval": 3,
+        "typing_sound_silence_capture": true,
         "announce_recording": true,
         "announce_conversations_update_start": true,
         "announce_conversations_update_complete": true,
+        "announce_sync_progress": true,
+        "announce_media_progress": true,
+        "announce_link_previews": true,
         "speak_active_conv_messages": true,
         "speak_other_conv_messages": true,
         "silence_while_recording": false
@@ -112,7 +194,13 @@
         "group": "default",
         "group_custom_path": ""
     },
+    "foreground_sounds": {
+        "active": "dedicated",
+        "other": "dedicated"
+    },
     "conversation_sounds": {},
+    "conversation_auto_ai": {},
+    "conversation_auto_ai_scope": "all",
     "cleared_chats": {},
     "cleared_starred_chats": {},
     "storage": {
@@ -127,5 +215,9 @@
         "media_max_days": 30,
         "media_max_mb": 100,
         "probe_video_duration_on_download": false
+    },
+    "advanced": {
+        "log_level": "info",
+        "local_api_port": 0
     }
 }

@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
+Date: Mon, 26 Oct 2026 10:10:08 -0300
+Subject: [PATCH] send: the <biz> node of a native flow message, as WhatsApp
+ Web sends it
+
+WhatsApp Web adds <biz native_flow_name=..> to a merchant's order updates
+and <biz><interactive type=native_flow v=1><native_flow name=../></biz> to
+other native flow messages (buttons, payment info), naming the flow of the
+first button (WAWebSendMsgCreateFanoutStanza).
+---
+ send.go | 73 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/send.go b/send.go
+index 4f94142..95078d9 100644
+--- a/send.go
++++ b/send.go
+@@ -1161,10 +1161,83 @@ func (cli *Client) getMessageContent(
+ 				Attrs: getButtonAttributes(message),
+ 			}},
+ 		})
++	} else if biz := getNativeFlowBizNode(message); biz != nil {
++		content = append(content, *biz)
+ 	}
+ 	return content
+ }
+ 
++// nativeFlowNames maps the first button of a native flow message to its flow,
++// as WhatsApp Web does (WAWebBizTemplateAndInteractiveMessagesUtils.
++// getNativeFlowNameByButtonName).
++var nativeFlowNames = map[string]string{
++	"review_and_pay":           "order_details",
++	"payment_info":             "payment_info",
++	"review_order":             "order_status",
++	"order_status":             "order_status",
++	"payment_status":           "payment_status",
++	"payment_method":           "payment_method",
++	"open_webview":             "message_with_link",
++	"message_with_link_status": "message_with_link_status",
++	"cta_url":                  "cta_url",
++	"cta_call":                 "cta_call",
++	"quick_reply":              "quick_reply",
++	"catalog_message":          "catalog_message",
++	"cta_catalog":              "cta_catalog",
++	"cta_copy":                 "cta_copy",
++	"galaxy_message":           "galaxy_message",
++	"payment_reminder":         "payment_reminder",
++	"booking_confirmation":     "booking_confirmation",
++	"booking_status":           "booking_confirmation",
++	"call_permission_request":  "call_permission_request",
++	"payment_request":          "payment_request",
++	"cta_app":                  "cta_app",
++}
++
++// nativeFlowAttributeOnly are the flows WhatsApp Web sends as a merchant's
++// order update (nfmInteractiveMsg false): <biz native_flow_name=".."/>.
++var nativeFlowAttributeOnly = map[string]bool{
++	"order_details": true, "order_status": true, "payment_status": true, "payment_method": true,
++}
++
++// getNativeFlowBizNode is the <biz> node WhatsApp Web adds to an interactive
++// native flow message (WAWebSendMsgCreateFanoutStanza): with the flow's name,
++// either as an attribute (a merchant's order updates) or as
++// <interactive type="native_flow" v="1"><native_flow name=".."/></interactive>.
++// Without it the message is not shown as a native flow message.
++func getNativeFlowBizNode(msg *waE2E.Message) *waBinary.Node {
++	switch {
++	case msg.ViewOnceMessage != nil:
++		return getNativeFlowBizNode(msg.ViewOnceMessage.Message)
++	case msg.ViewOnceMessageV2 != nil:
++		return getNativeFlowBizNode(msg.ViewOnceMessageV2.Message)
++	case msg.EphemeralMessage != nil:
++		return getNativeFlowBizNode(msg.EphemeralMessage.Message)
++	}
++	buttons := msg.GetInteractiveMessage().GetNativeFlowMessage().GetButtons()
++	if len(buttons) == 0 {
++		return nil
++	}
++	name, ok := nativeFlowNames[buttons[0].GetName()]
++	if !ok {
++		return nil
++	}
++	if nativeFlowAttributeOnly[name] {
++		return &waBinary.Node{Tag: "biz", Attrs: waBinary.Attrs{"native_flow_name": name}}
++	}
++	return &waBinary.Node{
++		Tag: "biz",
++		Content: []waBinary.Node{{
++			Tag:   "interactive",
++			Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
++			Content: []waBinary.Node{{
++				Tag:   "native_flow",
++				Attrs: waBinary.Attrs{"name": name},
++			}},
++		}},
++	}
++}
++
+ func (cli *Client) prepareMessageNode(
+ 	ctx context.Context,
+ 	to types.JID,

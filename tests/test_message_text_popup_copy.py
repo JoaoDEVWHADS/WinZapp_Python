@@ -4,7 +4,6 @@ Its breaks at ~100 characters are a view: copying a selection used to hand
 out those extra line breaks, splitting the message wherever the wrap had.
 """
 
-from pathlib import Path
 
 from core.wrapped_text import (
     normalize_newlines,
@@ -12,6 +11,7 @@ from core.wrapped_text import (
     selection_offsets,
     word_wrap,
 )
+from tests.god_modules import conversations_method_source
 
 
 LONG = ("palavra " * 40).strip()  # 319 chars, needs several wrapped lines
@@ -124,11 +124,7 @@ def test_an_empty_selection_copies_nothing():
 
 
 def test_popup_copies_through_the_original_range_not_the_control_text():
-    source = (
-        Path(__file__).resolve().parent.parent / "client" / "ui" / "conversations.py"
-    ).read_text(encoding="utf-8")
-    start = source.index("    def _show_message_text_popup(")
-    body = source[start:source.index("\n    def ", start + 1)]
+    body = conversations_method_source("_show_message_text_popup")
     assert "value=word_wrap(text)" in body
     assert "selection_offsets(" in body
     assert "original_range(text, *offsets)" in body

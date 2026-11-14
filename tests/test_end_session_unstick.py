@@ -31,7 +31,9 @@ class _Stub:
     # reached through the handler exactly as production reaches it.
     _run_windows_session_teardown = MainWindow._run_windows_session_teardown
     _END_SESSION_UNSTICK_SECONDS = 0.05
-    _WINDOWS_SHUTDOWN_BUDGET = MainWindow._WINDOWS_SHUTDOWN_BUDGET
+    # Not the shipped 4 s: a caller that finds the teardown owned elsewhere
+    # waits this long for real, and nothing here asserts on the figure.
+    _WINDOWS_SHUTDOWN_BUDGET = 0.05
 
     def __init__(self, already_shutting_down=False):
         self._shutting_down = already_shutting_down

@@ -24,10 +24,14 @@ the dialog tests are opt-in.
 import pathlib
 import re
 
-SOURCE = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "client" / "ui" / "dialogs" / "settings_dialog.py"
-).read_text(encoding="utf-8")
+_DIALOGS = pathlib.Path(__file__).resolve().parents[1] / "client" / "ui" / "dialogs"
+# The Transcription tab lives in its own mixin modules; scan them too.
+SOURCE = "\n".join(
+    (_DIALOGS / name).read_text(encoding="utf-8")
+    for name in ("settings_dialog.py", "transcription_tab.py",
+                 "transcription_external.py", "transcription_whisper_cpp.py",
+                 "transcription_precision.py")
+)
 
 
 def test_no_control_is_bound_directly_to_a_main_window_method():

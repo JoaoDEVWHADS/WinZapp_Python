@@ -27,6 +27,8 @@ import os
 import time
 from typing import Optional
 
+from core import session_engine
+
 _SESSIONS_FILE = "sessions.json"
 VALID_STATUS = ("active", "pairing", "abandoned")
 
@@ -85,7 +87,7 @@ class SessionStore:
     # ── mutations ────────────────────────────────────────────────────────
     def register(self, name: str, token: Optional[str], status: str = "active",
                  owner_pid: Optional[int] = None, owner_create_time: Optional[float] = None,
-                 attempt_id: Optional[str] = None) -> dict:
+                 attempt_id: Optional[str] = None, engine: Optional[str] = None) -> dict:
         if status not in VALID_STATUS:
             raise ValueError(f"invalid status {status!r}")
         data = self._read()
@@ -95,6 +97,8 @@ class SessionStore:
             "status": status,
             "created_at": int(time.time()),
         }
+        if engine:
+            entry["engine"] = engine
         if owner_pid is not None:
             entry["owner_pid"] = owner_pid
         if owner_create_time is not None:
@@ -123,16 +127,22 @@ class SessionStore:
         if len(data["sessions"]) != before:
             self._write(data)
 
-    def ensure_from_legacy_token(self, name: str, token: str) -> dict:
+    def ensure_from_legacy_token(self, name: str, token: str,
+                                 engine: Optional[str] = None) -> dict:
         """Seed a session from a migrated legacy token if none exists yet."""
         existing = self.get(name)
         if existing is not None:
             return existing
-        return self.register(name, token=token, status="active")
+        return self.register(name, token=token, status="active", engine=engine)
 
 
-def sessions_to_close(sessions: list[dict], current_session: str) -> list[dict]:
+def sessions_to_close(sessions: list[dict], current_session: str,
+                      engine: Optional[str] = None) -> list[dict]:
     """Pure filter: sessions this account may safely close. ONLY 'abandoned'
-    ones, and never the current session (plan Zad 3.2 / GPT r5 #5)."""
+    ones, and never the current session (plan Zad 3.2 / GPT r5 #5). With
+    ``engine``, only the sessions that engine owns: the others live on a
+    server this process is not talking to, and dropping their record would
+    leave them behind for good."""
     return [s for s in sessions
-            if s.get("status") == "abandoned" and s.get("name") != current_session]
+            if s.get("status") == "abandoned" and s.get("name") != current_session
+            and (engine is None or session_engine.entry_engine(s, engine) == engine)]

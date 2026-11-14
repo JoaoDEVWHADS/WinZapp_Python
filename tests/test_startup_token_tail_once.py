@@ -22,6 +22,7 @@ import pytest
 
 import main
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 class _FakeStore:
@@ -34,7 +35,7 @@ class _FakeStore:
     def list(self):
         return list(self.sessions)
 
-    def ensure_from_legacy_token(self, name, token):
+    def ensure_from_legacy_token(self, name, token, engine=None):
         self.seeded.append((name, token))
         return {"name": name, "status": "active"}
 
@@ -43,6 +44,8 @@ class _Stub:
     """Minimal stand-in for MainWindow for retrieve_token()."""
 
     retrieve_token = MainWindow.retrieve_token
+    _uses_neonize = MainWindow._uses_neonize
+    _session_engine_name = MainWindow._session_engine_name
 
     def __init__(self, token="sess-abc:hash-xyz"):
         self.settings = {"privateinfo": {"paired": True}}
@@ -159,7 +162,7 @@ class TestGenerateTokenMigration:
             posts.append(url)
             return _Resp()
 
-        monkeypatch.setattr(main, "api_post", _fake_post)
+        patch_main_global(monkeypatch, "api_post", _fake_post)
         mw = _Stub(token="sess-abc")
 
         mw.retrieve_token()
@@ -170,3 +173,62 @@ class TestGenerateTokenMigration:
         assert mw.token == "sess-abc:hash-xyz"
         assert len(mw.audit_lines) == 1
         assert mw.cleanup_calls == 1
+
+
+class TestNeonizeTokenIsRenewedAtStart:
+    """The Neonize bridge derives the hash from its own secret, so a token made
+    with the old public key must be renewed (same name, new hash); with any
+    other engine a token that already has its hash is left alone."""
+
+    @staticmethod
+    def _posts(monkeypatch):
+        posts = []
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"token": "new-hash"}
+
+        def _fake_post(url, *args, **kwargs):
+            posts.append(url)
+            return _Resp()
+
+        patch_main_global(monkeypatch, "api_post", _fake_post)
+        return posts
+
+    def test_a_neonize_token_with_an_old_hash_gets_the_new_one(self, monkeypatch):
+        posts = self._posts(monkeypatch)
+        mw = _Stub(token="sess-abc:old-hash")
+        mw.wpp_custom_api = True
+        mw.wpp_ws_server = "ws://127.0.0.1"
+
+        mw.retrieve_token()
+
+        assert len(posts) == 1
+        assert "/api/sess-abc/api-key/generate-token" in posts[0]
+        assert mw.token == "sess-abc:new-hash"
+        assert mw._stored_token == "sess-abc:new-hash"
+
+    def test_other_engines_leave_a_token_that_has_its_hash_alone(self, monkeypatch):
+        posts = self._posts(monkeypatch)
+        mw = _Stub(token="sess-abc:old-hash")
+
+        mw.retrieve_token()
+
+        assert posts == []
+        assert mw.token == "sess-abc:old-hash"
+
+    def test_a_failed_renewal_keeps_the_stored_token(self, monkeypatch):
+        def _down(url, *args, **kwargs):
+            raise ConnectionError("bridge not answering")
+
+        patch_main_global(monkeypatch, "api_post", _down)
+        mw = _Stub(token="sess-abc:old-hash")
+        mw.wpp_custom_api = True
+        mw.wpp_ws_server = "ws://127.0.0.1"
+
+        mw.retrieve_token()
+
+        assert mw.token == "sess-abc:old-hash"
+        assert mw._stored_token == "sess-abc:old-hash"

@@ -24,10 +24,21 @@ import inspect
 from pathlib import Path
 
 from core.sound_system import AlertPreviewController
+from tests.god_modules import main_window_source
 
 SETTINGS_DIALOG = (
     Path(__file__).resolve().parent.parent / "client" / "ui" / "dialogs" / "settings_dialog.py"
 )
+
+TRANSCRIPTION_TAB = SETTINGS_DIALOG.with_name("transcription_tab.py")
+TRANSCRIPTION_EXTERNAL = SETTINGS_DIALOG.with_name("transcription_external.py")
+TRANSCRIPTION_WHISPER_CPP = SETTINGS_DIALOG.with_name("transcription_whisper_cpp.py")
+TRANSCRIPTION_PRECISION = SETTINGS_DIALOG.with_name("transcription_precision.py")
+TRANSCRIPTION_CACHE = SETTINGS_DIALOG.with_name("transcription_cache.py")
+TRANSCRIPTION_OPTIONS = SETTINGS_DIALOG.with_name("transcription_options.py")
+TRANSCRIPTION_REUSE = SETTINGS_DIALOG.with_name("transcription_reuse.py")
+ADVANCED_TAB = SETTINGS_DIALOG.with_name("advanced_tab.py")
+VOICE_RECORDING_OPTIONS = SETTINGS_DIALOG.with_name("voice_recording_options.py")
 
 LABELLED_CONTROLS = {"StaticText", "CheckBox", "RadioButton", "StaticBox", "Button", "RadioBox"}
 
@@ -58,8 +69,60 @@ def _i18n_keys(node):
 
 
 def _dialog_class():
+    """SettingsDialog with the methods of the mixins that hold a tab merged in:
+    the Local Transcription tab lives in transcription_tab.py (and its models-in-other-folders
+    section in transcription_external.py, its whisper.cpp section in
+    transcription_whisper_cpp.py, its precision picker in
+    transcription_precision.py) but is built, relabelled and applied as part
+    of the dialog."""
     tree = ast.parse(SETTINGS_DIALOG.read_text(encoding="utf-8"))
-    return next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SettingsDialog")
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SettingsDialog")
+    tab = ast.parse(TRANSCRIPTION_TAB.read_text(encoding="utf-8"))
+    mixin = next(
+        n for n in tab.body if isinstance(n, ast.ClassDef) and n.name == "TranscriptionTabMixin"
+    )
+    external = ast.parse(TRANSCRIPTION_EXTERNAL.read_text(encoding="utf-8"))
+    external_mixin = next(
+        n for n in external.body
+        if isinstance(n, ast.ClassDef) and n.name == "ExternalModelsMixin"
+    )
+    whisper_cpp = ast.parse(TRANSCRIPTION_WHISPER_CPP.read_text(encoding="utf-8"))
+    whisper_cpp_mixin = next(
+        n for n in whisper_cpp.body
+        if isinstance(n, ast.ClassDef) and n.name == "WhisperCppMixin"
+    )
+    precision = ast.parse(TRANSCRIPTION_PRECISION.read_text(encoding="utf-8"))
+    precision_mixin = next(
+        n for n in precision.body
+        if isinstance(n, ast.ClassDef) and n.name == "TranscriptionPrecisionMixin"
+    )
+    cache = ast.parse(TRANSCRIPTION_CACHE.read_text(encoding="utf-8"))
+    cache_mixin = next(
+        n for n in cache.body
+        if isinstance(n, ast.ClassDef) and n.name == "TranscriptionCacheMixin"
+    )
+    options = ast.parse(TRANSCRIPTION_OPTIONS.read_text(encoding="utf-8"))
+    options_mixin = next(
+        n for n in options.body
+        if isinstance(n, ast.ClassDef) and n.name == "TranscriptionOptionsMixin"
+    )
+    reuse = ast.parse(TRANSCRIPTION_REUSE.read_text(encoding="utf-8"))
+    reuse_mixin = next(
+        n for n in reuse.body
+        if isinstance(n, ast.ClassDef) and n.name == "TranscriptionReuseMixin"
+    )
+    advanced_mixin = next(
+        n for n in ast.parse(ADVANCED_TAB.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "AdvancedTabMixin"
+    )
+    voice_options = next(
+        n for n in ast.parse(VOICE_RECORDING_OPTIONS.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "VoiceRecordingOptionsMixin"
+    )
+    cls.body = (cls.body + mixin.body + external_mixin.body + whisper_cpp_mixin.body
+                + precision_mixin.body + cache_mixin.body + options_mixin.body
+                + reuse_mixin.body + advanced_mixin.body + voice_options.body)
+    return cls
 
 
 def _built_and_refreshed():
@@ -126,7 +189,25 @@ def _built_and_refreshed():
         for name, p in inspect.signature(AlertPreviewController.__init__).parameters.items()
         if name in ("play_label_key", "stop_label_key")
     }
-    for node in ast.walk(refresh):
+    # _refresh_dialog_labels() may hand a whole tab to a `self._refresh_*()`
+    # helper of its own (the Local Transcription tab's _refresh_transcription_labels()
+    # rebuilds comboboxes as well as relabelling); what such a helper re-applies
+    # is re-applied on Apply just the same, so it is read as part of it.
+    methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+    # Followed to any depth: _refresh_transcription_labels() hands the section
+    # for models in other folders on to _refresh_external_labels().
+    scopes = [refresh]
+    for scope in scopes:
+        for node in ast.walk(scope):
+            if (
+                isinstance(node, ast.Call)
+                and _self_attr(node.func)
+                and node.func.attr.startswith(("_refresh_", "_relabel_"))
+                and node.func.attr in methods
+                and methods[node.func.attr] not in scopes
+            ):
+                scopes.append(methods[node.func.attr])
+    for node in (n for scope in scopes for n in ast.walk(scope)):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
         # self._x.SetLabel(i18n.t(k)) / self._x.SetItemLabel(i, i18n.t(k)) / ...
@@ -168,9 +249,7 @@ def test_every_built_label_is_reapplied_to_its_own_control():
 
 
 def test_main_language_change_repaints_dynamic_content_and_calls():
-    main_source = (
-        Path(__file__).resolve().parent.parent / "client" / "main.py"
-    ).read_text(encoding="utf-8")
+    main_source = main_window_source()
     start = main_source.index("    def apply_language_changes(self):")
     end = main_source.index("\n    def on_alt_1", start)
     body = main_source[start:end]
@@ -179,6 +258,8 @@ def test_main_language_change_repaints_dynamic_content_and_calls():
     assert "cp.populate_messages(preserve_focus=True)" in body
     assert "self._chats_ui_fp = None" in body
     assert "self.add_chats_to_ui()" in body
+    assert "self._refresh_status_language()" in body
+    assert "self._build_menubar()" in body
 
 
 def test_incoming_call_popup_has_live_language_refresh_hook():
@@ -187,5 +268,8 @@ def test_incoming_call_popup_has_live_language_refresh_hook():
         / "client" / "ui" / "dialogs" / "incoming_call.py"
     ).read_text(encoding="utf-8")
     assert "def refresh_labels(self, message: str | None = None):" in source
-    assert 'self._answer_button.SetLabel(i18n.t("incoming_call_answer_button"))' in source
-    assert 'self._close_button.SetLabel(i18n.t("incoming_call_close_button"))' in source
+    assert "self._apply_labels()" in source
+    assert (
+        "(self._answer_button, answer_key, self._on_answer)" in source
+        and '"incoming_call_close_button", self._on_close' in source
+    )

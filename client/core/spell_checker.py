@@ -1,9 +1,9 @@
 """Small adapter around the Windows spell-checking service.
 
 WinZapp's message editor remains an ordinary ``wx.TextCtrl``. This module
-checks the text after the user appends a word boundary and reports a detected
-error through a callback. It neither changes the message nor exposes custom
-UI Automation text attributes.
+supplies spelling suggestions and reports detected errors through the
+application's sound callback. It neither changes the message nor replaces
+the editor's accessibility interfaces.
 
 ``comtypes`` is optional at import time so a missing Windows component can
 never prevent WinZapp from starting. Spell checking is simply unavailable
@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import os
 import time
+import unicodedata
 import ctypes
 from ctypes import POINTER, c_int, c_ulong, wintypes
 from typing import Callable
+from core.emoticons import caret_value_index
 
 
 try:
@@ -182,21 +184,28 @@ IID_IENUM_SPELLING_ERROR = GUID(
 IID_ISPELLING_ERROR = GUID(
     "{B7C82D61-FBE8-4B47-9B27-6C0D2E0DE0A3}"
 ) if comtypes is not None else None
+IID_IENUM_STRING = GUID(
+    "{00000101-0000-0000-C000-000000000046}"
+) if comtypes is not None else None
 
 S_FALSE = 1
 CORRECTIVE_ACTION_DELETE = 3
 LOCALE_NAME_MAX_LENGTH = 85
 
-# WinZapp uses a short code for Polish while the Windows spell-checking API
-# expects a BCP 47 language tag. The other currently bundled UI languages are
-# already valid Windows tags, but keeping the whole mapping explicit makes the
-# boundary between application locales and spell-checker locales clear.
+# WinZapp uses short codes for Polish, Romanian, Arabic and Italian while the Windows
+# spell-checking API expects a BCP 47 language tag. The other currently
+# bundled UI languages are already valid Windows tags, but keeping the whole
+# mapping explicit makes the boundary between application locales and
+# spell-checker locales clear.
 _WINZAPP_LANGUAGE_TAGS = {
+    "ar": "ar-SA",
     "en-US": "en-US",
     "es-ES": "es-ES",
+    "it": "it-IT",
     "pl": "pl-PL",
     "pt-BR": "pt-BR",
     "pt-PT": "pt-PT",
+    "ro": "ro-RO",
 }
 
 
@@ -222,6 +231,23 @@ if comtypes is not None:
         ]
 
 
+    class IEnumString(IUnknown):
+        """The COM string enumerator returned by ISpellChecker.Suggest."""
+
+        _iid_ = IID_IENUM_STRING
+        _methods_ = [
+            COMMETHOD(
+                [], HRESULT, "Next",
+                (['in'], c_ulong, "count"),
+                (['out'], POINTER(wintypes.LPWSTR), "value"),
+                (['out'], POINTER(c_ulong), "fetched"),
+            ),
+            COMMETHOD([], HRESULT, "Skip", (['in'], c_ulong, "count")),
+            COMMETHOD([], HRESULT, "Reset"),
+            COMMETHOD([], HRESULT, "Clone", (['out'], POINTER(POINTER(IUnknown)), "value")),
+        ]
+
+
     class ISpellChecker(IUnknown):
         _iid_ = IID_ISPELL_CHECKER
         _methods_ = [
@@ -234,7 +260,7 @@ if comtypes is not None:
             COMMETHOD(
                 [], HRESULT, "Suggest",
                 (['in'], wintypes.LPCWSTR, "word"),
-                (['out'], POINTER(POINTER(IUnknown)), "value"),
+                (['out'], POINTER(POINTER(IEnumString)), "value"),
             ),
             COMMETHOD([], HRESULT, "Add", (['in'], wintypes.LPCWSTR, "word")),
             COMMETHOD([], HRESULT, "Ignore", (['in'], wintypes.LPCWSTR, "word")),
@@ -372,20 +398,62 @@ def _language_candidates(preferred_language: str | None) -> list[str]:
     return candidates
 
 
-def _word_ended(previous_text: str, current_text: str) -> bool:
-    """Return whether one trailing whitespace character was just appended.
+# Characters that sit inside a word rather than ending it: "don't", "co-op".
+_WORD_JOINERS = "'\u2019-"
 
-    Requiring an exact one-character append is important: Backspace can expose
-    a space that was already present before the deleted word. Treating that as
-    a newly typed boundary would replay the error sound while deleting text.
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char in _WORD_JOINERS
+
+
+def _is_boundary_char(char: str) -> bool:
+    """Whitespace or punctuation/symbol that ends a word when typed."""
+    if char in _WORD_JOINERS:
+        return False
+    return char.isspace() or unicodedata.category(char)[0] in ("P", "S")
+
+
+def _word_ended(previous_text: str, current_text: str) -> bool:
+    """Return whether one word-ending character was just appended.
+
+    The character is whitespace or punctuation (space, comma, full stop,
+    question mark...). Requiring an exact one-character append is important:
+    Backspace can expose a boundary that was already present before the
+    deleted word. Treating that as a newly typed boundary would replay the
+    error sound while deleting text. The character before it must belong to a
+    word, so a run of spaces or "?!" cues once.
     """
     return bool(
         current_text
         and len(current_text) == len(previous_text) + 1
         and current_text.startswith(previous_text)
-        and current_text[-1].isspace()
-        and (len(current_text) == 1 or not current_text[-2].isspace())
+        and _is_boundary_char(current_text[-1])
+        and (len(current_text) == 1 or _is_word_char(current_text[-2]))
     )
+
+
+def word_span_at(text: str, index: int) -> tuple[int, int] | None:
+    """Return the (start, end) of the word the caret at `index` touches.
+
+    The word after the caret wins, so a caret at the start of a word is on
+    that word; a caret at its end is still on it.
+    """
+    if not text:
+        return None
+    index = max(0, min(index, len(text)))
+    if index < len(text) and _is_word_char(text[index]):
+        anchor = index
+    elif index > 0 and _is_word_char(text[index - 1]):
+        anchor = index - 1
+    else:
+        return None
+    start = anchor
+    while start > 0 and _is_word_char(text[start - 1]):
+        start -= 1
+    end = anchor + 1
+    while end < len(text) and _is_word_char(text[end]):
+        end += 1
+    return start, end
 
 
 class WindowsSpellChecker:
@@ -402,6 +470,7 @@ class WindowsSpellChecker:
         self._checker = None
         self._initialized = False
         self._last_text = ""
+        self._caret_word = None
 
     def reset(self, text: str = "") -> None:
         """Re-baseline the last-seen text without checking anything.
@@ -415,6 +484,7 @@ class WindowsSpellChecker:
         cues an error for a word the user typed long before.
         """
         self._last_text = text or ""
+        self._caret_word = None
 
     def set_language(self, language: str | None) -> None:
         """Change the preferred language and reopen Windows' checker lazily."""
@@ -507,14 +577,80 @@ class WindowsSpellChecker:
             if action == CORRECTIVE_ACTION_DELETE:
                 continue
             if length > 0:
-                errors.append((start, start + length))
+                # The Windows API reports UTF-16 units, not Python indices.
+                errors.append((
+                    caret_value_index(text, start, utf16=True),
+                    caret_value_index(text, start + length, utf16=True),
+                ))
         return errors
+
+    @staticmethod
+    def _suggestion_value(value) -> str:
+        """Unwrap the string value returned by comtypes' IEnumString."""
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                item = _unwrap_out(item)
+                if isinstance(item, str):
+                    return item
+                if hasattr(item, "value") and isinstance(item.value, str):
+                    return item.value
+            return ""
+        value = _unwrap_out(value)
+        if isinstance(value, str):
+            return value
+        if hasattr(value, "value") and isinstance(value.value, str):
+            return value.value
+        return ""
+
+    def suggestions_for_word(self, word: str, limit: int = 5) -> list[str]:
+        """Return Windows' replacement suggestions for *word*.
+
+        The checker is optional, so a missing dictionary or a COM failure
+        simply produces an empty list.  ``IEnumString.Next(1)`` returns
+        ``(value, fetched)``; S_FALSE is a success code, so the end of the
+        enumeration arrives as ``(None, 0)`` rather than as an exception.
+        """
+        word = str(word or "")
+        if not word or limit <= 0:
+            return []
+        checker = self._get_checker()
+        if checker is None:
+            return []
+        try:
+            enumeration = _unwrap_out(checker.Suggest(word))
+        except (COMError, OSError, RuntimeError, TypeError, AttributeError):
+            return []
+        suggestions = []
+        while enumeration and len(suggestions) < limit:
+            try:
+                result = enumeration.Next(1)
+            except (COMError, OSError, RuntimeError, TypeError, AttributeError, ValueError):
+                break
+            value = self._suggestion_value(result)
+            if not value:
+                break
+            if value != word and value not in suggestions:
+                suggestions.append(value)
+        return suggestions
+
+    def suggestions_at(self, text: str, index: int, limit: int = 5):
+        """Return ``(start, end, suggestions)`` when the caret touches an error."""
+        text = text or ""
+        span = word_span_at(text, index)
+        if span is None:
+            return None
+        start, end = span
+        if not any(s < end and start < e for s, e in self.errors_for_text(text)):
+            return None
+        suggestions = self.suggestions_for_word(text[start:end], limit=limit)
+        return (start, end, suggestions) if suggestions else None
 
     def text_changed(self, text: str) -> list[tuple[int, int]]:
         """Check after appended whitespace and cue a just-completed error."""
         text = text or ""
         previous_text = self._last_text
         self._last_text = text
+        self._caret_word = None
         if not _word_ended(previous_text, text):
             return []
 
@@ -523,3 +659,22 @@ class WindowsSpellChecker:
         if any(start <= previous_character < end for start, end in errors):
             self._play_error_sound()
         return errors
+
+    def caret_moved(self, text: str, index: int) -> bool:
+        """Cue an error when the caret has just arrived at a misspelled word.
+
+        Called after a navigation key or a click. Moving within the same word
+        does not repeat the cue; leaving it and coming back does.
+        """
+        text = text or ""
+        span = word_span_at(text, index)
+        if span == self._caret_word:
+            return False
+        self._caret_word = span
+        if span is None:
+            return False
+        start, end = span
+        if any(s < end and start < e for s, e in self.errors_for_text(text)):
+            self._play_error_sound()
+            return True
+        return False

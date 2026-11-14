@@ -1,7 +1,8 @@
 from pathlib import Path
+from tests.god_modules import main_window_method_source, main_window_source
 
 
-SOURCE = (Path(__file__).parents[1] / "client" / "main.py").read_text(encoding="utf-8")
+SOURCE = main_window_source()
 
 
 def test_startup_captures_baseline_before_remote_chat_merge():
@@ -26,9 +27,11 @@ def test_periodic_poll_uses_message_delta_instead_of_global_resync():
         "def _phone_digits_equivalent")]
     assert "baseline = self._capture_chat_sync_baseline()" in block
     assert "self._plan_message_sync(" in block
-    assert "self.sync_remote_chats(full_targets, incremental=False)" in block
-    assert "self.sync_remote_chats(incremental_targets, incremental=True)" in block
-    assert "self.sync_media_for_all_chats(changed_jids)" in block
+    # Delta calls and context forwarding are exercised by TestPeriodicPoll in
+    # test_sync_lifecycle_guards.py; signatures are not behaviour evidence.
+    # Scoped to the changed chats, and stoppable by the setting.
+    assert "".join(block.split()).count(
+        "self.sync_media_for_all_chats(changed_jids,should_stop=") == 1
 
 
 def test_pending_history_repair_survives_restart():
@@ -55,7 +58,7 @@ def test_failed_message_delta_is_durable_and_blocks_false_completion():
 def test_list_chat_markers_are_deferred_until_message_delta_succeeds():
     assert "defer_chat_save: bool = False" in SOURCE
     assert "elif not defer_chat_save:" in SOURCE
-    run_sync = SOURCE[SOURCE.index("def _run_sync"):SOURCE.index("def clear_local_data")]
+    run_sync = main_window_method_source("_run_sync")
     assert run_sync.count("defer_chat_save=True") >= 3
     assert "self._schedule_save()" in run_sync
 

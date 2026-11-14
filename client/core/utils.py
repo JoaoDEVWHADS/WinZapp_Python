@@ -7,6 +7,8 @@ import base64
 import unicodedata
 import requests
 from cryptography.fernet import Fernet
+from core.link_preview import decode_html_entities
+from core.reaction_shortcuts import DEFAULT_QUICK_REACTIONS
 
 
 # How much Unicode folding searching applies, in the order the Settings radio
@@ -19,6 +21,11 @@ SEARCH_NORMALIZATION_MODES = ("off", "nfd", "nfkd")
 #: a resync overwrites "seconds" with the server's copy and must not touch
 #: this, and only a measured value can legitimately be 0 (see video_seconds).
 MEASURED_SECONDS_KEY = "_measured_seconds"
+
+
+def video_label(video: dict, i18n) -> str:
+    """The word naming a video: a video message (``ptv``) is not a plain video."""
+    return i18n.t("video_message") if (video or {}).get("ptv") else i18n.t("video")
 
 
 def video_seconds(video: dict):
@@ -269,7 +276,7 @@ _FORWARDABLE_SUB_KEYS = (
     "extendedTextMessage", "audioMessage", "imageMessage",
     "videoMessage", "documentMessage", "stickerMessage",
     "locationMessage", "contactMessage", "buttonsMessage",
-    "listMessage",
+    "listMessage", "templateMessage", "interactiveMessage",
 )
 
 
@@ -304,7 +311,13 @@ def is_voice_message(msg) -> bool:
     """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
     if not isinstance(msg, dict):
         return False
-    if msg.get("_is_voice_recording") or msg.get("type") == "ptt":
+    if msg.get("_is_voice_recording"):
+        # A recording WinZapp sends as an audio message instead (microphone +
+        # computer audio) says so on its pending row with an
+        # explicit ptt False; any other recording is a voice note.
+        inner = (msg.get("message") or {}).get("audioMessage") or {}
+        return inner.get("ptt") is not False
+    if msg.get("type") == "ptt":
         return True
     if msg.get("isPtt") or msg.get("ptt"):
         return True
@@ -561,6 +574,52 @@ def migrate_voice_message_mode_default(settings) -> bool:
     return True
 
 
+# Marks that the one-shot WPPConnect-reinstall-notice check has already run
+# for this install. Its own flag, like the one above, for the same reason.
+WPP_REINSTALL_NOTICE_MIGRATION_FLAG = "wpp_reinstall_notice_migrated"
+
+
+def migrate_wpp_reinstall_notice(settings) -> bool:
+    """Flag a pre-2.0 install as needing the one-time WPPConnect reinstall
+    recommendation.
+
+    No version number has ever been persisted to settings.json before this
+    migration existed, so there is no string to parse or compare. But that
+    absence is itself the signal: settings_default.json now ships this flag
+    pre-set to True, so a genuinely fresh 2.0+ install (bootstrapped by
+    copying settings_default.json — see load_settings()) already has it and
+    never reaches the branch below. Every settings.json that exists on disk
+    right now, anywhere, was therefore necessarily created before this PR —
+    there is no way for one to exist today that a 2.0.0.0+ build wrote,
+    because 2.0.0.0 does not exist until this merges. So "the flag is
+    missing" already means "this account predates 2.0", with nothing else to
+    check.
+
+    Pre-2.0 (pre-calling) WPPConnect installs carry a stale pairing/pin
+    catalogue that leaves some accounts hitting HTTP 500 on calls after
+    updating; only a WPPConnect reinstall clears it. Alpha users were told to
+    do this manually via Help > Force Reinstall WPPConnect long ago — this
+    migration just arms the one-time dialog that offers everyone else the
+    same fix, from _show_wpp_reinstall_notice_if_pending().
+
+    One-shot, own flag, same shape as the other migrations in this module:
+    once the flag is set — whether the user says yes, no, or the dialog never
+    got to run — it never flips back to pending on a later launch. Returns
+    True whenever *settings* changed, the flag included.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(WPP_REINSTALL_NOTICE_MIGRATION_FLAG):
+        return False
+    general[WPP_REINSTALL_NOTICE_MIGRATION_FLAG] = True
+    general["wpp_reinstall_notice_pending"] = True
+    return True
+
+
 # Marks that the one-shot spell_check_enabled -> spell_check_mode conversion
 # has already run. Its own flag, like the two above, for the same reason.
 SPELL_CHECK_MODE_MIGRATION_FLAG = "spell_check_mode_migrated"
@@ -609,6 +668,141 @@ def migrate_spell_check_mode(settings) -> bool:
     return True
 
 
+# Marks that the one-shot call_audio_devices.exclusive_mode split has run.
+# Its own flag, like the three above, for the same reason.
+CALL_EXCLUSIVE_SPLIT_MIGRATION_FLAG = "call_exclusive_mode_split_migrated"
+
+
+def migrate_call_exclusive_mode_split(settings) -> bool:
+    """Split ``call_audio_devices.exclusive_mode`` into input/output flags.
+
+    One checkbox governed both directions, and the two have very different
+    costs: an exclusive MICROPHONE takes a device nothing else is using during
+    a call, while an exclusive SPEAKER silences every other application on it
+    -- the screen reader included, for the whole call, which for WinZapp's
+    users means losing the call window's own controls. They are now separate,
+    and only the output one carries a warning.
+
+    An install that already has the old key keeps its choice for the
+    MICROPHONE only. The speaker starts off, deliberately, even for a user
+    whose old box was ticked.
+
+    That looks like discarding an intent, and is the opposite. The old
+    checkbox never did anything: _stream_extra_settings() returns None for
+    any non-WASAPI device, and until this same release nothing ever resolved
+    to one, so exclusive mode could not engage at all. Nobody who ticked that
+    box has experienced its consequences. Carrying it onto the speaker would
+    mean this release does two things at once -- makes WASAPI reachable for
+    the first time AND converts a dead flag into a live one -- so a user who
+    ticked it months ago would update, answer their first call, and lose the
+    screen reader for the whole of it, with no idea why. They would never see
+    the warning either: it fires when the box is TICKED in Settings, and they
+    are not going to go and tick a box they believe is already on.
+
+    Preserving an intent that never had an effect is not preserving intent;
+    it is delivering a new effect without the consent this very feature
+    treats as necessary. Whoever wants exclusive output ticks the box and
+    reads the warning.
+
+    A missing old key is left alone -- backfill_missing_defaults() puts both
+    new keys there straight after, at their False defaults. The old key is
+    removed once carried across, so a later build cannot read a stale value
+    that no longer governs anything.
+
+    The flag is what makes this one-shot rather than a permanent override:
+    without it, a user who unticks the speaker box would find it back on at
+    the next launch, and that is exactly the user who cares. Returns True
+    whenever *settings* changed, the flag included.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(CALL_EXCLUSIVE_SPLIT_MIGRATION_FLAG):
+        return False
+    section = settings.get("call_audio_devices")
+    if isinstance(section, dict) and "exclusive_mode" in section:
+        legacy = bool(section.pop("exclusive_mode"))
+        section.setdefault("exclusive_input", legacy)
+        section.setdefault("exclusive_output", False)
+    general[CALL_EXCLUSIVE_SPLIT_MIGRATION_FLAG] = True
+    return True
+
+
+# Marks that the one-shot show_typing_row True -> False default change has
+# run. Its own flag, like the ones above, for the same reason.
+TYPING_ROW_DEFAULT_MIGRATION_FLAG = "show_typing_row_default_migrated"
+
+
+def migrate_typing_row_default(settings) -> bool:
+    """Move an existing install onto the new show_typing_row default (off).
+
+    The "is typing..." last row of the message list shipped on by default in
+    the 2.1.0.0 alphas, and backfill_missing_defaults() wrote that True into
+    every alpha install's settings.json, so changing the default alone would
+    reach only new installs. Stable 2.0 installs never had the key and get the
+    new default from the backfill; this is for the alpha ones. A user who
+    turned it on deliberately cannot be told apart from one who never opened
+    the setting, so both are switched off once and the first ticks the box
+    again in Configuracoes > Interface do usuario.
+
+    Only an exact True is converted; a missing value is left for the backfill.
+    The flag keeps this one-shot: without it, the user who turns the row back
+    on would find it off again on the next launch. Returns True whenever
+    *settings* changed, the flag included.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(TYPING_ROW_DEFAULT_MIGRATION_FLAG):
+        return False
+    section = settings.get("user_interface")
+    if isinstance(section, dict) and section.get("show_typing_row") is True:
+        section["show_typing_row"] = False
+    general[TYPING_ROW_DEFAULT_MIGRATION_FLAG] = True
+    return True
+
+
+# Marks that the one-shot echo_cancellation False -> True default change has
+# run. Its own flag, like the ones above, for the same reason.
+ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG = "call_echo_cancellation_default_migrated"
+
+
+def migrate_echo_cancellation_default(settings) -> bool:
+    """Move an existing install onto the new echo_cancellation default (on).
+
+    Call echo cancellation shipped off by default, and every settings.json was
+    seeded with that False, so changing the default alone would reach only new
+    installs. Users on a laptop speaker or a mixer with loopback were sending
+    the other person their own voice back without knowing the option existed.
+    A user who turned it off deliberately cannot be told apart from one who
+    never opened the setting, so both are switched on once; the first unticks
+    the box again in the call settings.
+
+    Only an exact False is converted; a missing value is left for the backfill.
+    The flag keeps this one-shot. Returns True whenever *settings* changed, the
+    flag included.
+    """
+    if not isinstance(settings, dict):
+        return False
+    general = settings.get("general")
+    if not isinstance(general, dict):
+        general = {}
+        settings["general"] = general
+    if general.get(ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG):
+        return False
+    section = settings.get("call_audio_devices")
+    if isinstance(section, dict) and section.get("echo_cancellation") is False:
+        section["echo_cancellation"] = True
+    general[ECHO_CANCELLATION_DEFAULT_MIGRATION_FLAG] = True
+    return True
+
+
 def auto_download_allows(settings, msg) -> bool:
     """Whether the background auto-download may fetch *msg*'s media.
 
@@ -632,6 +826,53 @@ def auto_download_allows(settings, msg) -> bool:
         # skip it, this check is not the one to do it.
         return True
     return category in allowed
+
+
+def auto_download_enabled(settings) -> bool:
+    """Whether media may be fetched without being asked (Configuracoes >
+    Armazenamento > "Baixar midias automaticamente").
+
+    On unless explicitly turned off: that is the default, so a missing or
+    corrupt value keeps the behaviour everyone has always had instead of
+    silently leaving recent audios and documents undownloaded. Read live, from the
+    settings dict the dialog updates in place, by every automatic sweep's
+    ``should_stop`` — that is what lets unticking the box end a sweep that is
+    already running instead of only preventing the next one.
+
+    The master switch: sync_if_media() asks it for the sweeps and for a
+    message arriving live alike, and auto_download_allows() only narrows what
+    it lets through. "Baixar midias" in the menu is an explicit request and
+    is the one path that does not ask.
+    """
+    section = settings.get("storage") if isinstance(settings, dict) else None
+    return not (isinstance(section, dict) and section.get("auto_download_media") is False)
+
+
+def _auto_download_categories(storage) -> set:
+    """The categories a storage section lets through, as auto_download_allows()
+    reads it: every one of them when no list was ever saved."""
+    saved = storage.get("auto_download_media_types") if isinstance(storage, dict) else None
+    if not isinstance(saved, (list, tuple)):
+        return set(AUTO_DOWNLOAD_MEDIA_TYPES)
+    return set(saved) & set(AUTO_DOWNLOAD_MEDIA_TYPES)
+
+
+def auto_download_newly_wanted(old_storage, new_storage) -> bool:
+    """Whether a settings change asks for media nothing has swept for yet.
+
+    True when the auto-download is on afterwards and either it was off before
+    or a category was ticked that was not. Unticking never needs a sweep (the
+    running one notices by itself), and neither does a change made while the
+    auto-download stays off.
+    """
+    if not auto_download_enabled({"storage": new_storage}):
+        return False
+    wanted = _auto_download_categories(new_storage)
+    if not wanted:
+        return False
+    if not auto_download_enabled({"storage": old_storage}):
+        return True
+    return bool(wanted - _auto_download_categories(old_storage))
 
 
 # The Media tab's "Filtrar midias" radio, mirroring the conversation list's own
@@ -748,8 +989,8 @@ def link_preview_text(ext: dict, text: str, main_window=None) -> str:
     bits = [
         part
         for part in (
-            (ext.get("title") or "").strip(),
-            (ext.get("description") or "").strip(),
+            decode_html_entities(ext.get("title") or "").strip(),
+            decode_html_entities(ext.get("description") or "").strip(),
         )
         if part
     ]
@@ -808,22 +1049,55 @@ def get_downloads_folder() -> str:
 # one copy avoids the two call sites drifting apart when a new settings key
 # is added to only one of them.
 DEFAULT_SETTINGS = {
+    "keyboard_shortcuts": {},
+    "quick_chats": {},
     "connection": {
         "wpp_server": "http://127.0.0.1",
         "wpp_port": 6300,
         "wpp_ws_server": "ws://127.0.0.1",
         "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
-        "wpp_custom_api": False
+        "wpp_custom_api": False,
+        "wpp_engine": ""
     },
     "general": {
         "language": "",
         "notifications_enabled": True,
+        # How much a background notification says: "full", "name" or
+        # "sound" (core.notification_manager.NOTIFICATION_CONTENT_LEVELS,
+        # issue #258). "full" is what WinZapp always did.
+        "notification_content": "full",
+        # Which name a group toast leads with: "participant" or "group"
+        # (core.notification_manager.GROUP_TOAST_ORDERS).
+        "group_toast_order": "participant",
+        # Audio files pasted into the message field (Ctrl+V): "audio" or
+        # "document" (core.attachment_types.PASTED_AUDIO_MODES).
+        "pasted_audio_as": "audio",
         "keep_muted_chats_silent_when_open": True,
+        # Message notifications let through per second when many arrive at
+        # once (core.notification_burst).
+        "notification_burst_limit": 3,
         "updates_enabled": True,
         # Alpha channel (one build per commit on main) - opt-in, see
         # client/updater.py's select_release().
         "alpha_updates_enabled": False,
+        # Updates are downloaded with no progress window and the app is only
+        # interrupted to install them. Off: the long-standing behaviour, so no
+        # migration.
+        "background_update_downloads": False,
+        "update_on_exit": False,
+        # Offer every WPPConnect Server release, not only the approved ones
+        # (core/wpp_upstream.py). Off: the approved list, as since it existed.
+        "wpp_all_updates": False,
         "noise_reduction_enabled": False,
+        # the neural model when installed (False: the common reducer, faster)
+        "noise_reduction_neural": True,
+        # where the neural model runs: cpu, cuda12, cuda13, coreml (core/cuda_components)
+        "noise_reduction_device": "cpu",
+        "voice_recording_mode": "auto",
+        "voice_recording_bitrate": 64,
+        "voice_recording_bitrate_stereo": 128,
+        "system_audio_recording_volume": 100,
+        "system_audio_recording_nvda_volume": 100,
         # Windows spell checking in the message field (core/spell_checker.py).
         # One of SPELL_CHECK_MODES: "windows" (default — follow Windows' own
         # Settings > Time & language > Typing > Spelling), or "on"/"off" to
@@ -832,20 +1106,36 @@ DEFAULT_SETTINGS = {
         # Eventos Sonoros; "off" turns the checking itself off, which is
         # also what stops the COM/dictionary work from ever being done.
         "spell_check_mode": "windows",
+        # Emoticons like ":)" become emoji in the message field as they are
+        # typed, and a trailing one at send (core/emoticons.py). An install
+        # without the key gets it from backfill_missing_defaults(), so no
+        # migration: nobody has an older value to keep.
+        "convert_emoticons": True,
         "first_run": True,
         "api_type_first_run_asked": False,
+        "neonize_offer_asked": False,
         "hotkey_first_run_asked": False,
         "autostart": False,
         "show_tray_icon": True,
         "terms_alert_displayed": False,
         "quick_tip_shown": False,
         "global_hotkey": None,
+        # System-wide keys that answer / reject-or-hang-up a call from any
+        # window (main_window/call_hotkeys.py). {"vk": 0, "mod": 0} = removed.
+        "call_answer_hotkey": {"vk": 13, "mod": 7},
+        "call_end_hotkey": {"vk": 8, "mod": 7},
         "switch_behavior": "single",
         # Master mute (Settings > Geral) for the spoken+sound announcements of
         # sync progress/completion, media downloads and the automatic offline
         # transition. On by default; unchecked = those warnings stay silent.
         "announce_sync_events": True,
-        "search_normalization": "off"
+        "search_normalization": "off",
+        # Ships pre-set True: a genuinely fresh 2.0+ install already has this
+        # flag and skips migrate_wpp_reinstall_notice() entirely. Every
+        # settings.json that reaches that migration without the flag already
+        # set predates 2.0 by construction — see the migration's docstring.
+        "wpp_reinstall_notice_migrated": True,
+        "wpp_reinstall_notice_pending": False
     },
     "status": {
         "messages_set_completed": False
@@ -856,28 +1146,63 @@ DEFAULT_SETTINGS = {
     },
     "calls": {
         "alerts_enabled": True,
-        "popup_enabled": True
+        "popup_enabled": True,
+        # say who joins or leaves a group call held here (call_participants.py)
+        "announce_participant_joined": True,
+        "announce_participant_left": True
     },
     "profile_backup": {
+        # Settings > Cópia de segurança: keep no restore point at all
+        # (core/profile_backup.snapshots_disabled()). The pre-existing
+        # behaviour, so no migration: backfill adds it as False.
+        "snapshots_disabled": False,
         "close_snapshot_min_hours": 24,
         "live_snapshot_enabled": False,
         "live_snapshot_interval_hours": 24,
         "live_snapshot_confirm": True
     },
+    # Settings > Reactions. Off: the twelve quick reactions are listed
+    # most-used first. On: exactly these rows, in this order, for users who
+    # pick a reaction by counting arrow presses (core/reaction_shortcuts.py).
+    "reactions": {
+        "fixed_quick_reactions": False,
+        "quick_reaction_slots": list(DEFAULT_QUICK_REACTIONS),
+    },
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
         "focus_on_open": "message_field",
+        "message_list_open_position": "unread_or_last",
+        "remove_bookmarks_after_use": False,
+        "remove_temp_bookmarks_after_use": False,
         "voice_record_focus": "send",
         "message_list_mode": "classic",
         "show_listbox_item_count": False,
+        "show_typing_row": False,
         "page_up_down_step": 15,
         "self_reference_mode": "eu",
         "self_reference_custom_word": "",
+        "hide_own_sender_in_message_list": False,
+        "hide_unnamed_sender_numbers": False,
+        "mark_unsaved_contacts": True,
         "show_delivery_status_in_chat_list": True,
+        "keep_pinned_chat_order": False,
+        "show_channels_in_chat_list": False,
+        # What happens to what was typed and not sent when the conversation
+        # is left: one draft per conversation, like WhatsApp Web
+        # (core/message_drafts.py MODES).
+        "message_draft_mode": "per_conversation",
         "preserve_typed_text_as_attachment_caption": True,
         "bulk_action_shortcuts": True,
         "confirm_mark_all_read": True,
+        "confirm_clear_chat": True,
+        "confirm_delete_chat": True,
+        # Ask before F5 / Shift+F5 (MainWindow._confirm_resync()); the
+        # confirmations' own "don't show again" boxes clear these.
+        "confirm_resync_all": True,
+        "confirm_resync_conversation": True,
+        "warn_system_audio_recording": True,
+        "system_audio_consent_revision": 0,
         # Once a selection exists, plain Space keeps selecting instead of
         # playing/pausing the focused message ("selection mode"), and Esc
         # clears the message selection before it closes the conversation.
@@ -885,11 +1210,39 @@ DEFAULT_SETTINGS = {
         # users who already learned the previous behaviour.
         "space_selects_in_selection_mode": True,
         "escape_clears_selection": True,
+        # Opening a conversation keeps the chat search, so Esc returns to the
+        # results. Off: the long-standing behaviour, so no migration.
+        "keep_search_after_open": False,
+        # Enter and Space on a voice message transcribe it into its line of the
+        # list instead of playing it; Alt+Shift+N then plays it (and, with this
+        # off, is what transcribes it). Off: Enter plays, as it always has.
+        "enter_transcribes_voice_messages": False,
+        # The same choice on the Status tab: on, Enter and Space transcribe an
+        # audio or video status into its line and Alt+Shift+N opens or plays
+        # it. See core/transcription/statuses.py.
+        "enter_transcribes_statuses": False,
+        # Voice notes play one after the other. Off: each one ends on its own.
+        "auto_play_voice_in_sequence": True,
         "auto_focus_next_audio": True,
         "selected_announcement_position": "end",
+        # Where a chat row says how many new messages it has (issue 684):
+        # "after" the name, as always, or "before" it (core/chat_row_text.py).
+        "unread_count_position": "after",
         "show_yesterday_label": True,
         "show_link_previews": True,
         "forwarded_prefix_enabled": False,
+        # How the "also delete the media from your phone" box of the delete
+        # confirmations starts. On is WhatsApp Web's own default and what
+        # WinZapp did before the box existed, so no migration.
+        "delete_media_from_phone": True,
+        # A forwarded voice message stays a voice message instead of becoming
+        # a plain audio, as WhatsApp makes it. Off: WhatsApp's own behaviour,
+        # so no migration.
+        "forward_voice_as_voice": False,
+        # How the "keep link previews" box of the forward dialog starts. On:
+        # a forwarded link keeps the card it had. A new key, so existing
+        # installs get it from backfill_missing_defaults(): no migration.
+        "forward_keep_link_preview": True,
         "conversation_video_media_viewer_dialog": True,
         "status_media_viewer_dialog": True,
         "voice_message_mode": "voice_message",
@@ -904,7 +1257,11 @@ DEFAULT_SETTINGS = {
         # voice note is never flagged "played" in the message list when its
         # playback ends — which also means no row rewrite, and so no screen
         # reader announcement about a message the user has already moved off.
-        "mark_audio_played_in_list": True
+        "mark_audio_played_in_list": True,
+        # Leave the speed button and the duration bar out of the controls
+        # after the message list while media plays (core/playback_controls.py).
+        "hide_speed_button": False,
+        "hide_progress_bar": False
     },
     "audio_devices": {
         "output_device_name": "",
@@ -917,7 +1274,18 @@ DEFAULT_SETTINGS = {
     "call_audio_devices": {
         "output_device_name": "",
         "input_device_name": "",
-        "exclusive_mode": False
+        # Per direction, because the costs differ completely: an exclusive
+        # microphone takes a device nothing else is using mid-call, while an
+        # exclusive speaker silences every other application on it -- the
+        # screen reader included, for the whole call. Both default off.
+        "exclusive_input": False,
+        "exclusive_output": False,
+        # Echo cancellation on the outgoing microphone; on by default, since a
+        # laptop speaker or a mixer loopback sends the other person their own
+        # voice back (migrate_echo_cancellation_default() for old installs).
+        "echo_cancellation": True,
+        # Steady-noise suppression (fans, hiss, hum) on the outgoing microphone.
+        "noise_suppression": False
     },
     # Camera choice for video calls, deliberately its own section for the
     # same reason as call_audio_devices above: swap devices per-call without
@@ -928,6 +1296,48 @@ DEFAULT_SETTINGS = {
     "accessibility": {
         "extended_sr_compat_enabled": True,
         "sapi_fallback_enabled": True
+    },
+    # Local (offline) transcription of voice messages. Every value is a stored
+    # "automatic" rather than a blank — see core/transcription/preferences.py,
+    # which owns the meaning of each one and is pinned to this copy by a test.
+    # The models FOLDER is deliberately absent: it is install-wide and lives in
+    # app_settings.py, because the model files are shared by every account.
+    "transcription": {
+        "backend": "auto",
+        "model": "auto",
+        "device": "auto",
+        # faster-whisper's precision (CTranslate2 compute type), part 11.
+        "compute_type": "auto",
+        # Which language to force when auto-detection is off. "interface" means
+        # "whatever language WinZapp itself is in", kept as a sentinel so it
+        # follows a later change of the interface language.
+        "language": "interface",
+        "auto_detect_language": True,
+        # Keep the loaded model in memory for good (off: released after a
+        # few idle minutes). See core/transcription/residency.py.
+        "keep_model_loaded": False,
+        # Transcribe with no progress window: stay on the list until the text
+        # is ready. See ui/transcription_flow.py (_start_in_background).
+        "run_without_dialog": False,
+        # Transcribe received voice messages on arrival and put the text in
+        # the message line. See core/transcription/auto_queue.py.
+        "auto_transcribe_received": False,
+        # How old (minutes) a received message may be and still be
+        # transcribed/described on its own, local or online: one of
+        # auto_queue.AGE_CHOICES_MINUTES. See auto_queue.max_age_seconds().
+        "auto_max_age_minutes": 5,
+        # Settings > Local transcription: the local automatic
+        # transcription takes messages however old (auto_queue).
+        "auto_any_age": False,
+        # Keep results with the message so they are not redone (on), and the
+        # per-model overrides {model id: bool}. See stored.cache_enabled_for().
+        "cache_enabled": True,
+        "cache_by_model": {},
+        # The same two switches for status updates: transcribe on arrival
+        # (off) and keep the result with the status, which takes it along when
+        # it expires (on). See core/transcription/statuses.py.
+        "auto_transcribe_statuses": False,
+        "status_cache_enabled": True
     },
     # See core/save_location.py — which folder a Save As dialog opens on.
     # "last" is the default and is a deliberate change from the old
@@ -941,9 +1351,17 @@ DEFAULT_SETTINGS = {
     },
     "speech_content": {
         "announce_typing": True,
+        "typing_sound": False,
+        "typing_sound_interval": 3,
+        "typing_sound_silence_capture": True,
         "announce_recording": True,
         "announce_conversations_update_start": True,
         "announce_conversations_update_complete": True,
+        "announce_sync_progress": True,
+        "announce_media_progress": True,
+        # "Loading link preview...", "Link preview added." and the failure
+        # reason while writing a message with a link. New key: no migration.
+        "announce_link_previews": True,
         "speak_active_conv_messages": True,
         "speak_other_conv_messages": True,
         "silence_while_recording": False
@@ -956,10 +1374,23 @@ DEFAULT_SETTINGS = {
         "group": "default",
         "group_custom_path": ""
     },
+    # Sound played for a message while the window is in front: "dedicated"
+    # (message_current / message_foreground) or "notification" (the
+    # background notification sound). New key: no migration.
+    "foreground_sounds": {
+        "active": "dedicated",
+        "other": "dedicated"
+    },
     "conversation_sounds": {},
+    "conversation_auto_ai": {},
+    "conversation_auto_ai_scope": "all",
     "cleared_chats": {},
     "cleared_starred_chats": {},
     "storage": {
+        # On by default, deliberately — a design decision, not an oversight.
+        # Off, a recent voice message or document is not on the computer when
+        # the person opens it, so playing it first says "baixando" and, offline,
+        # cannot play at all. Existing installs keep what they saved.
         "auto_download_media": True,
         # Which categories the auto-download covers. All of them by default —
         # see auto_download_allows(). Links are not a category here.
@@ -967,6 +1398,13 @@ DEFAULT_SETTINGS = {
         "media_max_days": 30,
         "media_max_mb": 100,
         "probe_video_duration_on_download": False
+    },
+    # Settings > Advanced (ui/dialogs/advanced_tab.py). INFO is what log.log
+    # always recorded (core/log_level.py); 0 is the automatic per-account
+    # port of the bundled API (core/local_api_port.py).
+    "advanced": {
+        "log_level": "info",
+        "local_api_port": 0
     }
 }
 
@@ -1055,6 +1493,18 @@ def decrypt_json(encrypted_data, key):
     data = json.loads(decrypted_data.decode())
     return data
 
+_NUMBER_MASK = "∙•·*"
+
+
+def is_masked_number(name: str) -> bool:
+    """'+55∙∙∙∙∙∙∙∙76': the name WhatsApp gives a group member whose number is
+    hidden. Digits with mask characters in between, never a real name."""
+    if not name or not any(m in name for m in _NUMBER_MASK):
+        return False
+    rest = "".join(ch for ch in name if ch not in _NUMBER_MASK + "+-() ")
+    return rest.isdigit()
+
+
 def is_phone_like(name: str) -> bool:
     """Return True if name looks like a phone number rather than a display name.
 
@@ -1067,6 +1517,8 @@ def is_phone_like(name: str) -> bool:
     stripped = name.strip()
     if stripped.isdigit():
         return True  # "0", "123", "5511999999999" — never a real name
+    if is_masked_number(stripped):
+        return True
     digit_count = sum(1 for c in stripped if c.isdigit())
     return digit_count >= 7 and digit_count >= len(stripped) * 0.7
 
@@ -1145,6 +1597,27 @@ def _extract_mentioned_jids(quoted):
     return []
 
 
+#: How much of a quoted message's text a stored reply keeps. A quote whose
+#: text is exactly this long may have been cut here (core/quote_recovery.py).
+QUOTED_TEXT_CAP = 300
+
+
+def quoted_message_text(quoted) -> str:
+    """The full text of a quoted message, in any of the shapes it arrives in."""
+    if not isinstance(quoted, dict):
+        return ""
+    text = (
+        quoted.get("conversation")
+        or quoted.get("caption")
+        or quoted.get("body")
+        or (quoted.get("extendedTextMessage") or {}).get("text")
+        or ""
+    )
+    if not isinstance(text, str) or looks_like_binary_blob(text):
+        return ""
+    return text
+
+
 def _slim_quoted_message(quoted):
     """Reduce a quoted-message dict to only what the reply preview needs.
 
@@ -1163,16 +1636,8 @@ def _slim_quoted_message(quoted):
     """
     if not isinstance(quoted, dict):
         return quoted
-    text = (
-        quoted.get("conversation")
-        or quoted.get("caption")
-        or quoted.get("body")
-        or (quoted.get("extendedTextMessage") or {}).get("text")
-        or ""
-    )
-    if not isinstance(text, str) or looks_like_binary_blob(text):
-        text = ""
-    text = text[:300]  # a long pasted message must not be duplicated into replies
+    # a long pasted message must not be duplicated into replies
+    text = quoted_message_text(quoted)[:QUOTED_TEXT_CAP]
 
     qtype = quoted.get("type")
     slim: dict = {}
@@ -1480,34 +1945,12 @@ def mute_response_accepted(http_ok: bool, body: str, is_unmute: bool) -> bool:
 
 
 def first_unread_index(displayable, unread_count: int) -> int:
-    """Index of the first unread message in *displayable*, or -1.
-
-    WhatsApp's ``unreadCount`` only ever counts messages you *received*. The
-    naive ``len(displayable) - unread_count`` therefore lands in the wrong place
-    whenever any of your own messages sit at the tail of the conversation —
-    typically because you replied from your phone or another linked device. The
-    unread separator was then drawn above your own messages, announcing them as
-    unread, which is what "minhas próprias mensagens contam como não lidas"
-    describes.
-
-    Walk backwards instead, counting only incoming (``key.fromMe`` falsy)
-    messages, and stop on the *unread_count*-th one. Returns -1 when the loaded
-    history doesn't hold that many incoming messages (nothing sensible to
-    anchor the separator to).
-    """
-    if unread_count <= 0:
-        return -1
-    seen = 0
-    for idx in range(len(displayable) - 1, -1, -1):
-        msg = displayable[idx]
-        if not isinstance(msg, dict):
-            continue
-        if (msg.get("key") or {}).get("fromMe"):
-            continue
-        seen += 1
-        if seen == unread_count:
-            return idx
-    return -1
+    """Index of the first unread message in *displayable*, or -1: where
+    WhatsApp Web puts its divider (core/unread_types.py). Your own messages,
+    deletions, notices and calls among the unread ones are not counted, so
+    they never take an unread message's place."""
+    from core.unread_types import first_unread_index as whatsapp_divider
+    return whatsapp_divider(displayable, unread_count)
 
 
 def display_page_fetch_limit(configured_limit: int, cap: int = 2000, buffer: int = 50) -> int:

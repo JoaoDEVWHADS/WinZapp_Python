@@ -7,6 +7,42 @@ from main import MainWindow
 from window_title import format_window_title
 
 
+class _StatusI18n:
+    def __init__(self, language="pt-BR"):
+        self.language = language
+
+    def t(self, key):
+        return {
+            "pt-BR": {"synchronizing": "Sincronizando"},
+            "en-US": {"synchronizing": "Synchronizing"},
+        }[self.language].get(key, key)
+
+
+class _StatusStub:
+    _TRAY_STATUS_KEYS = MainWindow._TRAY_STATUS_KEYS
+    _set_status = MainWindow._set_status
+    _refresh_status_language = MainWindow._refresh_status_language
+
+    def __init__(self):
+        self.i18n = _StatusI18n()
+        self._tray_status = ""
+        self.title_updates = 0
+
+    def _update_title(self):
+        self.title_updates += 1
+
+
+def test_current_title_status_is_retranslated_after_a_language_change():
+    window = _StatusStub()
+    window._set_status("Sincronizando")
+    assert window._tray_status_key == "synchronizing"
+
+    window.i18n.language = "en-US"
+    window._refresh_status_language()
+
+    assert window._tray_status == "Synchronizing"
+
+
 def test_single_account_plain():
     assert format_window_title("WinZapp", "WinZapp", 0, is_multi=False) == "WinZapp"
 

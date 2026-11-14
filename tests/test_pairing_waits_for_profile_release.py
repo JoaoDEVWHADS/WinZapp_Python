@@ -24,10 +24,13 @@ session succeeded and this one did not.
 
 import inspect
 import os
+from types import SimpleNamespace
 
 import pytest
+from requests.exceptions import ConnectionError
 
 from main import MainWindow
+from tests.god_modules import patch_main_global
 from ui.dialogs.connect import Connect
 
 
@@ -84,12 +87,34 @@ class TestThePollerContract:
         assert "return False" in source
         assert "except Exception" in source
 
-    def test_a_connection_error_counts_as_closed(self):
-        """If Node has already torn the session down there is nothing left to
-        hold the lock — blocking the full timeout would just delay pairing."""
-        source = inspect.getsource(MainWindow._wait_for_session_flushed)
-        conn_error = source.index("conn-error")
-        assert "return True" in source[conn_error : conn_error + 200]
+    @pytest.mark.parametrize("confirmed", [None, "CLOSED", "DESTROYED"])
+    def test_a_connection_error_needs_a_later_explicit_close(self, monkeypatch, confirmed):
+        """An unreachable Node does not prove Chrome flushed its profile.
+
+        Pairing can proceed on a later explicit close; otherwise the shared
+        poller times out without reporting a clean shutdown.
+        """
+        clock = SimpleNamespace(now=0.0)
+        calls, audits = [], []
+        stub = SimpleNamespace(wpp_server="http://synthetic.invalid", wpp_port=6300,
+                               _SHUTDOWN_FLUSH_POLL=1, _shutdown_audit=audits.append)
+
+        def get(url, **kwargs):
+            calls.append(kwargs["timeout"])
+            if len(calls) == 1 or confirmed is None:
+                raise ConnectionError("synthetic unavailable API")
+            return SimpleNamespace(status_code=200, json=lambda: {"status": confirmed})
+
+        patch_main_global(monkeypatch, "api_get", get)
+        patch_main_global(monkeypatch, "time", SimpleNamespace(
+            monotonic=lambda: clock.now,
+            sleep=lambda delay: setattr(clock, "now", clock.now + delay)))
+        result = MainWindow._wait_for_session_flushed(stub, "synthetic:key", timeout=2)
+        assert result is (confirmed is not None)
+        assert calls == [2, 1]
+        assert clock.now == (2 if confirmed is None else 1)
+        assert any("ConnectionError" in entry for entry in audits)
+        assert any("TIMEOUT" in entry for entry in audits) is (confirmed is None)
 
     def test_it_is_bounded(self):
         assert 0 < MainWindow._SHUTDOWN_FLUSH_POLL < MainWindow._SHUTDOWN_FLUSH_TIMEOUT

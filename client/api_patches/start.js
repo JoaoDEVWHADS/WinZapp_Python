@@ -1,6 +1,72 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+// Scope loader instrumentation to this synchronous import only. Restore the
+// original functions before starting HTTP or WhatsApp; never log file paths.
+function profileServerModules(operation) {
+  const Module = require('node:module');
+  const originalLoad = Module._load;
+  const originalRead = fs.readFileSync;
+  const started = process.hrtime.bigint();
+  const cpuStarted = process.cpuUsage();
+  const stack = [];
+  const costs = new Map();
+  let readNs = 0n;
+  let reads = 0;
+  let active = true;
+  function label(request, parent) {
+    let name = String(request).replace(/\\/g, '/');
+    if (name.startsWith('.') || path.isAbsolute(name)) {
+      const owner = String(parent && parent.filename || '').replace(/\\/g, '/');
+      name = owner.split('/node_modules/').pop();
+      if (!owner.includes('/node_modules/')) return 'api';
+    }
+    const match = name.match(/^(@[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+|[a-zA-Z0-9_.-]+)/);
+    return match ? match[1] : 'other';
+  }
+  Module._load = function (request, parent, isMain) {
+    if (!active) return originalLoad.apply(this, arguments);
+    const frame = { began: process.hrtime.bigint(), children: 0n };
+    stack.push(frame);
+    try { return originalLoad.apply(this, arguments); }
+    finally {
+      const elapsed = process.hrtime.bigint() - frame.began;
+      stack.pop();
+      if (stack.length) stack[stack.length - 1].children += elapsed;
+      const key = label(request, parent);
+      const cost = costs.get(key) || { self: 0n, calls: 0 };
+      cost.self += elapsed - frame.children;
+      cost.calls++;
+      costs.set(key, cost);
+    }
+  };
+  fs.readFileSync = function () {
+    if (!active) return originalRead.apply(this, arguments);
+    const began = process.hrtime.bigint();
+    try { return originalRead.apply(this, arguments); }
+    finally { readNs += process.hrtime.bigint() - began; reads++; }
+  };
+  try { return operation(); }
+  finally {
+    active = false;
+    Module._load = originalLoad;
+    fs.readFileSync = originalRead;
+    const cpu = process.cpuUsage(cpuStarted);
+    const seconds = ns => (Number(ns) / 1e9).toFixed(3);
+    console.log(`[node-load] elapsed_s=${seconds(process.hrtime.bigint() - started)} cpu_s=${((cpu.user + cpu.system) / 1e6).toFixed(3)} read_s=${seconds(readNs)} reads=${reads}`);
+    for (const [name, cost] of [...costs].sort((a, b) => Number(b[1].self - a[1].self)).slice(0, 10)) {
+      console.log(`[node-load] module=${name} self_s=${seconds(cost.self)} calls=${cost.calls}`);
+    }
+  }
+}
+function timedStartup(step, operation) {
+  const began = process.hrtime.bigint();
+  console.log(`[node-startup] step=${step} event=start`);
+  try { return operation(); }
+  finally {
+    console.log(`[node-startup] step=${step} event=end elapsed_s=${(Number(process.hrtime.bigint() - began) / 1e9).toFixed(3)}`);
+  }
+}
 
 // Garante que o Puppeteer saiba onde encontrar o cache do Chrome
 const puppeteerCacheDir = path.join(__dirname, '.cache');
@@ -60,11 +126,24 @@ function findExecutable(dir, names, depth) {
   return null;
 }
 
+function findPuppeteerChrome(headless) {
+  // Preserving the cache means multiple versions can coexist. Prefer the
+  // version requested by this Puppeteer instead of the first directory found.
+  try {
+    const executable = timedStartup('puppeteer', () => require('puppeteer'))
+      .executablePath({ browser: 'chrome', headless });
+    if (fs.existsSync(executable)) return executable;
+  } catch (e) {}
+  return null;
+}
+
 function findHeadlessShell() {
-  return findExecutable(puppeteerCacheDir, HEADLESS_SHELL_NAMES, 0);
+  return findPuppeteerChrome('shell') || findExecutable(puppeteerCacheDir, HEADLESS_SHELL_NAMES, 0);
 }
 
 function findFullChrome() {
+  const preferred = findPuppeteerChrome(true);
+  if (preferred) return preferred;
   const roots = [
     puppeteerCacheDir,
     path.join(os.homedir(), '.cache', 'puppeteer')
@@ -207,8 +286,9 @@ if (chromeExecutable && !HEADLESS_SHELL_NAMES.includes(path.basename(chromeExecu
 
 // Carrega a configuração padrão compilada
 const distPath = path.join(__dirname, 'dist');
-const configDefault = require(path.join(distPath, 'config')).default;
-const { initServer } = require(path.join(distPath, 'index'));
+const configDefault = timedStartup('config', () => require(path.join(distPath, 'config'))).default;
+const { initServer } = timedStartup('server_modules', () =>
+  profileServerModules(() => require(path.join(distPath, 'index'))));
 
 // WPPConnect 2.3.3 still hard-codes Chrome/102 in WAuserAgente.  Current
 // WhatsApp Web uses that UA while deciding whether its VoIP backend worker may
@@ -217,10 +297,15 @@ const { initServer } = require(path.join(distPath, 'index'));
 // Chromium version we actually launch instead of an unrelated legacy build.
 try {
   const uaModule = require('@wppconnect-team/wppconnect/dist/config/WAuserAgente');
-  const versionMatch = String(chromeExecutable || '').match(/(?:win64-|chrome-)(\d+\.\d+\.\d+\.\d+)/i);
+  const versionMatch = String(chromeExecutable || '').match(/(?:win64-|chrome-|mac(?:_arm)?-)(\d+\.\d+\.\d+\.\d+)/i);
   const chromeVersion = versionMatch?.[1] || '148.0.7778.97';
+  // WhatsApp names the linked device after this platform ("Chrome (Windows)"
+  // / "Chrome (Mac OS)"), so report the one we actually run on.
+  const uaPlatform = process.platform === 'darwin'
+    ? 'Macintosh; Intel Mac OS X 10_15_7'
+    : 'Windows NT 10.0; Win64; x64';
   uaModule.useragentOverride =
-    `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ` +
+    `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 ` +
     `(KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
   console.log(`[WinZapp] Chromium user-agent aligned to Chrome/${chromeVersion}`);
 } catch (error) {
@@ -377,7 +462,7 @@ function requireWaVersion() {
 // on one shared binding is what makes that unrepresentable.
 const waVersion = (() => {
   try {
-    return requireWaVersion();
+    return timedStartup('whatsapp_catalogue_modules', requireWaVersion);
   } catch (e) {
     return null;
   }
@@ -1061,6 +1146,23 @@ function patchWppconnectVersionPinning() {
         );
       }
     }
+    // The call media hooks must exist before WhatsApp's modules evaluate, and
+    // this is the one moment before the first load: register them now instead
+    // of reloading later (see registerCallMediaBridgeBeforeLoad in
+    // src/util/callMediaBridge.ts for the reload that wedged the page).
+    try {
+      const { registerCallMediaBridgeBeforeLoad } = require(
+        path.join(distPath, 'util', 'callMediaBridge')
+      );
+      if (await registerCallMediaBridgeBeforeLoad(page)) {
+        console.log('[WinZapp] call media bridge registered before WhatsApp Web loads.');
+      }
+    } catch (e) {
+      console.warn(
+        '[WinZapp] Could not register the call media bridge before load ' +
+        `(${e && e.message}); it will be installed into the running page instead.`
+      );
+    }
     return original.call(this, page, token, clear, version, proxy, log);
   };
 }
@@ -1131,4 +1233,4 @@ const finalConfig = {
 };
 
 // Inicializa o servidor
-initServer(finalConfig);
+timedStartup('server_init', () => initServer(finalConfig));

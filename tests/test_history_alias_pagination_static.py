@@ -1,7 +1,8 @@
 from pathlib import Path
+from tests.god_modules import conversations_source
 
 
-SOURCE = Path("client/ui/conversations.py").read_text(encoding="utf-8")
+SOURCE = conversations_source()
 
 
 def test_local_history_prefers_mapped_lid():

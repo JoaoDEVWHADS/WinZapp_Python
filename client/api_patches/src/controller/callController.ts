@@ -7,6 +7,8 @@
  * yet, while activating the injected media bridge before a call asks for audio.
  */
 import { Request, Response } from 'express';
+import { installVoipInitPolicyInPage } from '../util/voipInitPolicy';
+import { installGroupCallRuntimeInPage } from '../util/groupCallRuntime';
 
 import {
   ensureCallMediaBridge,
@@ -17,7 +19,10 @@ import {
 type CallActionPayload = {
   callId?: string;
   to?: string;
+  groupJid?: string;
+  chatJid?: string;
   isVideo?: boolean;
+  participants?: string[];
 };
 
 function getWhatsappPage(req: Request): any {
@@ -33,10 +38,30 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
   const page = getWhatsappPage(req);
   const logger = (req as any).logger;
   const session = String((req.client as any)?.session || 'unknown');
+  if (action === 'group-invite') {
+    // Into the call this device is already in: VoIP is up, nothing to warm.
+    await page.evaluate(installGroupCallRuntimeInPage);
+    return page.evaluate((invitePayload: any) =>
+      (window as any).__winzappGroupCallRuntime.invite(invitePayload), payload);
+  }
+  if (action === 'group-ongoing' || action === 'ongoing-list' || action === 'participants' || action === 'group-join-check') {
+    // Discovery must not initialize VoIP or acquire devices every timer tick.
+    await page.evaluate(installGroupCallRuntimeInPage);
+    return page.evaluate(({ action, payload }) => {
+      const runtime = (window as any).__winzappGroupCallRuntime;
+      if (action === 'ongoing-list') return runtime.list();
+      if (action === 'participants') return runtime.participants(payload.callId);
+      return action === 'group-ongoing' ? runtime.ongoing(payload.groupJid) : runtime.check(payload);
+    }, { action, payload });
+  }
   // Session startup warms the lazy VoIP bundle in the background. Await it in
   // Node, before entering the browser context, so the browser callback never
   // tries to resolve a Node-side helper name.
   await warmCallVoipRuntime(req.client, logger);
+  await page.evaluate(installVoipInitPolicyInPage);
+  if (action === 'group-join') {
+    await page.evaluate(installGroupCallRuntimeInPage);
+  }
 
   let result: any;
   try {
@@ -119,6 +144,14 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         );
       };
 
+      // Connected or reconnecting -- not ringing, not over. Unlike
+      // isOutgoingOrLiveCall(), an outgoing call that has ENDED is not live.
+      const CONNECTED_CALL_STATES = [
+        'ACCEPT_SENT', 'ACCEPT_RECEIVED', 'ACTIVE', 'REJOINING', 'CONNECTED_LONELY',
+      ];
+      const isConnectedCall = (call: any): boolean =>
+        !!call && CONNECTED_CALL_STATES.includes(callStateOf(call));
+
       const getModels = (store: any): any[] => {
         try {
           const models = store?.getModelsArray?.();
@@ -199,6 +232,14 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           functions.requireVoipJsBackend ||
           win.WPP?.whatsapp?.requireVoipJsBackend;
 
+        // WhatsApp's VoIP WebAssembly module can be instantiated once per page.
+        // Asking the backend to initialise again while it is already up, or
+        // while a first initialisation is still in flight (the session
+        // warm-up, a second call action), makes it fail with "cannot load
+        // module more than once per process". So: skip init when it is ready,
+        // share one in-flight init per page, and once that error is seen stop
+        // initialising; the loop below then keeps polling until the first load
+        // reports ready.
         let lastError: any = null;
         for (let attempt = 0; attempt < 8; attempt += 1) {
           try {
@@ -209,17 +250,11 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
                 backend?.initWAWebVoip;
               if (typeof init === 'function') {
                 const initModule = backend?.WAWebVoipInit || backend;
-                await init.call(initModule, 'winzapp_call_action');
-                const emitter = initModule?.VoipInitEventEmitter;
-                if (
-                  emitter?.getIsVoipInited?.() !== true &&
-                  emitter?.getDidVoipInitError?.() === true &&
-                  typeof initModule?.retryWAWebVoipInitAfterFailure === 'function'
-                ) {
-                  await initModule.retryWAWebVoipInitAfterFailure();
-                }
-                if (emitter?.getIsVoipInited?.() === false) {
-                  throw new Error('WhatsApp VoIP initializer completed without becoming ready');
+                await win.__winzappInitializeVoip(initModule, 'winzapp_call_action', init);
+                const initState = win.__winzappReadVoipInitState(initModule);
+                if (initState.ready === false) {
+                  throw new Error('WhatsApp VoIP initializer completed without becoming ready: '
+                    + JSON.stringify(initState));
                 }
               }
             }
@@ -229,10 +264,11 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
             lastError = stack
               ? new Error('WhatsApp VoIP connection initialization is pending')
               : new Error('VoIP stack interface is not available');
-          } catch (error) {
+          } catch (error: any) {
+            if (error?.winzappVoipFatal === true) throw error;
             lastError = error;
           }
-          await delay(180 * (attempt + 1));
+          if (attempt < 7) await delay(180 * (attempt + 1));
         }
 
         const message = String(lastError?.message || lastError || 'unknown error');
@@ -260,6 +296,11 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         }
         throw lastError;
       };
+
+      if (action === 'group-join') {
+        await ensureVoipRuntimeReady();
+        return win.__winzappGroupCallRuntime.join(payload);
+      }
 
       if (action === 'accept') {
         const callId = String(payload.callId || '');
@@ -318,7 +359,183 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
         return result;
       }
 
-      if (action === 'offer') {
+      // Turn the ongoing voice call into a video call, exactly as WhatsApp's
+      // own camera button does in an audio call ("A/V switch":
+      // requestVideoUpgrade(), arity 0, resolves 0 on success). The call
+      // keeps its CallModel and its id; only isVideo flips once the engine
+      // reports the media change.
+      if (action === 'upgrade-video') {
+        const call = getCallStore()?.activeCall;
+        if (!isConnectedCall(call)) {
+          throw new Error('There is no ongoing call to upgrade to video');
+        }
+        if (call.isVideo === true) {
+          return { handled: true, alreadyVideo: true, call: summarizeCall(call) };
+        }
+        return runNativeVoipAction(async (voipStack: any) => {
+          if (typeof voipStack?.requestVideoUpgrade !== 'function') {
+            throw new Error('Native VoIP requestVideoUpgrade is not available');
+          }
+          const status = Number(await voipStack.requestVideoUpgrade());
+          if (status !== 0) {
+            throw new Error(`requestVideoUpgrade failed with status ${status}`);
+          }
+          return { handled: true, via: 'native-voip', call: summarizeCall(call) };
+        });
+      }
+
+      // Is this exact call still going on? Asked before WinZapp announces an
+      // end: a voice call upgraded to video keeps its id and stays ACTIVE,
+      // yet WinZapp received a terminal event for it and hung the user out
+      // of a call that was still running. Live means the page's activeCall
+      // is that id in a connected state AND the engine does not say "no
+      // call" or "ending" (getCallInfo(): '' once no call is ongoing).
+      if (action === 'status') {
+        const callId = String(payload.callId || '');
+        // findCall(), not activeCall alone: WhatsApp briefly swaps activeCall
+        // during internal transitions (the poll keeps a 5 s grace and a
+        // findCall() fallback for exactly that), and an A/V switch is a
+        // plausible one. Reading activeCall alone would answer "gone" in that
+        // window and turn a spurious terminal event into a real hang-up.
+        const found = callId ? findCall(callId) : null;
+        const call = sameCallId(found, callId) ? found : null;
+        const state = call ? callStateOf(call) : '';
+        let engine = 'unknown';
+        try {
+          const stack = await getNativeVoipStack();
+          const raw = await stack?.getCallInfo?.();
+          if (raw === '' || raw === null) {
+            engine = 'none';
+          } else if (raw !== undefined) {
+            let info: any = raw;
+            if (typeof raw === 'string') {
+              try { info = JSON.parse(raw); } catch (_) { info = null; }
+            }
+            engine = info?.call_ending === true ? 'ending' : 'ongoing';
+          }
+        } catch (_) {}
+        const live =
+          !!callId && sameCallId(call, callId) && isConnectedCall(call) &&
+          engine !== 'none' && engine !== 'ending';
+        return { live, state, engine, isVideo: !!call?.isVideo };
+      }
+
+      // WinZapp has told the user a call is over. If the page still holds
+      // THAT call live, the user would be left inside it, the remote side
+      // audible and nothing on screen to hang up with -- so end it for real.
+      // Scoped to the id WinZapp ended, unlike 'end' (which hangs up whatever
+      // the page holds): a late request must never kill a newer call.
+      if (action === 'ensure-ended') {
+        const callId = String(payload.callId || '');
+        const call = getCallStore()?.activeCall;
+        const stillLive =
+          isConnectedCall(call) ||
+          ['CALLING', 'PRE_CALLING', 'CALL_B_STARTING'].includes(callStateOf(call));
+        if (!sameCallId(call, callId) || !stillLive) {
+          return { handled: false, stillLive: false };
+        }
+        const summary = summarizeCall(call);
+        let ended = false;
+        await runNativeVoipAction(async (voipStack: any) => {
+          // endCall() hangs up whatever the page holds, so the id is checked
+          // again right before it: the runtime warm-up above can take
+          // seconds, and a new call may have replaced this one meanwhile.
+          const current = getCallStore()?.activeCall;
+          if (!sameCallId(current, callId)) return;
+          ended = true;
+          call.userEndedCall = true;
+          if (typeof voipStack?.endCall === 'function') {
+            await voipStack.endCall(2, true);
+          } else {
+            await win.WPP.call.end();
+          }
+        });
+        return { handled: ended, stillLive: ended, call: summary };
+      }
+
+      // WPP.call.offer() (wa-js 4.6.0) calls startWAWebVoipCall(peer, isVideo,
+      // 8, 5) and stops there. Since WhatsApp Web 2.3000.1048x the sixth
+      // argument carries the call's entry trust, and when it is missing the
+      // trust defaults to "deep_link": WhatsApp asks "Start a WhatsApp call
+      // with <name>?" in a confirmation popup and waits for it. Nobody can
+      // answer that popup in the hidden page, so the offer never resolved,
+      // Node's page.evaluate hung until the 75 s HTTP abort, and every attempt
+      // left one more popup open (two were found over CDP, 2026-09-23). The
+      // call is started by the user's own keystroke in WinZapp, which is
+      // exactly what "user_gesture" means. The fallback only surfaces
+      // wa-js' own error: WPP.call.offer needs the same function.
+      //
+      // wa-js 4.6.1 makes the same call natively (startWAWebVoipCall(peer,
+      // isVideo, 8, 5, null, { entryTrust: 'user_gesture' }), then polls
+      // CallStore for the call and returns it), so on 4.6.1 the fallback above
+      // works too. This direct path stays the primary one regardless: it is
+      // the one measured on a real account, it behaves the same on 4.6.0 and
+      // 4.6.1 (an install that declined the reinstall prompt keeps the old
+      // library under this code), and the offer loop below already does its
+      // own CallStore tracking.
+      const startOutgoingCall = async (to: string, isVideo: boolean): Promise<any> => {
+        const start = win.WPP?.whatsapp?.functions?.startWAWebVoipCall;
+        if (typeof start !== 'function') {
+          return win.WPP.call.offer(to, { isVideo });
+        }
+        const exists = await win.WPP.contact.queryExists(to);
+        if (!exists) throw new Error(`The contact ${to} does not exist on WhatsApp`);
+        const peer = exists.lid || exists.wid;
+        if (!peer?.isUser?.()) throw new Error(`The ${to} is not a user to call`);
+        await start(peer, isVideo, 8, 5, undefined, { entryTrust: 'user_gesture' });
+        return null;
+      };
+
+      // A group call has no single peer to dial. WhatsApp's own group-info
+      // call buttons go through WAWebVoipStartCall.startWAWebVoipGroupCallFromChat
+      // with the CALL_FROM_UI.GROUP_CHAT_INFO / LOBBY_ENTRY_POINT_TYPE.GROUP_CHAT_INFO
+      // entry points: it preloads the group-call bundle, opens the lobby and
+      // invites the group. The resulting call then lives in CallStore exactly
+      // like a one-to-one one, which is why the polling below is shared.
+      // Never hand-roll group signaling here.
+      const startOutgoingGroupCall = async (
+        groupJid: string,
+        isVideo: boolean
+      ): Promise<any> => {
+        const requireWa = (name: string): any => {
+          try {
+            return win.require?.(name);
+          } catch (_) {
+            return null;
+          }
+        };
+        const start =
+          win.WPP?.whatsapp?.functions?.startWAWebVoipGroupCallFromChat ||
+          requireWa('WAWebVoipStartCall')?.startWAWebVoipGroupCallFromChat;
+        if (typeof start !== 'function') {
+          throw new Error('startWAWebVoipGroupCallFromChat is not available');
+        }
+        const createWid = requireWa('WAWebWidFactory')?.createWid;
+        const chats = requireWa('WAWebChatCollection')?.ChatCollection;
+        if (typeof createWid !== 'function' || typeof chats?.get !== 'function') {
+          throw new Error('WhatsApp chat collection is not available');
+        }
+        const chat = chats.get(createWid(groupJid));
+        if (!chat || !chat.groupMetadata) {
+          throw new Error(`The group ${groupJid} is not a callable group chat`);
+        }
+        const callFromUi =
+          requireWa('WAWebWamEnumCallFromUi')?.CALL_FROM_UI?.GROUP_CHAT_INFO ?? 10;
+        const lobbyEntryPoint =
+          requireWa('WAWebWamEnumLobbyEntryPointType')?.LOBBY_ENTRY_POINT_TYPE
+            ?.GROUP_CHAT_INFO ?? 11;
+        await start(chat, isVideo, callFromUi, lobbyEntryPoint);
+        return null;
+      };
+
+      // Current WhatsApp Web promotes the real ongoing call through
+      // CallStore.activeCall. The value returned by the legacy collection
+      // lookup may point at an older call model, so prefer a newly-active call
+      // and only trust a direct return value when it is not stale.
+      const waitForOfferedCall = async (
+        place: () => Promise<any>,
+        kind: string
+      ): Promise<any> => {
         let call: any = null;
         const storeBeforeOffer = getCallStore();
         const preexistingIds = new Set(
@@ -328,12 +545,8 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
 
         for (let attempt = 0; attempt < 3 && !call; attempt += 1) {
           await ensureVoipRuntimeReady();
-          const offered = await win.WPP.call.offer(payload.to, { isVideo: !!payload.isVideo });
+          const offered = await place();
 
-          // Current WhatsApp Web promotes the real ongoing call through
-          // CallStore.activeCall.  The value returned by the legacy collection
-          // lookup may point at an older call model, so prefer a newly-active
-          // call and only trust the direct return value when it is not stale.
           for (let waitAttempt = 0; waitAttempt < 50 && !call; waitAttempt += 1) {
             const store = getCallStore();
             const active = store?.activeCall;
@@ -365,7 +578,23 @@ async function evaluateWppCall(req: Request, action: string, payload: CallAction
           }
           if (!call && attempt < 2) await delay(300 * (attempt + 1));
         }
-        if (!call) throw new Error('WhatsApp did not create an outgoing call model');
+        if (!call) throw new Error(`WhatsApp did not create ${kind} call model`);
+        return call;
+      };
+
+      if (action === 'offer') {
+        const call = await waitForOfferedCall(
+          () => startOutgoingCall(String(payload.to), !!payload.isVideo),
+          'an outgoing'
+        );
+        return summarizeCall(call);
+      }
+
+      if (action === 'group-offer') {
+        const call = await waitForOfferedCall(
+          () => startOutgoingGroupCall(String(payload.groupJid), !!payload.isVideo),
+          'an outgoing group'
+        );
         return summarizeCall(call);
       }
 
@@ -446,6 +675,36 @@ export async function endCall(req: Request, res: Response) {
   }
 }
 
+export async function ensureCallEnded(req: Request, res: Response) {
+  try {
+    await installAudioBridge(req);
+    const result = await evaluateWppCall(req, 'ensure-ended', req.body || {});
+    // Only when it was THAT call: this runs seconds after the end, and by
+    // then the user may be in a new call whose bridge must stay enabled.
+    // WinZapp already stood the bridge down when it declared the end.
+    if (result?.stillLive) await stopAudioBridge(req);
+    ok(res, result);
+  } catch (error) {
+    fail(req, res, 'ensureCallEnded', error);
+  }
+}
+
+export async function callStatus(req: Request, res: Response) {
+  try {
+    ok(res, await evaluateWppCall(req, 'status', req.body || {}));
+  } catch (error) {
+    fail(req, res, 'callStatus', error);
+  }
+}
+
+export async function upgradeCallToVideo(req: Request, res: Response) {
+  try {
+    ok(res, await evaluateWppCall(req, 'upgrade-video', req.body || {}));
+  } catch (error) {
+    fail(req, res, 'upgradeCallToVideo', error);
+  }
+}
+
 export async function offerCall(req: Request, res: Response) {
   try {
     const body = req.body || {};
@@ -454,16 +713,168 @@ export async function offerCall(req: Request, res: Response) {
       return;
     }
     await prepareAudioBridge(req);
-    ok(res, await evaluateWppCall(req, 'offer', body));
+    const stopWatching = watchOutgoingCallNotices(req);
+    try {
+      ok(res, await evaluateWppCall(req, 'offer', body));
+    } finally {
+      stopWatching();
+    }
   } catch (error) {
     await stopAudioBridge(req);
     fail(req, res, 'offerCall', error);
   }
 }
 
+export async function offerGroupCall(req: Request, res: Response) {
+  try {
+    const body = req.body || {};
+    if (!body.groupJid) {
+      res.status(400).json({ status: 'error', message: 'Parameter groupJid is required!' });
+      return;
+    }
+    await prepareAudioBridge(req);
+    const stopWatching = watchOutgoingCallNotices(req);
+    try {
+      ok(res, await evaluateWppCall(req, 'group-offer', body));
+    } finally {
+      stopWatching();
+    }
+  } catch (error) {
+    await stopAudioBridge(req);
+    fail(req, res, 'offerGroupCall', error);
+  }
+}
+
+export async function ongoingGroupCall(req: Request, res: Response) {
+  try {
+    ok(res, await evaluateWppCall(req, 'group-ongoing', req.body || {}));
+  } catch (error) {
+    fail(req, res, 'ongoingGroupCall', error);
+  }
+}
+
+export async function ongoingCalls(req: Request, res: Response) {
+  try {
+    ok(res, await evaluateWppCall(req, 'ongoing-list'));
+  } catch (error) {
+    fail(req, res, 'ongoingCalls', error);
+  }
+}
+
+export async function callParticipants(req: Request, res: Response) {
+  try {
+    ok(res, await evaluateWppCall(req, 'participants', req.body || {}));
+  } catch (error) {
+    fail(req, res, 'callParticipants', error);
+  }
+}
+
+export async function addCallParticipants(req: Request, res: Response) {
+  try {
+    const body = req.body || {};
+    if (!body.callId || !Array.isArray(body.participants) || body.participants.length === 0) {
+      res.status(400).json({ status: 'error', message: 'Parameters callId and participants are required!' });
+      return;
+    }
+    ok(res, await evaluateWppCall(req, 'group-invite',
+      { callId: String(body.callId), participants: body.participants.map(String) }));
+  } catch (error) {
+    fail(req, res, 'addCallParticipants', error);
+  }
+}
+
+export async function joinGroupCall(req: Request, res: Response) {
+  try {
+    const body = req.body || {};
+    if (!body.callId || !(body.chatJid || body.groupJid)) {
+      res.status(400).json({ status: 'error', message: 'Parameters callId and chatJid are required!' });
+      return;
+    }
+    await evaluateWppCall(req, 'group-join-check', body);
+    await prepareAudioBridge(req);
+    ok(res, await evaluateWppCall(req, 'group-join', body));
+  } catch (error) {
+    // An incoming/new call can replace this attempt while its POST is pending.
+    // Its media bridge belongs to that call, even when our join failed.
+    let mayStop = false;
+    try {
+      mayStop = await getWhatsappPage(req).evaluate((callId: string) =>
+        (window as any).__winzappGroupCallRuntime?.mayStopAudio(callId) === true,
+      req.body?.callId);
+    } catch (_) { /* A lost page cannot prove it is safe to stop another call. */ }
+    if (mayStop) await stopAudioBridge(req);
+    fail(req, res, 'joinGroupCall', error);
+  }
+}
+
+/**
+ * While an outgoing call is being placed, WhatsApp Web can open a notice the
+ * hidden page has no one to answer -- seen live calling a WhatsApp Business
+ * account: "About this call. This business uses a secure service from Meta to
+ * manage this call..." [Learn more] [Continue]. The offer then waits on it
+ * until the request is aborted at 75 s and the call never rings.
+ *
+ * The user asked for this call, so this notice is answered with its primary
+ * (last) button, WhatsApp's affirmative position, which keeps this independent
+ * of the UI language. Only dialogs that appear during the offer are touched,
+ * and only informational ones: a dialog must carry a link ("Learn more") to be
+ * answered. A decision dialog -- "Unblock X to call?" with Cancel/Unblock, a
+ * permission prompt -- has no link and is left alone, since its last button
+ * can be a destructive one. What was answered is logged without the dialog
+ * text (it can hold a contact or business name; see docs/traps/log-pii.md).
+ */
+function watchOutgoingCallNotices(req: Request): () => void {
+  const page = getWhatsappPage(req);
+  const logger = (req as any).logger;
+  let stopped = false;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const answered: number[] = await page.evaluate(() => {
+        const win = window as any;
+        const seen: WeakSet<Element> = (win.__winzappCallNoticesSeen ||= new WeakSet());
+        const out: number[] = [];
+        for (const dialog of Array.from(document.querySelectorAll('[role="dialog"]'))) {
+          if (seen.has(dialog)) continue;
+          const buttons = Array.from(dialog.querySelectorAll('button,[role="button"]')) as HTMLElement[];
+          if (!buttons.length || buttons.length > 3) continue;
+          // An informational notice carries a "Learn more" link; a decision
+          // dialog does not, and is not ours to answer.
+          if (!dialog.querySelector('a[href],[role="link"]')) continue;
+          seen.add(dialog);
+          buttons[buttons.length - 1].click();
+          out.push(buttons.length);
+        }
+        return out;
+      });
+      for (const count of answered) {
+        logger?.info?.(`[call-notice] answered a notice with ${count} buttons while placing a call`);
+      }
+    } catch (_) {
+      // page busy or navigating; try again on the next tick
+    }
+    if (!stopped) setTimeout(tick, 500);
+  };
+  // Dialogs already open before this call are not ours to answer.
+  page
+    .evaluate(() => {
+      const win = window as any;
+      const seen: WeakSet<Element> = (win.__winzappCallNoticesSeen ||= new WeakSet());
+      document.querySelectorAll('[role="dialog"]').forEach((d) => seen.add(d));
+    })
+    .catch(() => undefined)
+    .finally(() => setTimeout(tick, 250));
+  const limit = setTimeout(() => (stopped = true), 60_000);
+  return () => {
+    stopped = true;
+    clearTimeout(limit);
+  };
+}
+
 export async function callDiagnostics(req: Request, res: Response) {
   try {
     const page = getWhatsappPage(req);
+    await page.evaluate(installVoipInitPolicyInPage);
     const response = await page.evaluate(async () => {
       const win = window as any;
       const functions = win.WPP?.whatsapp?.functions || {};
@@ -486,6 +897,7 @@ export async function callDiagnostics(req: Request, res: Response) {
           return `error:${error?.message || error}`;
         }
       };
+      const voipInit = win.__winzappReadVoipInitState(backend?.WAWebVoipInit || backend);
       return {
         userAgent: navigator.userAgent,
         webdriver: navigator.webdriver,
@@ -512,11 +924,24 @@ export async function callDiagnostics(req: Request, res: Response) {
         backendInitSource: (backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip)
           ? String(backend?.WAWebVoipInit?.initWAWebVoip || backend?.initWAWebVoip).slice(0, 1200)
           : '',
-        emitterReady: backend?.WAWebVoipInit?.VoipInitEventEmitter?.getIsVoipInited?.(),
-        emitterFailed: backend?.WAWebVoipInit?.VoipInitEventEmitter?.getDidVoipInitError?.(),
+        emitterReady: voipInit.ready,
+        emitterFailed: voipInit.failed,
+        voipInit,
         callMediaBridge: (() => {
           const bridge = win.__winzappCallMediaBridge;
           return bridge ? {
+            version: bridge.version || 0,
+            // Which remote tap actually ran. The worklet is the fix for the
+            // ~1% of buffers the ScriptProcessor dropped, and its Blob-URL
+            // module can be refused by the page's CSP, so a build that fell
+            // back has to be recognisable from the outside rather than
+            // looking fixed.
+            remoteTapMode: bridge.remoteTapMode || '',
+            // The mic tap has its own mode: only the PEER can hear this side
+            // chop, so a silent fallback here is otherwise found by someone
+            // else's ears rather than by a diagnostic.
+            micTapMode: bridge.micTapMode || '',
+            audioWorkletStatus: bridge.audioWorkletStatus || 'unknown',
             enabled: !!bridge.enabled,
             micFramesPushed: bridge.micFramesPushed || 0,
             micBytesPushed: bridge.micBytesPushed || 0,

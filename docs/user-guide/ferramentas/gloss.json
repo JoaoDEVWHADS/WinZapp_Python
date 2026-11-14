@@ -1,0 +1,1127 @@
+{
+"Abrir": {
+"pt-BR": "Abrir",
+"pt-PT": "Abrir",
+"en-US": "Open",
+"es-ES": "Abrir",
+"pl": "Otwórz",
+"tr-TR": "Aç",
+"ro": "Deschide"
+},
+"Abrir em visualizador externo": {
+"pt-BR": "Abrir em visualizador externo",
+"pt-PT": "Abrir num visualizador externo",
+"en-US": "Open in external viewer",
+"es-ES": "Abrir en visor externo",
+"pl": "Otwórz w zewnętrznej przeglądarce",
+"tr-TR": "Harici görüntüleyicide aç",
+"ro": "Deschide în vizualizator extern"
+},
+"Abrir grupo": {
+"pt-BR": "Abrir grupo",
+"pt-PT": "Abrir grupo",
+"en-US": "Open group",
+"es-ES": "Abrir grupo",
+"pl": "Otwórz grupę",
+"tr-TR": "Grubu aç",
+"ro": "Deschideți grupul"
+},
+"Abrir link": {
+"pt-BR": "Abrir link",
+"pt-PT": "Abrir ligação",
+"en-US": "Open link",
+"es-ES": "Abrir enlace",
+"pl": "Otwórz link",
+"tr-TR": "Bağlantıyı aç",
+"ro": "Deschideți linkul"
+},
+"Aceitar carrinhos no meu catálogo": {
+"pt-BR": "Aceitar carrinhos no meu catálogo",
+"pt-PT": "Aceitar carrinhos no meu catálogo",
+"en-US": "Accept carts in my catalog",
+"es-ES": "Aceptar carritos en mi catálogo",
+"pl": "Przyjmuj koszyki w moim katalogu",
+"tr-TR": "Kataloğumda sepetleri kabul et",
+"ro": "Acceptați coșuri în catalogul meu"
+},
+"Aceitar pedido": {
+"pt-BR": "Aceitar pedido",
+"pt-PT": "Aceitar encomenda",
+"en-US": "Accept order",
+"es-ES": "Aceptar pedido",
+"pl": "Przyjmij zamówienie",
+"tr-TR": "Siparişi onayla",
+"ro": "Acceptați comanda"
+},
+"Adicionar ao carrinho": {
+"pt-BR": "Adicionar ao carrinho",
+"pt-PT": "Adicionar ao carrinho",
+"en-US": "Add to cart",
+"es-ES": "Añadir al carrito",
+"pl": "Dodaj do koszyka",
+"tr-TR": "Sepete ekle",
+"ro": "Adăugați în coș"
+},
+"Adicionar grupos": {
+"pt-BR": "Adicionar grupos",
+"pt-PT": "Adicionar grupos",
+"en-US": "Add groups",
+"es-ES": "Añadir grupos",
+"pl": "Dodaj grupy",
+"tr-TR": "Grup ekle",
+"ro": "Adăugați grupuri"
+},
+"Adicionar mais reações": {
+"pt-BR": "Adicionar mais reações",
+"pt-PT": "Adicionar mais reações",
+"en-US": "Add more reactions",
+"es-ES": "Añadir más reacciones",
+"pl": "Dodaj więcej reakcji",
+"tr-TR": "Daha fazla tepki ekle",
+"ro": "Adăugați mai multe reacții"
+},
+"Adicionar membro": {
+"pt-BR": "Adicionar membro",
+"pt-PT": "Adicionar membro",
+"en-US": "Add member",
+"es-ES": "Agregar miembro",
+"pl": "Dodaj członka",
+"tr-TR": "Üye ekle",
+"ro": "Adăugați membru"
+},
+"Aguardando mensagem. Isso pode levar alguns instantes": {
+"pt-BR": "Aguardando mensagem. Isso pode levar alguns instantes",
+"pt-PT": "A aguardar mensagem. Isto pode demorar algum tempo",
+"en-US": "Waiting for this message. This may take a while",
+"es-ES": "Esperando este mensaje. Esto puede tardar un poco",
+"pl": "Oczekiwanie na tę wiadomość. Może to chwilę potrwać",
+"tr-TR": "Bu mesaj bekleniyor. Bu biraz zaman alabilir",
+"ro": "Se așteaptă acest mesaj. Acest lucru poate dura ceva timp"
+},
+"Alterar": {
+"pt-BR": "Alterar",
+"pt-PT": "Alterar",
+"en-US": "Change",
+"es-ES": "Cambiar",
+"pl": "Zmień",
+"tr-TR": "Değiştir",
+"ro": "Modifică"
+},
+"Alterar quantidade": {
+"pt-BR": "Alterar quantidade",
+"pt-PT": "Alterar quantidade",
+"en-US": "Change quantity",
+"es-ES": "Cambiar cantidad",
+"pl": "Zmień ilość",
+"tr-TR": "Adedi değiştir",
+"ro": "Schimbați cantitatea"
+},
+"Anunciar sincronização, download de mídias e modo offline automático": {
+"pt-BR": "Anunciar sincronização, download de mídias e modo offline automático",
+"pt-PT": "Anunciar sincronização, descarregamento de mídias e modo offline automático",
+"en-US": "Announce sync, media downloads and automatic offline mode",
+"es-ES": "Anunciar sincronización, descarga de medios y modo sin conexión automático",
+"pl": "Ogłaszaj synchronizację, pobieranie multimediów i automatyczne przejście w tryb offline",
+"tr-TR": "Eşitlemeyi, medya indirmelerini ve otomatik çevrimdışı modu duyur",
+"ro": "Anunțați sincronizarea, descărcări media și modul offline automat"
+},
+"Apagar também a mídia do celular": {
+"pt-BR": "Apagar também a mídia do celular",
+"pt-PT": "Eliminar também a multimédia do telemóvel",
+"en-US": "Also delete the media from your phone",
+"es-ES": "Eliminar también el archivo multimedia del teléfono",
+"pl": "Usuń też multimedia z telefonu",
+"tr-TR": "Medyayı telefondan da sil",
+"ro": "Șterge și conținutul media din telefon"
+},
+"Apagar transcrição": {
+"pt-BR": "Apagar transcrição",
+"pt-PT": "Apagar transcrição",
+"en-US": "Delete transcription",
+"es-ES": "Eliminar transcripción",
+"pl": "Usuń transkrypcję",
+"tr-TR": "Dökümü sil",
+"ro": "Ștergeți transcrierea"
+},
+"Apagar transcrições locais salvas dos status": {
+"pt-BR": "Apagar transcrições locais salvas dos status",
+"pt-PT": "Eliminar transcrições locais guardadas dos estados",
+"en-US": "Clear saved local transcriptions of statuses",
+"es-ES": "Borrar las transcripciones locales guardadas de los estados",
+"pl": "Wyczyść zapisane lokalne transkrypcje statusów",
+"tr-TR": "Durumların kaydedilmiş yerel dökümlerini temizle",
+"ro": "Șterge transcrierile locale salvate ale stărilor"
+},
+"Apagar transcrições salvas de todos os modelos": {
+"pt-BR": "Apagar transcrições salvas de todos os modelos",
+"pt-PT": "Apagar transcrições guardadas de todos os modelos",
+"en-US": "Clear saved transcriptions of all models",
+"es-ES": "Borrar las transcripciones guardadas de todos los modelos",
+"pl": "Wyczyść zapisane transkrypcje wszystkich modeli",
+"tr-TR": "Tüm modellerin kayıtlı dökümlerini sil",
+"ro": "Ștergeți transcrierile salvate ale tuturor modelelor"
+},
+"Apagar transcrições salvas deste modelo": {
+"pt-BR": "Apagar transcrições salvas deste modelo",
+"pt-PT": "Apagar transcrições guardadas deste modelo",
+"en-US": "Clear this model's saved transcriptions",
+"es-ES": "Borrar las transcripciones guardadas de este modelo",
+"pl": "Wyczyść zapisane transkrypcje tego modelu",
+"tr-TR": "Bu modelin kayıtlı dökümlerini sil",
+"ro": "Ștergeți transcrierile salvate ale acestui model"
+},
+"Aprovar": {
+"pt-BR": "Aprovar",
+"pt-PT": "Aprovar",
+"en-US": "Approve",
+"es-ES": "Aprobar",
+"pl": "Zatwierdź",
+"tr-TR": "Onayla",
+"ro": "Aprobați"
+},
+"Atender": {
+"pt-BR": "Atender",
+"pt-PT": "Atender",
+"en-US": "Answer",
+"es-ES": "Contestar",
+"pl": "Odbierz",
+"tr-TR": "Cevapla",
+"ro": "Răspundeți"
+},
+"Atender com vídeo": {
+"pt-BR": "Atender com vídeo",
+"pt-PT": "Atender com vídeo",
+"en-US": "Answer with video",
+"es-ES": "Contestar con vídeo",
+"pl": "Odbierz z wideo",
+"tr-TR": "Görüntülü cevapla",
+"ro": "Răspundeți cu video"
+},
+"Atender sem vídeo": {
+"pt-BR": "Atender sem vídeo",
+"pt-PT": "Atender sem vídeo",
+"en-US": "Answer without video",
+"es-ES": "Contestar sin vídeo",
+"pl": "Odbierz bez wideo",
+"tr-TR": "Görüntüsüz cevapla",
+"ro": "Răspundeți fără video"
+},
+"Atualizar": {
+"pt-BR": "Atualizar",
+"pt-PT": "Atualizar",
+"en-US": "Refresh",
+"es-ES": "Actualizar",
+"pl": "Odśwież",
+"tr-TR": "Yenile",
+"ro": "Actualizați"
+},
+"Atualizar estado": {
+"pt-BR": "Atualizar estado",
+"pt-PT": "Atualizar estado",
+"en-US": "Update status",
+"es-ES": "Actualizar estado",
+"pl": "Zmień status",
+"tr-TR": "Durumu güncelle",
+"ro": "Actualizați starea"
+},
+"Avisar antes de gravar o áudio do computador": {
+"pt-BR": "Avisar antes de gravar o áudio do computador",
+"pt-PT": "Avisar antes de gravar o áudio do computador",
+"en-US": "Warn before recording computer audio",
+"es-ES": "Avisar antes de grabar el audio del ordenador",
+"pl": "Ostrzegaj przed nagrywaniem dźwięku komputera",
+"tr-TR": "Bilgisayar sesini kaydetmeden önce uyar",
+"ro": "Avertizați înainte de înregistrarea sunetului computerului"
+},
+"Ações em massa": {
+"pt-BR": "Ações em massa",
+"pt-PT": "Ações em massa",
+"en-US": "Bulk actions",
+"es-ES": "Acciones en masa",
+"pl": "Akcje masowe",
+"tr-TR": "Toplu işlemler",
+"ro": "Acțiuni în bloc"
+},
+"Baixar": {
+"pt-BR": "Baixar",
+"pt-PT": "Descarregar",
+"en-US": "Download",
+"es-ES": "Descargar",
+"pl": "Pobierz",
+"tr-TR": "İndir",
+"ro": "Descarcă"
+},
+"Baixar mídias": {
+"pt-BR": "Baixar mídias",
+"pt-PT": "Descarregar ficheiros multimédia",
+"en-US": "Download media",
+"es-ES": "Descargar medios",
+"pl": "Synchronizuj multimedia",
+"tr-TR": "Medyayı indir",
+"ro": "Descărcați media"
+},
+"Baixar mídias automaticamente": {
+"pt-BR": "Baixar mídias automaticamente",
+"pt-PT": "Descarregar ficheiros multimédia automaticamente",
+"en-US": "Automatically download media",
+"es-ES": "Descargar medios automáticamente",
+"pl": "Automatycznie pobieraj multimedia",
+"tr-TR": "Medyayı otomatik olarak indir",
+"ro": "Descărcați automat media"
+},
+"Bibliotecas CUDA": {
+"pt-BR": "Bibliotecas CUDA",
+"pt-PT": "Bibliotecas CUDA",
+"en-US": "CUDA libraries",
+"es-ES": "Bibliotecas CUDA",
+"pl": "Biblioteki CUDA",
+"tr-TR": "CUDA kütüphaneleri",
+"ro": "Biblioteci CUDA"
+},
+"Cancelar download em segundo plano": {
+"pt-BR": "Cancelar download em segundo plano",
+"pt-PT": "Cancelar transferência em segundo plano",
+"en-US": "Cancel download in the background",
+"es-ES": "Cancelar descarga en segundo plano",
+"pl": "Anuluj pobieranie w tle",
+"tr-TR": "Arka plan indirmesini iptal et",
+"ro": "Anulați descărcarea în fundal"
+},
+"Catálogo e carrinho da empresa": {
+"pt-BR": "Catálogo e carrinho da empresa",
+"pt-PT": "Catálogo e carrinho da empresa",
+"en-US": "Business catalog and cart",
+"es-ES": "Catálogo y carrito de la empresa",
+"pl": "Katalog i koszyk firmy",
+"tr-TR": "İşletmenin kataloğu ve sepeti",
+"ro": "Catalogul și coșul firmei"
+},
+"Como se referir a mim?": {
+"pt-BR": "Como se referir a mim?",
+"pt-PT": "Como se referir a mim?",
+"en-US": "How should I be referred to?",
+"es-ES": "¿Cómo debo referirme a mí?",
+"pl": "Jak mam się do Ciebie zwracać?",
+"tr-TR": "Kendimden nasıl bahsedilsin?",
+"ro": "Cum să se facă referire la mine?"
+},
+"Comunidades": {
+"pt-BR": "Comunidades",
+"pt-PT": "Comunidades",
+"en-US": "Communities",
+"es-ES": "Comunidades",
+"pl": "Społeczności",
+"tr-TR": "Topluluklar",
+"ro": "Comunități"
+},
+"Configurações de vídeo da chamada": {
+"pt-BR": "Configurações de vídeo da chamada",
+"pt-PT": "Definições de vídeo da chamada",
+"en-US": "Call video settings",
+"es-ES": "Configuración de vídeo de la llamada",
+"pl": "Ustawienia wideo połączenia",
+"tr-TR": "Görüntülü arama ayarları",
+"ro": "Setări video pentru apeluri"
+},
+"Configurações de áudio da chamada": {
+"pt-BR": "Configurações de áudio da chamada",
+"pt-PT": "Definições de áudio da chamada",
+"en-US": "Call audio settings",
+"es-ES": "Configuración de audio de la llamada",
+"pl": "Ustawienia dźwięku połączenia",
+"tr-TR": "Arama ses ayarları",
+"ro": "Setări audio pentru apeluri"
+},
+"Conteúdo das notificações em segundo plano": {
+"pt-BR": "Conteúdo das notificações em segundo plano",
+"pt-PT": "Conteúdo das notificações em segundo plano",
+"en-US": "Background notification content",
+"es-ES": "Contenido de las notificaciones en segundo plano",
+"pl": "Treść powiadomień w tle",
+"tr-TR": "Arka plan bildirimlerinin içeriği",
+"ro": "Conținutul notificărilor de fundal"
+},
+"Conversas trancadas": {
+"pt-BR": "Conversas trancadas",
+"pt-PT": "Conversas trancadas",
+"en-US": "Locked chats",
+"es-ES": "Chats bloqueados",
+"pl": "Zabezpieczone czaty",
+"tr-TR": "Kilitli sohbetler",
+"ro": "Conversații blocate"
+},
+"Converter em texto acessível": {
+"pt-BR": "Converter em texto acessível",
+"pt-PT": "Converter em texto acessível",
+"en-US": "Convert to accessible text",
+"es-ES": "Convertir en texto accesible",
+"pl": "Konwertuj na dostępny tekst",
+"tr-TR": "Erişilebilir metne dönüştür",
+"ro": "Convertiți în text accesibil"
+},
+"Copiar link": {
+"pt-BR": "Copiar link",
+"pt-PT": "Copiar ligação",
+"en-US": "Copy link",
+"es-ES": "Copiar enlace",
+"pl": "Kopiuj link",
+"tr-TR": "Bağlantıyı kopyala",
+"ro": "Copiați linkul"
+},
+"Criar pedido para este contato": {
+"pt-BR": "Criar pedido para este contato",
+"pt-PT": "Criar encomenda para este contacto",
+"en-US": "Create an order for this contact",
+"es-ES": "Crear un pedido para este contacto",
+"pl": "Utwórz zamówienie dla tego kontaktu",
+"tr-TR": "Bu kişi için sipariş oluştur",
+"ro": "Creați o comandă pentru acest contact"
+},
+"Curtir ❤️": {
+"pt-BR": "Curtir ❤️",
+"pt-PT": "Gosto ❤️",
+"en-US": "Like ❤️",
+"es-ES": "Me gusta ❤️",
+"pl": "Polub ❤️",
+"tr-TR": "Beğen",
+"ro": "Apreciază ❤️"
+},
+"Dados da conversa": {
+"pt-BR": "Dados da conversa",
+"pt-PT": "Detalhes da conversa",
+"en-US": "Chat info",
+"es-ES": "Datos de la conversación",
+"pl": "Informacje o czacie",
+"tr-TR": "Sohbet bilgisi",
+"ro": "Informații despre conversație"
+},
+"Desativar comunidade": {
+"pt-BR": "Desativar comunidade",
+"pt-PT": "Desativar comunidade",
+"en-US": "Deactivate community",
+"es-ES": "Desactivar comunidad",
+"pl": "Dezaktywuj społeczność",
+"tr-TR": "Topluluğu devre dışı bırak",
+"ro": "Dezactivați comunitatea"
+},
+"Descrever": {
+"pt-BR": "Descrever",
+"pt-PT": "Descrever",
+"en-US": "Describe",
+"es-ES": "Describir",
+"pl": "Opisz",
+"tr-TR": "Betimle",
+"ro": "Descrieți"
+},
+"Descrever figurinha": {
+"pt-BR": "Descrever figurinha",
+"pt-PT": "Descrever figurinha",
+"en-US": "Describe sticker",
+"es-ES": "Describir sticker",
+"pl": "Opisz naklejkę",
+"tr-TR": "Çıkartmayı betimle",
+"ro": "Descrieți autocolantul"
+},
+"Editar resposta não enviada sem a citação": {
+"pt-BR": "Editar resposta não enviada sem a citação",
+"pt-PT": "Editar resposta não enviada sem a citação",
+"en-US": "Edit unsent reply without its quote",
+"es-ES": "Editar respuesta no enviada sin la cita",
+"pl": "Edytuj niewysłaną odpowiedź bez cytatu",
+"tr-TR": "Gönderilmemiş yanıtı alıntısız düzenle",
+"ro": "Editați răspunsul netrimis fără citat"
+},
+"Encaminhada": {
+"pt-BR": "Encaminhada",
+"pt-PT": "Reencaminhada",
+"en-US": "Forwarded",
+"es-ES": "Reenviada",
+"pl": "Przekazano",
+"tr-TR": "İletildi",
+"ro": "Redirecționat"
+},
+"Entrar no grupo ou solicitar aprovação": {
+"pt-BR": "Entrar no grupo ou solicitar aprovação",
+"pt-PT": "Entrar no grupo ou pedir aprovação",
+"en-US": "Join group or request approval",
+"es-ES": "Unirse al grupo o solicitar aprobación",
+"pl": "Dołącz do grupy lub wyślij prośbę o zatwierdzenie",
+"tr-TR": "Gruba katıl veya onay iste",
+"ro": "Alătură-te grupului sau solicită aprobarea"
+},
+"Entrar no grupo por link": {
+"pt-BR": "Entrar no grupo por link",
+"pt-PT": "Entrar no grupo por ligação",
+"en-US": "Join group by link",
+"es-ES": "Unirse al grupo mediante enlace",
+"pl": "Dołącz do grupy przez link",
+"tr-TR": "Gruba bağlantıyla katıl",
+"ro": "Alăturare la grup prin link"
+},
+"Enviar": {
+"pt-BR": "Enviar",
+"pt-PT": "Enviar",
+"en-US": "Send",
+"es-ES": "Enviar",
+"pl": "Wyślij",
+"tr-TR": "Gönder",
+"ro": "Trimite fișierele"
+},
+"Enviar mídia como status": {
+"pt-BR": "Enviar mídia como status",
+"pt-PT": "Enviar ficheiros multimédia como estado",
+"en-US": "Send media as status",
+"es-ES": "Enviar multimedia como estado",
+"pl": "Wyślij multimedia jako status",
+"tr-TR": "Durum olarak medya gönder",
+"ro": "Trimiteți media ca stare"
+},
+"Enviar pedido": {
+"pt-BR": "Enviar pedido",
+"pt-PT": "Enviar encomenda",
+"en-US": "Send order",
+"es-ES": "Enviar pedido",
+"pl": "Wyślij zamówienie",
+"tr-TR": "Siparişi gönder",
+"ro": "Trimiteți comanda"
+},
+"Esta conversa está vazia": {
+"pt-BR": "Esta conversa está vazia",
+"pt-PT": "Esta conversa está vazia",
+"en-US": "This chat is empty",
+"es-ES": "Esta conversación está vacía",
+"pl": "Ten czat jest pusty",
+"tr-TR": "Bu sohbet boş",
+"ro": "Această conversație este goală"
+},
+"Esvaziar carrinho": {
+"pt-BR": "Esvaziar carrinho",
+"pt-PT": "Esvaziar carrinho",
+"en-US": "Empty cart",
+"es-ES": "Vaciar carrito",
+"pl": "Opróżnij koszyk",
+"tr-TR": "Sepeti boşalt",
+"ro": "Goliți coșul"
+},
+"Exportar configurações": {
+"pt-BR": "Exportar configurações",
+"pt-PT": "Exportar definições",
+"en-US": "Export settings",
+"es-ES": "Exportar configuración",
+"pl": "Eksportuj ustawienia",
+"tr-TR": "Ayarları dışa aktar",
+"ro": "Exportați setările"
+},
+"Fechar conta atual": {
+"pt-BR": "Fechar conta atual",
+"pt-PT": "Fechar conta atual",
+"en-US": "Close current account",
+"es-ES": "Cerrar cuenta actual",
+"pl": "Zamknij bieżące konto",
+"tr-TR": "Geçerli hesabı kapat",
+"ro": "Închideți contul curent"
+},
+"Ferramentas comerciais": {
+"pt-BR": "Ferramentas comerciais",
+"pt-PT": "Ferramentas comerciais",
+"en-US": "Business tools",
+"es-ES": "Herramientas para empresas",
+"pl": "Narzędzia firmowe",
+"tr-TR": "İşletme araçları",
+"ro": "Instrumente pentru firme"
+},
+"Foto do perfil": {
+"pt-BR": "Foto do perfil",
+"pt-PT": "Fotografia do perfil",
+"en-US": "Profile picture",
+"es-ES": "Foto de perfil",
+"pl": "Zdjęcie profilowe",
+"tr-TR": "Profil fotoğrafı",
+"ro": "Fotografie de profil"
+},
+"Gerenciar listas do WhatsApp": {
+"pt-BR": "Gerenciar listas do WhatsApp",
+"pt-PT": "Gerir listas do WhatsApp",
+"en-US": "Manage WhatsApp lists",
+"es-ES": "Administrar listas de WhatsApp",
+"pl": "Zarządzaj listami WhatsApp",
+"tr-TR": "WhatsApp listelerini yönet",
+"ro": "Gestionează listele WhatsApp"
+},
+"Importar configurações": {
+"pt-BR": "Importar configurações",
+"pt-PT": "Importar definições",
+"en-US": "Import settings",
+"es-ES": "Importar configuración",
+"pl": "Importuj ustawienia",
+"tr-TR": "Ayarları içe aktar",
+"ro": "Importați setările"
+},
+"Ligação de voz": {
+"pt-BR": "Ligação de voz",
+"pt-PT": "Chamada de voz",
+"en-US": "Voice call",
+"es-ES": "Llamada de voz",
+"pl": "Połączenie głosowe",
+"tr-TR": "Sesli arama",
+"ro": "Apel vocal"
+},
+"Ligação de voz perdida": {
+"pt-BR": "Ligação de voz perdida",
+"pt-PT": "Chamada de voz perdida",
+"en-US": "Missed voice call",
+"es-ES": "Llamada de voz perdida",
+"pl": "Nieodebrane połączenie głosowe",
+"tr-TR": "Cevapsız sesli arama",
+"ro": "Apel vocal pierdut"
+},
+"Ligação de vídeo": {
+"pt-BR": "Ligação de vídeo",
+"pt-PT": "Chamada de vídeo",
+"en-US": "Video call",
+"es-ES": "Videollamada",
+"pl": "Połączenie wideo",
+"tr-TR": "Görüntülü arama",
+"ro": "Apel video"
+},
+"Ligação de vídeo atendida": {
+"pt-BR": "Ligação de vídeo atendida",
+"pt-PT": "Chamada de vídeo atendida",
+"en-US": "Answered video call",
+"es-ES": "Videollamada atendida",
+"pl": "Odebrane połączenie wideo",
+"tr-TR": "Cevaplanan görüntülü arama",
+"ro": "Apel video preluat"
+},
+"Manter a ordem das conversas fixadas": {
+"pt-BR": "Manter a ordem das conversas fixadas",
+"pt-PT": "Manter a ordem das conversas afixadas",
+"en-US": "Keep pinned chats in a fixed order",
+"es-ES": "Mantener el orden de las conversaciones fijadas",
+"pl": "Zachowuj kolejność przypiętych czatów",
+"tr-TR": "Sabitlenmiş sohbetlerin sırasını koru",
+"ro": "Păstrează ordinea conversațiilor fixate"
+},
+"Manter mensagens favoritas": {
+"pt-BR": "Manter mensagens favoritas",
+"pt-PT": "Manter mensagens marcadas com estrela",
+"en-US": "Keep starred messages",
+"es-ES": "Conservar los mensajes destacados",
+"pl": "Zachowaj wiadomości oznaczone gwiazdką",
+"tr-TR": "Yıldızlı mesajları sakla",
+"ro": "Păstrați mesajele marcate cu stea"
+},
+"Manter o modelo carregado na memória (faster-whisper e whisper.cpp)": {
+"pt-BR": "Manter o modelo carregado na memória (faster-whisper e whisper.cpp)",
+"pt-PT": "Manter o modelo carregado na memória (faster-whisper e whisper.cpp)",
+"en-US": "Keep the model loaded in memory (faster-whisper and whisper.cpp)",
+"es-ES": "Mantener el modelo cargado en memoria (faster-whisper y whisper.cpp)",
+"pl": "Utrzymuj model w pamięci (faster-whisper i whisper.cpp)",
+"tr-TR": "Modeli bellekte yüklü tut (faster-whisper ve whisper.cpp)",
+"ro": "Păstrați modelul încărcat în memorie (faster-whisper și whisper.cpp)"
+},
+"Mensagem de visualização única. Abra no celular para ver": {
+"pt-BR": "Mensagem de visualização única. Abra no celular para ver",
+"pt-PT": "Mensagem de visualização única. Abra-a no telemóvel para a ver",
+"en-US": "View once message. Open it on your phone to see it",
+"es-ES": "Mensaje de visualización única. Ábrelo en el teléfono para verlo",
+"pl": "Wiadomość do jednorazowego wyświetlenia. Otwórz ją na telefonie, aby ją zobaczyć",
+"tr-TR": "Bir kez görüntülenebilen mesaj. Görmek için telefonunuzda açın",
+"ro": "Mesaj cu vizualizare unică. Deschideți-l pe telefon pentru a-l vedea"
+},
+"Mensagem encaminhada": {
+"pt-BR": "Mensagem encaminhada",
+"pt-PT": "Mensagem reencaminhada",
+"en-US": "Message forwarded",
+"es-ES": "Mensaje reenviado",
+"pl": "Wiadomość przekazana",
+"tr-TR": "Mesaj iletildi",
+"ro": "Mesajul a fost redirecționat"
+},
+"Meu status": {
+"pt-BR": "Meu status",
+"pt-PT": "O meu estado",
+"en-US": "My status",
+"es-ES": "Mi estado",
+"pl": "Mój status",
+"tr-TR": "Durumum",
+"ro": "Starea mea"
+},
+"Modelos em outras pastas": {
+"pt-BR": "Modelos em outras pastas",
+"pt-PT": "Modelos noutras pastas",
+"en-US": "Models in other folders",
+"es-ES": "Modelos guardados en otras carpetas",
+"pl": "Modele w innych folderach",
+"tr-TR": "Diğer klasörlerdeki modeller",
+"ro": "Modele existente în alte foldere"
+},
+"Mostrar na pasta": {
+"pt-BR": "Mostrar na pasta",
+"pt-PT": "Mostrar na pasta",
+"en-US": "Show in folder",
+"es-ES": "Mostrar en carpeta",
+"pl": "Pokaż w folderze",
+"tr-TR": "Klasörde göster",
+"ro": "Afișați în folder"
+},
+"Mostrar quem está digitando ou gravando áudio como última linha da lista de mensagens": {
+"pt-BR": "Mostrar quem está digitando ou gravando áudio como última linha da lista de mensagens",
+"pt-PT": "Mostrar quem está a escrever ou a gravar áudio como última linha da lista de mensagens",
+"en-US": "Show who is typing or recording audio as the last row of the messages list",
+"es-ES": "Mostrar quién está escribiendo o grabando audio como última fila de la lista de mensajes",
+"pl": "Pokazuj informację o tym, kto pisze lub nagrywa wiadomość głosową, w ostatnim wierszu listy wiadomości",
+"tr-TR": "Yazan veya ses kaydeden kişiyi mesaj listesinin son satırı olarak göster",
+"ro": "Afișează cine tastează sau înregistrează un mesaj vocal ca ultim rând al listei de mesaje"
+},
+"Nenhuma conversa aberta": {
+"pt-BR": "Nenhuma conversa aberta",
+"pt-PT": "Nenhuma conversa aberta",
+"en-US": "No chat is open",
+"es-ES": "No hay ninguna conversación abierta",
+"pl": "Żaden czat nie jest otwarty",
+"tr-TR": "Hiçbir sohbet açık değil",
+"ro": "Nicio conversație nu este deschisă"
+},
+"Nova comunidade": {
+"pt-BR": "Nova comunidade",
+"pt-PT": "Nova comunidade",
+"en-US": "New community",
+"es-ES": "Nueva comunidad",
+"pl": "Nowa społeczność",
+"tr-TR": "Yeni topluluk",
+"ro": "Comunitate nouă"
+},
+"Nova conversa": {
+"pt-BR": "Nova conversa",
+"pt-PT": "Nova conversa",
+"en-US": "New chat",
+"es-ES": "Nueva conversación",
+"pl": "Nowy czat",
+"tr-TR": "Yeni sohbet",
+"ro": "Conversație nouă"
+},
+"Novidades desde a última vez que você viu": {
+"pt-BR": "Novidades desde a última vez que você viu",
+"pt-PT": "Novidades desde a última vez que viu",
+"en-US": "What's New Since You Last Looked",
+"es-ES": "Novedades desde la última vez que miraste",
+"pl": "Nowości od ostatniego przeglądania",
+"tr-TR": "Son baktığınızdan beri yenilikler",
+"ro": "Noutăți de la ultima vizualizare"
+},
+"Não mostrar novamente": {
+"pt-BR": "Não mostrar novamente",
+"pt-PT": "Não mostrar novamente",
+"en-US": "Don't show again",
+"es-ES": "No volver a mostrar",
+"pl": "Nie pokazuj ponownie",
+"tr-TR": "Tekrar gösterme",
+"ro": "Nu mai afișați"
+},
+"Ocultar números de telefone de remetentes sem nome nas mensagens": {
+"pt-BR": "Ocultar números de telefone de remetentes sem nome nas mensagens",
+"pt-PT": "Ocultar números de telefone de remetentes sem nome nas mensagens",
+"en-US": "Hide phone numbers of unnamed senders in messages",
+"es-ES": "Ocultar los números de teléfono de remitentes sin nombre en los mensajes",
+"pl": "Ukrywaj numery telefonów nadawców bez nazwy w wiadomościach",
+"tr-TR": "Mesajlarda isimsiz gönderenlerin telefon numaralarını gizle",
+"ro": "Ascunde numerele de telefon ale expeditorilor fără nume în mesaje"
+},
+"Onde executar a transcrição": {
+"pt-BR": "Onde executar a transcrição",
+"pt-PT": "Onde executar a transcrição",
+"en-US": "Where to run the transcription",
+"es-ES": "Dónde ejecutar la transcripción",
+"pl": "Gdzie wykonywać transkrypcję",
+"tr-TR": "Yazıya dökümün yapılacağı yer",
+"ro": "Unde se face transcrierea"
+},
+"Ortografia": {
+"pt-BR": "Ortografia",
+"pt-PT": "Ortografia",
+"en-US": "Spelling",
+"es-ES": "Ortografía",
+"pl": "Pisownia",
+"tr-TR": "Yazım",
+"ro": "Ortografie"
+},
+"Pedir confirmação ao marcar todas as conversas como lidas": {
+"pt-BR": "Pedir confirmação ao marcar todas as conversas como lidas",
+"pt-PT": "Pedir confirmação ao marcar todas as conversas como lidas",
+"en-US": "Ask for confirmation before marking all chats as read",
+"es-ES": "Pedir confirmación al marcar todas las conversaciones como leídas",
+"pl": "Pytaj o potwierdzenie przed oznaczeniem wszystkich czatów jako przeczytane",
+"tr-TR": "Tüm sohbetleri okundu olarak işaretlemeden önce onay iste",
+"ro": "Cereți confirmare înainte de a marca toate conversațiile ca citite"
+},
+"Permitir que o Windows abra links de convite de grupo do WhatsApp com o WinZapp": {
+"pt-BR": "Permitir que o Windows abra links de convite de grupo do WhatsApp com o WinZapp",
+"pt-PT": "Permitir que o Windows abra ligações de convite de grupo do WhatsApp com o WinZapp",
+"en-US": "Let Windows open WhatsApp group invitation links with WinZapp",
+"es-ES": "Permitir que Windows abra los enlaces de invitación a grupos de WhatsApp con WinZapp",
+"pl": "Pozwól systemowi Windows otwierać linki zaproszeń do grup WhatsApp w WinZappie",
+"tr-TR": "Windows'un WhatsApp grup daveti bağlantılarını WinZapp ile açmasına izin ver",
+"ro": "Permite ca Windows să deschidă linkurile de invitație în grupuri WhatsApp cu WinZapp"
+},
+"Postar texto como status": {
+"pt-BR": "Postar texto como status",
+"pt-PT": "Publicar o texto como estado",
+"en-US": "Post text as status",
+"es-ES": "Publicar texto como estado",
+"pl": "Opublikuj tekst jako status",
+"tr-TR": "Durum olarak metin paylaş",
+"ro": "Postați text ca stare"
+},
+"Promover a administrador da comunidade": {
+"pt-BR": "Promover a administrador da comunidade",
+"pt-PT": "Promover a administrador da comunidade",
+"en-US": "Promote to community admin",
+"es-ES": "Promover a administrador de la comunidad",
+"pl": "Nadaj uprawnienia administratora społeczności",
+"tr-TR": "Topluluk yöneticisi yap",
+"ro": "Promovați ca administrator al comunității"
+},
+"Prévia do grupo": {
+"pt-BR": "Prévia do grupo",
+"pt-PT": "Pré-visualizar grupo",
+"en-US": "Preview group",
+"es-ES": "Vista previa del grupo",
+"pl": "Podgląd grupy",
+"tr-TR": "Grubu önizle",
+"ro": "Previzualizare grup"
+},
+"Próximo resultado": {
+"pt-BR": "Próximo resultado",
+"pt-PT": "Resultado seguinte",
+"en-US": "Next result",
+"es-ES": "Resultado siguiente",
+"pl": "Następny wynik",
+"tr-TR": "Sonraki sonuç",
+"ro": "Următorul rezultat"
+},
+"Quais as novidades?": {
+"pt-BR": "Quais as novidades?",
+"pt-PT": "O que há de novo?",
+"en-US": "What's new?",
+"es-ES": "¿Qué hay de nuevo?",
+"pl": "Co nowego?",
+"tr-TR": "Yenilikler neler?",
+"ro": "Ce este nou?"
+},
+"Rebaixar administrador da comunidade": {
+"pt-BR": "Rebaixar administrador da comunidade",
+"pt-PT": "Despromover administrador da comunidade",
+"en-US": "Demote community admin",
+"es-ES": "Quitar como administrador de la comunidad",
+"pl": "Odbierz uprawnienia administratora społeczności",
+"tr-TR": "Topluluk yöneticiliğinden çıkar",
+"ro": "Eliminați ca administrator al comunității"
+},
+"Recusar": {
+"pt-BR": "Recusar",
+"pt-PT": "Recusar",
+"en-US": "Reject",
+"es-ES": "Rechazar",
+"pl": "Odrzuć",
+"tr-TR": "Reddet",
+"ro": "Respingeți"
+},
+"Recusar pedido": {
+"pt-BR": "Recusar pedido",
+"pt-PT": "Recusar encomenda",
+"en-US": "Decline order",
+"es-ES": "Rechazar pedido",
+"pl": "Odrzuć zamówienie",
+"tr-TR": "Siparişi reddet",
+"ro": "Refuzați comanda"
+},
+"Redefinir link de convite": {
+"pt-BR": "Redefinir link de convite",
+"pt-PT": "Redefinir ligação de convite",
+"en-US": "Reset invitation link",
+"es-ES": "Restablecer enlace de invitación",
+"pl": "Zresetuj link zaproszenia",
+"tr-TR": "Davet bağlantısını sıfırla",
+"ro": "Resetează linkul de invitație"
+},
+"Rejeitar": {
+"pt-BR": "Rejeitar",
+"pt-PT": "Rejeitar",
+"en-US": "Reject",
+"es-ES": "Rechazar",
+"pl": "Odrzuć",
+"tr-TR": "Reddet",
+"ro": "Respingeți"
+},
+"Remover do carrinho": {
+"pt-BR": "Remover do carrinho",
+"pt-PT": "Remover do carrinho",
+"en-US": "Remove from cart",
+"es-ES": "Quitar del carrito",
+"pl": "Usuń z koszyka",
+"tr-TR": "Sepetten çıkar",
+"ro": "Eliminați din coș"
+},
+"Remover grupo da comunidade": {
+"pt-BR": "Remover grupo da comunidade",
+"pt-PT": "Remover grupo da comunidade",
+"en-US": "Remove group from the community",
+"es-ES": "Quitar grupo de la comunidad",
+"pl": "Usuń grupę ze społeczności",
+"tr-TR": "Grubu topluluktan çıkar",
+"ro": "Eliminați grupul din comunitate"
+},
+"Responder ao status": {
+"pt-BR": "Responder ao status",
+"pt-PT": "Responder ao estado",
+"en-US": "Reply to status",
+"es-ES": "Responder al estado",
+"pl": "Odpowiedz na status",
+"tr-TR": "Durumu yanıtla",
+"ro": "Răspuns la stare"
+},
+"Resposta enviada": {
+"pt-BR": "Resposta enviada",
+"pt-PT": "Resposta enviada",
+"en-US": "Reply sent",
+"es-ES": "Respuesta enviada",
+"pl": "Odpowiedź wysłana",
+"tr-TR": "Yanıt gönderildi",
+"ro": "Răspuns trimis"
+},
+"Respostas ao aviso da comunidade": {
+"pt-BR": "Respostas ao aviso da comunidade",
+"pt-PT": "Respostas ao aviso da comunidade",
+"en-US": "Community announcement replies",
+"es-ES": "Respuestas al anuncio de la comunidad",
+"pl": "Odpowiedzi na ogłoszenie społeczności",
+"tr-TR": "Topluluk duyurusunun yanıtları",
+"ro": "Răspunsuri la anunțul comunității"
+},
+"Restaurar posições padrão": {
+"pt-BR": "Restaurar posições padrão",
+"pt-PT": "Repor posições predefinidas",
+"en-US": "Restore default positions",
+"es-ES": "Restablecer posiciones predeterminadas",
+"pl": "Przywróć domyślne pozycje",
+"tr-TR": "Varsayılan konumları geri yükle",
+"ro": "Restabiliți pozițiile implicite"
+},
+"Resultado anterior": {
+"pt-BR": "Resultado anterior",
+"pt-PT": "Resultado anterior",
+"en-US": "Previous result",
+"es-ES": "Resultado anterior",
+"pl": "Poprzedni wynik",
+"tr-TR": "Önceki sonuç",
+"ro": "Rezultat anterior"
+},
+"Retornar ligação": {
+"pt-BR": "Retornar ligação",
+"pt-PT": "Devolver chamada",
+"en-US": "Call back",
+"es-ES": "Devolver llamada",
+"pl": "Oddzwoń",
+"tr-TR": "Geri ara",
+"ro": "Sună înapoi"
+},
+"Reutilizar downloads de outra pasta": {
+"pt-BR": "Reutilizar downloads de outra pasta",
+"pt-PT": "Reutilizar transferências de outra pasta",
+"en-US": "Reuse downloads from another folder",
+"es-ES": "Reutilizar descargas de otra carpeta",
+"pl": "Użyj ponownie plików pobranych do innego folderu",
+"tr-TR": "Başka bir klasörden indirilenleri yeniden kullan",
+"ro": "Refolosiți descărcările dintr-un alt dosar"
+},
+"Salvar como": {
+"pt-BR": "Salvar como",
+"pt-PT": "Guardar como",
+"en-US": "Save as",
+"es-ES": "Guardar como",
+"pl": "Zapisz jako",
+"tr-TR": "Farklı kaydet",
+"ro": "Salvați ca"
+},
+"Salvar código QR": {
+"pt-BR": "Salvar código QR",
+"pt-PT": "Guardar código QR",
+"en-US": "Save QR code",
+"es-ES": "Guardar código QR",
+"pl": "Zapisz kod QR",
+"tr-TR": "QR kodunu kaydet",
+"ro": "Salvează codul QR"
+},
+"Salvar mídia como": {
+"pt-BR": "Salvar mídia como",
+"pt-PT": "Guardar como",
+"en-US": "Save as",
+"es-ES": "Guardar como",
+"pl": "Zapisz multimedia jako",
+"tr-TR": "Farklı kaydet",
+"ro": "Salvați ca"
+},
+"Silenciar alerta": {
+"pt-BR": "Silenciar alerta",
+"pt-PT": "Silenciar alerta",
+"en-US": "Silence alert",
+"es-ES": "Silenciar alerta",
+"pl": "Wycisz alert",
+"tr-TR": "Sessize al",
+"ro": "Opriți alerta"
+},
+"Sincronizar favoritos locais antigos com o WhatsApp": {
+"pt-BR": "Sincronizar favoritos locais antigos com o WhatsApp",
+"pt-PT": "Sincronizar estrelas locais antigas com o WhatsApp",
+"en-US": "Sync old local stars with WhatsApp",
+"es-ES": "Sincronizar destacados locales antiguos con WhatsApp",
+"pl": "Synchronizuj wcześniejsze lokalne oznaczenia gwiazdką z WhatsApp",
+"tr-TR": "Eski yerel yıldızları WhatsApp ile eşitle",
+"ro": "Sincronizează marcajele cu stea locale vechi cu WhatsApp"
+},
+"Solicitações de entrada que aguardam aprovação": {
+"pt-BR": "Solicitações de entrada que aguardam aprovação",
+"pt-PT": "Pedidos de entrada que aguardam aprovação",
+"en-US": "Pending join requests",
+"es-ES": "Solicitudes de unión que esperan aprobación",
+"pl": "Prośby o dołączenie",
+"tr-TR": "Bekleyen katılma istekleri",
+"ro": "Cereri de alăturare care așteaptă aprobarea"
+},
+"Status postado com sucesso": {
+"pt-BR": "Status postado com sucesso",
+"pt-PT": "Estado publicado com sucesso",
+"en-US": "Status posted successfully",
+"es-ES": "Estado publicado con éxito",
+"pl": "Status opublikowany pomyślnie",
+"tr-TR": "Durum başarıyla paylaşıldı",
+"ro": "Starea a fost publicată cu succes"
+},
+"Substituir atalhos por ações em massa ao selecionar conversas e mensagens": {
+"pt-BR": "Substituir atalhos por ações em massa ao selecionar conversas e mensagens",
+"pt-PT": "Substituir atalhos por ações em massa ao selecionar conversas e mensagens",
+"en-US": "Replace shortcuts with bulk actions when selecting chats and messages",
+"es-ES": "Sustituir atajos por acciones en masa al seleccionar chats y mensajes",
+"pl": "Zastąp skróty akcjami masowymi podczas zaznaczania czatów i wiadomości",
+"tr-TR": "Sohbet ve mesaj seçerken kısayolları toplu işlemlerle değiştir",
+"ro": "Înlocuiți comenzile rapide cu acțiuni în bloc atunci când selectați conversații și mesaje"
+},
+"Trancar conversa": {
+"pt-BR": "Trancar conversa",
+"pt-PT": "Trancar conversa",
+"en-US": "Lock chat",
+"es-ES": "Bloquear chat",
+"pl": "Zabezpiecz dostęp do czatu",
+"tr-TR": "Sohbeti kilitle",
+"ro": "Blocați conversația"
+},
+"Transcrever com IA online": {
+"pt-BR": "Transcrever com IA online",
+"pt-PT": "Transcrever com IA online",
+"en-US": "Transcribe with online AI",
+"es-ES": "Transcribir con IA en línea",
+"pl": "Transkrybuj za pomocą AI online",
+"tr-TR": "Çevrimiçi yapay zekâ ile yazıya dök",
+"ro": "Transcrieți cu AI online"
+},
+"Transcrever mensagem localmente com Whisper": {
+"pt-BR": "Transcrever mensagem localmente com Whisper",
+"pt-PT": "Transcrever mensagem localmente com o Whisper",
+"en-US": "Transcribe message locally with Whisper",
+"es-ES": "Transcribir mensaje localmente con Whisper",
+"pl": "Transkrybuj wiadomość lokalnie za pomocą Whispera",
+"tr-TR": "Mesajı Whisper ile bu bilgisayarda yazıya dök",
+"ro": "Transcrieți mesajul local cu Whisper"
+},
+"Transcrever novamente": {
+"pt-BR": "Transcrever novamente",
+"pt-PT": "Transcrever novamente",
+"en-US": "Transcribe again",
+"es-ES": "Transcribir de nuevo",
+"pl": "Transkrybuj ponownie",
+"tr-TR": "Yeniden yazıya dök",
+"ro": "Transcrieți din nou"
+},
+"Usar Espaço para marcar/desmarcar enquanto houver algo marcado": {
+"pt-BR": "Usar Espaço para marcar/desmarcar enquanto houver algo marcado",
+"pt-PT": "Utilizar Espaço para marcar/desmarcar enquanto existir algo marcado",
+"en-US": "Use Space to select/deselect whenever a selection already exists",
+"es-ES": "Usar Espacio para marcar/desmarcar cuando ya haya algo marcado",
+"pl": "Używaj Spacji do zaznaczania/odznaczania, gdy coś jest już zaznaczone",
+"tr-TR": "Zaten bir seçim varken seçmek/seçimi kaldırmak için Boşluk tuşunu kullan",
+"ro": "Folosiți Spațiu pentru a selecta/deselecta când există deja o selecție"
+},
+"Use o WhatsApp no celular para ver as mensagens mais antigas": {
+"pt-BR": "Use o WhatsApp no celular para ver as mensagens mais antigas",
+"pt-PT": "Use o WhatsApp no telemóvel para ver as mensagens mais antigas",
+"en-US": "Use WhatsApp on your phone to see older messages",
+"es-ES": "Usa WhatsApp en tu teléfono para ver los mensajes más antiguos",
+"pl": "Starsze wiadomości możesz zobaczyć w WhatsAppie na telefonie",
+"tr-TR": "Daha eski mesajları görmek için telefonunuzdaki WhatsApp'ı kullanın",
+"ro": "Folosiți WhatsApp pe telefon pentru a vedea mesajele mai vechi"
+},
+"Ver pedido": {
+"pt-BR": "Ver pedido",
+"pt-PT": "Ver encomenda",
+"en-US": "View order",
+"es-ES": "Ver pedido",
+"pl": "Pokaż zamówienie",
+"tr-TR": "Siparişi görüntüle",
+"ro": "Vedeți comanda"
+},
+"Ver transcrição": {
+"pt-BR": "Ver transcrição",
+"pt-PT": "Ver transcrição",
+"en-US": "View transcription",
+"es-ES": "Ver transcripción",
+"pl": "Pokaż transkrypcję",
+"tr-TR": "Dökümü göster",
+"ro": "Afișați transcrierea"
+},
+"Ver votos": {
+"pt-BR": "Ver votos",
+"pt-PT": "Ver votos",
+"en-US": "View votes",
+"es-ES": "Ver votos",
+"pl": "Pokaż głosy",
+"tr-TR": "Oyları göster",
+"ro": "Vezi voturile"
+},
+"Verificar atualizações alpha (instáveis)": {
+"pt-BR": "Verificar atualizações alpha (instáveis)",
+"pt-PT": "Verificar atualizações alpha (instáveis)",
+"en-US": "Check for alpha updates (unstable)",
+"es-ES": "Buscar actualizaciones alpha (inestables)",
+"pl": "Sprawdzaj aktualizacje alfa (niestabilne)",
+"tr-TR": "Alfa güncellemelerini denetle (kararsız)",
+"ro": "Verificați actualizările alfa (instabile)"
+},
+"digitando": {
+"pt-BR": "digitando",
+"pt-PT": "a escrever",
+"en-US": "typing",
+"es-ES": "escribiendo",
+"pl": "pisze",
+"tr-TR": "yazıyor",
+"ro": "tastând"
+},
+"iniciando o WPPConnect": {
+"pt-BR": "iniciando o WPPConnect",
+"pt-PT": "a iniciar o WPPConnect",
+"en-US": "starting WPPConnect",
+"es-ES": "iniciando WPPConnect",
+"pl": "uruchamianie WPPConnect",
+"tr-TR": "WPPConnect başlatılıyor",
+"ro": "se pornește WPPConnect"
+},
+"selecionado": {
+"pt-BR": "selecionado",
+"pt-PT": "selecionado",
+"en-US": "selected",
+"es-ES": "seleccionado",
+"pl": "zaznaczony",
+"tr-TR": "seçildi",
+"ro": "selectat"
+}
+}

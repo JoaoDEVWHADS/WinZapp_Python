@@ -1,11 +1,12 @@
 from pathlib import Path
+from tests.god_modules import main_window_source, status_panel_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_successful_status_api_reconciles_own_cache():
-    source = (ROOT / "client" / "status_panel.py").read_text(encoding="utf-8")
+    source = status_panel_source()
     assert 'api_ok = getattr(self, "_last_status_api_ok", False)' in source
     assert "if api_ok:" in source
     assert "self._reconcile_my_status_cache(" in source
@@ -14,7 +15,7 @@ def test_successful_status_api_reconciles_own_cache():
 
 
 def test_status_parser_drops_tombstones_and_reactions():
-    source = (ROOT / "client" / "status_panel.py").read_text(encoding="utf-8")
+    source = status_panel_source()
     for marker in (
         '"protocolMessage"',
         '"reactionMessage"',
@@ -26,7 +27,7 @@ def test_status_parser_drops_tombstones_and_reactions():
 
 
 def test_reconciled_status_is_removed_from_memory_and_sqlite():
-    main_source = (ROOT / "client" / "main.py").read_text(encoding="utf-8")
+    main_source = main_window_source()
     bridge_source = (ROOT / "client" / "core" / "database_bridge.py").read_text(
         encoding="utf-8"
     )
@@ -45,6 +46,6 @@ def test_status_api_exposes_own_status_readiness_marker():
 
 
 def test_status_panel_only_accepts_empty_snapshot_when_ready():
-    source = (ROOT / "client" / "status_panel.py").read_text(encoding="utf-8")
+    source = status_panel_source()
     assert 'my_status_ready = getattr(self, "_last_my_status_ready", False)' in source
     assert "authoritative_empty=my_status_ready" in source

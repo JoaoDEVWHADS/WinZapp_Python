@@ -6,10 +6,10 @@ status author.
 """
 
 from pathlib import Path
+from tests.god_modules import main_window_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = ROOT / "client" / "main.py"
 CONTROLLER = (
     ROOT
     / "client"
@@ -29,12 +29,11 @@ def test_status_like_uses_targeted_status_reaction_transport():
     assert "loader?.search?.(" in status_branch
     assert "wpp-loader-capability" in status_branch
     assert "native-status-reaction-action-not-found; " in status_branch
-    assert "mintStatusReactionKey(model)" in status_branch
-    assert "applyOptimisticStatusReaction(" in status_branch
-    assert "previousOptimisticReaction" in status_branch
-    assert "hasCurrentReactionCompanions || sendStatusReaction.length >= 3" in status_branch
-    assert "native-status-reaction-signature-unsupported" in status_branch
-    assert "await sendStatusReaction(model, reactionText)" in status_branch
+    # The call into the module (which export, in which shape) is
+    # util/statusReactionRuntime.ts; tests/test_status_reaction_runtime.py
+    # runs it against every shape WhatsApp Web has shipped.
+    assert "runtime.call({" in status_branch
+    assert "action: statusReactionAction," in status_branch
     assert "WPP.chat.sendRawMessage(" not in status_branch
     assert "broadcastParticipants: [authorWid]" not in status_branch
     assert "crypto.getRandomValues(new Uint8Array(10))" not in status_branch
@@ -46,7 +45,7 @@ def test_status_like_uses_targeted_status_reaction_transport():
 
 
 def test_status_reaction_opts_in_to_idempotent_stale_socket_retry():
-    source = MAIN.read_text(encoding="utf-8")
+    source = main_window_source()
     send_reaction = source[source.index("    def send_reaction(") :]
     send_reaction = send_reaction[: send_reaction.index("\n    def ", 1)]
 

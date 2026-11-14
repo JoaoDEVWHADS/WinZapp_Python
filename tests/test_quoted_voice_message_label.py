@@ -13,16 +13,14 @@ dropping the flag for good until a sync replaced the record.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
 from core.utils import _slim_quoted_message, is_voice_message
 from ui.conversations import ConversationsPanel
+from tests.locales import load_strings
 
-_PT_BR = json.loads(
-    (Path(__file__).parents[1] / "client" / "languages" / "pt-BR.json").read_text(encoding="utf-8")
-)
+_PT_BR = load_strings("pt-BR")
 
 VOICE_BODY = {"audioMessage": {"url": "x", "seconds": 7, "ptt": True}}
 AUDIO_BODY = {"audioMessage": {"url": "x", "seconds": 7, "mimetype": "audio/mpeg"}}

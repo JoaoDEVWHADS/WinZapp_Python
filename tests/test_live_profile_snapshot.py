@@ -16,6 +16,7 @@ import main as main_module
 from main import MainWindow
 from core.profile_recovery import SNAPSHOT_MAX_AGE_SECONDS
 from tests.test_restart_wpp_session import _Stub as _RestartStub
+from tests.god_modules import patch_main_global
 
 HOUR = 3600
 
@@ -160,7 +161,7 @@ def answer(monkeypatch):
         assert kw["default_yes"] is False
         return state.value
 
-    monkeypatch.setattr(main_module, "confirm_with_checkbox", _confirm)
+    patch_main_global(monkeypatch, "confirm_with_checkbox", _confirm)
     return state
 
 
@@ -255,7 +256,7 @@ class TestNotNow:
             stub._wa_connected = False
             return True, False
 
-        monkeypatch.setattr(main_module, "confirm_with_checkbox", _confirm_then_go_offline)
+        patch_main_global(monkeypatch, "confirm_with_checkbox", _confirm_then_go_offline)
         stub._maybe_refresh_profile_snapshot_live(now=HOUR + 10)
         assert stub.restarts == [] and stub.spoken == []
         assert stub._live_snapshot_pending is False
@@ -268,7 +269,7 @@ class TestNotNow:
             stub.settings["profile_backup"]["live_snapshot_enabled"] = False
             return True, False
 
-        monkeypatch.setattr(main_module, "confirm_with_checkbox", _confirm_then_turn_off)
+        patch_main_global(monkeypatch, "confirm_with_checkbox", _confirm_then_turn_off)
         stub._maybe_refresh_profile_snapshot_live(now=HOUR + 10)
         assert stub.restarts == []
 
@@ -325,6 +326,22 @@ class TestTheBackup:
         assert snapshot.promoted == [] and snapshot.discarded == ["sess"]
         assert stub.spoken == ["profile_backup_live_started", "profile_backup_live_failed"]
         assert stub.audits == []
+
+    def test_copies_turned_off_during_the_backup_are_dropped_quietly(self, snapshot, answer):
+        """"Keep no profile backups" ticked while the copy was being made: the
+        user chose the space, so the copy is not promoted — and nothing
+        failed, so nothing says so."""
+        stub = _Stub(live_snapshot_confirm=False)
+        restart = stub._restart_wpp_session
+
+        def _restart_then_turn_copies_off(**kw):
+            stub.settings["profile_backup"]["snapshots_disabled"] = True
+            return restart(**kw)
+
+        stub._restart_wpp_session = _restart_then_turn_copies_off
+        _due(stub)
+        assert snapshot.promoted == [] and snapshot.discarded == ["sess"]
+        assert stub.spoken == ["profile_backup_live_started"]
 
     def test_a_copy_that_was_not_written_is_announced(self, snapshot, answer):
         snapshot.staged = False
@@ -450,7 +467,7 @@ class TestTheSendQueue:
             stub.message_queue.work = True
             return True, False
 
-        monkeypatch.setattr(main_module, "confirm_with_checkbox", _confirm_then_send)
+        patch_main_global(monkeypatch, "confirm_with_checkbox", _confirm_then_send)
         _due(stub)
         assert stub.restarts == ["profile backup"]
         assert stub.events == ["hold", "drain", "restart", "release"]
@@ -488,13 +505,13 @@ class TestTheSendQueue:
             stub._restarting_wpp_session = True
             return True, False
 
-        monkeypatch.setattr(main_module, "confirm_with_checkbox", _busy_after_the_question)
+        patch_main_global(monkeypatch, "confirm_with_checkbox", _busy_after_the_question)
         stub._maybe_refresh_profile_snapshot_live(now=0)
         stub._maybe_refresh_profile_snapshot_live(now=HOUR + 10)
         assert stub.restarts == [] and stub.workers == 1
 
         stub._restarting_wpp_session = False
-        monkeypatch.setattr(main_module, "confirm_with_checkbox", lambda *a, **kw: (True, False))
+        patch_main_global(monkeypatch, "confirm_with_checkbox", lambda *a, **kw: (True, False))
         stub._maybe_refresh_profile_snapshot_live(now=HOUR + 70)
         assert stub.restarts == ["profile backup"]
 

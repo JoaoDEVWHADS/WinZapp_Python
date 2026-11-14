@@ -29,6 +29,7 @@ import pytest
 import wx
 
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 TAG = "v2.10.10"
@@ -48,7 +49,7 @@ class _Dialog:
     """Stands in for ApiSetupDialog — records that it was constructed at all,
     which is the thing under test: it must not exist before the stop is done."""
 
-    def __init__(self, parent, title_override=None, forced_tag=None):
+    def __init__(self, parent, title_override=None, forced_tag=None, api_dir=None):
         parent.dialogs.append(forced_tag)
         self._result = parent.dialog_result
 
@@ -84,9 +85,11 @@ class _Stub:
     _update_wpp_server = MainWindow._update_wpp_server
 
     def __init__(self, dialog_result=wx.ID_OK, stop_raises=False):
-        # background_mode keeps output()/restore_window out of the picture;
-        # these tests are about what runs where, not about the announcements.
-        self.background_mode = True
+        # A visible window keeps restore_window and the bring-to-front timers
+        # out of the picture; these tests are about what runs where, not about
+        # the announcements (recorded on self.spoken, never voiced).
+        self.background_mode = False
+        self.spoken = []
         self.i18n = _I18n()
         self.error_sound = _Sound()
         self.dialog_result = dialog_result
@@ -96,6 +99,12 @@ class _Stub:
         self.dialogs = []
         self.events = []
         self.flag_during_stop = None
+
+    def output(self, text, interrupt=False):
+        self.spoken.append(text)
+
+    def _discard_wpp_staging_leftovers(self):
+        pass
 
     def _stop_wpp_server(self):
         self.flag_during_stop = self._wpp_updating
@@ -133,12 +142,20 @@ def threads(monkeypatch):
     run on the main thread in production), and swap the real setup dialog out."""
     import main as main_module
     from ui.dialogs import api_setup
+    from main_window import updates
+    monkeypatch.setattr(updates.api_staging, "discard", lambda _p: None)
+    monkeypatch.setattr(updates.api_staging, "has_room_for_staging", lambda _p: True)
+    monkeypatch.setattr(updates.api_staging, "swap_in_staged_api", lambda *a, **k: "backup")
+    monkeypatch.setattr(updates, "restart_api_after_update",
+                        lambda window, api, backup, done: (window.ensure_wpp_running(), done(True)))
 
     captured = _Threads()
-    # Only main's own binding is replaced, never the threading module itself.
-    monkeypatch.setattr(main_module, "threading", captured)
+    # Only the modules' `threading` bindings are replaced (main and every
+    # main_window mixin that imports it), never the threading module itself.
+    patch_main_global(monkeypatch, "threading", captured)
     monkeypatch.setattr(main_module.wx, "CallAfter", lambda fn, *a, **k: fn(*a, **k))
     monkeypatch.setattr(main_module.wx, "MessageBox", lambda *a, **k: wx.ID_OK)
+    monkeypatch.setattr(updates, "show_error_details", lambda *a, **k: None)
     monkeypatch.setattr(api_setup, "ApiSetupDialog", _Dialog)
     return captured
 
@@ -183,10 +200,14 @@ class TestTheStopIsHandedToAWorker:
 
     def test_the_post_update_reconnect_still_gets_its_own_thread(self, threads):
         stub = _Stub()
+        seen = []
+        stub.check_wa_connection_http = lambda: seen.append(stub._wpp_updating)
         stub._update_wpp_server(TAG)
         threads.run_next()
 
         assert len(threads.started) == 1
+        threads.run_next()
+        assert seen == [False]
 
 
 class TestTheFlagAlwaysClears:

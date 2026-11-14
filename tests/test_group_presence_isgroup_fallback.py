@@ -21,21 +21,36 @@ fully warmed up yet right after a fresh pairing. The @g.us suffix on the
 event's own id doesn't depend on that being warmed up, so it's now checked
 first and is authoritative regardless of what isGroup says.
 
-WebSocketClient imports wx/socketio at module top; both are stubbed out so
-this stays headless. wx.CallAfter is faked to run its callback immediately
-(main.py's on_presence_update isn't under test here, only what gets handed
-to it).
+WebSocketClient imports wx/socketio at module top; each is stubbed out only
+where it is not installed, so this stays headless. wx.CallAfter is faked to
+run its callback immediately (main.py's on_presence_update isn't under test
+here, only what gets handed to it) — per test, through monkeypatch. Assigning
+it on the module once, as this file used to, changed the real wx for every
+test after this one: a later pairing test's background thread then ran
+connect.py's error handler on the spot and put a real wx.MessageBox on the
+desktop of whoever was running the suite.
 """
 
+import importlib
 import sys
 import types
 
+import pytest
+
 for _name in ("wx", "socketio"):
-    if _name not in sys.modules:
-        sys.modules[_name] = types.ModuleType(_name)
-sys.modules["wx"].CallAfter = lambda fn, *a, **k: fn(*a, **k)
+    try:
+        importlib.import_module(_name)
+    except ImportError:
+        sys.modules.setdefault(_name, types.ModuleType(_name))
 
 from core.websocket_client import WebSocketClient
+
+
+@pytest.fixture(autouse=True)
+def _call_after_runs_now(monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["wx"], "CallAfter", lambda fn, *a, **k: fn(*a, **k), raising=False
+    )
 
 
 class _FakeMainWindow:
@@ -79,7 +94,7 @@ class TestIsGroupFallsBackToTheJidSuffix:
         (jid, presences), = stub.main_window.presence_calls
         assert jid == "120363427511142886@g.us"
         assert presences == {
-            "197813359124557@lid": {"lastKnownPresence": "composing", "lastSeen": 1787320530}
+            "197813359124557@lid": {"lastKnownPresence": "composing"}
         }
 
     def test_group_event_with_isgroup_missing_entirely(self):
@@ -143,7 +158,7 @@ class TestIsGroupFallsBackToTheJidSuffix:
         (jid, presences), = stub.main_window.presence_calls
         assert jid == "5511999999999@s.whatsapp.net"
         assert presences == {
-            "5511999999999@s.whatsapp.net": {"lastKnownPresence": "composing", "lastSeen": 1787320530}
+            "5511999999999@s.whatsapp.net": {"lastKnownPresence": "composing", "isOnline": None, "eventTimestamp": 1787320530}
         }
 
     def test_a_lid_1to1_chat_is_unaffected(self):
@@ -160,7 +175,7 @@ class TestIsGroupFallsBackToTheJidSuffix:
         (jid, presences), = stub.main_window.presence_calls
         assert jid == "131928795652121@lid"
         assert presences == {
-            "131928795652121@lid": {"lastKnownPresence": "available", "lastSeen": 1787320530}
+            "131928795652121@lid": {"lastKnownPresence": "available", "isOnline": None, "eventTimestamp": 1787320530}
         }
 
 

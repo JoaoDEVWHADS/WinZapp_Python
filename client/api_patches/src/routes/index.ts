@@ -20,13 +20,31 @@ import swaggerUi from 'swagger-ui-express';
 import uploadConfig from '../config/upload';
 import * as CallController from '../controller/callController';
 import * as CatalogController from '../controller/catalogController';
+import * as ChatListsController from '../controller/chatListsController';
 import * as CommunityController from '../controller/communityController';
 import ContactController from '../controller/contactController';
+import * as ContactSaveController from '../controller/contactSaveController';
 import * as DeviceController from '../controller/deviceController';
 import { encryptSession } from '../controller/encryptController';
 import * as GroupController from '../controller/groupController';
+import * as GroupOperationsController from '../controller/groupOperationsController';
 import * as LabelsController from '../controller/labelsController';
 import * as MessageController from '../controller/messageController';
+import * as PinnedMessagesController from '../controller/pinnedMessagesController';
+import * as PrivacyController from '../controller/privacyController';
+import * as PollController from '../controller/pollController';
+import * as EventController from '../controller/eventController';
+import * as CommunityCommentsController from '../controller/communityCommentsController';
+import * as CommunityOverviewController from '../controller/communityOverviewController';
+import * as ChannelsPanelController from '../controller/channelsPanelController';
+import * as CommunityJoinController from '../controller/communityJoinController';
+import * as PageHeapController from '../controller/pageHeapController';
+import * as StatusDeleteController from '../controller/statusDeleteController';
+import * as CommunityAdminController from '../controller/communityAdminController';
+import * as CommerceController from '../controller/commerceController';
+import * as OrderConfirmController from '../controller/orderConfirmController';
+import * as ButtonReplyController from '../controller/buttonReplyController';
+import * as GroupMembershipRequestsController from '../controller/groupMembershipRequestsController';
 import * as MiscController from '../controller/miscController';
 import * as NewsletterController from '../controller/newsletterController';
 import * as OrderController from '../controller/orderController';
@@ -40,6 +58,9 @@ import swaggerDocument from '../swagger.json';
 
 const upload = multer(uploadConfig as any) as any;
 const routes: Router = Router();
+
+routes.get('/api/:session/custom-lists', verifyToken, statusConnection, ChatListsController.readLists);
+routes.post('/api/:session/custom-lists', verifyToken, statusConnection, ChatListsController.changeList);
 
 // ── WinZapp multi-account: Node instance identity (plan Zad 3.0) ─────────────
 // Public, unauthenticated, read-only. Lets a WinZapp client verify that THIS
@@ -60,10 +81,12 @@ routes.get('/winzapp/identity', (_req, res) => {
 routes.post('/api/:session/:secretkey/generate-token', encryptSession);
 
 // All Sessions
-routes.get(
-  '/api/:secretkey/show-all-sessions',
-  SessionController.showAllSessions
+routes.get('/api/:secretkey/show-all-sessions', (_req, res) =>
+  res.status(410).json({
+    message: 'Use POST /api/show-all-sessions with the x-secret-key header.',
+  })
 );
+routes.post('/api/show-all-sessions', SessionController.showAllSessions);
 routes.post('/api/:secretkey/start-all', SessionController.startAllSessions);
 
 // Sessions
@@ -105,7 +128,6 @@ routes.post(
 routes.post(
   '/api/:session/logout-session',
   verifyToken,
-  statusConnection,
   SessionController.logOutSession
 );
 routes.post(
@@ -180,6 +202,66 @@ routes.post(
   statusConnection,
   MessageController.pinMessage
 );
+routes.get(
+  '/api/:session/message-comments/:messageId',
+  verifyToken,
+  statusConnection,
+  CommunityCommentsController.getComments
+);
+routes.post(
+  '/api/:session/message-comments/:messageId',
+  verifyToken,
+  statusConnection,
+  CommunityCommentsController.sendCommentMessage
+);
+routes.post(
+  '/api/:session/pinned-messages',
+  verifyToken,
+  statusConnection,
+  PinnedMessagesController.readPinnedMessages
+);
+routes.post(
+  '/api/:session/poll-votes',
+  verifyToken,
+  statusConnection,
+  PollController.readPollVotesRoute
+);
+routes.post(
+  '/api/:session/poll-voters',
+  verifyToken,
+  statusConnection,
+  PollController.readPollVotersRoute
+);
+routes.post(
+  '/api/:session/vote-poll',
+  verifyToken,
+  statusConnection,
+  PollController.votePollRoute
+);
+routes.post(
+  '/api/:session/event-responses',
+  verifyToken,
+  statusConnection,
+  EventController.readEventResponsesRoute
+);
+routes.post(
+  '/api/:session/event-respond',
+  verifyToken,
+  statusConnection,
+  EventController.respondEventRoute
+);
+routes.post(
+  '/api/:session/send-event',
+  verifyToken,
+  statusConnection,
+  EventController.sendEventRoute
+);
+routes.post(
+  '/api/:session/edit-event',
+  verifyToken,
+  statusConnection,
+  EventController.editEventRoute
+);
 routes.post(
   '/api/:session/mark-played',
   verifyToken,
@@ -243,6 +325,14 @@ routes.get(
   verifyToken,
   SessionController.getSessionState
 );
+// A full V8 garbage collection of the WhatsApp Web page, asked for after a
+// large sync batch (issue #379; pageHeapController.ts). No connection probe:
+// it needs only the page, and the probe would be one more evaluation in it.
+routes.post(
+  '/api/:session/collect-page-garbage',
+  verifyToken,
+  PageHeapController.collectGarbage
+);
 routes.post(
   '/api/:session/send-status',
   verifyToken,
@@ -305,6 +395,18 @@ routes.post(
 );
 
 // Group
+routes.get('/api/:session/group-invitation/:groupId', verifyToken, statusConnection,
+  GroupOperationsController.readInvitation);
+routes.post('/api/:session/group-invitation/:groupId/reset', verifyToken, statusConnection,
+  GroupOperationsController.resetInvitation);
+// Pending requests to join a group and the admin's answer (WinZapp's own:
+// wppconnect-server has no route for the library's functions).
+routes.get('/api/:session/group-membership-requests/:groupId', verifyToken, statusConnection,
+  GroupMembershipRequestsController.listRequests);
+routes.post('/api/:session/group-membership-requests/:groupId/approve', verifyToken, statusConnection,
+  GroupMembershipRequestsController.approveRequests);
+routes.post('/api/:session/group-membership-requests/:groupId/reject', verifyToken, statusConnection,
+  GroupMembershipRequestsController.rejectRequests);
 routes.get(
   '/api/:session/all-broadcast-list',
   verifyToken,
@@ -339,7 +441,7 @@ routes.get(
   '/api/:session/group-info/:groupId',
   verifyToken,
   statusConnection,
-  GroupController.getGroupInfo
+  GroupOperationsController.getGroupInfo
 );
 routes.get(
   '/api/:session/group-invite-link/:groupId',
@@ -375,7 +477,7 @@ routes.post(
   '/api/:session/join-code',
   verifyToken,
   statusConnection,
-  GroupController.joinGroupByCode
+  GroupOperationsController.joinGroupByCode
 );
 routes.post(
   '/api/:session/add-participant-group',
@@ -405,7 +507,7 @@ routes.post(
   '/api/:session/group-info-from-invite-link',
   verifyToken,
   statusConnection,
-  GroupController.getGroupInfoFromInviteLink
+  GroupOperationsController.getGroupInfoFromInviteLink
 );
 routes.post(
   '/api/:session/group-description',
@@ -546,6 +648,13 @@ routes.post(
   statusConnection,
   DeviceController.requestOlderMessages
 );
+// Read-only: the same verdicts, with nothing sent to the phone.
+routes.get(
+  '/api/:session/older-history-state/:phone',
+  verifyToken,
+  statusConnection,
+  DeviceController.olderHistoryState
+);
 // Read-only diagnostic: is WhatsApp Web's history-sync pipeline alive at all?
 routes.get(
   '/api/:session/history-sync-status',
@@ -604,11 +713,62 @@ routes.post(
   statusConnection,
   DeviceController.deleteMessage
 );
+// Account privacy and who can see the account's Status (WPP.privacy, not
+// wrapped by WPPConnect Server itself).
+routes.post(
+  '/api/:session/privacy',
+  verifyToken,
+  statusConnection,
+  PrivacyController.getPrivacySettings
+);
+routes.post(
+  '/api/:session/privacy/set',
+  verifyToken,
+  statusConnection,
+  PrivacyController.setPrivacySetting
+);
+routes.post(
+  '/api/:session/privacy/status',
+  verifyToken,
+  statusConnection,
+  PrivacyController.setStatusPrivacy
+);
+// WhatsApp's "Keep chats archived" (WAWebArchiveSettingSync in WhatsApp Web).
+routes.get(
+  '/api/:session/keep-chats-archived',
+  verifyToken,
+  statusConnection,
+  PrivacyController.getKeepChatsArchived
+);
+routes.post(
+  '/api/:session/keep-chats-archived',
+  verifyToken,
+  statusConnection,
+  PrivacyController.setKeepChatsArchived
+);
+routes.post(
+  '/api/:session/message-ack',
+  verifyToken,
+  statusConnection,
+  DeviceController.getMessageAck
+);
 routes.post(
   '/api/:session/react-message',
   verifyToken,
   statusConnection,
   DeviceController.reactMessage
+);
+routes.get(
+  '/api/:session/meta-ai-terms',
+  verifyToken,
+  statusConnection,
+  DeviceController.getMetaAiTerms
+);
+routes.post(
+  '/api/:session/meta-ai-terms/accept',
+  verifyToken,
+  statusConnection,
+  DeviceController.acceptMetaAiTerms
 );
 routes.get(
   '/api/:session/send-capabilities',
@@ -726,10 +886,34 @@ routes.post(
   CallController.endCall
 );
 routes.post(
+  '/api/:session/call/ensure-ended',
+  verifyToken,
+  statusConnection,
+  CallController.ensureCallEnded
+);
+routes.post(
+  '/api/:session/call/status',
+  verifyToken,
+  statusConnection,
+  CallController.callStatus
+);
+routes.post(
+  '/api/:session/call/upgrade-video',
+  verifyToken,
+  statusConnection,
+  CallController.upgradeCallToVideo
+);
+routes.post(
   '/api/:session/call/offer',
   verifyToken,
   statusConnection,
   CallController.offerCall
+);
+routes.post(
+  '/api/:session/call/group/offer',
+  verifyToken,
+  statusConnection,
+  CallController.offerGroupCall
 );
 routes.get(
   '/api/:session/call/diagnostics',
@@ -737,6 +921,16 @@ routes.get(
   statusConnection,
   CallController.callDiagnostics
 );
+routes.post('/api/:session/call/group/ongoing', verifyToken, statusConnection,
+  CallController.ongoingGroupCall);
+routes.post('/api/:session/call/ongoing', verifyToken, statusConnection,
+  CallController.ongoingCalls);
+routes.post('/api/:session/call/participants', verifyToken, statusConnection,
+  CallController.callParticipants);
+routes.post('/api/:session/call/group/join', verifyToken, statusConnection,
+  CallController.joinGroupCall);
+routes.post('/api/:session/call/add-participants', verifyToken, statusConnection,
+  CallController.addCallParticipants);
 
 // Catalog
 routes.get(
@@ -823,6 +1017,37 @@ routes.post(
   statusConnection,
   CatalogController.setProductVisibility
 );
+// Carts and orders (WinZapp's own: commerceController.ts). The cart is the
+// buyer's; accepting, declining and updating an order are a business
+// account's. Creating an order for a customer (send-order-message) and the
+// business's own cart setting (set-cart-enabled) are the upstream routes.
+routes.get('/api/:session/commerce/account', verifyToken, statusConnection, CommerceController.account);
+routes.get('/api/:session/commerce/catalog/:chatId', verifyToken, statusConnection, CommerceController.catalog);
+routes.get('/api/:session/commerce/cart/:chatId', verifyToken, statusConnection, CommerceController.cart);
+routes.post('/api/:session/commerce/cart/:chatId/set', verifyToken, statusConnection, CommerceController.cartSet);
+routes.post('/api/:session/commerce/cart/:chatId/remove', verifyToken, statusConnection,
+  CommerceController.cartRemove);
+routes.post('/api/:session/commerce/cart/:chatId/clear', verifyToken, statusConnection,
+  CommerceController.cartClear);
+routes.post('/api/:session/commerce/cart/:chatId/submit', verifyToken, statusConnection,
+  CommerceController.cartSubmit);
+routes.get('/api/:session/commerce/order/:messageId', verifyToken, statusConnection, CommerceController.order);
+routes.post('/api/:session/commerce/order/:messageId/accept', verifyToken, statusConnection,
+  CommerceController.orderAccept);
+routes.post('/api/:session/commerce/order/:messageId/decline', verifyToken, statusConnection,
+  CommerceController.orderDecline);
+routes.post('/api/:session/commerce/order/:messageId/status', verifyToken, statusConnection,
+  CommerceController.orderUpdate);
+// The buyer's "Confirm order info" for an order a seller created, when it is
+// paid outside the app (orderConfirmController.ts).
+routes.get('/api/:session/commerce/order-details/:messageId', verifyToken, statusConnection,
+  OrderConfirmController.readBuyerOrder);
+routes.post('/api/:session/commerce/order-details/:messageId/confirm', verifyToken, statusConnection,
+  OrderConfirmController.confirmBuyerOrder);
+// A button of a business's message, answered the way WhatsApp Web does
+// (buttonReplyController.ts).
+routes.post('/api/:session/reply-button/:messageId', verifyToken, statusConnection,
+  ButtonReplyController.replyToButton);
 routes.post(
   '/api/:session/set-cart-enabled',
   verifyToken,
@@ -856,6 +1081,14 @@ routes.get(
   verifyToken,
   statusConnection,
   StatusController.getStatuses
+);
+// Delete one of the account's own statuses for everyone who received it
+// (statusDeleteController.ts).
+routes.post(
+  '/api/:session/status/:statusId/delete',
+  verifyToken,
+  statusConnection,
+  StatusDeleteController.deleteStatus
 );
 
 // Labels
@@ -954,6 +1187,26 @@ routes.post(
   DeviceController.unblockContact
 );
 
+// Contacts that WhatsApp syncs to the phone's address book (WPP.contact.save
+// / .remove, which neither wppconnect nor this server exposed).
+routes.post(
+  '/api/:session/save-contact',
+  verifyToken,
+  statusConnection,
+  ContactSaveController.saveContact
+);
+// Deliberately WITHOUT statusConnection, like subscribe-presence above: its
+// contact-validation pass answers 400 "O número X não existe." whenever
+// checkNumberStatus() fails or errors, and a contact whose number has left
+// WhatsApp is exactly one the user needs to be able to remove. The controller
+// answers a missing or closed page itself (503 contact_not_available), and
+// WPP.contact.remove says so when the number is not a contact.
+routes.post(
+  '/api/:session/remove-contact',
+  verifyToken,
+  ContactSaveController.removeContact
+);
+
 // Device
 routes.get(
   '/api/:session/get-battery-level',
@@ -981,6 +1234,12 @@ routes.post(
   verifyToken,
   statusConnection,
   DeviceController.setProfilePic
+);
+routes.get(
+  '/api/:session/my-profile',
+  verifyToken,
+  statusConnection,
+  DeviceController.getMyProfile
 );
 routes.post(
   '/api/:session/profile-status',
@@ -1014,7 +1273,12 @@ routes.get(
   statusConnection,
   OrderController.getOrderbyMsg
 );
-routes.get('/api/:secretkey/backup-sessions', MiscController.backupAllSessions);
+routes.get('/api/:secretkey/backup-sessions', (_req, res) =>
+  res.status(410).json({
+    message: 'Use POST /api/backup-sessions with the x-secret-key header.',
+  })
+);
+routes.post('/api/backup-sessions', MiscController.backupAllSessions);
 routes.post(
   '/api/:secretkey/restore-sessions',
   upload.single('file'),
@@ -1032,7 +1296,83 @@ routes.post(
   MiscController.setLimit
 );
 
+// WinZapp's channels window: followed channels, the directory, one channel,
+// follow, unfollow and mute (channelsPanelController.ts). Create, edit and
+// delete are the upstream newsletter routes further down.
+routes.post('/api/:session/channels/list', verifyToken, statusConnection,
+  ChannelsPanelController.listChannels);
+routes.post('/api/:session/channels/directory', verifyToken, statusConnection,
+  ChannelsPanelController.channelDirectory);
+routes.post('/api/:session/channels/info', verifyToken, statusConnection,
+  ChannelsPanelController.channelInfo);
+routes.post('/api/:session/channels/follow', verifyToken, statusConnection,
+  ChannelsPanelController.followChannel);
+routes.post('/api/:session/channels/unfollow', verifyToken, statusConnection,
+  ChannelsPanelController.unfollowChannel);
+routes.post('/api/:session/channels/mute', verifyToken, statusConnection,
+  ChannelsPanelController.muteChannel);
+routes.post('/api/:session/channels/pin', verifyToken, statusConnection,
+  ChannelsPanelController.pinChannelUpdate);
+routes.post('/api/:session/channels/reactions', verifyToken, statusConnection,
+  ChannelsPanelController.setChannelReactions);
+routes.post('/api/:session/channels/insights', verifyToken, statusConnection,
+  ChannelsPanelController.channelInsights);
+routes.post('/api/:session/channels/admin-profiles', verifyToken, statusConnection,
+  ChannelsPanelController.setChannelAdminProfiles);
+routes.post('/api/:session/channels/admins', verifyToken, statusConnection,
+  ChannelsPanelController.channelAdmins);
+routes.post('/api/:session/channels/admin-invite', verifyToken, statusConnection,
+  ChannelsPanelController.inviteChannelAdmin);
+routes.post('/api/:session/channels/admin-revoke', verifyToken, statusConnection,
+  ChannelsPanelController.revokeChannelAdminInvite);
+routes.post('/api/:session/channels/followers', verifyToken, statusConnection,
+  ChannelsPanelController.channelFollowers);
+routes.post('/api/:session/channels/admin-pending', verifyToken, statusConnection,
+  ChannelsPanelController.channelPendingAdmins);
+routes.post('/api/:session/channels/admin-demote', verifyToken, statusConnection,
+  ChannelsPanelController.demoteChannelAdmin);
+routes.post('/api/:session/channels/owner-change', verifyToken, statusConnection,
+  ChannelsPanelController.changeChannelOwner);
+
 //Communitys
+// The account's communities, their admins and joined groups (WinZapp's own:
+// see communityOverviewController.ts). The community actions below it are the
+// upstream routes, used as they are, except promotion: the library's cannot
+// promote anyone who is not an admin already (communityAdminController.ts).
+routes.get(
+  '/api/:session/communities',
+  verifyToken,
+  statusConnection,
+  CommunityOverviewController.listCommunities
+);
+// One community with the groups the account is not in, asked of WhatsApp the
+// way WhatsApp Web asks when the community is opened (a read).
+routes.get(
+  '/api/:session/community-subgroups/:communityId',
+  verifyToken,
+  statusConnection,
+  CommunityOverviewController.refreshCommunity
+);
+// Join a group of the community the account is not in, or ask to when an
+// admin has to approve; and withdraw that request (communityJoinController.ts).
+routes.post(
+  '/api/:session/community-subgroups/:communityId/:subgroupId/join',
+  verifyToken,
+  statusConnection,
+  CommunityJoinController.joinSubgroup
+);
+routes.post(
+  '/api/:session/community-subgroups/:communityId/:subgroupId/cancel-request',
+  verifyToken,
+  statusConnection,
+  CommunityJoinController.cancelJoinRequest
+);
+routes.post(
+  '/api/:session/community-admin/:communityId/promote',
+  verifyToken,
+  statusConnection,
+  CommunityAdminController.promoteAdmin
+);
 routes.post(
   '/api/:session/create-community',
   verifyToken,
@@ -1102,7 +1442,7 @@ routes.post(
   NewsletterController.muteNewsletter
 );
 
-routes.post('/api/:session/chatwoot', DeviceController.chatWoot);
+routes.post('/api/:session/chatwoot', verifyToken, DeviceController.chatWoot);
 
 // Api Doc
 routes.use('/api-docs', swaggerUi.serve as any);

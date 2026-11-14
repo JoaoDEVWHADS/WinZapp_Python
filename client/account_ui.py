@@ -76,6 +76,19 @@ def accounts_menu_signature(accounts: list[dict]) -> tuple:
     )
 
 
+def account_display_name(account: dict, i18n) -> str:
+    """Return the user-facing name for an account menu entry.
+
+    ``default`` is the internal name assigned to the first migrated/new
+    account, not a name the user entered. Keep user-chosen names unchanged,
+    but localize that one generated label.
+    """
+    name = account.get("name", account.get("id", ""))
+    if name == "default":
+        return i18n.t("acc_default_name")
+    return name
+
+
 def manager_rows(accounts: list[dict]) -> list[dict]:
     """Rows for the manager list: every non-deleting account, ordered, with a
     display state. 'deleting' accounts are hidden (mid-removal)."""
@@ -93,12 +106,21 @@ def can_archive(account: dict, current_account_id: str) -> tuple[bool, str]:
     return True, ""
 
 
-def can_hard_delete(account: dict, current_account_id: str) -> tuple[bool, str]:
+def can_hard_delete(account: dict, current_account_id: str,
+                    only_account: bool = False) -> tuple[bool, str]:
     """(allowed, reason_key). Hard-delete is never the current process's account
-    (must switch away first — plan Zad 4.5)."""
-    if account.get("id") == current_account_id:
+    (must switch away first — plan Zad 4.5), unless it is the only account:
+    there is nothing to switch to, so removing it closes WinZapp."""
+    if account.get("id") == current_account_id and not only_account:
         return False, "acc_err_delete_current"
     return True, ""
+
+
+def is_only_account(accounts: list, account_id: str) -> bool:
+    """True when `account_id` is the one account the install has (accounts being
+    removed do not count)."""
+    live = [a for a in accounts if a.get("state") != "deleting"]
+    return len(live) == 1 and live[0].get("id") == account_id
 
 
 def can_pair(account: dict, current_account_id: str) -> tuple[bool, str]:
@@ -110,6 +132,26 @@ def can_pair(account: dict, current_account_id: str) -> tuple[bool, str]:
     if account.get("state") != "pending":
         return False, "acc_err_pair_not_pending"
     return True, ""
+
+
+def account_to_foreground_after_close(accounts: list[dict], running_ids,
+                                      current_account_id: str) -> str | None:
+    """The account whose window takes over when the current one is closed
+    (Accounts > Close current account, Ctrl+F4), or None when no other account
+    is running — closing then quits WinZapp, which the caller confirms first.
+
+    Only accounts that are running already: bringing a closed one up would
+    spend the very resources closing is meant to free. Ordered like the menu
+    (the account's 'order'); a running account the registry does not list
+    (mid-removal, say) is still a window to land on, so it comes last rather
+    than being dropped."""
+    running = [r for r in (running_ids or ()) if r and r != current_account_id]
+    if not running:
+        return None
+    order = {a.get("id"): a.get("order", 0) for a in accounts}
+    known = sorted((r for r in running if r in order), key=lambda r: order[r])
+    unknown = [r for r in running if r not in order]
+    return (known + unknown)[0]
 
 
 def can_open(account: dict, current_account_id: str) -> tuple[bool, str]:
@@ -311,14 +353,15 @@ class UnpairedStartDialog:
 def build_accounts_menu(menu, accounts, current_account_id, i18n, id_factory):
     """Populate a wx 'Accounts' menu (plan Zad 4.2). Adds a radio-style item per
     paired account with Ctrl+Shift+<n> for the first 9, a separator, then
-    'Switch account…' and 'Manage accounts…'. Returns a dict mapping wx ids to
-    an action: {'switch': account_id} or {'open_switch': True}/{'open_manager': True}.
+    'Switch account…', 'Manage accounts…' and 'Close current account'. Returns a
+    dict mapping wx ids to an action: {'switch': account_id} or
+    {'open_switch': True}/{'open_manager': True}/{'close_current': True}.
     """
     wx = _wx()
     id_map: dict = {}
     for slot, acc in accelerator_slots(switchable_accounts(accounts)):
         item_id = id_factory()
-        label = f"&{slot} {acc.get('name', acc['id'])}\tCtrl+Alt+{slot}"
+        label = f"&{slot} {account_display_name(acc, i18n)}\tCtrl+Alt+{slot}"
         item = menu.AppendRadioItem(item_id, label)
         if acc.get("id") == current_account_id:
             item.Check(True)
@@ -330,6 +373,13 @@ def build_accounts_menu(menu, accounts, current_account_id, i18n, id_factory):
     mg_id = id_factory()
     menu.Append(mg_id, i18n.t("acc_menu_manage"))
     id_map[mg_id] = {"open_manager": True}
+    menu.AppendSeparator()
+    # Ctrl+F4 is handled by MainWindow._on_account_hotkey_char (frame-level
+    # EVT_CHAR_HOOK), for the same reason as Ctrl+Alt+1..9 above; the label
+    # only documents it.
+    close_id = id_factory()
+    menu.Append(close_id, f"{i18n.t('acc_menu_close_current')}\tCtrl+F4")
+    id_map[close_id] = {"close_current": True}
     return id_map
 
 
@@ -373,6 +423,11 @@ class AccountManagerDialog:
                   self.btn_restore, self.btn_delete):
             hbox.Add(b, 0, wx.ALL, 4)
         vbox.Add(hbox, 0, wx.ALL, 4)
+        # Install-wide: open every paired account when WinZapp starts.
+        self.chk_connect_all = wx.CheckBox(panel, label=i18n.t("acc_chk_connect_all"))
+        self.chk_connect_all.SetValue(self._connect_all_enabled())
+        self.chk_connect_all.Bind(wx.EVT_CHECKBOX, self._on_connect_all)
+        vbox.Add(self.chk_connect_all, 0, wx.ALL, 8)
         # Close button parented to the SAME panel as the sizer (wx requires the
         # sizer's managed widgets to share the sizer's window as parent, else
         # wxAssertionError CheckExpectedParentIs and the dialog never shows).
@@ -402,6 +457,26 @@ class AccountManagerDialog:
         self.lst.Bind(wx.EVT_LIST_ITEM_DESELECTED, lambda e: self._update_button_visibility())
         self._reload()
         self.lst.SetFocus()
+
+    # ── connect all accounts at startup ──────────────────────────────────
+    def _app_settings(self):
+        from app_settings import AppSettings
+        return AppSettings(self.global_dir)
+
+    def _connect_all_enabled(self) -> bool:
+        try:
+            return bool(self._app_settings().get("connect_all_accounts"))
+        except Exception:
+            logging.exception("[account manager] reading connect_all_accounts failed")
+            return False
+
+    def _on_connect_all(self, _e):
+        try:
+            self._app_settings().set("connect_all_accounts", self.chk_connect_all.GetValue())
+        except Exception:
+            logging.exception("[account manager] saving connect_all_accounts failed")
+            self.chk_connect_all.SetValue(self._connect_all_enabled())
+            self._error("acc_err_connect_all_save")
 
     # ── data ─────────────────────────────────────────────────────────────
     def _reload(self):
@@ -535,13 +610,19 @@ class AccountManagerDialog:
         acc = self._selected()
         if not acc:
             return
-        ok, reason = can_hard_delete(acc, self.current)
+        only = is_only_account(self.registry.list(), acc["id"])
+        ok, reason = can_hard_delete(acc, self.current, only_account=only)
         if not ok:
             self._error(reason)
             return
-        if wx.MessageBox(self.i18n.t("acc_delete_confirm").format(name=acc.get("name", "")),
+        in_use = acc["id"] == self.current
+        message_key = "acc_delete_last_confirm" if in_use else "acc_delete_confirm"
+        if wx.MessageBox(self.i18n.t(message_key).format(name=acc.get("name", "")),
                          self.i18n.t("acc_btn_delete").replace("&", ""),
-                         wx.YES_NO | wx.ICON_WARNING) != wx.YES:
+                         wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING) != wx.YES:
+            return
+        if in_use:
+            self._delete_account_in_use(acc)
             return
         try:
             _hard_delete_account(self.registry, self.global_dir, acc["id"])
@@ -549,6 +630,18 @@ class AccountManagerDialog:
             logging.exception("[account manager] hard delete failed")
             self._error("acc_err_delete_failed")
         self._reload()
+
+    def _delete_account_in_use(self, acc):
+        """The only account, and the one running: its files are open, so it is
+        marked 'deleting' and removed by the shutdown, after the browser and the
+        database are closed (an interrupted removal is finished at the next
+        start). WinZapp then closes - there is no account left to show."""
+        wx = _wx()
+        main_window = self.dlg.GetParent()
+        self.registry.set_state(acc["id"], "deleting")
+        main_window._purge_account_on_exit = acc["id"]
+        self.dlg.EndModal(wx.ID_CLOSE)
+        wx.CallAfter(main_window.real_exit)
 
     def _error(self, key):
         wx = _wx()
@@ -563,20 +656,12 @@ class AccountManagerDialog:
 
 
 def _hard_delete_account(registry, global_dir, account_id) -> None:
-    """Remove an account's data dir + registry entry, coordinating Node teardown
-    (plan Zad 4.5 / GPT r7 #3): the account's WPPConnect userDataDir must not be
-    deleted while the shared Node might be using it. We mark 'deleting' first
-    (blocks bootstrap), verify under node_lock that no live lease belongs to it,
-    then rmtree + remove from the registry.
+    """Remove everything an account owns - its data dir, the browser profile of
+    its sessions and that profile's restore points - then its registry entry
+    (client/account_removal.py). We mark 'deleting' first (blocks bootstrap) and
+    release its node lease; whatever cannot be removed now keeps the account
+    'deleting' and is finished at the next start.
     """
-    import shutil
-    import node_coord
+    import account_removal
 
-    registry.set_state(account_id, "deleting")
-    # Ensure this account holds no live node-lease.
-    node_coord.release_node_lease(global_dir, account_id)
-    data_dir = registry.data_dir_for(account_id)
-    try:
-        shutil.rmtree(data_dir, ignore_errors=True)
-    finally:
-        registry.remove(account_id)
+    account_removal.purge_account(registry, global_dir, account_id)

@@ -18,7 +18,7 @@ against what WinZapp overrides:
    trap: a changed dependency we do NOT override is good news, and upstream
    moving a caret we DO override is not by itself a reason to move our pin.
 3. **Whether the homologated pair moved.** `@wppconnect-team/wppconnect` and
-   `@wppconnect/wa-js` are pinned exact against the four `node_modules` patch
+   `@wppconnect/wa-js` are pinned exact against the five `node_modules` patch
    modules. Upstream moving its own declaration does not move ours, but it is
    the one dependency change worth a human's eyes.
 4. **Whether `engines.node` still matches the Node WinZapp ships.** Upstream
@@ -33,9 +33,16 @@ audit cannot answer against a stale copy of the very thing it is checking.
 Reads GitHub through `gh`, which every maintainer running this already has.
 Exit 1 means "a human has to look", never "the bump is wrong".
 
+`--approve` also records the candidate in `client/wpp_approved_versions.json`
+(core/wpp_approved.py) when the audit is clean and upstream touched nothing
+it compiles (`src/`, root build files): every install whose pin is at or after the old tag is then
+offered it, without a WinZapp release. It refuses otherwise; that release
+needs porting and a pin bump instead.
+
 Usage:
     python .github/scripts/audit_wpp_upgrade.py 2.10.21 2.10.24
     python .github/scripts/audit_wpp_upgrade.py 2.10.24   # from the committed pin
+    python .github/scripts/audit_wpp_upgrade.py 2.10.24 --approve
 
 tests/test_wpp_upgrade_audit.py covers the pure functions.
 """
@@ -227,6 +234,133 @@ def _bare(tag: str) -> str:
     return tag.strip().lstrip("vV")
 
 
+APPROVED_PATH = os.path.join(ROOT_DIR, "client", "wpp_approved_versions.json")
+
+
+def _is_built(path: str) -> bool:
+    if path.startswith("src/"):
+        return True
+    if "/" in path:
+        return False   # scripts/, .github/, docs: not part of dist/
+    name = path.lower()
+    return (name.endswith((".js", ".cjs", ".mjs", ".ts"))
+            or name.startswith(("tsconfig", "babel", ".babelrc")))
+
+
+def built_source_changes(changed_paths) -> list:
+    """Upstream changes to what `npm run build` compiles: src/ and the
+    build configuration and scripts at the repository root.
+
+    They reach an install through a server update, but every WinZapp update
+    copies the release's dist/, built at the pin, back over it
+    (core/update_keeps_server.py), so they would come and go with each
+    WinZapp release. A release approved without a WinZapp release must have
+    none.
+    """
+    return sorted(p for p in set(changed_paths) if _is_built(p))
+
+
+def node_requirement_moved(old_pkg: dict, new_pkg: dict) -> tuple:
+    """(old, new) engines.node when upstream changed it between the tags, else ().
+
+    The audit's own engines check compares with the NODE_VERSION of this
+    checkout, but an approval reaches every shipped build pinned at the old
+    tag or later, each with the Node it bundled. Those builds only have the old
+    tag's Node for sure.
+    """
+    was = ((old_pkg.get("engines") or {}).get("node") or "").strip()
+    now = ((new_pkg.get("engines") or {}).get("node") or "").strip()
+    return (was, now) if was != now else ()
+
+
+def approval_blockers(result: dict, changed_paths, old_pkg: dict = None,
+                      new_pkg: dict = None, min_winzapp: str = "") -> list:
+    """Why the candidate cannot be approved for builds pinned at the old tag."""
+    blockers = list(result["problems"])
+    moved = node_requirement_moved(old_pkg or {}, new_pkg or {})
+    if moved and not min_winzapp:
+        blockers.append(
+            f"Upstream moved engines.node from {moved[0] or 'nothing'} to "
+            f"{moved[1] or 'nothing'}. Builds already shipped bundle the old "
+            f"Node: pass --min-winzapp with the first WinZapp version that "
+            f"ships a matching one."
+        )
+    source = built_source_changes(changed_paths)
+    if source:
+        blockers.append(
+            "Upstream changed compiled source (" + ", ".join(source) + "). "
+            "A WinZapp update puts the pin's dist/ back, so this release can "
+            "only ship with a WinZapp release that bumps the pin."
+        )
+    return blockers
+
+
+def with_approval(manifest: dict, version: str, min_pin: str,
+                  min_winzapp: str = "") -> dict:
+    """*manifest* with {version, min_pin[, min_winzapp]} recorded, newest first.
+
+    Re-approving a version never narrows who gets it: the older of the two
+    min_pin values is kept (the default old tag is the current pin, which
+    moves). Every other entry is kept untouched.
+    """
+    from packaging.version import Version
+
+    entries, previous = [], None
+    for entry in manifest.get("approved", []):
+        if _bare(str(entry.get("version", ""))) == _bare(version):
+            previous = entry
+        else:
+            entries.append(entry)
+    pin = _bare(min_pin)
+    if previous is not None:
+        try:
+            pin = str(min(Version(pin), Version(_bare(str(previous.get("min_pin", ""))))))
+        except Exception:
+            pass   # an unreadable old entry is simply replaced
+    requirement = _later_winzapp(min_winzapp.strip(),
+                                 str((previous or {}).get("min_winzapp", "")).strip())
+    entry = {"version": _bare(version), "min_pin": pin}
+    if requirement:
+        entry["min_winzapp"] = requirement
+    entries.append(entry)
+    entries.sort(key=lambda e: Version(_bare(str(e["version"]))), reverse=True)
+    return {**manifest, "schema": manifest.get("schema", 1), "approved": entries}
+
+
+def _later_winzapp(a: str, b: str) -> str:
+    """The stricter of two min_winzapp requirements ("" = none).
+
+    Keeping the older min_pin on a re-approval must keep the requirement that
+    came with it, or builds pinned there with an older Node are offered the
+    release again. Unparseable values keep the one given now.
+    """
+    import re
+
+    def key(text):
+        m = re.match(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)", text)
+        return tuple(int(g) for g in m.groups()) if m else None
+
+    if not a or not b:
+        return a or b
+    ka, kb = key(a), key(b)
+    if ka is None or kb is None:
+        return a
+    return a if ka >= kb else b
+
+
+def write_approval(version: str, min_pin: str, path: str = APPROVED_PATH,
+                   min_winzapp: str = "") -> None:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except FileNotFoundError:
+        manifest = {"schema": 1, "approved": []}
+    updated = with_approval(manifest, version, min_pin, min_winzapp)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(updated, fh, indent=2)
+        fh.write("\n")
+
+
 def committed_pin() -> str:
     path = os.path.join(ROOT_DIR, "client", "wpp_minimum_version.txt")
     with open(path, encoding="utf-8") as fh:
@@ -294,7 +428,7 @@ def audit(changed_paths, old_pkg: dict, new_pkg: dict) -> dict:
             "The homologated runtime pair moved upstream: "
             + ", ".join(f"{name} {was} -> {now}" for (_b, name), (was, now) in sorted(pair.items()))
             + ". WinZapp's exact pin still wins, so nothing changes by itself, but "
-            "re-homologating means running all four node_modules patches against "
+            "re-homologating means running all five node_modules patches against "
             "the candidate first (see the wppconnect-patch skill)."
         )
     engines = engines_node_mismatch(new_pkg)
@@ -312,6 +446,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("old_tag", nargs="?", help="current tag (default: the committed pin)")
     parser.add_argument("new_tag", help="candidate tag")
+    parser.add_argument("--approve", action="store_true",
+                        help="record the candidate in client/wpp_approved_versions.json "
+                             "for builds pinned at the old tag or later, if it is clean")
+    parser.add_argument("--min-winzapp", default="",
+                        help="with --approve: the first WinZapp version that can run "
+                             "the candidate (required when engines.node moved)")
     args = parser.parse_args()
 
     old_tag = args.old_tag or committed_pin()
@@ -321,11 +461,10 @@ def main() -> int:
     print(f"=== WPPConnect Server {old_tag} -> {new_tag} ===\n")
 
     try:
-        result = audit(
-            fetch_changed_paths(old_tag, new_tag),
-            fetch_package_json(old_tag),
-            fetch_package_json(new_tag),
-        )
+        changed_paths = fetch_changed_paths(old_tag, new_tag)
+        old_pkg = fetch_package_json(old_tag)
+        new_pkg = fetch_package_json(new_tag)
+        result = audit(changed_paths, old_pkg, new_pkg)
     except AuditUnavailable as exc:
         # Deliberately not 1: "the audit could not run" and "the audit found
         # something" are opposite situations, and a typo'd tag reading as a
@@ -335,6 +474,10 @@ def main() -> int:
 
     for line in result["lines"]:
         print(line)
+
+    if args.approve:
+        return _approve(old_tag, new_tag, result, changed_paths,
+                        old_pkg, new_pkg, args.min_winzapp)
 
     if result["problems"]:
         print("NEEDS A HUMAN:")
@@ -346,9 +489,27 @@ def main() -> int:
           "homologated pair is untouched, and engines.node still matches the "
           "Node WinZapp ships.")
     print("Still do both: bump client/wpp_minimum_version.txt, then re-run "
-          "setup_api.py and confirm all four node_modules patches report "
+          "setup_api.py and confirm all five node_modules patches report "
           "applied. A plain npm install can resolve differently even when "
           "nothing upstream moved.")
+    return 0
+
+
+def _approve(old_tag: str, new_tag: str, result: dict, changed_paths,
+             old_pkg: dict, new_pkg: dict, min_winzapp: str) -> int:
+    blockers = approval_blockers(result, changed_paths, old_pkg, new_pkg, min_winzapp)
+    if blockers:
+        print("NOT APPROVED:")
+        for blocker in blockers:
+            print(f"  - {blocker}")
+        return 1
+    write_approval(new_tag, old_tag, min_winzapp=min_winzapp)
+    print(f"Approved {_bare(new_tag)} for every build pinned at {_bare(old_tag)} or "
+          f"later, in client/wpp_approved_versions.json.")
+    print(f"Before merging it to main, build it once: set WPPCONNECT_TAG_VERSION=v"
+          f"{_bare(new_tag)}, run setup_api.py, confirm all five node_modules "
+          f"patches report applied, and send a message. Installs read the file "
+          f"from main, so the merge is the release.")
     return 0
 
 

@@ -3,6 +3,7 @@ paths:
   - "client/core/utils.py"
   - "client/data/settings_default.json"
   - "client/app_settings.py"
+  - "client/main_window/settings.py"
 ---
 
 # Settings migrations

@@ -31,6 +31,7 @@ import wx
 import main as main_module
 from main import MainWindow
 from status_panel import StatusPanel, _status_content_label, _status_media_save_info
+from tests.god_modules import patch_main_global
 
 
 class _FakeI18n:
@@ -46,6 +47,9 @@ class _FakeI18n:
         "contact_message": "Contato: {name}",
         "unknown_contact": "Contato sem nome",
         "notif_unsupported": "Mensagem não suportada",
+        "notif_location": "Localização",
+        "notif_poll": "Enquete: {name}",
+        "notif_poll_no_name": "Enquete",
         "status_recent_updates": "Recentes",
         "status_viewed_updates": "Vistos",
         "my_status": "Meu status",
@@ -216,6 +220,7 @@ class _FakeKeyEvent:
 
 
 class _Stub:
+    _update_status_describe_button = lambda self: None  # the AI Describe button has its own tests
     _show_current_status         = StatusPanel._show_current_status
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
     _on_status_contact_activated = StatusPanel._on_status_contact_activated
@@ -226,6 +231,13 @@ class _Stub:
     _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
     _resolve_name                = StatusPanel._resolve_name
     _status_preview              = StatusPanel._status_preview
+    # The row text and Enter/Space now pass through the transcription mixin
+    # (status_tab/status_transcription.py); with its setting off and nothing
+    # saved, as here, they change nothing.
+    _status_inline_suffix        = StatusPanel._status_inline_suffix
+    _status_shown_by_row         = StatusPanel._status_shown_by_row
+    _enter_transcribes_status_row = StatusPanel._enter_transcribes_status_row
+    _open_status_row             = StatusPanel._open_status_row
     _on_play_pause_video         = StatusPanel._on_play_pause_video
     _update_play_pause_label     = StatusPanel._update_play_pause_label
     _is_status_liked             = StatusPanel._is_status_liked
@@ -236,6 +248,7 @@ class _Stub:
     _on_next_status               = StatusPanel._on_next_status
     _on_prev_status                = StatusPanel._on_prev_status
     _on_escape                    = StatusPanel._on_escape
+    _hide_status_viewer           = StatusPanel._hide_status_viewer
     _hide_post_panels             = StatusPanel._hide_post_panels
     _is_status_composer_open      = StatusPanel._is_status_composer_open
     _enter_status_composer        = StatusPanel._enter_status_composer
@@ -249,6 +262,7 @@ class _Stub:
     _mark_status_viewed           = StatusPanel._mark_status_viewed
     _MAX_REMEMBERED_VIEWED        = StatusPanel._MAX_REMEMBERED_VIEWED
     _populate_list                = StatusPanel._populate_list
+    _unsent_rows                  = StatusPanel._unsent_rows
     _my_status_label              = StatusPanel._my_status_label
     _set_list_loading             = StatusPanel._set_list_loading
     _status_row_text              = StatusPanel._status_row_text
@@ -1010,6 +1024,18 @@ class TestStatusContentLabelHandlesEveryMessageType:
         label = _status_content_label("documentMessage", {"documentMessage": {}}, self.i18n)
         assert label == "Documento"
 
+    def test_location_status_is_not_incompatible(self):
+        label = _status_content_label("locationMessage", {"locationMessage": {}}, self.i18n)
+        assert label == "Localização"
+
+    def test_poll_status_is_not_incompatible(self):
+        msg_obj = {"pollCreationMessage": {"name": "Pizza?"}}
+        label = _status_content_label("pollCreationMessage", msg_obj, self.i18n)
+        assert label == "Enquete: Pizza?"
+
+    def test_truly_unknown_status_stays_incompatible(self):
+        assert _status_content_label("weirdMessage", {}, self.i18n) == "Mensagem não suportada"
+
     def test_sticker_status_is_translated(self):
         label = _status_content_label("stickerMessage", {}, self.i18n)
         assert label == "Figurinha"
@@ -1625,6 +1651,19 @@ class TestEscapeClosesTheViewer:
         assert stub._selected_contact_idx == -1
         assert stub._video_player.stop_calls == 1
 
+    def test_rows_that_waited_come_in_after_esc(self, monkeypatch):
+        """Reviewer: a post that failed while a status was open waited for
+        the viewer to close, and Esc, the usual way out, did not bring it in."""
+        import wx
+        queued = []
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **k: queued.append(fn))
+        stub = _Stub()
+        stub._viewer_panel.Show()
+        stub._unsent_redraw_pending = True
+        stub._flush_unsent_redraw = lambda: None
+        stub._on_escape(None)
+        assert queued == [stub._flush_unsent_redraw]
+
     def test_no_op_when_already_hidden(self):
         stub = _Stub()
         stub._viewer_panel.Hide()
@@ -1780,7 +1819,7 @@ class TestFailedStatusReplyNeverDegradesToPlainMessage:
             calls.append((url, kwargs["json"]))
             return self._Response()
 
-        monkeypatch.setattr(main_module, "api_post", _post)
+        patch_main_global(monkeypatch, "api_post", _post)
         stub = self._MainStub()
 
         result = stub.send_text_message(

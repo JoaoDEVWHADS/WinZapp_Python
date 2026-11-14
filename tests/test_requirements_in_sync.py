@@ -24,8 +24,28 @@ from packaging.version import Version
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _read_requirements(name: str) -> dict:
+def _keyed(requirements: list, source: str) -> dict:
+    """{key: Requirement}. A package listed once is keyed by its name; one
+    listed several times (a different pin per platform, like onnxruntime on an
+    Intel Mac) by name and marker, which must then differ."""
+    counts = {}
+    for req in requirements:
+        counts[canonicalize_name(req.name)] = counts.get(canonicalize_name(req.name), 0) + 1
     reqs = {}
+    for req in requirements:
+        name = canonicalize_name(req.name)
+        key = name if counts[name] == 1 else f"{name};{_marker(req)}"
+        assert key not in reqs, f"{source} lists {req.name} twice"
+        reqs[key] = req
+    return reqs
+
+
+def _base_name(key: str) -> str:
+    return key.split(";", 1)[0]
+
+
+def _read_requirements(name: str) -> dict:
+    parsed = []
     for raw in (ROOT / name).read_text(encoding="utf-8").splitlines():
         line = raw.split(" #", 1)[0].strip()
         if not line or line.startswith("#"):
@@ -34,11 +54,8 @@ def _read_requirements(name: str) -> dict:
             f"{name}: pip options and includes ({line!r}) are not understood "
             "by this check — extend it before using one"
         )
-        req = Requirement(line)
-        key = canonicalize_name(req.name)
-        assert key not in reqs, f"{name} lists {req.name} twice"
-        reqs[key] = req
-    return reqs
+        parsed.append(Requirement(line))
+    return _keyed(parsed, name)
 
 
 def _pyproject() -> dict:
@@ -46,13 +63,7 @@ def _pyproject() -> dict:
     declared = list(data["project"]["dependencies"])
     for group in data.get("dependency-groups", {}).values():
         declared.extend(group)
-    reqs = {}
-    for spec in declared:
-        req = Requirement(spec)
-        key = canonicalize_name(req.name)
-        assert key not in reqs, f"pyproject.toml declares {req.name} twice"
-        reqs[key] = req
-    return reqs
+    return _keyed([Requirement(spec) for spec in declared], "pyproject.toml")
 
 
 def _pin(req: Requirement) -> str:
@@ -139,14 +150,13 @@ def _windows_lock_closure() -> dict:
     from packaging.markers import Marker
 
     entries = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8")).get("package", [])
-    packages = {canonicalize_name(pkg["name"]): pkg for pkg in entries}
-    # The walk below keys packages by name and never follows extras. Neither
-    # happens in today's lock; if either appears, say so instead of quietly
-    # comparing against the wrong version or an incomplete set.
-    assert len(packages) == len(entries), (
-        "uv.lock now records one package at several versions; teach "
-        "_windows_lock_closure() to pick by resolution marker"
-    )
+    packages = {(canonicalize_name(pkg["name"]), pkg["version"]): pkg for pkg in entries}
+    versions = {}
+    for name, version in packages:
+        versions.setdefault(name, []).append(version)
+    # The walk below never follows extras. None appear in today's lock; if one
+    # does, say so instead of quietly comparing an incomplete set. A package
+    # locked at several versions is picked by the version its edge names.
     assert not any("optional-dependencies" in pkg for pkg in entries) and not any(
         "extra" in dep for pkg in entries for dep in pkg.get("dependencies", [])
     ), "uv.lock now uses extras; teach _windows_lock_closure() to follow them"
@@ -167,8 +177,13 @@ def _windows_lock_closure() -> dict:
             key = canonicalize_name(dep["name"])
             if key in seen:
                 continue
-            seen[key] = str(Version(packages[key]["version"]))
-            pending.append(packages[key])
+            version = dep.get("version") or versions[key][0]
+            assert dep.get("version") or len(versions[key]) == 1, (
+                f"uv.lock records {key} at several versions and an edge that "
+                "does not say which"
+            )
+            seen[key] = str(Version(version))
+            pending.append(packages[(key, version)])
     return seen
 
 
@@ -178,10 +193,12 @@ def test_pip_pins_every_package_uv_installs_on_windows():
     `pip install -r` then quietly takes whatever is newest on PyPI."""
     if not (ROOT / "uv.lock").is_file():
         pytest.skip("no uv.lock in this checkout")
-    pip_side = {
-        key: str(Version(_pin(req)))
-        for key, req in _read_requirements("requirements.txt").items()
-    }
+    pip_side = {}
+    for key, req in _read_requirements("requirements.txt").items():
+        # Of a platform-split pin only the one that applies on Windows counts.
+        if req.marker is not None and not req.marker.evaluate(_WINDOWS_CPYTHON_313):
+            continue
+        pip_side[_base_name(key)] = str(Version(_pin(req)))
     problems = []
     for key, version in sorted(_windows_lock_closure().items()):
         if key not in pip_side:
@@ -206,6 +223,7 @@ def test_uv_lock_resolves_the_same_pins():
     stale = []
     for key, req in _pyproject().items():
         wanted = str(Version(_pin(req)))
-        if wanted not in locked.get(key, set()):
-            stale.append(f"{req.name}=={wanted} (uv.lock has {sorted(locked.get(key, []))})")
+        name = _base_name(key)
+        if wanted not in locked.get(name, set()):
+            stale.append(f"{req.name}=={wanted} (uv.lock has {sorted(locked.get(name, []))})")
     assert not stale, f"uv.lock is stale — run `uv lock`: {stale}"

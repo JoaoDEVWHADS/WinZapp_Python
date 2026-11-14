@@ -42,6 +42,11 @@ class _FakeMentionPanel:
 class _Stub:
     _on_message_field_key_down = ConversationsPanel._on_message_field_key_down
     on_change_message_field = ConversationsPanel.on_change_message_field
+    # Shift+Enter ends an emoticon too (core/emoticons.py), and Backspace may
+    # undo one; both go through these.
+    _convert_emoticon_before_caret = ConversationsPanel._convert_emoticon_before_caret
+    _undo_emoticon_conversion = ConversationsPanel._undo_emoticon_conversion
+    _emoticon_conversion_enabled = ConversationsPanel._emoticon_conversion_enabled
 
     def __init__(self, frame):
         self.message_field = wx.TextCtrl(frame, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER)

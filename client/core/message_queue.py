@@ -14,6 +14,7 @@ Behaviour
 """
 
 import logging
+import os
 import threading
 import time
 import wx
@@ -37,19 +38,32 @@ class PendingMessage:
                  contact_info: dict = None,
                  quoted: dict = None,
                  mentioned_jids: list = None,
-                 link_preview: dict = None):
+                 link_preview: dict = None,
+                 owns_media_path: bool = False,
+                 custom_filename: str = "",
+                 poll: dict = None,
+                 voice_mimetype: str = ""):
         # local_id matches the "_local_id" field in the virtual message dict
         # that was already added to the UI.
         self.local_id      = local_id
         self.jid           = jid
         self.text          = text           # plain-text body
         self.audio_path    = audio_path     # path to recorded WAV
-        self.ogg_bytes     = ogg_bytes      # pre-encoded OGG Opus (skips encoding on send)
+        self.ogg_bytes     = ogg_bytes      # pre-encoded voice message (skips encoding on send)
+        self.voice_mimetype = voice_mimetype  # of ogg_bytes when not OGG Opus (core/voice_stereo.py)
         self.media_path    = media_path     # path to attached file (image/video/doc/audio)
         self.media_type    = media_type     # "image"|"video"|"audio"|"document"
+        # Only internally-created recordings opt in. Never remove a file the
+        # user picked as an attachment. This does not select the PTT sender.
+        self.owns_media_path = bool(owns_media_path)
+        # The name the recipient sees, when the temp file's own name is not
+        # one (a recorded audio message).
+        self.custom_filename = custom_filename or ""
+        self.recording_path = audio_path or (media_path if owns_media_path else None)
         self.caption       = caption or ""  # optional caption for media
         self.progress_callback = progress_callback
         self.contact_info  = contact_info   # dict for contact attachment
+        self.poll          = poll           # {"name", "options", "selectableCount"} for a poll
         self.quoted        = quoted         # quoted/replied-to message dict
         self.mentioned_jids = mentioned_jids or []  # JIDs @mentioned in text
         self.link_preview  = link_preview   # resolved {"title","description","canonicalUrl"} or None
@@ -301,7 +315,7 @@ class MessageQueue:
             msg.local_id,
             real_id if isinstance(real_id, str) else None,
             msg.jid,
-            msg.audio_path,
+            msg.recording_path,
             quote_lost,
             # Passed on rather than folded into "no ID": the UI restores an
             # unknown outcome differently from a confirmed one.
@@ -319,7 +333,7 @@ class MessageQueue:
         wx.CallAfter(
             self.main_window._on_cancelled_message_dropped,
             msg.local_id,
-            msg.audio_path,
+            msg.recording_path,
         )
 
     def _run(self, media_only: bool):
@@ -387,6 +401,7 @@ class MessageQueue:
                         real_id = self.main_window.send_audio_message(
                             msg.jid, msg.audio_path, quoted=msg.quoted,
                             ogg_bytes=msg.ogg_bytes,
+                            voice_mimetype=msg.voice_mimetype,
                         )
                     elif msg.media_path:
                         def _media_progress(progress, pending=msg):
@@ -399,6 +414,11 @@ class MessageQueue:
                             msg.jid, msg.media_path, msg.media_type, msg.caption,
                             quoted=msg.quoted, upload_id=msg.local_id,
                             progress_callback=_media_progress,
+                            custom_filename=msg.custom_filename,
+                        )
+                    elif msg.poll:
+                        real_id = self.main_window.send_poll_message(
+                            msg.jid, msg.poll
                         )
                     elif msg.contact_info:
                         real_id = self.main_window.send_contact_attachment(
@@ -412,6 +432,7 @@ class MessageQueue:
                         )
                     retryable_failure = False
                     disconnected      = False
+                    failure_reason    = ""
                     if isinstance(real_id, dict):
                         if real_id.get("ok"):
                             quote_lost = bool(real_id.get("quote_lost", False))
@@ -421,6 +442,7 @@ class MessageQueue:
                             retryable_failure = bool(real_id.get("retry", True))
                             disconnected      = bool(real_id.get("disconnected"))
                             ambiguous         = bool(real_id.get("ambiguous"))
+                            failure_reason    = real_id.get("reason") or ""
                             real_id = False
 
                     if msg.cancel_event.is_set():
@@ -498,7 +520,7 @@ class MessageQueue:
                         wx.CallAfter(
                             self.main_window._on_message_sent,
                             msg.local_id,
-                            msg.audio_path,
+                            msg.recording_path,
                             real_id if isinstance(real_id, str) else None,
                             msg.jid,
                             quote_lost,
@@ -518,12 +540,15 @@ class MessageQueue:
                                           msg.local_id, msg.jid, msg.fail_count, msg.last_error)
                             with self._lock:
                                 self._pending.pop(msg.local_id, None)
-                            wx.CallAfter(
-                                self.main_window._on_message_failed,
-                                msg.local_id,
-                                msg.last_error,
-                                bool(msg.media_path),  # show dialog for media failures
-                            )
+                            if failure_reason == "quoted_message_not_found":
+                                wx.CallAfter(self.main_window._on_reply_quote_missing, msg.local_id)
+                            else:
+                                wx.CallAfter(
+                                    self.main_window._on_message_failed,
+                                    msg.local_id,
+                                    msg.last_error,
+                                    bool(msg.media_path),  # show dialog for media failures
+                                )
                             # Same as the ambiguous branch: _on_message_failed()
                             # is cancel-aware, so this is this message's report.
                             reported = True
@@ -585,6 +610,19 @@ class MessageQueue:
                             and msg.local_id not in self._pending
                             and not reported
                         )
+                        release_owned_media = (
+                            msg.owns_media_path and not real_id
+                            and msg.local_id not in self._pending
+                        )
+                    # No retry is possible after a terminal failure/unknown
+                    # outcome. The encrypted .msv remains for offline playback;
+                    # only our generated plaintext upload is disposable here.
+                    # Success/cancel callbacks own the recording on delivery.
+                    if release_owned_media and msg.media_path:
+                        try:
+                            os.unlink(msg.media_path)
+                        except OSError:
+                            pass
                     if orphaned:
                         # Outside the try/except above, so it needs its own:
                         # an exception raised here is on the worker thread with

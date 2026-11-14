@@ -19,6 +19,7 @@ function against a stub carrying only what it touches.
 import pytest
 
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 TOKEN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:$2b$10$abcdef"
@@ -36,7 +37,7 @@ class _FakeStore:
                 return entry
         return None
 
-    def register(self, name, token=None, status="active"):
+    def register(self, name, token=None, status="active", engine=None):
         self.registered.append({"name": name, "token": token, "status": status})
         self.entries = [e for e in self.entries if e["name"] != name]
         self.entries.append({"name": name, "status": status})
@@ -44,6 +45,8 @@ class _FakeStore:
 
 class _Stub:
     _register_abandoned_session = MainWindow._register_abandoned_session
+    _session_engine_name = MainWindow._session_engine_name
+    wpp_engine = "wppconnect"
 
     def __init__(self, store=None):
         self._store = store
@@ -217,7 +220,7 @@ def captured_post(monkeypatch):
 
     import main as main_module
 
-    monkeypatch.setattr(main_module, "api_post", _fake_post)
+    patch_main_global(monkeypatch, "api_post", _fake_post)
     return calls
 
 
@@ -301,7 +304,7 @@ class TestLogoutCircuitBreaker:
         def _refuse(url, **kwargs):
             raise requests.exceptions.ConnectionError("refused")
 
-        monkeypatch.setattr(main_module, "api_post", _refuse)
+        patch_main_global(monkeypatch, "api_post", _refuse)
 
         assert _LogoutStub()._logout_abandoned_session("s", token="t") is False
 
@@ -311,7 +314,7 @@ class TestLogoutCircuitBreaker:
         def _boom(url, **kwargs):
             raise ValueError("something else")
 
-        monkeypatch.setattr(main_module, "api_post", _boom)
+        patch_main_global(monkeypatch, "api_post", _boom)
 
         assert _LogoutStub()._logout_abandoned_session("s", token="t") is True
 

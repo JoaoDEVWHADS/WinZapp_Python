@@ -33,7 +33,7 @@ import os
 import sys
 import time
 import uuid
-from typing import Callable, Optional
+from typing import Callable, Optional, NamedTuple
 
 from coord_locks import updater_lock
 
@@ -141,12 +141,42 @@ def _default_proc_create_time(pid: int):
         return _CT_UNKNOWN  # unknown -> fail closed
 
 
+def _current_image_basename() -> str:
+    r"""Lower-cased basename of the image THIS process is actually running.
+
+    ``sys.executable`` is not always that image. Under the Microsoft Store
+    build of Python it reports the WindowsApps *alias*
+    (``...\AppData\Local\Microsoft\WindowsApps\...\python.exe``) while the
+    process Windows actually created — and the name every process listing,
+    psutil included, reports for it — is ``python3.13.exe`` under
+    ``C:\Program Files\WindowsApps\...``. Both liveness paths below compare
+    image basenames, so on such an install WinZapp failed to recognise even
+    its own pid: `_default_proc_matches_us(os.getpid())` returned False, and
+    a live holder read as dead. ``GetModuleFileNameW(NULL)`` resolves the
+    real image regardless of the alias, without adding a psutil dependency
+    the installed build does not have.
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        if ctypes.windll.kernel32.GetModuleFileNameW(None, buffer, len(buffer)):
+            return os.path.basename(buffer.value).lower()
+    except Exception:
+        pass
+    return ""
+
+
 def _expected_process_basenames() -> set:
     """Lower-cased executable basenames a live WinZapp process could have.
 
     sys.executable covers both the frozen build (WinZapp.exe) and a dev-mode
     run (python.exe/pythonw.exe); the literal fallback guards the unlikely
-    case sys.executable reports something else in a bundled runner."""
+    case sys.executable reports something else in a bundled runner. The real
+    running image is added on top of it, because the two genuinely differ
+    under an aliased interpreter — see _current_image_basename()."""
     names = {"winzapp.exe"}
     try:
         exe = os.path.basename(sys.executable or "").lower()
@@ -154,6 +184,9 @@ def _expected_process_basenames() -> set:
             names.add(exe)
     except Exception:
         pass
+    image = _current_image_basename()
+    if image:
+        names.add(image)
     return names
 
 
@@ -415,6 +448,8 @@ def _read_state(global_dir: str):
     if not isinstance(data, dict) or not isinstance(data.get("update_in_progress"), bool):
         return _CORRUPT
     if data["update_in_progress"]:
+        if not isinstance(data.get("installer_guard", False), bool):
+            return _CORRUPT
         # An in-progress record MUST carry a strictly-valid owner (GPT r3 #3).
         if not _valid_pid(data.get("owner_pid")) or not _valid_ct(data.get("owner_create_time")):
             return _CORRUPT
@@ -442,10 +477,51 @@ def _is_update_in_progress_locked(global_dir: str,
         return True
     if not state.get("update_in_progress"):
         return False
-    if not is_alive(int(state["owner_pid"]), float(state["owner_create_time"])):
+    if not _installation_alive(global_dir, state, is_alive):
         _clear_state(global_dir)  # dead owner -> recover
         return False
     return True
+
+
+def _installation_alive(global_dir, state, is_alive):
+    if state.get("installer_guard"):
+        from core.update_install_guard import active_guard
+        guarded = active_guard(global_dir, state)
+        if guarded is not None:
+            return guarded
+    return is_alive(int(state["owner_pid"]), float(state["owner_create_time"]))
+
+
+def arm_installer_guard(global_dir, token):
+    """Reserve a lifetime guard under the existing owner's exact token."""
+    from core.update_install_guard import guard_paths
+    with updater_lock(global_dir):
+        state = _read_state(global_dir)
+        if (state is _CORRUPT or not state.get("update_in_progress")
+                or state.get("owner_token") != token.get("owner_token")):
+            raise ValueError("installer no longer owns the update slot")
+        state["installer_guard"] = True
+        _write_state(global_dir, state)
+        paths = guard_paths(global_dir, state["owner_token"])
+        paths.owner_root, paths.owner_token = global_dir, token
+        return paths
+
+
+def transfer_installer_guard(global_dir, token, pid, proc_create_time=None):
+    """Keep legacy startup gates blocked too, by naming the real guardian."""
+    if not _valid_pid(pid):
+        raise ValueError("invalid guardian process identity")
+    ct = (proc_create_time or _default_proc_create_time)(pid)
+    if not _valid_ct(ct) or ct <= 0:
+        raise ValueError("guardian process identity could not be verified")
+    with updater_lock(global_dir):
+        state = _read_state(global_dir)
+        if (state is _CORRUPT or not state.get("update_in_progress")
+                or not state.get("installer_guard")
+                or state.get("owner_token") != token.get("owner_token")):
+            raise ValueError("installer no longer owns the update slot")
+        state.update(owner_pid=pid, owner_create_time=ct)
+        _write_state(global_dir, state)
 
 
 def _is_own_lease(lease: dict, pid: int, create_time: float) -> bool:
@@ -476,25 +552,67 @@ def other_live_leases(global_dir: str, pid: Optional[int] = None,
                 if not _is_own_lease(l, pid, create_time)]
 
 
+def peer_pids(runtime_leases, node_leases, own_account: str, own_pid: int) -> list[int]:
+    """The pids the installer must wait on: every other account's process.
+
+    Runtime leases alone missed one: with two accounts open, the update ran
+    "also waiting on no other account" while the second account's process,
+    named in its node lease, was still running (2026-10-18). The two lists
+    describe the same processes, so either one naming a pid is enough; a
+    corrupt entry, our own account or our own pid is never waited on."""
+    pids: list[int] = []
+    for lease in list(runtime_leases or ()) + [
+            l for l in (node_leases or ()) if l.get("account_id") != own_account]:
+        pid = lease.get("pid")
+        if lease.get("_corrupt") or not _valid_pid(pid) or pid == own_pid or pid in pids:
+            continue
+        pids.append(int(pid))
+    return pids
+
+
+class UpdateClaim(NamedTuple):
+    token: Optional[dict]
+    reason: str = ""
+
+
 def try_begin_update(global_dir: str, pid: Optional[int] = None,
                      create_time: Optional[float] = None,
-                     is_alive: Callable[[int, float], bool] = lease_alive):
+                     is_alive: Callable[[int, float], bool] = lease_alive,
+                     *, explain: bool = False):
     """Atomically claim the update slot. Returns an owner-token dict on success,
     or None if a live updater owns it OR any OTHER account lease is live (the
     caller's own lease is expected — see other_live_leases()). The token
     carries a random owner_token so only THIS install run can end it
-    (GPT r2 #2 / r3 #2). All check+write under one updater_lock."""
+    (GPT r2 #2 / r3 #2). All check+write under one updater_lock.
+
+    With explain=True return UpdateClaim, including the refusal reason from
+    the SAME locked decision. Never steal a live own-process record: an earlier
+    batch may still be waiting for us. Aborted attempts release their exact
+    token through end_update; only then is same-process retry safe.
+    """
     pid, create_time = _resolve_identity(pid, create_time)
+
+    def answer(token=None, reason=""):
+        return UpdateClaim(token, reason) if explain else token
+
     with updater_lock(global_dir):
-        if _is_update_in_progress_locked(global_dir, is_alive):
-            return None
+        state = _read_state(global_dir)
+        if state is _CORRUPT:
+            return answer(reason="invalid_state")
+        if state.get("update_in_progress"):
+            owner_pid, owner_ct = int(state["owner_pid"]), float(state["owner_create_time"])
+            if _installation_alive(global_dir, state, is_alive):
+                same = (owner_pid == pid and owner_ct > 0 and create_time > 0
+                        and abs(owner_ct - create_time) < 1e-6)
+                return answer(reason="same_process" if same else "other_updater")
+            _clear_state(global_dir)
         if any(not _is_own_lease(l, pid, create_time)
                for l in _live_leases_locked(global_dir, is_alive)):
-            return None
+            return answer(reason="other_accounts")
         token = {"owner_pid": pid, "owner_create_time": create_time,
                  "owner_token": uuid.uuid4().hex}
         _write_state(global_dir, {"update_in_progress": True, **token})
-        return token
+        return answer(token)
 
 
 def end_update(global_dir: str, token: dict) -> bool:
@@ -510,8 +628,26 @@ def end_update(global_dir: str, token: dict) -> bool:
             state = {}
         if state.get("owner_token") != token["owner_token"]:
             return False
+        if state.get("installer_guard"):
+            from core.update_install_guard import active_guard, guard_paths, read_signal
+            paths = guard_paths(global_dir, state["owner_token"])
+            if active_guard(global_dir, state) is True:
+                if (read_signal(paths["commit"]) == "commit"
+                        or read_signal(paths["abort"]) != "abort"):
+                    return False  # No revocation of a live or ambiguous handoff.
         _clear_state(global_dir)
         return True
+
+
+def update_state_age(global_dir: str, now: Optional[float] = None) -> Optional[float]:
+    """Seconds since update_state.json was last written (the claim, the
+    hand-over to the installer), or None when it cannot be read. Startup uses
+    it to tell a running update from a stuck one (startup_exit_notice.py)."""
+    try:
+        written = os.path.getmtime(_state_path(global_dir))
+    except OSError:
+        return None
+    return max(0.0, (time.time() if now is None else now) - written)
 
 
 def is_update_in_progress(global_dir: str,
@@ -540,11 +676,16 @@ def is_update_in_progress(global_dir: str,
 _PROMPT_FILE = "update_prompt.json"
 
 
-def _prompt_path(global_dir: str) -> str:
-    return os.path.join(global_dir, _PROMPT_FILE)
+#: The WPPConnect Server prompt has its own claim: it asks about a different
+#: thing than the WinZapp prompt, and the two must not suppress each other.
+WPP_PROMPT_FILE = "wpp_update_prompt.json"
 
 
-def _read_prompt(global_dir: str):
+def _prompt_path(global_dir: str, name: str = _PROMPT_FILE) -> str:
+    return os.path.join(global_dir, name)
+
+
+def _read_prompt(global_dir: str, name: str = _PROMPT_FILE):
     """Return the claim dict, or _CORRUPT if the file exists but is unreadable
     or fails validation.
 
@@ -555,7 +696,7 @@ def _read_prompt(global_dir: str):
     dialog — while treating it as held would silently suppress update prompts
     on every account, forever, with nothing to show the user why.
     """
-    path = _prompt_path(global_dir)
+    path = _prompt_path(global_dir, name)
     if not os.path.lexists(path):
         return None
     if not os.path.isfile(path):
@@ -576,16 +717,17 @@ def _read_prompt(global_dir: str):
 
 
 def _prompt_holder_locked(global_dir: str,
-                          is_alive: Callable[[int, float], bool]) -> "dict | None":
+                          is_alive: Callable[[int, float], bool],
+                          name: str = _PROMPT_FILE) -> "dict | None":
     """Caller holds updater_lock. Returns the live holder, or None. A dead or
     corrupt claim is cleared on the way past, so it blocks nobody twice."""
-    claim = _read_prompt(global_dir)
+    claim = _read_prompt(global_dir, name)
     if claim is None:
         return None
     if claim is _CORRUPT or not is_alive(int(claim["owner_pid"]),
                                          float(claim["owner_create_time"])):
         try:
-            os.remove(_prompt_path(global_dir))
+            os.remove(_prompt_path(global_dir, name))
         except OSError:
             pass
         return None
@@ -595,7 +737,8 @@ def _prompt_holder_locked(global_dir: str,
 def try_claim_update_prompt(global_dir: str, version: str,
                             pid: Optional[int] = None,
                             create_time: Optional[float] = None,
-                            is_alive: Callable[[int, float], bool] = prompt_owner_alive):
+                            is_alive: Callable[[int, float], bool] = prompt_owner_alive,
+                            name: str = _PROMPT_FILE):
     """Claim the right to ask the user about an update. Returns an owner-token
     dict, or None when another live process is already asking.
 
@@ -607,30 +750,30 @@ def try_claim_update_prompt(global_dir: str, version: str,
     """
     pid, create_time = _resolve_identity(pid, create_time)
     with updater_lock(global_dir):
-        holder = _prompt_holder_locked(global_dir, is_alive)
+        holder = _prompt_holder_locked(global_dir, is_alive, name)
         if holder is not None and int(holder["owner_pid"]) != pid:
             return None
         token = {"owner_pid": pid, "owner_create_time": create_time,
                  "owner_token": uuid.uuid4().hex}
-        _atomic_write(_prompt_path(global_dir),
+        _atomic_write(_prompt_path(global_dir, name),
                       {"version": str(version), "claimed_at": int(time.time()), **token})
         return token
 
 
-def release_update_prompt(global_dir: str, token: dict) -> bool:
+def release_update_prompt(global_dir: str, token: dict, name: str = _PROMPT_FILE) -> bool:
     """Release a claim from try_claim_update_prompt. Only the matching
     owner_token may release, so a checker that claims again after a decline
     cannot be cleared by its own earlier dialog closing late."""
     if not isinstance(token, dict) or not token.get("owner_token"):
         return False
     with updater_lock(global_dir):
-        claim = _read_prompt(global_dir)
+        claim = _read_prompt(global_dir, name)
         if claim is _CORRUPT or claim is None:
             return False
         if claim.get("owner_token") != token["owner_token"]:
             return False
         try:
-            os.remove(_prompt_path(global_dir))
+            os.remove(_prompt_path(global_dir, name))
         except OSError:
             return False
         return True

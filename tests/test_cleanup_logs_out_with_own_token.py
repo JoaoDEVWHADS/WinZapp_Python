@@ -28,6 +28,7 @@ a real log, and the fix has not yet been observed working in one.
 import pytest
 
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 SESSION = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -50,6 +51,8 @@ class _Store:
 class _Stub:
     _cleanup_abandoned_sessions_worker = MainWindow._cleanup_abandoned_sessions_worker
     _logout_abandoned_session = MainWindow._logout_abandoned_session
+    _session_engine_name = MainWindow._session_engine_name
+    wpp_engine = "wppconnect"
 
     def __init__(self, store):
         self._store = store
@@ -82,7 +85,7 @@ def posts(monkeypatch, tmp_path):
 
     import main as main_module
 
-    monkeypatch.setattr(main_module, "api_post", _fake_post)
+    patch_main_global(monkeypatch, "api_post", _fake_post)
 
     # sessions_lock is imported inside the worker, so patch it at its source.
     import coord_locks
@@ -98,8 +101,7 @@ def posts(monkeypatch, tmp_path):
 
     # Point the profile root somewhere empty so the delete step is a clean
     # "already gone" — this file is about the logout, not the rmtree.
-    monkeypatch.setattr(
-        main_module, "resource_path",
+    patch_main_global(monkeypatch, "resource_path",
         lambda *parts: str(tmp_path.joinpath(*parts)),
     )
     return calls

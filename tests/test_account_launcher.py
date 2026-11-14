@@ -133,7 +133,10 @@ class _MainWindowStub:
         self.global_dir = "gd"
         self.account_id = A
         self.app_name = "WinZapp"
-        self.app_settings = None
+        # `_app_settings`, with the underscore — the name MainWindow writes.
+        # This stub once spelled it without one, matching the method's own
+        # misspelling, so neither could catch the other.
+        self._app_settings = None
         self.settings = {"general": {"switch_behavior": "single"}}
         self.hidden_to_tray = False
         self.message_boxes = []
@@ -198,3 +201,37 @@ class TestAFailedSwitchIsVisibleAndNonDestructive:
 
         assert stub.hidden_to_tray is True
         assert not stub.message_boxes
+
+
+class TestTheSwitchBehaviourIsReadInstallWide:
+    """switch_behavior lives in the shared file. Read through the bare
+    `app_settings` — an attribute nothing sets — the switch only ever saw the
+    copy settings["general"] got at startup, and missed a change made in
+    another account since."""
+
+    class _Shared:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self, key):
+            assert key == "switch_behavior"
+            return self.value
+
+    def test_keep_open_in_the_shared_file_keeps_the_window(self, stub, monkeypatch):
+        monkeypatch.setattr(account_launcher, "switch_to_account",
+                            lambda *a, **k: "spawned")
+        stub._app_settings = self._Shared("keep_open")  # startup copy says "single"
+
+        stub._switch_to_account("b" * 32)
+
+        assert stub.hidden_to_tray is False
+
+    def test_single_in_the_shared_file_hides_it(self, stub, monkeypatch):
+        monkeypatch.setattr(account_launcher, "switch_to_account",
+                            lambda *a, **k: "spawned")
+        stub.settings["general"]["switch_behavior"] = "keep_open"
+        stub._app_settings = self._Shared("single")
+
+        stub._switch_to_account("b" * 32)
+
+        assert stub.hidden_to_tray is True

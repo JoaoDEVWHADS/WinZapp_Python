@@ -76,7 +76,18 @@ def test_normal_success_ends_the_running_modal(monkeypatch):
     assert dialog._trickling is False
 
 
-def test_cancel_is_idempotent():
+def test_staged_build_closes_without_announcing_installation_success(monkeypatch):
+    boxes = []
+    monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
+    dialog = _DialogStub()
+    dialog._api_dir = "api_staging"
+    dialog._finish_success()
+    assert dialog.end_results == [wx.ID_OK] and boxes == []
+
+
+def test_queued_success_after_cancel_is_ignored(monkeypatch):
+    boxes = []
+    monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
     dialog = _DialogStub()
 
     dialog._on_cancel()
@@ -106,7 +117,7 @@ def test_completion_after_modal_loop_already_ended_uses_close(monkeypatch, callb
 
 def test_normal_error_ends_the_running_modal(monkeypatch):
     boxes = []
-    monkeypatch.setattr(api_setup.wx, "MessageBox", lambda *args: boxes.append(args))
+    monkeypatch.setattr(api_setup, "show_error_details", lambda *args: boxes.append(args))
     dialog = _DialogStub()
 
     dialog._finish_error("npm failed")
@@ -114,5 +125,5 @@ def test_normal_error_ends_the_running_modal(monkeypatch):
     assert dialog.end_results == [wx.ID_CANCEL]
     assert dialog.close_calls == 0
     assert len(boxes) == 1
-    assert "npm failed" in boxes[0][0]
-    assert dialog._timer.stop_calls == 1
+    assert "npm failed" in boxes[0][-1]
+    assert dialog.kill_calls == 0

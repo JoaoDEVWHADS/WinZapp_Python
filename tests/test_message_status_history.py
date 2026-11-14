@@ -21,6 +21,7 @@ from datetime import datetime
 import pytest
 
 from ui.conversations import ConversationsPanel
+from tests.god_modules import patch_conversations_global
 
 
 @pytest.fixture(autouse=True)
@@ -33,8 +34,8 @@ def _fixed_locale_format(monkeypatch):
     suite. Pin both to their fallback argument (the CI-runner-independent
     behavior _format_date already has off-Windows) so this test's expected
     strings are deterministic everywhere."""
-    monkeypatch.setattr("ui.conversations.get_time_format", lambda fallback: fallback)
-    monkeypatch.setattr("ui.conversations.get_datetime_format", lambda fallback: fallback)
+    patch_conversations_global(monkeypatch, "get_time_format", lambda fallback: fallback)
+    patch_conversations_global(monkeypatch, "get_datetime_format", lambda fallback: fallback)
 
 
 class _FakeI18n:

@@ -1,7 +1,7 @@
 """Tests for core.locale_format — GitHub issue #14.
 
 WinZapp used to hardcode date/time display formats per UI language
-("time_fmt"/"date_fmt"/"datetime_fmt" in client/languages/*.json), ignoring
+("time_fmt"/"date_fmt"/"datetime_fmt" in the translation catalogs), ignoring
 whatever the user actually configured in Windows' Region settings. This
 reads the real per-user pattern via GetLocaleInfoEx and translates the
 Windows format tokens (yyyy/MM/dd, HH/mm/tt, ...) to Python strftime codes,

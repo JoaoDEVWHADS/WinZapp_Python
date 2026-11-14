@@ -59,6 +59,8 @@ class _Stub:
     _sync_conversation_read_state = MainWindow._sync_conversation_read_state
     _persist_locally_read_at = MainWindow._persist_locally_read_at
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _note_server_unread = MainWindow._note_server_unread
+    _pop_server_unread = MainWindow._pop_server_unread
     # on_chat_unread_update looks the chat up through this rather than
     # self.chats.get() directly, so the @lid / phone identities of an incoming
     # event get bridged first — see tests/test_chats_update_lid_resolution.py.

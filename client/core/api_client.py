@@ -34,12 +34,17 @@ retrying the ambiguous case used to duplicate real sends. A blanket retry here
 would quietly undo that.
 """
 
+import contextlib
 import logging
 import re
+import threading
 import time
 import uuid
 
 import requests
+
+from core.pii_redaction import redact_phone
+from core.text_surrogates import repair_payload
 
 # The Node middleware only accepts an id matching /^[A-Za-z0-9._:-]{1,128}$/ and
 # silently generates its own otherwise, which would break correlation without
@@ -77,11 +82,18 @@ _SECRET_KEY_SECOND_ROUTES = (  # /api/<session>/<key>/<endpoint>
 
 
 def redact_api_url(url: str) -> str:
-    """A log-safe label for an API URL: no token, just the endpoint.
+    """A log-safe label for an API URL: no token, no phone number/JID, just
+    the endpoint shape.
 
     WPPConnect's routes are /api/<session>:<token>/<endpoint>/..., so the
     credential sits in the path rather than a header. Everything before the
-    endpoint is dropped, and what remains is what a reader actually wants.
+    endpoint is dropped, and what remains is what a reader actually wants —
+    except most endpoints (get-messages/<jid>, profile-status/<jid>,
+    last-seen/<phone>, ...) carry a phone number or LID as their next path
+    segment, which `redact_phone()` masks the same way the global logging
+    formatter does (`main.py`'s `_PiiRedactingFormatter`). Applied here too,
+    not just relying on that formatter, so this function's own "log-safe"
+    contract holds for any caller — logging or not.
     """
     if not url:
         return ""
@@ -90,7 +102,8 @@ def redact_api_url(url: str) -> str:
     if index == -1:
         # Not an API URL (health checks, /metrics, ...): keep the path only.
         without_scheme = url.split("://", 1)[-1]
-        return "/" + without_scheme.split("/", 1)[1] if "/" in without_scheme else url
+        path = "/" + without_scheme.split("/", 1)[1] if "/" in without_scheme else url
+        return redact_phone(path)
     rest = url[index + len(marker):]
     # rest is "<session>:<token>/<endpoint>/<...>" — drop the credential segment.
     parts = rest.split("/", 1)
@@ -103,7 +116,8 @@ def redact_api_url(url: str) -> str:
     # already safe here, since that is the segment this drops anyway.
     if endpoint.endswith(_SECRET_KEY_SECOND_ROUTES):
         endpoint = endpoint.rsplit("/", 1)[-1]
-    return "/" + endpoint if endpoint else "/api/"
+    label = "/" + endpoint if endpoint else "/api/"
+    return redact_phone(label)
 
 
 def redact_token(token: str) -> str:
@@ -248,16 +262,130 @@ def api_headers(token: str, *, json_body: bool = True,
 _STALE_RETRY_TIMEOUT = 2.0
 
 
-def api_request(method: str, url: str, *, token: str = "", request_id: str = "",
-                timeout: float = 30, session: requests.Session = None,
-                retry_stale_socket: bool = False,
-                **kwargs) -> requests.Response:
+# ── The sync's concurrency limit (issue #379) ───────────────────────────────
+#
+# The sync and backfill pools fire get-messages from up to six threads at once
+# (and the two pools can overlap). Every one of those calls is evaluated inside
+# the single WhatsApp Web page that Puppeteer drives over one CDP connection,
+# so the extra parallelism buys no speed: it only queues work inside the page
+# and, on a small machine, serialises and re-serialises large JSON payloads at
+# once (the report: 3,085 calls in an hour, 143% CPU, 2.98 GB of Chromium).
+#
+# So the requests of those two pools — and only those — pass through one shared
+# gate of SYNC_FETCH_CONCURRENCY. What it deliberately is NOT:
+#
+# * Not a change to the pools. They keep their workers, their order, their
+#   run-id checks and their retries; a worker simply waits at the gate for its
+#   turn, holding nothing the holder of the gate could need (a holder is inside
+#   one HTTP call and waits for nothing else), so it cannot deadlock.
+# * Not applied to anything a person is waiting on: opening a chat, scrolling
+#   up, the resync command, the open conversation's reconciliation. They are not
+#   made to queue behind a background sweep. The gate applies only inside
+#   sync_throttled(), which the pools wrap their tasks with.
+# * Not part of a request's timeout. A caller's timeout still measures its HTTP
+#   call; time spent waiting is not a fault of the server, and counting it would
+#   turn a queue into "genuine I/O failures" — see docs/traps/sync-completion.md.
+# * Not able to hold a worker forever: the wait is bounded, and past the bound
+#   the request goes out unthrottled, which is exactly what it did before.
+#
+# Whether 2 is the right number is the open question of the issue; it is one
+# constant so the experiment is a one-line change.
+
+#: How many get-messages calls the sync and backfill may have in flight.
+SYNC_FETCH_CONCURRENCY = 2
+
+#: The longest a request waits for its turn before it goes out regardless.
+#: Far above any normal queue (six workers, ~1 s a call) and below the point at
+#: which a user would think the app had stopped.
+SYNC_GATE_MAX_WAIT_SECONDS = 180.0
+
+#: A wait worth a line in the log; shorter ones are the gate working.
+_SYNC_GATE_LOG_WAIT_SECONDS = 1.0
+
+_SYNC_GATE = threading.BoundedSemaphore(SYNC_FETCH_CONCURRENCY)
+_gate_scope = threading.local()
+
+
+def sync_throttled(fn):
+    """`fn` wrapped so the get-messages calls it makes pass through the gate.
+
+    For the tasks the sync and backfill pools submit. The mark lives in the
+    calling thread only and is restored on the way out, so a pooled thread that
+    is later reused for something else is not left throttled.
+    """
+    def wrapper(*args, **kwargs):
+        before = getattr(_gate_scope, "active", False)
+        _gate_scope.active = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _gate_scope.active = before
+    return wrapper
+
+
+def _gate_applies(method: str, url: str) -> bool:
+    return (getattr(_gate_scope, "active", False)
+            and method.upper() == "GET" and "/get-messages/" in (url or ""))
+
+
+@contextlib.contextmanager
+def _sync_gate():
+    """Hold one place of the gate for the duration of one request."""
+    waited_from = time.monotonic()
+    acquired = _SYNC_GATE.acquire(timeout=SYNC_GATE_MAX_WAIT_SECONDS)
+    waited = time.monotonic() - waited_from
+    if not acquired:
+        logging.warning(
+            "[api] a get-messages call waited %.0fs for its turn and goes out "
+            "without the limit", waited)
+    elif waited >= _SYNC_GATE_LOG_WAIT_SECONDS:
+        logging.info("[api] a get-messages call waited %.0fms for its turn "
+                     "(sync limit: %d at a time)", waited * 1000, SYNC_FETCH_CONCURRENCY)
+    try:
+        yield
+    finally:
+        if acquired:
+            _SYNC_GATE.release()
+
+
+def api_request(method: str, url: str, **kwargs) -> requests.Response:
     """Perform one call to the Node API, logged and correlated.
 
     Raises whatever requests raises — the caller's own error handling stays in
-    charge, and every existing call site already has one.
+    charge, and every existing call site already has one. A get-messages call
+    made by the sync or backfill waits for its turn first (see above); every
+    other call goes straight through.
     """
+    if not _gate_applies(method, url):
+        return _api_request(method, url, **kwargs)
+    with _sync_gate():
+        response = _api_request(method, url, **kwargs)
+    _note_sync_payload(response)
+    return response
+
+
+def _note_sync_payload(response) -> None:
+    """The size of one sync or backfill answer, for core/page_heap.py's
+    decision of when the page's heap is worth a collection. Never raises."""
+    try:
+        from core.page_heap import note_sync_payload
+        content = getattr(response, "content", None)
+        if isinstance(content, (bytes, bytearray)):
+            note_sync_payload(len(content))
+    except Exception:
+        pass
+
+
+def _api_request(method: str, url: str, *, token: str = "", request_id: str = "",
+                 timeout: float = 30, session: requests.Session = None,
+                 retry_stale_socket: bool = False,
+                 **kwargs) -> requests.Response:
+    """The call itself, logged and correlated. See api_request()."""
     request_id = request_id or new_request_id()
+    if "json" in kwargs:
+        # An emoji split into two loose UTF-16 halves by a wx char handler
+        # cannot be encoded on the other side (core/text_surrogates.py).
+        kwargs["json"] = repair_payload(kwargs["json"])
     headers = dict(kwargs.pop("headers", None) or {})
     if token and "Authorization" not in headers:
         headers["Authorization"] = f"Bearer {token}"

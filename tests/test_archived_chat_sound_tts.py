@@ -106,7 +106,7 @@ class _FakeNotificationManager:
     def __init__(self):
         self.sent = []
 
-    def send(self, title, body, remote_jid, msg_key=None):
+    def send(self, title, body, remote_jid, msg_key=None, *, sound_event=None):
         self.sent.append((title, body, remote_jid))
 
 
@@ -114,6 +114,10 @@ class _StubMainWindow:
     """Minimal stub of MainWindow for testing on_new_message and _maybe_notify_reaction."""
 
     on_new_message = MainWindow.on_new_message
+    # Real methods, not invented answers: a message that is not a reply
+    # (and not a placeholder) returns from them before touching anything.
+    _recover_quoted_placeholder = MainWindow._recover_quoted_placeholder
+    _recover_placeholders_from_replies = MainWindow._recover_placeholders_from_replies
     _drop_protocol_edit = MainWindow._drop_protocol_edit
     _maybe_notify_reaction = MainWindow._maybe_notify_reaction
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
@@ -121,7 +125,10 @@ class _StubMainWindow:
     _phone_digits_equivalent = staticmethod(MainWindow._phone_digits_equivalent)
     _is_reply_or_mention_of_me = MainWindow._is_reply_or_mention_of_me
 
-    def __init__(self, *, open_jid="", archived_jids=None, muted_jids=None, window_active=True):
+    def __init__(
+        self, *, open_jid="", archived_jids=None, muted_jids=None,
+        locked_jids=None, window_active=True,
+    ):
         self.my_jid = "5511999998888@s.whatsapp.net"
         self.my_lid = ""
         self.chats = {}
@@ -129,11 +136,13 @@ class _StubMainWindow:
         self.db = MagicMock()
         self._lid_to_phone = {}
         self._phone_to_lid = {}
+        self._lid_mapping_lock = threading.RLock()
         self._pending_lid_inserts = {}
         self._own_sent_ids = set()
         self._own_sent_ids_lock = threading.Lock()
         self._archived_chats = set(archived_jids or [])
         self._muted_chats = set(muted_jids or [])
+        self._locked_chats = set(locked_jids or [])
         self._deleted_chats = set()
         self._window_active = window_active
         self._window_hidden = not window_active
@@ -151,6 +160,7 @@ class _StubMainWindow:
         self.i18n = _FakeI18n()
         self.message_current_sound = _FakeSound()
         self.message_foreground_sound = _FakeSound()
+        self.reaction_received_sound = _FakeSound()
         self.spoken = []
         self.read_marked = []
         self._last_activation_time = 0
@@ -183,6 +193,9 @@ class _StubMainWindow:
 
     def IsActive(self):
         return self._window_active
+
+    def is_chat_locked(self, jid):
+        return jid in self._locked_chats
 
     def is_chat_archived(self, jid):
         return jid in self._archived_chats
@@ -356,9 +369,65 @@ class TestArchivedChatSoundAndTTS(unittest.TestCase):
 
         stub._maybe_notify_reaction(self.ARCHIVED_JID, msg)
 
-        self.assertEqual(stub.message_current_sound.play_count, 1)
+        self.assertEqual(stub.reaction_received_sound.play_count, 1)
+        self.assertEqual(stub.message_current_sound.play_count, 0)
         self.assertEqual(len(stub.spoken), 1)
         self.assertIn("👍", stub.spoken[0])
+
+    def test_reaction_in_closed_locked_chat_never_leaks_sender_or_text(self):
+        stub = _StubMainWindow(
+            locked_jids=[self.ARCHIVED_JID],
+            window_active=True,
+        )
+        msg = {
+            "key": {
+                "remoteJid": self.ARCHIVED_JID,
+                "id": "REACT_PRIVATE",
+                "fromMe": False,
+            },
+            "message": {
+                "reactionMessage": {
+                    "text": "👍",
+                    "key": {"id": "TARGET_MSG", "fromMe": True},
+                }
+            },
+            "pushName": "Private contact",
+            "messageTimestamp": int(time.time()),
+        }
+
+        stub._maybe_notify_reaction(self.ARCHIVED_JID, msg)
+
+        self.assertEqual(stub.message_current_sound.play_count, 0)
+        self.assertEqual(stub.message_foreground_sound.play_count, 0)
+        self.assertEqual(stub.spoken, [])
+        self.assertEqual(stub.notification_manager.sent, [])
+
+    def test_reaction_in_open_locked_chat_keeps_normal_active_chat_behavior(self):
+        stub = _StubMainWindow(
+            open_jid=self.ARCHIVED_JID,
+            locked_jids=[self.ARCHIVED_JID],
+            window_active=True,
+        )
+        msg = {
+            "key": {
+                "remoteJid": self.ARCHIVED_JID,
+                "id": "REACT_OPEN_PRIVATE",
+                "fromMe": False,
+            },
+            "message": {
+                "reactionMessage": {
+                    "text": "👍",
+                    "key": {"id": "TARGET_MSG", "fromMe": True},
+                }
+            },
+            "messageTimestamp": int(time.time()),
+        }
+
+        stub._maybe_notify_reaction(self.ARCHIVED_JID, msg)
+
+        self.assertEqual(stub.reaction_received_sound.play_count, 1)
+        self.assertEqual(stub.message_current_sound.play_count, 0)
+        self.assertEqual(len(stub.spoken), 1)
 
     def test_matches_open_conversation_robustness(self):
         """ConversationsPanel._matches_open_conversation must match across 9th-digit,

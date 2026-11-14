@@ -3,6 +3,9 @@ paths:
   - "client/core/wppconnect_sender_layer_patch.py"
   - "client/api_patches/src/controller/deviceController.ts"
   - "client/api_patches/src/util/functions.ts"
+  - "client/main_window/media.py"
+  - "client/ui/conversation_panel/media_files.py"
+  - "client/ui/conversation_panel/attachments.py"
 ---
 
 # Large media

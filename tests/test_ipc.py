@@ -76,6 +76,32 @@ def test_activate_delivers_with_source(tmp_path):
         listener.stop()
 
 
+@pytest.mark.parametrize("ringing", [True, False])
+def test_reject_ringing_call_answers_whether_something_rang(tmp_path, ringing):
+    """Another account's call-end key: the answer says whether a call rang here."""
+    gd = _gd(tmp_path)
+    acc = "c" * 32
+    asked = []
+
+    def on_reject():
+        asked.append(True)
+        return ringing
+
+    listener = ipc.IpcListener(gd, acc, on_activate=lambda s: None, on_quit=lambda: None,
+                               on_reject_ringing_call=on_reject)
+    listener.start()
+    try:
+        assert listener.wait_ready(timeout=2.0)
+        assert ipc.request_reject_ringing_call(gd, acc, timeout=2.0) is ringing
+        assert asked == [True]
+    finally:
+        listener.stop()
+
+
+def test_reject_ringing_call_without_a_listener_is_no(tmp_path):
+    assert ipc.request_reject_ringing_call(_gd(tmp_path), "d" * 32, timeout=0.3) is False
+
+
 def test_quit_ack_then_release(tmp_path):
     """request_quit returns True only after the target signals release."""
     gd = _gd(tmp_path)

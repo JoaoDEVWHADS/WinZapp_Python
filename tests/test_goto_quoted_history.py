@@ -2,17 +2,12 @@
 
 import ast
 from pathlib import Path
+from tests.god_modules import conversations_method_source
 
-SOURCE = Path(__file__).resolve().parents[1] / "client/ui/conversations.py"
 
 
 def _method_source(name: str) -> str:
-    source = SOURCE.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    lines = source.splitlines()
-    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ConversationsPanel")
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
-    return "\n".join(lines[method.lineno - 1:method.end_lineno])
+    return conversations_method_source(name)
 
 
 def test_goto_quoted_loads_message_from_database_before_reporting_failure():

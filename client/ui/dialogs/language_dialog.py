@@ -7,7 +7,7 @@ The user picks a language and clicks OK to proceed, or Cancel to exit.
 This dialog runs before core.i18n.I18n exists — there is no saved language
 in settings yet for it to read — so it can't call I18n.t(). Its own UI
 strings (title, prompt, OK/Cancel) are instead read straight out of the
-matching languages/<code>.json file for whichever language
+matching gettext catalog for whichever language
 _detect_system_language() below resolves to (the user's Windows display
 language if it's one of ours, else English), rather than being hardcoded in
 one fixed language regardless of the machine's actual settings. The list of
@@ -23,6 +23,7 @@ import wx
 from app_paths import resource_path
 from core.utils import normalize_for_search
 from core.combo_search import bind_incremental_search
+from core.translation_catalog import load_catalog
 
 # Fallback used only if languages/language_map.json is missing or unreadable.
 _FALLBACK_LANGUAGE_CHOICES = [
@@ -31,8 +32,8 @@ _FALLBACK_LANGUAGE_CHOICES = [
 ]
 
 # The handful of keys this dialog needs. Used both to validate a loaded
-# languages/<code>.json has all of them, and as the last-resort fallback if
-# even languages/en-US.json can't be read (should never happen in practice).
+# catalog has all of them, and as the last-resort fallback if
+# even the English catalog can't be read (should never happen in practice).
 _BOOTSTRAP_KEYS = ("language_select_title", "language_select_prompt", "ok", "cancel")
 _HARDCODED_BOOTSTRAP_STRINGS = {
     "language_select_title":  "Select a language | WinZapp",
@@ -64,19 +65,11 @@ _LANGUAGE_CHOICES = _load_language_choices()
 
 
 def _load_bootstrap_strings(lang_code: str) -> dict:
-    """Read this dialog's own UI strings straight out of
-    languages/<lang_code>.json, bypassing core.i18n.I18n (which reads the
-    active language from settings — not written yet on a first run). Falls
-    back to languages/en-US.json, then to a hardcoded copy of the same
-    English strings, if even that can't be read."""
+    """Load settings-independent gettext, then English, then emergency text."""
     for code in (lang_code, "en-US"):
-        try:
-            with open(resource_path("languages", f"{code}.json"), "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if all(key in data for key in _BOOTSTRAP_KEYS):
-                return data
-        except Exception:
-            continue
+        data = load_catalog(code)
+        if all(data.get(key) for key in _BOOTSTRAP_KEYS):
+            return data
     return _HARDCODED_BOOTSTRAP_STRINGS
 
 

@@ -2,7 +2,7 @@
 
 How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
-In this repo the measured history of each area lives in `docs/traps/` (index at the end of `CLAUDE.md`); read the trap file for the area alongside any ADR.
+In this repo the measured history of each area lives in `docs/traps/`; read the trap file for the area alongside any ADR.
 
 ## Before exploring, read these
 

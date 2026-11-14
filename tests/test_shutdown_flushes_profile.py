@@ -25,6 +25,7 @@ The same misplaced signal, in a third place: it also made status-session the
 wrong gate for /start-session (see test_pairing_waits_for_profile_release.py).
 """
 
+import pytest
 import inspect
 
 from main import MainWindow
@@ -132,6 +133,22 @@ class TestAnUnreadableProcessListIsNotAnAnswer:
     is a latent fault rather than the cause of the losses that prompted the
     review — and still the wrong default.
     """
+
+    @pytest.fixture(autouse=True)
+    def _fake_clock(self, monkeypatch):
+        """wait_for_profile_release() polls with time.sleep(0.5) against a
+        time.monotonic() deadline. A clock that sleep() advances keeps the
+        same number of polls without waiting them out for real."""
+        class _Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        monkeypatch.setattr("main_window.connection.time", _Clock())
 
     class _Stub:
         wait_for_profile_release = MainWindow.wait_for_profile_release

@@ -48,6 +48,7 @@ class _SendStub:
     """Everything _on_send_attachment() touches, and nothing else."""
 
     _on_send_attachment = ConversationsPanel._on_send_attachment
+    _send_attachment_file = ConversationsPanel._send_attachment_file
     _get_message_content = ConversationsPanel._get_message_content
     _format_filesize = ConversationsPanel._format_filesize
     _format_duration = ConversationsPanel._format_duration

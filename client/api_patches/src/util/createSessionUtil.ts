@@ -21,20 +21,44 @@ import * as path from 'path';
 
 import { download } from '../controller/sessionController';
 import { WhatsAppServer } from '../types/WhatsAppServer';
+import { installContactPresenceBridge, forwardLegacyContactPresence, legacyPresenceOwnerCurrent } from './contactPresenceBridge';
+import { installGroupPresenceBridge } from './groupPresenceBridge';
 import chatWootClient from './chatWootClient';
 import {
   ensureCallMediaBridge,
   prepareLinuxCallAudioEnvironment,
   warmCallVoipRuntime,
 } from './callMediaBridge';
+import { installAnnouncementReplyBridge } from './announcementReplyBridge';
+import { installChannelsWatchBridge } from './channelsWatchBridge';
+import { installChatClearedBridge } from './chatClearedBridge';
+import { installEventsWatchBridge } from './eventsWatchBridge';
+import { installCallParticipantsBridge } from './callParticipantsBridge';
 import {
   autoDownload,
   callWebHook,
   probeIsConnected,
   startHelper,
 } from './functions';
+import { tryBeginSessionStart } from './sessionMaintenance';
 import { clientsArray, eventEmitter } from './sessionUtil';
 import Factory from './tokenStore/factory';
+
+// Statuses a session can hold while it is still on its way to CONNECTED. A
+// pairing moves it off INITIALIZING: exportQR() and exportPhoneCode() set
+// QRCODE/PHONECODE, statusFind sets notLogged. On a fast link the CONNECTED
+// state event fires before checkStateSession() subscribes, which leaves the
+// isConnected() probe in start() as the only thing that can promote the
+// session. Accepting INITIALIZING alone left it reporting PHONECODE on a linked
+// device: the phone showed it connected, session-logged never went out, and
+// the pairing dialog stayed open. Terminal states set by the state listener
+// (UNPAIRED, TIMEOUT...) stay out of this set.
+const PRE_CONNECTED_STATUSES = new Set([
+  'INITIALIZING',
+  'QRCODE',
+  'PHONECODE',
+  'notLogged',
+]);
 
 /**
  * Kill the actual Puppeteer/Chrome browser process (and its tree of child
@@ -50,6 +74,26 @@ import Factory from './tokenStore/factory';
  * Falls back to forceKillByUserDataDir() (below) when no page/pid is
  * available, e.g. mid-pairing, before create() has returned.
  */
+/**
+ * Page-side half of the call-state poll watchdog (runs via page.evaluate, so
+ * it must stay self-contained). Re-arms the poll when its last tick is older
+ * than `staleMs`; the poll ticks every 250 ms, so a stale heartbeat means its
+ * timer is gone, not slow.
+ */
+export const CALL_STATE_POLL_WATCHDOG_MS = 3000;
+export const CALL_STATE_POLL_STALE_MS = 2000;
+export function reviveStalledCallStatePoll(staleMs: number): string {
+  const w = window as any;
+  if (typeof w.__winzappRearmCallStatePoll !== 'function') return 'absent';
+  const last = Math.min(
+    Number(w.__winzappCallStatePollLastTick || 0),
+    Number(w.__winzappIncomingCallPollLastTick || 0)
+  );
+  if (Date.now() - last < staleMs) return 'ok';
+  w.__winzappRearmCallStatePoll();
+  return 'rearmed';
+}
+
 function forceKillBrowserProcess(page: any, logger?: any): boolean {
   let pid: number | undefined;
   try {
@@ -585,85 +629,94 @@ async function restoreMsgKeySerialized(
 }
 
 /**
- * Adapt WA-JS's status sender to WhatsApp Web's current object argument.
+ * Adapt WhatsApp Web's status sender to WA-JS's positional call.
  *
- * WA-JS still calls encryptAndSendStatusMsg(msg, proto, reporters), while the
- * current WhatsApp module expects { sendMsgRecord, msgProtobuf,
- * metricsReporter }. The old call throws inside the page, WA-JS swallows it,
- * and the API only sees messageSendResult=ERROR_UNKNOWN.
+ * WA-JS 4.6.0 wraps WAWebSendMsgJob.encryptAndSendMsg and, for a
+ * status@broadcast record, calls encryptAndSendStatusMsg(msg, proto, reporter)
+ * positionally, inside a try/catch that turns ANY error into `return null`.
+ * Current WhatsApp takes one object, { sendMsgRecord, msgProtobuf,
+ * metricsReporter }, so the positional call throws, WA-JS swallows it and the
+ * API only ever sees messageSendResult=ERROR_UNKNOWN - for text, image, video
+ * and audio statuses alike.
+ *
+ * The first version of this shim wrapped encryptAndSendMsg itself, which only
+ * works while it is the OUTERMOST wrapper. Measured over CDP on 2026-09-23
+ * (WhatsApp Web 2.3000.1048298845): WA-JS's wrapper had ended up outside ours,
+ * a fake status record reached encryptAndSendStatusMsg with 3 positional
+ * arguments, and every post failed again. So the adapter now sits on
+ * encryptAndSendStatusMsg: WA-JS reads that export live (the same probe saw a
+ * replacement take effect), so both call shapes are served whatever order the
+ * wrappers were installed in. An object call - WhatsApp's own - passes
+ * through untouched.
+ *
+ * WA-JS 4.6.1 learned the object form itself (its wrapper calls
+ * encryptAndSendStatusMsg({ metricsReporter, msgProtobuf, sendMsgRecord })
+ * when the export's .length is 1, positionally otherwise). It reads the export
+ * live too, so the two do not double-wrap: this adapter has length 1, WA-JS
+ * then makes the object call, and the adapter passes it through. On 4.6.0, or
+ * when something wrapping the sender reports length 0, the positional call is
+ * what arrives and the adapter converts it. Both libraries are served by the
+ * same code.
  */
 async function restoreStatusSender(page: any, logger: any, session: string) {
   if (!page) return;
   try {
     const result = await page.evaluate(() => {
-      const install = () => {
+      // Returns what it did as a string, or '' when WhatsApp is not ready yet:
+      // the log line is the first thing read when statuses fail again, so it
+      // must say "skipped" when it skipped, and which length it saw.
+      const install = (): string => {
         const wpp = (window as any).WPP;
-        if (!wpp?.loader?.moduleRequire) return false;
-        if ((window as any).__winzappStatusSenderInstalled) return true;
+        if (!wpp?.loader?.moduleRequire) return '';
 
         try {
-          const sendModule = wpp.loader.moduleRequire('WAWebSendMsgJob');
           const statusModule = wpp.loader.moduleRequire(
             'WAWebEncryptAndSendStatusMsg'
           );
-          const protoModule = wpp.loader.moduleRequire(
-            'WAWebE2EProtoGenerator'
-          );
-          const original = sendModule?.encryptAndSendMsg;
           const sendStatus = statusModule?.encryptAndSendStatusMsg;
-
-          // The legacy function accepts positional arguments and needs no shim.
-          if (
-            typeof original !== 'function' ||
-            typeof sendStatus !== 'function' ||
-            typeof protoModule?.createMsgProtobuf !== 'function' ||
-            sendStatus.length !== 1
-          ) {
-            return false;
+          if (typeof sendStatus !== 'function') return '';
+          if (sendStatus.__winzappPositionalAdapter) return 'already installed';
+          // Current WhatsApp takes one object (length 1); a wrapper around it
+          // - WA-JS's own wrapFunction shape, (...r) => t(e, ...r) - reports 0.
+          // Only a sender declaring 2+ parameters still takes the positional
+          // call WA-JS makes, and needs no adapter.
+          if (sendStatus.length > 1) {
+            return `skipped: sender takes ${sendStatus.length} positional args`;
           }
 
-          sendModule.encryptAndSendMsg = async function (
-            sendMsgRecord: any,
-            metricsReporter: any,
-            ...additionalArgs: any[]
-          ) {
-            if (
-              sendMsgRecord?.data?.to?.toString?.() !== 'status@broadcast'
-            ) {
-              return original.apply(this, [
-                sendMsgRecord,
-                metricsReporter,
-                ...additionalArgs,
-              ]);
+          const adapted = function (this: any, first: any, ...rest: any[]) {
+            if (first && typeof first === 'object' && 'sendMsgRecord' in first) {
+              return sendStatus.call(this, first, ...rest);
             }
-
-            await sendStatus({
-              sendMsgRecord,
-              msgProtobuf: protoModule.createMsgProtobuf(sendMsgRecord.data),
+            const [msgProtobuf, metricsReporter] = rest;
+            return sendStatus.call(this, {
+              sendMsgRecord: first,
+              msgProtobuf,
               metricsReporter,
             });
-
-            return {
-              t: sendMsgRecord.data.t,
-              sync: null,
-              phash: null,
-              addressingMode: null,
-              count: null,
-              error: null,
-            };
           };
-
-          (window as any).__winzappStatusSenderInstalled = true;
-          return true;
+          (adapted as any).__winzappPositionalAdapter = true;
+          statusModule.encryptAndSendStatusMsg = adapted;
+          return `installed (sender length ${sendStatus.length})`;
         } catch (e) {
-          return false;
+          return '';
         }
       };
 
-      if (install()) return 'installed';
+      const now = install();
+      if (now) return now;
       let tries = 0;
       const timer = setInterval(() => {
-        if (install() || ++tries > 60) clearInterval(timer);
+        const outcome = install();
+        if (outcome || ++tries > 60) {
+          clearInterval(timer);
+          // Reaches wppconnect.log through the page console forwarder.
+          console.log(
+            `[browser-evaluate] status sender shim: ${
+              outcome || 'gave up (WhatsApp modules never became ready)'
+            }`
+          );
+        }
       }, 500);
       return 'scheduled (WhatsApp modules not ready yet)';
     });
@@ -814,11 +867,12 @@ export default class CreateSessionUtil {
     }
   }
 
-  startChatWootClient(client: any) {
+  startChatWootClient(client: any, allowedUrls: string[] = []) {
     if (client.config.chatWoot && !client._chatWootClient)
       client._chatWootClient = new chatWootClient(
         client.config.chatWoot,
-        client.session
+        client.session,
+        allowedUrls
       );
     return client._chatWootClient;
   }
@@ -834,6 +888,11 @@ export default class CreateSessionUtil {
     // its own. `client` itself is declared inside the try and is out of scope
     // there, which is why the old catch had to re-resolve it through
     // getClient() — and why it could not tell a superseded attempt apart.
+    // Upstream 2.10.52: a name is a folder under customUserDataDir.
+    if (!/^[A-Za-z0-9_-]+$/.test(session)) {
+      req.logger.error(new Error('Invalid session name'));
+      return;
+    }
     let ownClient: any = null;
     try {
       let client = this.getClient(session) as any;
@@ -851,6 +910,7 @@ export default class CreateSessionUtil {
       }
       ownClient = client;
       client.status = 'INITIALIZING';
+      (client as any).syncing = false;
       client.config = req.body;
 
       const tokenStore = new Factory();
@@ -868,14 +928,17 @@ export default class CreateSessionUtil {
       // start looks like a logout, even though the phone still lists the linked
       // device. Reading nothing is not a reason to destroy what is on disk.
       if (tokenData) {
-        myTokenStore.setToken(session, tokenData);
+        await myTokenStore.setToken(session, tokenData);
       } else {
         req.logger?.warn?.(
           `[${session}] Token store returned no data — leaving the stored token untouched.`
         );
       }
 
-      this.startChatWootClient(client);
+      this.startChatWootClient(
+        client,
+        req.serverOptions.chatwoot?.allowedUrls || []
+      );
 
       if (req.serverOptions.customUserDataDir) {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
@@ -1052,6 +1115,21 @@ export default class CreateSessionUtil {
               req.logger.info(`[${session}] ${percent}% - ${message}`);
             },
             statusFind: (statusFind: StatusFind) => {
+              // wppconnect emits disconnectedMobile ~1s after "Session Unpaired"
+              // on a fresh, never-paired page. Before the runtime is attached
+              // (wppClient merged into `client` below) there is nothing to
+              // disconnect, and recording it as the session status would
+              // reach WinZapp's REST poll as a lost phone. Upstream
+              // wppconnect-server 2.10.62 ignores it the same way.
+              if (
+                statusFind === StatusFind.disconnectedMobile &&
+                typeof client.close !== 'function'
+              ) {
+                req.logger.info(
+                  `[${session}] Ignoring disconnectedMobile before the session is ready`
+                );
+                return;
+              }
               try {
                 if ((client as any).shouldClose) {
                   req.logger.info(
@@ -1099,6 +1177,14 @@ export default class CreateSessionUtil {
                 // below, which routes it via the REST poll into the guarded
                 // path instead. Re-add this line only together with a fix for
                 // on_wpp_status_find()'s own classification.
+                // The stored login was accepted: from here to CONNECTED the
+                // page is catching up with what it missed, minutes after a
+                // long time unused, and the status stays INITIALIZING.
+                // status-session says so, or WinZapp reads a working account
+                // as a dropped one.
+                if (statusFind === StatusFind.isLogged) {
+                  (client as any).syncing = true;
+                }
                 if (
                   statusFind === StatusFind.disconnectedMobile ||
                   statusFind === StatusFind.notLogged
@@ -1110,7 +1196,9 @@ export default class CreateSessionUtil {
                 if (statusFind === StatusFind.autocloseCalled) {
                   client.status = 'CLOSED';
                   client.qrcode = null;
-                  client.close();
+                  // During initialization `client` is a plain state object with
+                  // no close(); calling it threw and skipped the webhook below.
+                  if (typeof client.close === 'function') client.close();
                   clientsArray[session] = undefined;
                 }
                 callWebHook(client, req, 'status-find', statusPayload);
@@ -1274,7 +1362,26 @@ export default class CreateSessionUtil {
   }
 
   async opendata(req: Request, session: string, res?: any) {
-    await this.createSessionUtil(req, clientsArray, session, res);
+    // Upstream 2.10.56: no new start while a session backup or restore owns
+    // the profile directories. Kept here, outside createSessionUtil(), so the
+    // ownership logic in that method stays as it was.
+    const releaseStart = tryBeginSessionStart();
+    if (!releaseStart) {
+      req.logger.info('Session start skipped: backup or restore in progress');
+      const response = res as any;
+      if (response && !response.headersSent && !response._headerSent) {
+        response.status(503).json({
+          status: false,
+          message: 'Session backup or restore is in progress. Try again later.',
+        });
+      }
+      return;
+    }
+    try {
+      await this.createSessionUtil(req, clientsArray, session, res);
+    } finally {
+      releaseStart();
+    }
   }
 
   exportPhoneCode(
@@ -1489,7 +1596,7 @@ export default class CreateSessionUtil {
         if (connected === true) {
           // Only promote if the state listener hasn't already moved us to a
           // newer terminal state (UNPAIRED/TIMEOUT/etc). The event wins.
-          if (client.status === 'INITIALIZING') {
+          if (PRE_CONNECTED_STATUSES.has(client.status)) {
             this.markConnected(client, req);
           }
           return;
@@ -1531,10 +1638,21 @@ export default class CreateSessionUtil {
     }
 
     if (req.serverOptions.webhook.onPresenceChanged) {
-      await this.onPresenceChanged(client, req);
+      installContactPresenceBridge(client, req);
+      // The upstream registration waits for all chat subscriptions. A slow or
+      // rejected one must not prevent our field bridge or later listeners.
+      void this.onPresenceChanged(client, req).catch(() =>
+        req.logger.warn('[onPresenceChanged] legacy listener registration failed')
+      );
+      await this.onGroupPresenceBridge(client, req);
     }
 
     await this.onUnreadCountChanged(client, req);
+    await installAnnouncementReplyBridge(client, req.io, req.logger);
+    await installChannelsWatchBridge(client, req.io, req.logger);
+    await installChatClearedBridge(client, req.io, req.logger);
+    await installEventsWatchBridge(client, req.io, req.logger);
+    await installCallParticipantsBridge(client, req.io, req.logger);
   }
 
   /**
@@ -1898,12 +2016,17 @@ export default class CreateSessionUtil {
               call?.id ||
               ''
             );
+          // The group of each incoming offer, read from the offer stanza
+          // itself (installGroupCallFixes below): it arrives before WhatsApp
+          // Web's CallModel carries groupJid.
+          const offeredGroups = new Map<string, string>();
           const groupJidOf = (call: any) =>
             String(
               call?.groupJid?._serialized ||
               call?.groupJid?.toString?.() ||
               call?.get?.('groupJid')?._serialized ||
               call?.get?.('groupJid')?.toString?.() ||
+              offeredGroups.get(callIdOf(call)) ||
               ''
             );
           const groupParticipantCountOf = (call: any): number => {
@@ -2089,6 +2212,93 @@ export default class CreateSessionUtil {
             }
             return null;
           };
+
+          // ── Group calls: never shown as the caller's private call ──
+          // Two paths lost the group of an incoming group call. The ring:
+          // emitIncomingOffer waits 1 s for CallModel.groupJid and then
+          // announced the call without its group. The record: WhatsApp Web
+          // writes the call log of a call that ended for us with
+          // {isGroup: false} unless the reason is group_call_ended
+          // (WAWebVoipActionWebHandleIncomingSignalingMessage, read over CDP
+          // on 2026-10-28), so a group call that rang out landed in the
+          // caller's private chat as a missed private call. The offer stanza
+          // names the group (group-jid); it is kept by call id and handed to
+          // both. Both modules can load after this script: retried.
+          const rememberOfferedGroup = (stanza: any) => {
+            const children = Array.isArray(stanza?.content) ? stanza.content : [];
+            for (const child of children) {
+              const attrs = child?.attrs || {};
+              const id = String(attrs['call-id'] || '');
+              const group = String(attrs['group-jid']?.toString?.() || attrs['group-jid'] || '');
+              if (id && /@g\.us$/.test(group)) {
+                offeredGroups.set(id, group);
+                while (offeredGroups.size > 200) {
+                  offeredGroups.delete(offeredGroups.keys().next().value as string);
+                }
+              }
+            }
+          };
+          const installGroupCallFixes = (): boolean => {
+            const requireWa = (name: string): any => {
+              try {
+                return (window as any).require?.(name);
+              } catch (_) {
+                return null;
+              }
+            };
+            let done = true;
+            const handler = requireWa('WAWebHandleVoipCall');
+            if (typeof handler?.handleCall !== 'function') {
+              done = false;
+            } else if (!handler.handleCall.__winzappGroups) {
+              const original = handler.handleCall;
+              const wrapped = function (this: any, stanza: any, ...rest: any[]) {
+                try {
+                  rememberOfferedGroup(stanza);
+                } catch (_) {
+                  // Never let the group lookup break call handling.
+                }
+                return original.call(this, stanza, ...rest);
+              };
+              (wrapped as any).__winzappGroups = true;
+              handler.handleCall = wrapped;
+            }
+            const notice = requireWa('WAWebVoipActionWriteCallLogOfferNotice');
+            if (typeof notice?.generateCallLogOfferNotice !== 'function') {
+              done = false;
+            } else if (!notice.generateCallLogOfferNotice.__winzappGroups) {
+              const original = notice.generateCallLogOfferNotice;
+              const wrapped = function (this: any, details: any, ...rest: any[]) {
+                let fixed = details;
+                try {
+                  const id = String(details?.callId || '');
+                  if (details && !details.isGroup && id) {
+                    const call = findCall(id);
+                    const group = groupJidOf(call) || offeredGroups.get(id) || '';
+                    if (group) {
+                      const wid =
+                        call?.groupJid ||
+                        requireWa('WAWebWidFactory')?.createWid?.(group);
+                      if (wid) fixed = { ...details, isGroup: true, groupJid: wid };
+                    }
+                  }
+                } catch (_) {
+                  fixed = details;
+                }
+                return original.call(this, fixed, ...rest);
+              };
+              (wrapped as any).__winzappGroups = true;
+              notice.generateCallLogOfferNotice = wrapped;
+            }
+            return done;
+          };
+          if (!installGroupCallFixes()) {
+            let tries = 0;
+            const retry = window.setInterval(() => {
+              tries += 1;
+              if (installGroupCallFixes() || tries >= 120) window.clearInterval(retry);
+            }, 5000);
+          }
           const emitIncomingOffer = (
             call: any,
             attempt = 0,
@@ -2243,7 +2453,11 @@ export default class CreateSessionUtil {
 
           // Poll only active incoming calls. If a model disappears for 2.5s,
           // WhatsApp has removed it after answer/rejection/caller cancellation.
-          (window as any).__winzappIncomingCallPoll = window.setInterval(() => {
+          // Armed by armCallStatePoll() below, together with the activeCall
+          // poll: both are created at the same moment and can lose their
+          // timers the same way.
+          const incomingCallPollTick = () => {
+            (window as any).__winzappIncomingCallPollLastTick = Date.now();
             const now = Date.now();
             for (const [id, tracked] of trackedCalls.entries()) {
               try {
@@ -2276,7 +2490,7 @@ export default class CreateSessionUtil {
                 // The next poll can recover from a transient Store mutation.
               }
             }
-          }, 500);
+          };
 
           // Native WhatsApp Web VoIP keeps the active call on CallStore.activeCall
           // and may never add it to the legacy collection. Poll that slot so both
@@ -2286,11 +2500,75 @@ export default class CreateSessionUtil {
           let lastActiveIncomingOfferId = '';
           let activeCallMissingSince = 0;
           const ACTIVE_CALL_MISSING_GRACE_MS = 5000;
+          // The grace above exists for one real case: WhatsApp briefly
+          // replacing CallStore.activeCall mid-call. It cannot tell that apart
+          // from a call that is simply over, so every rejected, unanswered or
+          // remotely ended call waited the full 5 s before Python heard of it
+          // -- measured live on 2026-09-21: a rejection left activeCall gone
+          // (last state PREACCEPT_RECEIVED, absent from the collection) while
+          // the call window stayed up until the user hung up by hand.
+          //
+          // The VoIP engine is the source of truth, and it answers the
+          // question directly: getCallInfo() returns an empty string once no
+          // call is ongoing (verified live), JSON naming the call otherwise.
+          // So on each disappearance the engine is asked once; "no call" or
+          // "ending" ends it now, and anything else keeps the grace (see
+          // below for why "a different call_id" is not trusted).
+          let engineEndProbe: 'idle' | 'pending' | 'ended' | 'ongoing' = 'idle';
+          // Bumped on every return to 'idle'. A probe answers asynchronously;
+          // one that resolves after its absence is over (activeCall came back,
+          // or the grace already ended the call) must not leave its verdict
+          // behind for the NEXT absence -- a stale 'ongoing' would skip that
+          // probe and wait the full grace, a stale 'ended' would end the next
+          // call on its first brief activeCall swap.
+          let engineProbeGeneration = 0;
+          const resetEngineEndProbe = () => {
+            engineEndProbe = 'idle';
+            engineProbeGeneration += 1;
+          };
+          const probeEngineForEnd = () => {
+            const generation = engineProbeGeneration;
+            const settle = (verdict: 'ended' | 'ongoing') => {
+              if (generation === engineProbeGeneration) engineEndProbe = verdict;
+            };
+            engineEndProbe = 'pending';
+            try {
+              const getter =
+                WPP?.whatsapp?.functions?.getVoipStackInterface ||
+                WPP?.whatsapp?.getVoipStackInterface;
+              if (typeof getter !== 'function') {
+                settle('ongoing');
+                return;
+              }
+              Promise.resolve(getter())
+                .then((stack: any) => stack?.getCallInfo?.())
+                .then((raw: any) => {
+                  if (!raw) {
+                    settle('ended');
+                    return;
+                  }
+                  let info: any = raw;
+                  if (typeof raw === 'string') {
+                    try { info = JSON.parse(raw); } catch (_) { info = null; }
+                  }
+                  // Only "no call" and "ending" end it early. Whether the
+                  // engine's call_id has the same form as the CallStore id has
+                  // never been measured, so "the engine names another call" is
+                  // not trusted: a mismatch of form alone would end every
+                  // healthy call on its first brief activeCall swap.
+                  settle(!info || info.call_ending === true ? 'ended' : 'ongoing');
+                })
+                .catch(() => settle('ongoing'));
+            } catch (_) {
+              settle('ongoing');
+            }
+          };
           const TERMINAL_CALL_STATES = new Set([
             'ENDED', 'REJECTED', 'FAILED', 'NOT_ANSWERED',
             'HANDLED_REMOTELY', 'REMOTE_CALL_IN_PROGRESS',
           ]);
-          (window as any).__winzappCallStatePoll = window.setInterval(() => {
+          const callStatePollTick = () => {
+            (window as any).__winzappCallStatePollLastTick = Date.now();
             try {
               let activeCall: any = null;
               for (const store of stores) {
@@ -2330,7 +2608,11 @@ export default class CreateSessionUtil {
                 }
                 const now = Date.now();
                 activeCallMissingSince = activeCallMissingSince || now;
-                if (now - activeCallMissingSince < ACTIVE_CALL_MISSING_GRACE_MS) {
+                if (engineEndProbe === 'idle') probeEngineForEnd();
+                if (
+                  engineEndProbe !== 'ended' &&
+                  now - activeCallMissingSince < ACTIVE_CALL_MISSING_GRACE_MS
+                ) {
                   return;
                 }
                 emitCallState('ended', lastActiveCall, 'ENDED');
@@ -2338,16 +2620,24 @@ export default class CreateSessionUtil {
                 lastActiveSignature = '';
                 lastActiveIncomingOfferId = '';
                 activeCallMissingSince = 0;
+                resetEngineEndProbe();
                 return;
               }
 
               activeCallMissingSince = 0;
+              if (engineEndProbe !== 'idle') resetEngineEndProbe();
               const state = callStateOf(activeCall);
+              // isVideo is part of the signature: a voice call upgraded to
+              // video keeps its CallModel, its id and its ACTIVE state --
+              // WhatsApp's handleVideoStateChange only flips isVideo on the
+              // same model (read from the bundle, 2026-09-26). Without it the
+              // upgrade never reached Python at all.
               const signature = [
                 callIdOf(activeCall),
                 state,
                 peerJidOf(activeCall),
                 activeCall?.outgoing ? '1' : '0',
+                activeCall?.isVideo || activeCall?.isVideoCall ? 'v' : 'a',
               ].join('|');
               if (signature !== lastActiveSignature) {
                 const activeId = callIdOf(activeCall);
@@ -2375,7 +2665,46 @@ export default class CreateSessionUtil {
             } catch (e) {
               // A later poll can recover from WhatsApp replacing CallStore.
             }
-          }, 250);
+          };
+          // This listener is installed as soon as WA-JS appears, which can be
+          // before WhatsApp's own bundle has replaced window.setInterval and
+          // clearInterval with its JSScheduler wrappers. Measured live on
+          // 2026-09-21: the poll's native timer (id 4) had silently stopped
+          // -- a logpoint on its first line never fired while a fresh
+          // interval ticked normally -- so no call state reached Python at
+          // all: an outgoing call the other person rejected kept the call
+          // window open and the microphone capturing until the user hung up
+          // by hand. The closure (lastActiveCall and friends) is kept; only
+          // the timer is re-created, by the Node-side watchdog, whenever the
+          // last tick is stale.
+          // Both polls of this listener are (re)armed here. Clearing the old
+          // ids is for a false-positive rearm (page busy > 2 s, old timers
+          // alive); the first ids come from the browser's own setInterval, and
+          // WhatsApp's clearInterval wrapper only cancels ids it issued
+          // itself, so at worst an old timer keeps running once -- harmless,
+          // the closures dedupe by signature.
+          const armCallStatePoll = () => {
+            for (const name of ['__winzappCallStatePoll', '__winzappIncomingCallPoll']) {
+              try {
+                window.clearInterval((window as any)[name]);
+              } catch (_) {
+                // An id from before WhatsApp's wrapper: nothing to clear.
+              }
+            }
+            const now = Date.now();
+            (window as any).__winzappCallStatePollLastTick = now;
+            (window as any).__winzappIncomingCallPollLastTick = now;
+            (window as any).__winzappCallStatePoll = window.setInterval(
+              callStatePollTick,
+              250
+            );
+            (window as any).__winzappIncomingCallPoll = window.setInterval(
+              incomingCallPollTick,
+              500
+            );
+          };
+          (window as any).__winzappRearmCallStatePoll = armCallStatePoll;
+          armCallStatePoll();
           return true;
         }, listenerStartedAt)
         .then((installed: boolean) => {
@@ -2393,6 +2722,36 @@ export default class CreateSessionUtil {
     // Re-install on page reload (fresh JS context loses the listener)
     client.page.on('load', installListener);
     installListener();
+
+    // The page-side call-state poll can lose its timer (see
+    // armCallStatePoll above). Check its heartbeat from here and re-arm it;
+    // one watchdog per client, replaced when listeners are wired again.
+    const previousWatchdog = (client as any).__winzappCallPollWatchdog;
+    if (previousWatchdog) clearInterval(previousWatchdog);
+    let watchdogBusy = false;
+    const watchdog = setInterval(() => {
+      const page: any = client.page;
+      if (!page || page.isClosed?.()) {
+        clearInterval(watchdog);
+        return;
+      }
+      if (watchdogBusy) return;
+      watchdogBusy = true;
+      page
+        .evaluate(reviveStalledCallStatePoll, CALL_STATE_POLL_STALE_MS)
+        .then((result: string) => {
+          if (result === 'rearmed') {
+            req.logger.warn(
+              `[${client.session}] call-state poll had stopped ticking; re-armed`
+            );
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          watchdogBusy = false;
+        });
+    }, CALL_STATE_POLL_WATCHDOG_MS);
+    (client as any).__winzappCallPollWatchdog = watchdog;
   }
 
   /**
@@ -2497,10 +2856,11 @@ export default class CreateSessionUtil {
         download(message, client, req.logger);
       }
 
-      if (
-        req.serverOptions?.websocket?.autoDownload ||
-        (req.serverOptions?.webhook?.autoDownload && message.fromMe == false)
-      ) {
+      // The Socket.IO event has its own download policy. callWebHook already
+      // handles downloads for configured webhook destinations; its default
+      // autoDownload=true must not inline every received file into this event
+      // when no webhook exists (nor download twice when one does exist).
+      if (req.serverOptions?.websocket?.autoDownload) {
         await autoDownload(client, req, message);
       }
 
@@ -2601,175 +2961,24 @@ export default class CreateSessionUtil {
   }
 
   async onPresenceChanged(client: WhatsAppServer, req: Request) {
-    await client.onPresenceChanged(async (presenceChangedEvent: any) => {
-      let forwardedEvent: any = presenceChangedEvent;
-
-      try {
-        const rawId = presenceChangedEvent?.id;
-        const eventId =
-          typeof rawId === 'string'
-            ? rawId
-            : typeof rawId?._serialized === 'string'
-              ? rawId._serialized
-              : rawId?.user && rawId?.server
-                ? `${String(rawId.user)}@${String(rawId.server)}`
-                : '';
-
-        const isGroupId = eventId.endsWith('@g.us');
-        const hasParticipants =
-          Array.isArray(presenceChangedEvent?.participants) &&
-          presenceChangedEvent.participants.length > 0;
-
-        // WA-JS 4.x can emit a real group presence event with id=@g.us while
-        // its derived isGroup flag is false. registerPresenceChange.ts only
-        // serializes `participants` when presence.isGroup is true, so that
-        // malformed event reaches Socket.IO without the member whose
-        // chatstate actually changed. Rehydrate the group snapshot directly
-        // from the live Chat/Presence store before forwarding it.
-        if (isGroupId && !hasParticipants) {
-          const page = (client as any).page;
-          if (page) {
-            const participants: any[] = await page.evaluate(
-              (groupId: string) => {
-                const wpp = (window as any).WPP;
-                const whatsapp = wpp?.whatsapp;
-                if (!whatsapp) {
-                  return [];
-                }
-
-                let wid: any = groupId;
-                try {
-                  if (typeof whatsapp.WidFactory?.createWid === 'function') {
-                    wid = whatsapp.WidFactory.createWid(groupId);
-                  }
-                } catch {
-                  wid = groupId;
-                }
-
-                let presence: any = null;
-                try {
-                  const chat =
-                    whatsapp.ChatStore?.get?.(wid) ||
-                    whatsapp.ChatStore?.get?.(groupId);
-                  presence = chat?.presence || null;
-                } catch {
-                  presence = null;
-                }
-
-                if (!presence) {
-                  try {
-                    presence =
-                      whatsapp.PresenceStore?.get?.(wid) ||
-                      whatsapp.PresenceStore?.get?.(groupId) ||
-                      null;
-                  } catch {
-                    presence = null;
-                  }
-                }
-
-                if (
-                  !presence &&
-                  typeof whatsapp.PresenceStore?.getModelsArray === 'function'
-                ) {
-                  try {
-                    presence = whatsapp.PresenceStore
-                      .getModelsArray()
-                      .find((candidate: any) => {
-                        const candidateId = candidate?.id;
-                        const serialized =
-                          typeof candidateId === 'string'
-                            ? candidateId
-                            : typeof candidateId?._serialized === 'string'
-                              ? candidateId._serialized
-                              : typeof candidateId?.toString === 'function'
-                                ? candidateId.toString()
-                                : candidateId?.user && candidateId?.server
-                                  ? `${String(candidateId.user)}@${String(candidateId.server)}`
-                                  : '';
-                        return serialized === groupId;
-                      });
-                  } catch {
-                    presence = null;
-                  }
-                }
-
-                const states =
-                  typeof presence?.chatstates?.getModelsArray === 'function'
-                    ? presence.chatstates.getModelsArray()
-                    : [];
-                if (!Array.isArray(states)) {
-                  return [];
-                }
-
-                return states
-                  .filter((state: any) => Boolean(state?.type))
-                  .map((state: any) => {
-                    const stateId = state?.id;
-                    const id =
-                      typeof stateId === 'string'
-                        ? stateId
-                        : typeof stateId?._serialized === 'string'
-                          ? stateId._serialized
-                          : typeof stateId?.toString === 'function'
-                            ? stateId.toString()
-                            : stateId?.user && stateId?.server
-                              ? `${String(stateId.user)}@${String(stateId.server)}`
-                              : '';
-                    if (!id) {
-                      return null;
-                    }
-
-                    let shortName = '';
-                    try {
-                      const contact = whatsapp.ContactStore?.get?.(stateId);
-                      shortName =
-                        contact?.formattedShortName ||
-                        contact?.shortName ||
-                        contact?.pushname ||
-                        '';
-                    } catch {
-                      shortName = '';
-                    }
-
-                    return {
-                      id,
-                      state: String(state.type),
-                      shortName,
-                    };
-                  })
-                  .filter(Boolean);
-              },
-              eventId
-            );
-
-            if (participants.length > 0) {
-              forwardedEvent = {
-                ...presenceChangedEvent,
-                isGroup: true,
-                participants,
-              };
-              req.logger.info(
-                `[${client.session}] Rehydrated group presence event for ${eventId} with ${participants.length} participant state(s)`
-              );
-            } else {
-              req.logger.warn(
-                `[${client.session}] Group presence event for ${eventId} arrived without participants and the live PresenceStore snapshot was empty`
-              );
-            }
-          }
-        }
-      } catch (presenceRepairError) {
-        req.logger.warn(
-          `[${client.session}] Failed to repair group presence event: ${presenceRepairError}`
-        );
+    const page = client.page;
+    await client.onPresenceChanged(async (presenceChangedEvent) => {
+      if (!legacyPresenceOwnerCurrent(client, req, page)) return;
+      if (forwardLegacyContactPresence(client, presenceChangedEvent)) {
+        req.io.emit('onpresencechanged', {
+          ...presenceChangedEvent,
+          session: client.session,
+        });
       }
-
-      req.io.emit('onpresencechanged', {
-        ...forwardedEvent,
-        session: client.session,
-      });
-      callWebHook(client, req, 'onpresencechanged', forwardedEvent);
+      // Preserve the existing webhook payload and source. The new native
+      // snapshot bridge is local Socket.IO only and never calls a webhook.
+      callWebHook(client, req, 'onpresencechanged', presenceChangedEvent);
     });
+  }
+
+  /** Owned local group activity; legacy group webhook shape stays unchanged. */
+  async onGroupPresenceBridge(client: WhatsAppServer, req: Request) {
+    installGroupPresenceBridge(client, req);
   }
 
   async onReactionMessage(client: WhatsAppServer, req: Request) {

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "neonize": {
+    "repository": "https://github.com/krypton-byte/neonize.git",
+    "approved": [
+      {
+        "version": "0.6.0",
+        "commit": "ce082701aeb94d3fa2ede0e61f397b755051f556",
+        "approved_on": "2026-10-26"
+      },
+      {
+        "version": "0.10.0",
+        "commit": "0a17277637df391ff4af9395bfa09abc236aa597",
+        "approved_on": "2026-11-08"
+      }
+    ]
+  },
+  "whatsmeow": {
+    "module": "go.mau.fi/whatsmeow",
+    "version": "v0.0.0-20260921121126-35ae40906e74"
+  },
+  "meowcaller": {
+    "repository": "https://github.com/purpshell/meowcaller.git",
+    "commit": "27a3c6b18657614c9ec2ed16dfc497eff11de6ec"
+  },
+  "toolchain": {
+    "protoc": {
+      "version": "34.1",
+      "asset": "protoc-34.1-win64.zip",
+      "sha256": "6d7ebdc75e9c1f0026d4fb28f17ef1d0aae77d36744d83a9e052d79ba493724f"
+    },
+    "protoc_gen_go": "v1.36.12",
+    "mypy_protobuf": "5.1.0"
+  },
+  "release": null
+}

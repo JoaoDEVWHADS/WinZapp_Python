@@ -180,3 +180,70 @@ def test_set_limit_route_authenticates_and_checks_connection():
         r"verifyToken,\s*statusConnection,\s*MiscController\.setLimit",
         route.group("body"),
     )
+
+
+def test_disconnected_mobile_before_the_runtime_is_attached_is_ignored():
+    """wppconnect emits disconnectedMobile ~1s after "Session Unpaired" on a
+    fresh, never-paired page, while `client` is still the plain state object
+    (the wppconnect runtime is merged into it only after create() returns).
+    Recording it as the session status looks like a lost phone to WinZapp's
+    REST poll, and calling client.close() on that object throws and skips the
+    status-find webhook. Ported from wppconnect-server 2.10.62.
+    """
+    source = _patch("src/util/createSessionUtil.ts")
+
+    assert "statusFind === StatusFind.disconnectedMobile &&" in source
+    assert "typeof client.close !== 'function'" in source
+    assert "Ignoring disconnectedMobile before the session is ready" in source
+    assert "if (typeof client.close === 'function') client.close();" in source
+
+
+def test_server_2_10_70_admin_hardening_is_ported_into_the_restored_files():
+    """These five files are restored over the checkout, so upstream's 2.10.70
+    changes only reach WinZapp when they are carried into api_patches/."""
+    controller = _patch("src/controller/sessionController.ts")
+    assert "hasAdminSecret(req, req.serverOptions.secretKey)" in controller
+    assert "Invalid session path" in controller
+
+    routes = _patch("src/routes/index.ts")
+    assert "routes.post('/api/show-all-sessions', SessionController.showAllSessions)" in routes
+    assert "routes.post('/api/backup-sessions', MiscController.backupAllSessions)" in routes
+
+    assert "allowedUrls: []" in _patch("src/config.ts")
+    assert "req.serverOptions.chatwoot?.allowedUrls" in _patch("src/util/createSessionUtil.ts")
+    assert "function splitDelimited(" in _patch("src/util/functions.ts")
+
+
+def test_server_2_10_71_security_bootstrap_is_ported_into_the_restored_files():
+    """index.ts, jest.config.js and .prettierignore are restored over the
+    checkout, so upstream's 2.10.71 deepmerge bootstrap only reaches WinZapp
+    when it is carried into api_patches/ (it must stay the first import)."""
+    index = _patch("src/index.ts")
+    assert "import './security/runtime';" in index
+    assert index.index("import './security/runtime';") < index.index(
+        "import { defaultLogger }"
+    )
+    assert "test/jest-setup.cjs" in _patch("jest.config.js")
+    assert "vendor/" in _patch(".prettierignore")
+
+
+def test_server_2_10_75_chatwoot_authentication_is_ported_into_the_restored_files():
+    """routes/index.ts and deviceController.ts are restored over the checkout,
+    so upstream's 2.10.75 authentication of the Chatwoot webhook only reaches
+    WinZapp when it is carried into api_patches/."""
+    routes = _patch("src/routes/index.ts")
+    assert "routes.post('/api/:session/chatwoot', verifyToken, DeviceController.chatWoot)" in routes
+
+    controller = _patch("src/controller/deviceController.ts")
+    assert "const client: any = req.client;" in controller
+    assert "Session is not connected" in controller
+    assert "clientsArray" not in controller
+
+
+def test_server_2_10_77_private_media_cache_is_not_served_in_the_restored_index():
+    """src/index.ts is restored over the checkout, so upstream's 2.10.77 removal
+    of the public /files route (the private media cache) only reaches WinZapp
+    when it is carried into api_patches/."""
+    index = _patch("src/index.ts")
+    assert "express.static('WhatsAppImages')" not in index
+    assert "'/files'" not in index

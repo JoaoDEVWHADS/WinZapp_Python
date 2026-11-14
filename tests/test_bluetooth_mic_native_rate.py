@@ -32,6 +32,7 @@ import pytest
 
 import core.audio_devices as audio_devices
 from core.audio_devices import RECORDING_SAMPLE_CONFIGS, recording_configs_for
+from tests.god_modules import conversations_source
 
 
 class _FakePyAudio:
@@ -78,9 +79,8 @@ class TestTheDevicesOwnRateComesFirst:
         assert (16000, 2) not in configs
 
     def test_a_stereo_device_gets_mono_first_anyway(self):
-        """WhatsApp voice messages are mono, and a stereo capture costs a
-        downmix loop in pure Python — the reason the fixed list is ordered that
-        way too."""
+        """The device test asks for mono first; only a recording asks for
+        stereo first (core/voice_stereo.py)."""
         info = {"defaultSampleRate": 32000.0, "maxInputChannels": 2}
         configs = recording_configs_for(3, _FakePyAudio(info))
         assert configs[:2] == [(32000, 1), (32000, 2)]
@@ -131,7 +131,9 @@ def test_both_call_sites_resolve_per_device():
 
     root = Path(__file__).resolve().parents[1] / "client"
     for rel in ("core/audio_devices.py", "ui/conversations.py"):
-        source = (root / rel).read_text(encoding="utf-8")
+        # ConversationsPanel is split over ui/conversation_panel/ now.
+        source = (conversations_source() if rel == "ui/conversations.py"
+                  else (root / rel).read_text(encoding="utf-8"))
         tree = ast.parse(source)
         calls = [
             node for node in ast.walk(tree)

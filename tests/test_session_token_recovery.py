@@ -32,6 +32,8 @@ class _FakeStore:
 
 class _Stub:
     _recover_active_session_token = MainWindow._recover_active_session_token
+    _session_engine_name = MainWindow._session_engine_name
+    wpp_engine = "wppconnect"
 
     def __init__(self, store, paired=True):
         self._store = store

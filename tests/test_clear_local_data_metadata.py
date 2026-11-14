@@ -39,13 +39,14 @@ import pytest
 from core.database_bridge import DatabaseBridgeClosed, DatabaseBridgeTimeout
 import main as main_module
 from main import MainWindow
+from tests.god_modules import patch_main_global
 
 
 @pytest.fixture(autouse=True)
 def _media_dirs_elsewhere(tmp_path, monkeypatch):
     """data_path() refuses to answer without an active account, and the tail
     of clear_local_data() deletes media/ and voice_messages/ file by file."""
-    monkeypatch.setattr(main_module, "data_path",
+    patch_main_global(monkeypatch, "data_path",
                         lambda *parts: str(tmp_path.joinpath(*parts)))
 
 
@@ -56,6 +57,7 @@ class _FakeDB:
 
     def save_full_state(self, data, clear_metadata=True):
         self.calls.append(clear_metadata)
+        self.saved_lids = dict(data.get("lid_to_phone") or {})
 
     def set_metadata_json(self, key, value):
         self.metadata[key] = value
@@ -201,6 +203,20 @@ _METADATA = ("_deleted_chats", "_archived_chats", "_pinned_chats",
 
 
 class TestAnAccountSwitchClearsTheMetadataInMemoryToo:
+    @pytest.mark.parametrize("wipe_metadata", [False, True])
+    def test_pin_order_cache_is_cleared_only_for_an_account_wipe(self, wipe_metadata):
+        stub = _Stub()
+        state = stub._pinned_order_state = object()
+        stub.clear_local_data(wipe_metadata=wipe_metadata)
+        assert stub._pinned_order_state is (None if wipe_metadata else state)
+
+    @pytest.mark.parametrize("wipe_metadata", [False, True])
+    def test_list_cache_is_invalidated_before_f5_or_account_wipe(self, wipe_metadata):
+        stub, seen = _Stub(), []
+        stub._invalidate_wa_lists = lambda: seen.append(bool(stub.chats))
+        stub.clear_local_data(wipe_metadata=wipe_metadata)
+        assert seen == [True]
+
     def test_every_metadata_collection_is_emptied(self):
         stub = _Stub()
 
@@ -813,3 +829,32 @@ class TestMediaIsSweptBeforeTheKeyIsDropped:
         stub.clear_local_data(wipe_metadata=False)
 
         assert seen == ["media-swept", "media-swept"]
+
+
+class TestF5KeepsTheLidBridge:
+    """Reported: after F5 some conversations showed twice (under the @lid and
+    under the number) until the backfill learned the bridge again and merged
+    them. The bridge says who is who on this same account; F5 keeps it, in
+    memory and on disk. Another account's data takes it away."""
+
+    def test_f5_keeps_the_mappings_in_memory_and_writes_them_back(self):
+        stub = _Stub()
+        stub.clear_local_data(wipe_metadata=False)
+        assert stub._lid_to_phone == {"182736450192837@lid": "5511999999999@s.whatsapp.net"}
+        assert stub._phone_to_lid == {"5511999999999@s.whatsapp.net": "182736450192837@lid"}
+        assert stub.db.saved_lids == stub._lid_to_phone
+        # what is retried, not known, still starts over
+        assert not stub._unresolvable_lids and not stub._resolving_lids
+
+    def test_an_account_wipe_drops_them(self):
+        stub = _Stub()
+        stub.clear_local_data(wipe_metadata=True)
+        assert stub._lid_to_phone == {} and stub._phone_to_lid == {}
+        assert stub.db.saved_lids == {}
+
+    def test_only_real_lid_to_phone_pairs_are_kept(self):
+        from main_window.chats_store import lids_kept_on_clear
+        kept = lids_kept_on_clear({"1@lid": "55@s.whatsapp.net", "2@lid": "",
+                                   "x@g.us": "55@s.whatsapp.net"}, False)
+        assert kept == {"1@lid": "55@s.whatsapp.net"}
+        assert lids_kept_on_clear({"1@lid": "55@s.whatsapp.net"}, True) == {}

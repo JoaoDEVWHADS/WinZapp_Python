@@ -459,7 +459,8 @@ class SoundSystem:
         return (now - last) >= self._RECOVERY_COOLDOWN_SECONDS
 
     def handle_playback_failure(self) -> bool:
-        """Called when playing a BASS stream raises, on some already-active
+        """Called when playing a BASS stream raises (or a stream cannot be opened for
+        want of an output device), on some already-active
         output device configured earlier (not the default). Falls back to
         the system default device and warns once per session — further
         failures on the same device this session stay silent so a broken
@@ -528,11 +529,13 @@ SOUND_EVENTS: list[tuple[str, str]] = [
     ("startup", "startup.ogg"),
     ("error", "error.ogg"),
     ("spelling_error", "textError.ogg"),
+    ("typing", "typing.wav"),
     ("qrcode_loaded", "qrcode_loaded.ogg"),
     ("waiting_pairing", "waiting_pairing.ogg"),
     ("pairing_code_updated", "pairing_code_updated.ogg"),
     ("connected", "connected.ogg"),
     ("synchronizing", "synchronizing.ogg"),
+    ("ai_processing", "ai_processing.wav"),
     ("sync_complete", "sync_complete.ogg"),
     ("offline_mode", "offline_mode.ogg"),
     ("voicemsg_startrecording", "voicemsg_startrecording.ogg"),
@@ -542,7 +545,9 @@ SOUND_EVENTS: list[tuple[str, str]] = [
     ("message_current", "message_current.ogg"),
     ("message_foreground", "message_foreground.ogg"),
     ("message_background", "message_background.ogg"),
+    ("reaction_received", "reaction_received.ogg"),
     ("call_incoming", "call_incoming.ogg"),
+    ("call_ended", "call_ended.ogg"),
     ("message_sent", "message_sent.ogg"),
     ("audio_transition_next", "audio_transition_next.ogg"),
     ("audio_transition_end", "audio_transition_end.ogg"),
@@ -766,8 +771,9 @@ class NullSound:
 
 class Sound(stream.FileStream):
     def __init__(self, sound_system, file, event_key=None, pack_id=None,
-                 looping=False, *args, **kwargs):
+                 looping=False, *args, allow_device_recovery=True, **kwargs):
         self.sound_system = sound_system
+        self.allow_device_recovery = allow_device_recovery
         self.event_key = event_key
         # Which soundpack this event's enabled/path settings live under —
         # settings["sound_events"] is keyed {pack_id: {event_key: {...}}},
@@ -833,6 +839,8 @@ class Sound(stream.FileStream):
             # arrived" bug this was reported as.
             super().play(restart=True)
         except Exception:
+            if not getattr(self, "allow_device_recovery", True):
+                return  # A request-owned stream must remain stoppable by its owner.
             # The configured output device may have gone away mid-session
             # (unplugged, disabled) after having worked fine earlier — fall
             # back to the system default. Retrying super().play() on `self`
@@ -852,12 +860,14 @@ class Sound(stream.FileStream):
                     pass
 
 
-def load_sound(sound_system, file, event_key=None, pack_id=None, looping=False):
+def load_sound(sound_system, file, event_key=None, pack_id=None, looping=False,
+               allow_device_recovery=True):
     """Create a Sound, returning NullSound if the file can't be opened."""
     try:
         return Sound(
             sound_system, file, event_key=event_key, pack_id=pack_id,
             looping=looping,
+            allow_device_recovery=allow_device_recovery,
         )
     except Exception as e:
         logging.warning("[sound_system] Could not load sound '%s': %s", file, e)

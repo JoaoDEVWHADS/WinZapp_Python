@@ -12,15 +12,14 @@ create_accelerator_table) — a leading "&" before a letter marks that letter
 as the mnemonic; "&&" is a literal ampersand and carries no mnemonic.
 """
 
-import json
 import re
 
 from app_paths import resource_path
 
-from tests.locales import registered_locale_codes
+from tests.locales import load_strings, registered_locale_codes
 
 #: Derived from language_map.json, not repeated here — the set of locales is
-#: data, not code (a locale is added by dropping in `<code>.json` plus an entry
+#: data, not code (a locale is added by a PO catalog plus an entry
 #: in that map, with no rebuild), so a list written out here goes stale the
 #: moment one is added and silently stops checking it. Through the shared
 #: helper because the derivation has to be checked for emptiness before it is
@@ -35,8 +34,7 @@ TOP_LEVEL_MENU_KEYS = ["menu_file", "menu_sync", "menu_help"]
 
 
 def _load(name):
-    with open(resource_path("languages", f"{name}.json"), "r", encoding="utf-8") as f:
-        return json.load(f)
+    return load_strings(name)
 
 
 def _mnemonic(label: str) -> "str | None":
@@ -114,6 +112,19 @@ class TestMessageFieldMnemonicDoesNotCollideWithAltT:
                     "with a globally reserved shortcut"
                 )
 
+    def test_no_attachment_panel_button_is_mnemonic_ed_on_a_reserved_letter(self):
+        # The staged-attachment panel sits in the same conversation panel,
+        # so its buttons lose to the window's Alt+T as well: Romanian's
+        # "&Trimite" announced presence instead of sending the files.
+        for locale in LOCALES:
+            translations = _load(locale)
+            for key in ("send_attachment", "add_more_files"):
+                label = translations.get(key, "")
+                assert _mnemonic(label) not in _GLOBALLY_RESERVED_ALT_LETTERS, (
+                    f"{locale}: {key!r} ({label!r}) collides with a globally "
+                    "reserved shortcut"
+                )
+
     def test_type_message_and_its_variants_share_one_letter_per_locale(self):
         for locale in LOCALES:
             translations = _load(locale)
@@ -122,3 +133,11 @@ class TestMessageFieldMnemonicDoesNotCollideWithAltT:
                 for key in _MESSAGE_FIELD_LABEL_KEYS
             }
             assert len(set(letters.values())) == 1, f"{locale}: {letters!r}"
+
+
+def test_spanish_and_european_portuguese_composer_keep_alt_e_for_editing():
+    """All composer states keep Alt+P; editing an own message keeps Alt+E."""
+    for locale in ("es-ES", "pt-PT"):
+        strings = _load(locale)
+        for key in (*_MESSAGE_FIELD_LABEL_KEYS, "group_admins_only"):
+            assert _mnemonic(strings[key]) == "p", (locale, key, strings[key])

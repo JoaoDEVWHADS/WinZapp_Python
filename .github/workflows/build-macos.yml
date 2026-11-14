@@ -1,0 +1,64 @@
+name: macOS build
+
+# Builds the self-contained WinZapp.app (macos/build_app.py) for Apple
+# Silicon and Intel and runs the macOS layer's tests. The zips are uploaded
+# as workflow artifacts; nothing is published.
+#
+# Runs only for pull requests that touch the Mac build or what it packages
+# directly (two macOS runners, up to an hour each), and on demand. A rename
+# in client/ that the Mac layer depends on is caught on Windows CI by
+# tests/test_macos_layer_contract.py, without starting a Mac.
+on:
+  pull_request:
+    paths:
+      - "macos/**"
+      - ".github/workflows/build-macos.yml"
+      - "setup_api.py"
+      - "requirements.txt"
+      - "client/api_patches/**"
+      - "client/node_download_config.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15          # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel    # Intel (GitHub's last x86_64 image, until Aug 2027)
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: PortAudio (for PyAudio)
+        run: brew install portaudio
+
+      - name: Build WinZapp.app
+        run: python macos/build_app.py --zip
+
+      - name: macOS layer tests
+        env:
+          PYTHONPATH: .pydeps
+        run: python -m pytest macos/tests -q -p no:cacheprovider --rootdir macos/tests -c /dev/null --run-wx-gui
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: WinZapp-macOS-${{ matrix.arch }}
+          path: macos/dist/WinZapp-macOS-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -15,6 +15,7 @@ small stub — same approach as tests/test_message_bookmarks.py.
 import pytest
 
 from ui.conversations import ConversationsPanel
+from ui.conversation_panel.pinned_messages import PinnedMessagesMixin
 
 
 class _FakeI18n:
@@ -57,7 +58,7 @@ class _FakeMainWindow:
         self.save_calls += 1
 
 
-class _Stub:
+class _Stub(PinnedMessagesMixin):
     _on_menu_pin_message = ConversationsPanel._on_menu_pin_message
     _on_pin_message_failed = ConversationsPanel._on_pin_message_failed
     _persist_message_local_flag = ConversationsPanel._persist_message_local_flag
@@ -180,3 +181,25 @@ class TestPinMessage:
 
         assert "pinInChat" not in msg
         assert mw.pin_calls == []
+
+    def test_a_raising_write_rolls_back_and_releases_the_pending_job(self, monkeypatch):
+        mw = _FakeMainWindow()
+        panel = _Stub(mw)
+        def fail(*args):
+            raise RuntimeError("write failed")
+        monkeypatch.setattr(mw, "pin_message", fail)
+        msg = _msg()
+        panel._on_menu_pin_message(msg)
+        assert msg["pinInChat"] is False
+        assert panel._pinned_writes == set()
+
+    def test_delayed_rollback_persists_in_the_original_chat_after_a_switch(self):
+        mw = _FakeMainWindow()
+        panel = _Stub(mw)
+        old_jid = panel.conversation["remoteJid"]
+        panel.conversation = {"remoteJid": "5511888888888@s.whatsapp.net"}
+        msg = _msg(pinned=True)
+        panel._on_pin_message_failed(msg, True, old_jid)
+        assert msg["pinInChat"] is False
+        assert mw.db.inserted[-1][0] == old_jid
+        assert panel.repainted == []

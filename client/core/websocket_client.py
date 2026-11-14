@@ -1,14 +1,34 @@
 import base64
+from core.call_media_ownership import accepts_media_epoch, media_fields, next_stream_epoch
 import logging
 import threading
 import time
 import socketio
+from core.remote_chat_clear import apply_remote_clear, chat_cleared_payload
 import wx
 import requests
+from core.community_comments import comment_count, parse_reply_count_event, parse_reply_preview_event
 from core.api_client import api_get, api_post
+from core.connection_lifecycle import socket_client_is_current
+from core.call_log import CALL_LOG_MESSAGE_TYPE, call_log_creator, call_log_payload
+from core.business_buttons import business_buttons
+from core.channels import server_id_of
+from core.chat_contact_names import find_contact_key
+from core.commerce import (
+    ORDER_MESSAGE_TYPE, ORDER_UPDATE_MESSAGE_TYPE, PRODUCT_MESSAGE_TYPE, order_payload,
+    order_update_payload, product_payload,
+)
 from core.i18n import I18n
 from core.message_edit import MESSAGE_EDIT, clean_message_id, server_marks_edited
+from core.message_stars import remote_star_state
+from core.reaction_echo import reaction_echo_keys, take_matching_send
+from core.meta_ai import rich_response_text
+from core.polls import poll_message_from_wpp
+from core import channel_invites
+from core import events
 from core.sync_contracts import observe_payload
+from core.vcard_payload import contact_message_payload
+from core.view_once import VIEW_ONCE_UNAVAILABLE_TYPE, is_view_once_unavailable
 from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 # ── Message delivery status ──────────────────────────────────────────────────
@@ -308,6 +328,7 @@ class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
         self.connect = connect
+        self._session_token = instance_name
         self.instance_name = instance_name.split(":")[0]
         #Initialize i18n
         self.i18n = I18n(self.main_window)
@@ -353,6 +374,12 @@ class WebSocketClient:
         self.sio.on("contacts.update", self.on_contacts_update)
         self.sio.on("presence.update", self.on_presence_update)
         self.sio.on("groups.update", self.on_groups_update)
+        self.sio.on("announcement-replies", self.on_announcement_replies)
+        self.sio.on("channels-changed", self.on_channels_changed)
+        self.sio.on("offline-sync", self.on_offline_sync)
+        self.sio.on("chat-cleared", self.on_chat_cleared)
+        self.sio.on("event-changed", self.on_event_changed)
+        self.sio.on("call-participants", self.on_call_participants)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -364,6 +391,7 @@ class WebSocketClient:
 
         # Debounce timer for on_disconnect() — see that method.
         self._disconnect_timer = None
+        self._disconnect_epoch = 0
         self._locally_sent_reaction_ids = {}
 
         # Diagnostic-only: how many "call:video:remote" frames Socket.IO has
@@ -374,8 +402,7 @@ class WebSocketClient:
     def _consume_own_reaction_echo(self, msg):
         """True only for an echo of a reaction just sent by WinZapp."""
         reaction = (msg.get("message") or {}).get("reactionMessage") or {}
-        signature = (str((reaction.get("key") or {}).get("id", "")),
-                     (reaction.get("text") or "").strip())
+        reacted_key = reaction.get("key") or {}
         reaction_id = str((msg.get("key") or {}).get("id", ""))
         now = time.monotonic()
         local_ids = getattr(self, "_locally_sent_reaction_ids", None)
@@ -392,14 +419,18 @@ class WebSocketClient:
         lock = getattr(self.main_window, "_pending_own_reactions_lock", None)
         if pending is None or lock is None:
             return False
+        # Matched with the chat, not just (message id, emoji): a message id is
+        # only unique within its chat, and without it a reaction made on the
+        # phone to another chat's message with the same id and emoji was
+        # swallowed as this echo (core/reaction_echo.py).
+        mw = self.main_window
+        keys = reaction_echo_keys(
+            (reacted_key.get("remoteJid"), (msg.get("key") or {}).get("remoteJid")),
+            reacted_key.get("id", ""), reaction.get("text") or "",
+            getattr(mw, "_lid_to_phone", {}), getattr(mw, "_phone_to_lid", {}))
         with lock:
-            created_at = pending.get(signature)
-            if created_at is None:
+            if take_matching_send(pending, keys, now) is None:
                 return False
-            if now - created_at > 60:
-                pending.pop(signature, None)
-                return False
-            pending.pop(signature, None)
             if reaction_id:
                 self._locally_sent_reaction_ids[reaction_id] = now
             return True
@@ -431,7 +462,12 @@ class WebSocketClient:
         return jid_val.replace("@c.us", "@s.whatsapp.net")
 
     def on_connect(self):
+        self._presence_delivery_generation = getattr(self, "_presence_delivery_generation", 0) + 1
+        if hasattr(self.main_window, "_invalidate_contact_presence"):
+            wx.CallAfter(self.main_window._invalidate_contact_presence)
+            wx.CallAfter(self.main_window._refresh_open_contact_presence)
         logging.info("[WebSocketClient] WebSocket connected.")
+        self._disconnect_epoch = getattr(self, "_disconnect_epoch", 0) + 1
         # Cancel any pending "confirm still disconnected" check from
         # on_disconnect() — we just reconnected, so that transient blip
         # never needs to be declared offline at all.
@@ -453,7 +489,11 @@ class WebSocketClient:
 
     def _recheck_connection_after_connect(self):
         try:
+            if not socket_client_is_current(self):
+                return
             self.main_window.check_wa_connection_http()
+            if not socket_client_is_current(self):
+                return
             if getattr(self.main_window, "_wa_connected", False):
                 if hasattr(self.main_window, "message_queue"):
                     self.main_window.message_queue.flush()
@@ -479,8 +519,14 @@ class WebSocketClient:
         except Exception:
             logging.exception("[WebSocketClient] _recheck_connection_after_connect error")
 
-    def on_disconnect(self):
-        logging.info("[WebSocketClient] WebSocket disconnected.")
+    def on_disconnect(self, reason=None):
+        # python-socketio (5.12+) says why: the server timed out our pings,
+        # the transport closed or errored, or we left. Every drop resyncs all
+        # chats (_recheck_connection_after_connect), so it is logged.
+        self._presence_delivery_generation = getattr(self, "_presence_delivery_generation", 0) + 1
+        if hasattr(self.main_window, "_invalidate_contact_presence"):
+            wx.CallAfter(self.main_window._invalidate_contact_presence)
+        logging.info("[WebSocketClient] WebSocket disconnected (%s).", reason or "no reason given")
         # Debounced: python-socketio auto-reconnects on its own within a few
         # seconds for an ordinary transient blip (Wi-Fi/NAT power-save churn,
         # a brief hiccup against the local WPPConnect server) — declaring the
@@ -495,9 +541,12 @@ class WebSocketClient:
         # 30-second health check regardless.
         if self._disconnect_timer is not None:
             self._disconnect_timer.cancel()
+        self._disconnect_epoch = getattr(self, "_disconnect_epoch", 0) + 1
+        epoch = self._disconnect_epoch
 
         def _confirm_still_disconnected():
-            if not self.sio.connected:
+            if (self._disconnect_epoch == epoch and socket_client_is_current(self)
+                    and not self.sio.connected):
                 self.main_window._set_wa_connected(False, "socket disconnected", False)
 
         self._disconnect_timer = threading.Timer(
@@ -1542,7 +1591,16 @@ class WebSocketClient:
                     message_timestamp > 0
                     and message_timestamp < getattr(self, "_connect_time", 0) - 5
                 )
-                if predates_connection or remote_jid not in self.main_window.chats:
+                # The Store may name a known phone conversation by its LID
+                # (or vice versa). Fresh history-flagged arrivals still need
+                # live unread/notification handling for that existing chat.
+                aliases = {remote_jid}
+                for mapping_name in ("_lid_to_phone", "_phone_to_lid"):
+                    alternate = getattr(self.main_window, mapping_name, {}).get(remote_jid, "")
+                    if alternate:
+                        aliases.add(self.main_window._normalize_jid(alternate))
+                known_chat = any(jid in self.main_window.chats for jid in aliases)
+                if predates_connection or not known_chat:
                     wx.CallAfter(self.main_window.on_historical_message, msg)
                     return
                 # Chat already known/synced — fall through to live handling below.
@@ -1752,14 +1810,11 @@ class WebSocketClient:
             presences = data.get("presences", {})
             if not jid or not isinstance(presences, dict):
                 return
-            normalized_presences = {}
-            for participant_jid, presence in presences.items():
-                clean_participant = self._clean_jid(participant_jid)
-                if clean_participant and isinstance(presence, dict):
-                    normalized_presences[clean_participant] = presence
-            if not normalized_presences:
-                return
-            wx.CallAfter(self.main_window.on_presence_update, jid, normalized_presences)
+            generation = getattr(self, "_presence_delivery_generation", 0)
+            def deliver():
+                if generation == getattr(self, "_presence_delivery_generation", 0):
+                    self.main_window.on_presence_update(jid, presences)
+            wx.CallAfter(deliver)
         except Exception:
             logging.exception("[WebSocketClient] on_presence_update error")
 
@@ -1827,10 +1882,11 @@ class WebSocketClient:
                     # Unknown/unexpected chat-state value — log it so a real-world
                     # mismatch (e.g. a different literal used for audio recording)
                     # can be diagnosed from the logs instead of failing silently.
-                    logging.warning(f"[WebSocketClient] Unrecognized presence state: {s!r} (raw info: {info})")
+                    logging.warning("[WebSocketClient] Unrecognized presence state")
                 return s
 
-            timestamp = info.get("t")
+            # WA-JS t is Date.now() when emitting, NOT chatstate.t (last seen).
+            timestamp = info.get("lastSeen")
 
             if is_group:
                 participants = info.get("participants", [])
@@ -1843,18 +1899,37 @@ class WebSocketClient:
                             p_state = map_state(p.get("state"))
                             presences[p_jid] = {
                                 "lastKnownPresence": p_state,
-                                "lastSeen": timestamp
                             }
             else:
                 state = map_state(info.get("state"))
                 presences[chat_jid] = {
                     "lastKnownPresence": state,
-                    "lastSeen": timestamp
+                    "isOnline": info.get("isOnline"),
+                    "eventTimestamp": info.get("t"),
                 }
+                # WPP's isContact is !chatstate.deny, not address-book membership.
+                # Unknown/missing fields cannot revoke an earlier denial.
+                if info.get("isContact") is False or info.get("restricted") is True:
+                    presences[chat_jid]["restricted"] = True
+                elif info.get("isContact") is True or info.get("restricted") is False:
+                    presences[chat_jid]["restricted"] = False
+                elif "isContact" in info or "restricted" in info:
+                    presences[chat_jid]["restricted"] = None
+                if "lastSeen" in info:
+                    presences[chat_jid]["lastSeen"] = timestamp
+                if info.get("snapshotStatus") == "pending":
+                    presences[chat_jid]["invalidated"] = True
 
             if presences:
-                logging.info(f"[WebSocketClient] on_wpp_presence_changed JID: {chat_jid}, presences: {presences}")
-                wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
+                logging.info("[WebSocketClient] presence delivery: group=%s, entries=%s", is_group, len(presences))
+                generation = getattr(self, "_presence_delivery_generation", 0)
+                def deliver():
+                    if generation == getattr(self, "_presence_delivery_generation", 0):
+                        if not is_group and info.get("snapshotStatus") == "ready":
+                            self.main_window.on_presence_update(chat_jid, presences, refresh_offline=False)
+                        else:
+                            self.main_window.on_presence_update(chat_jid, presences)
+                wx.CallAfter(deliver)
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_presence_changed error")
 
@@ -1885,14 +1960,21 @@ class WebSocketClient:
                 jid = self.main_window._normalize_jid(contact.get("remoteJid", ""))
                 if not jid:
                     continue
-                existing = self.main_window.contacts.get(jid)
+                # The record may sit under the other form of a Brazilian number
+                # (with or without the 9th digit): a second one created beside it
+                # would shadow the saved name.
+                contacts_by_jid = self.main_window.contacts
+                key = find_contact_key(contacts_by_jid, jid)
+                existing = contacts_by_jid.get(key) if key else None
+                if existing is not None:
+                    jid = key
                 # Bridge @lid JIDs to their canonical phone JID before giving up.
                 if existing is None and jid.endswith("@lid"):
                     phone_jid = getattr(self.main_window, "_lid_to_phone", {}).get(jid, "")
-                    if phone_jid:
-                        existing = self.main_window.contacts.get(phone_jid)
-                        if existing is not None:
-                            jid = phone_jid
+                    key = find_contact_key(contacts_by_jid, phone_jid) if phone_jid else ""
+                    if key:
+                        existing = contacts_by_jid[key]
+                        jid = key
                 if existing is None:
                     # Contact was absent from self.contacts (filtered out by
                     # get_remote_contacts because it had no pushName in the DB
@@ -2255,9 +2337,6 @@ class WebSocketClient:
 
     def on_wpp_message_received(self, data):
         try:
-            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
-            if note_live:
-                note_live()
             # Unconditional breadcrumb, logged before any filtering below —
             # reported live: a message shows up in the chat list (unread
             # count bumped) with no toast/sound/local notification at all,
@@ -2283,9 +2362,14 @@ class WebSocketClient:
             if not session_ok:
                 return
             wpp_msg = data.get("response")
-            if not wpp_msg:
+            if not isinstance(wpp_msg, dict) or not wpp_msg:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
+            if not isinstance(normalized, dict):
+                return
+            note_live = getattr(self.main_window, "_note_live_wpp_event", None)
+            if note_live:
+                note_live()
             # When this message reached WinZapp, so on_new_message() can say how
             # much of the delay before the screen reader speaks was its own.
             # Kept out of the stored record by prune_message_record()'s caller
@@ -2354,6 +2438,104 @@ class WebSocketClient:
             return
         wx.CallAfter(self.main_window.on_media_download_progress,
                      progress_id, progress)
+
+    def on_announcement_replies(self, data):
+        """A community announcement's reply count changed (announcementReplyBridge.ts)."""
+        try:
+            if not self._belongs_to_this_session(data):
+                return
+            preview = parse_reply_preview_event(data)
+            if preview is not None:
+                wx.CallAfter(self.main_window.on_announcement_reply_preview, preview)
+                return
+            event = parse_reply_count_event(data)
+            if event is not None:
+                wx.CallAfter(self.main_window.on_announcement_reply_count, event)
+        except Exception:
+            logging.exception("[WebSocketClient] announcement-replies failed")
+
+    def on_channels_changed(self, data):
+        """A followed channel was followed, left, muted or changed role, here
+        or on another device (channelsWatchBridge.ts; channel_events.py on
+        Neonize): the open Channels window reads its list again."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            if not str(data.get("id") or "").endswith("@newsletter"):
+                return
+            wx.CallAfter(self._channels_changed_on_ui, str(data["id"]))
+        except Exception:
+            logging.exception("[WebSocketClient] channels-changed failed")
+
+    def on_offline_sync(self, data):
+        """WhatsApp announced, or finished, the delivery of what it kept while
+        this device was away (neonize_bridge/offline_sync.py; WPPConnect has no
+        such event): the chat list is held meanwhile (main_window/backlog_flood.py)."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            state = data.get("state")
+            messages = data.get("messages", 0)
+            if state not in ("started", "completed"):
+                return
+            if isinstance(messages, bool) or not isinstance(messages, int):
+                messages = 0
+            from main_window.backlog_flood import note_offline_sync
+            wx.CallAfter(note_offline_sync, self.main_window, state, messages)
+        except Exception:
+            logging.exception("[WebSocketClient] offline-sync failed")
+
+    def on_event_changed(self, data):
+        """An answer to a WhatsApp event arrived, or the event was edited or
+        canceled (eventsWatchBridge.ts; neonize_bridge/events.py)."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            message_id, kind = data.get("id"), data.get("kind")
+            if (not isinstance(message_id, str) or not message_id or len(message_id) > 64
+                    or kind not in ("responses", "edited")):
+                return
+            panel = getattr(self.main_window, "conversations_panel", None)
+            if panel is not None:
+                wx.CallAfter(panel.on_event_changed, message_id, kind)
+        except Exception:
+            logging.exception("[WebSocketClient] event-changed failed")
+
+    def on_chat_cleared(self, data):
+        """A chat was cleared on another device (core/remote_chat_clear.py)."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            parsed = chat_cleared_payload(data)
+            if parsed is None:
+                return
+            wx.CallAfter(apply_remote_clear, self.main_window, *parsed)
+        except Exception:
+            logging.exception("[WebSocketClient] chat-cleared failed")
+
+    def on_call_participants(self, data):
+        """Who is connected to a group call changed (callParticipantsBridge.ts;
+        call_media.report_rosters on Neonize): the whole connected list."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            call_id, connected = data.get("callId"), data.get("connected")
+            if (not isinstance(call_id, str) or not call_id or not isinstance(connected, list)
+                    or len(connected) > 1024 or not all(isinstance(j, str) for j in connected)):
+                return
+            wx.CallAfter(self.main_window.on_call_participants, call_id, list(connected))
+        except Exception:
+            logging.exception("[WebSocketClient] call-participants failed")
+
+    def _channels_changed_on_ui(self, channel_id=""):
+        # the Channels panel reads its list again when shown; while it is on
+        # screen, at once (ui/dialogs/channels.py)
+        panel = getattr(self.main_window, "channels_panel", None)
+        if panel is not None and panel.IsShown():
+            panel.on_channels_changed()
+        people = getattr(self.main_window, "_channel_people_dialog", None)
+        if people is not None:
+            people.on_channels_changed(channel_id)
 
     def on_wpp_reaction(self, data):
         try:
@@ -2503,6 +2685,10 @@ class WebSocketClient:
         """Send a Python-captured PCM frame to the page call bridge."""
         if not pcm:
             return
+        epoch = (getattr(self.main_window, '_active_voice_call', None) or {}).get('media_epoch')
+        if getattr(self, '_mic_owner_epoch', None) != epoch or not getattr(self, '_mic_stream_epoch', None):
+            self._mic_owner_epoch = epoch
+            self._mic_stream_epoch = next_stream_epoch()
         try:
             # Keep the remote media transport JSON-safe.  Sending raw Socket.IO
             # binary here is not stable across polling/websocket upgrades and
@@ -2514,6 +2700,7 @@ class WebSocketClient:
                 "call:audio:mic",
                 {
                     "session": self.instance_name,
+                    **media_fields(epoch, self._mic_stream_epoch),
                     "encoding": "base64",
                     "sampleRate": 48000,
                     "pcm": base64.b64encode(bytes(pcm)).decode("ascii"),
@@ -2525,7 +2712,9 @@ class WebSocketClient:
     def stop_call_audio_stream(self):
         """Tell the page call bridge to drop buffered microphone frames."""
         try:
-            self.sio.emit("call:audio:stop", {"session": self.instance_name})
+            self.sio.emit("call:audio:stop", {"session": self.instance_name,
+                **media_fields(getattr(self, '_mic_owner_epoch', ''), getattr(self, '_mic_stream_epoch', None))})
+            self._mic_stream_epoch = None
         except Exception:
             logging.debug(
                 "[WebSocketClient] failed to emit call audio stop", exc_info=True
@@ -2536,6 +2725,9 @@ class WebSocketClient:
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
+            expected = (getattr(self.main_window, '_active_voice_call', None) or {}).get('media_epoch')
+            if not accepts_media_epoch(expected, data):
+                return
             pcm = _socketio_binary_to_bytes(data.get("pcm"))
             if not pcm:
                 return
@@ -2545,21 +2737,75 @@ class WebSocketClient:
                 sample_rate = 48000
             handler = getattr(self.main_window, "on_call_remote_audio", None)
             if handler is not None:
-                handler(pcm, sample_rate)
+                if 'mediaEpoch' in data:
+                    handler(pcm, sample_rate, media_epoch=data['mediaEpoch'])
+                else:
+                    handler(pcm, sample_rate)
         except Exception:
             logging.exception("[WebSocketClient] on_call_audio_remote error")
 
-    def send_call_camera_frame(self, jpeg: bytes):
+    def send_call_camera_frame(self, jpeg: bytes, epoch: int | None = None, *, media_epoch=None):
         if not jpeg or len(jpeg) > 256_000:
             return
-        self.sio.emit("call:video:camera", {
+        payload = {
             "session": self.instance_name,
+            **media_fields(media_epoch if media_epoch is not None else
+                           (getattr(self.main_window, '_active_voice_call', None) or {}).get('media_epoch')),
             "jpeg": base64.b64encode(jpeg).decode("ascii"),
-        })
+        }
+        if epoch is not None:
+            payload["epoch"] = int(epoch)
+        self.sio.emit("call:video:camera", payload)
+
+    def send_call_camera_stop(self, epoch: int | None = None, native: bool = False, *, media_epoch=None):
+        """Tell the page to stop transmitting local video.
+
+        Stopping the ffmpeg capture on this side is not enough: the page draws
+        our frames onto a canvas and hands WhatsApp a captureStream() of it,
+        which keeps emitting whatever the canvas last held at 10 fps. Without
+        this the peer went on seeing a frozen picture of the user for the rest
+        of the call -- and into the next one -- while WinZapp announced that
+        video was off.
+        """
+        try:
+            payload = {"session": self.instance_name,
+                       **media_fields(media_epoch if media_epoch is not None else
+                                      (getattr(self.main_window, '_active_voice_call', None) or {}).get('media_epoch'))}
+            if epoch is not None:
+                payload["epoch"] = int(epoch)
+            if native:
+                # The USER turned video off: WhatsApp's own engine is told too,
+                # through the same toggle as its camera button. Teardown stops
+                # (call ended, capture discarded) only blank the page.
+                payload["native"] = True
+            self.sio.emit("call:video:camera:stop", payload)
+        except Exception:
+            logging.debug("[call_video] could not emit call:video:camera:stop", exc_info=True)
+
+    def send_call_camera_start(self, epoch: int | None = None, *, media_epoch=None):
+        """Tell the page the user turned video back on.
+
+        WhatsApp Web transmits our camera through its own call engine, which
+        treated the camera as off once the picture went black and never came
+        back by itself. The page answers this with the engine's own camera
+        toggle (setCallVideoMute(false)), the one WhatsApp's UI button uses.
+        """
+        try:
+            payload = {"session": self.instance_name,
+                **media_fields(media_epoch if media_epoch is not None else
+                               (getattr(self.main_window, '_active_voice_call', None) or {}).get('media_epoch'))}
+            if epoch is not None:
+                payload['epoch'] = int(epoch)
+            self.sio.emit("call:video:camera:start", payload)
+        except Exception:
+            logging.debug("[call_video] could not emit call:video:camera:start", exc_info=True)
 
     def on_call_video_remote(self, data):
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            expected = (getattr(self.main_window, '_active_voice_call', None) or {}).get('media_epoch')
+            if not accepts_media_epoch(expected, data):
                 return
             jpeg = _socketio_binary_to_bytes(data.get("jpeg"))
             if jpeg and len(jpeg) <= 256_000:
@@ -2574,7 +2820,10 @@ class WebSocketClient:
                     )
                 handler = getattr(self.main_window, "on_call_remote_video", None)
                 if handler is not None:
-                    handler(jpeg)
+                    if 'mediaEpoch' in data:
+                        handler(jpeg, media_epoch=data['mediaEpoch'])
+                    else:
+                        handler(jpeg)
         except Exception:
             logging.exception("[WebSocketClient] on_call_video_remote error")
 
@@ -2630,6 +2879,8 @@ class WebSocketClient:
         # symptom to be diagnosed three layers away. Observation only: the
         # payload is returned untouched and nothing below changes behaviour.
         observe_payload([wpp_msg], "get-messages", where="wpp message")
+        from core.business_message_content import prepare_business_message
+        wpp_msg = prepare_business_message(wpp_msg)
         msg_id = wpp_msg.get("id")
         if isinstance(msg_id, dict):
             msg_id = msg_id.get("_serialized", "")
@@ -2678,7 +2929,33 @@ class WebSocketClient:
             ts //= 1000
 
         msg_type = wpp_msg.get("type", "chat")
+        # Older Neonize builds stored these proto messages as "unknown" while
+        # retaining their button payloads. Recognize them when history is read
+        # again so existing conversations gain their text and options too.
+        if msg_type == "unknown":
+            if isinstance(wpp_msg.get("dynamicReplyButtons"), list):
+                msg_type = "buttons"
+            elif isinstance(wpp_msg.get("interactivePayload"), dict):
+                msg_type = "interactive"
+            elif isinstance(wpp_msg.get("hydratedButtons"), list):
+                msg_type = "template"
+            elif isinstance(wpp_msg.get("list"), dict):
+                msg_type = "list"
+        is_video_message = msg_type == "ptv"
+        if is_video_message:
+            # A video message (recorded with the camera button, sent in place
+            # of a voice note) is type "ptv"; unmapped, it showed as
+            # incompatible. It is a video that keeps its own label.
+            msg_type = "video"
         conversation = wpp_msg.get("body", "") or wpp_msg.get("text", "")
+        # Meta AI's replies are "rich_response" messages with no body: the
+        # words are in richResponse/unifiedResponse (core/meta_ai.py). Without
+        # this the reply rendered as a row holding only the sender and time.
+        if msg_type == "rich_response":
+            rich_text = rich_response_text(wpp_msg)
+            if rich_text:
+                conversation = rich_text
+                msg_type = "chat"
 
         # WPPConnect's own message model flattens WhatsApp's OG link-preview
         # metadata (title/description/canonicalUrl — same proto fields
@@ -2717,7 +2994,14 @@ class WebSocketClient:
         message_content = {}
         _promoted_to_extended_text = False
         _is_edit_event = False
-        if msg_type == "chat":
+        if is_view_once_unavailable(wpp_msg):
+            # A view-once message, which WhatsApp never delivers to a linked
+            # device: a `ciphertext` that is not waiting for anything. Its own
+            # type, so the live funnel does not drop it as a placeholder and
+            # it counts, notifies and reads out (core/view_once.py, #47).
+            msg_type = VIEW_ONCE_UNAVAILABLE_TYPE
+            message_content = {VIEW_ONCE_UNAVAILABLE_TYPE: {}}
+        elif msg_type == "chat":
             if _has_link_preview:
                 message_content = {
                     "extendedTextMessage": _with_link_preview({"text": conversation})
@@ -2795,6 +3079,7 @@ class WebSocketClient:
                     "caption": vid_caption,
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
+                    "ptv": is_video_message,
                     "url": wpp_msg.get("clientUrl", ""),
                     "mimetype": wpp_msg.get("mimetype", "video/mp4"),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
@@ -2860,30 +3145,57 @@ class WebSocketClient:
                     "name": wpp_msg.get("loc") or wpp_msg.get("body") or "",
                 }
             }
-        elif msg_type == "vcard":
+        elif msg_type in ("vcard", "multi_vcard"):
+            # The card text must travel with the name: without it the contact
+            # arrived empty, with no number to show, copy or chat with.
+            message_content = {"contactMessage": contact_message_payload(wpp_msg)}
+        elif msg_type in ("pollCreation", "poll_creation"):
+            # WhatsApp Web's type is "poll_creation" (wa-js sends exactly that);
+            # "pollCreation" is what this branch used to wait for, so a real
+            # poll fell through to the unsupported-message fallback.
             message_content = {
-                "contactMessage": {
-                    "displayName": wpp_msg.get("displayName") or wpp_msg.get("body") or "Contato",
-                }
+                "pollCreationMessage": poll_message_from_wpp(wpp_msg)
             }
-        elif msg_type == "pollCreation":
-            message_content = {
-                "pollCreationMessage": {
-                    "name": wpp_msg.get("pollName") or wpp_msg.get("body") or ""
-                }
-            }
+        elif msg_type == events.WPP_TYPE:
+            # a WhatsApp event: name, date, place, call link (core/events.py)
+            message_content = {events.EVENT_MESSAGE_TYPE: events.event_from_wpp(wpp_msg)}
+        elif msg_type in channel_invites.WPP_TYPES:
+            # an invitation to follow a channel or to be its admin
+            invite = channel_invites.from_wpp(msg_type, wpp_msg)
+            if invite is not None:
+                msg_type, message_content = invite
         elif msg_type == "buttons":
             message_content = {
-                "buttonsMessage": {}
+                "buttonsMessage": {
+                    "contentText": conversation,
+                    "buttons": wpp_msg.get("dynamicReplyButtons") or [],
+                }
             }
         elif msg_type == "list":
             message_content = {
-                "listMessage": {}
+                "listMessage": wpp_msg.get("list") or {"description": conversation}
             }
         elif msg_type == "template":
             message_content = {
-                "templateMessage": {}
+                "templateMessage": {"hydratedContentText": conversation,
+                                    "hydratedButtons": wpp_msg.get("hydratedButtons") or []}
             }
+        elif msg_type == "interactive":
+            order_update = order_update_payload(wpp_msg)
+            if order_update is not None:
+                message_content = {ORDER_UPDATE_MESSAGE_TYPE: order_update}
+                msg_type = "order_update"
+            else:
+                message_content = {"interactiveMessage": {"body": {"text": conversation},
+                    "interactivePayload": wpp_msg.get("interactivePayload") or {}}}
+        elif msg_type == "buttons_response":
+            message_content = {"buttonsResponseMessage": {
+                "selectedDisplayText": conversation,
+                "selectedButtonID": wpp_msg.get("selectedButtonID") or ""}}
+        elif msg_type == "list_response":
+            message_content = {"listResponseMessage": {
+                "title": conversation,
+                "singleSelectReply": {"selectedRowId": wpp_msg.get("selectedRowID") or ""}}}
         elif msg_type == "revoked":
             # WPPConnect gives the revoke event its own serialized `id` and
             # points at the message being deleted through protocolMessageKey.
@@ -2917,6 +3229,20 @@ class WebSocketClient:
                 }
             }
             _is_edit_event = True
+        elif msg_type == "call_log":
+            # A voice/video call, which WhatsApp keeps as a message of its own
+            # in the chat (core/call_log.py). With no branch here it reached
+            # the list as an unhandled type with every call field dropped.
+            message_content = {CALL_LOG_MESSAGE_TYPE: call_log_payload(wpp_msg)}
+        elif msg_type == "order":
+            # A cart sent to a business (core/commerce.py). With no branch
+            # here it was an unmapped type and never reached the list.
+            message_content = {ORDER_MESSAGE_TYPE: order_payload(wpp_msg)}
+        elif msg_type == "product":
+            # An item of a business's catalog. Its `body` is the picture's
+            # thumbnail: left to the text fallback below it became a row of
+            # base64, or "unsupported message".
+            message_content = {PRODUCT_MESSAGE_TYPE: product_payload(wpp_msg)}
         elif msg_type == "gp2":
             # Group membership/settings notifications (join, leave, removed,
             # promoted, subject/description/picture change, …). WPPConnect
@@ -2974,15 +3300,25 @@ class WebSocketClient:
             "document": "documentMessage",
             "sticker": "stickerMessage",
             "vcard": "contactMessage",
+            "multi_vcard": "contactMessage",
             "pollCreation": "pollCreationMessage",
+            "poll_creation": "pollCreationMessage",
+            events.WPP_TYPE: events.EVENT_MESSAGE_TYPE,
             "buttons": "buttonsMessage",
             "list": "listMessage",
             "template": "templateMessage",
+            "interactive": "interactiveMessage",
+            "buttons_response": "buttonsResponseMessage",
+            "list_response": "listResponseMessage",
             "revoked": "protocolMessage",
             "extendedText": "extendedTextMessage",
             "gp2": "groupNotification",
             "location": "locationMessage",
             "liveLocation": "liveLocationMessage",
+            "call_log": CALL_LOG_MESSAGE_TYPE,
+            "order": ORDER_MESSAGE_TYPE,
+            "order_update": ORDER_UPDATE_MESSAGE_TYPE,
+            "product": PRODUCT_MESSAGE_TYPE,
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
         if _promoted_to_extended_text:
@@ -3013,11 +3349,31 @@ class WebSocketClient:
             "MessageUpdate": message_updates
         }
 
+        # The dispatcher distinguishes a history replay from a fresh message
+        # using this upstream flag. Dropping it here sent raw WPP history
+        # through on_new_message(), appending yesterday's rows as new arrivals.
+        if "isMdHistoryMsg" in wpp_msg:
+            normalized["isMdHistoryMsg"] = wpp_msg["isMdHistoryMsg"]
+
         # WhatsApp Web's own record that the message was edited — without it the
         # "Editada" marker only ever existed locally and every sync erased it
         # (core/message_edit.server_marks_edited()).
         if not _is_edit_event and server_marks_edited(wpp_msg):
             normalized["_edited"] = True
+        normalized.update(remote_star_state(wpp_msg))
+        buttons = business_buttons(wpp_msg)
+        if wpp_msg.get("businessTemplateIncomplete") is True:
+            normalized["businessTemplateIncomplete"] = True
+        if wpp_msg.get("businessHeaderKind"):
+            normalized["businessHeaderKind"] = wpp_msg["businessHeaderKind"]
+        if buttons:
+            normalized["businessButtons"] = buttons
+        replies = comment_count(wpp_msg.get("replyCount"))
+        if replies is not None:
+            normalized["replyCount"] = replies
+        # A channel update's server id: what pinning it names (core/channels.py).
+        if remote_jid.endswith("@newsletter") and server_id_of(wpp_msg):
+            normalized["serverId"] = server_id_of(wpp_msg)
 
         # Status messages: include the real sender as participant
         if status_participant:
@@ -3032,6 +3388,17 @@ class WebSocketClient:
         )
         if participant:
             normalized["key"]["participant"] = self._clean_jid(participant)
+
+        # A group call record names no author; its row reads "<caller>: Ligação
+        # de voz perdida" only if the caller becomes the participant. Never on
+        # our own record: on_new_message() learns my_lid from a fromMe
+        # message's participant, and a call we joined was created by someone
+        # else -- their @lid would become ours. Our row reads "Eu:" anyway.
+        if (msg_type == "call_log" and not participant and not from_me
+                and remote_jid.endswith("@g.us")):
+            creator = call_log_creator(wpp_msg)
+            if creator:
+                normalized["key"]["participant"] = creator
 
         quoted_msg = wpp_msg.get("quotedMsg")
         quoted_msg_obj = wpp_msg.get("quotedMsgObj")
@@ -3171,6 +3538,16 @@ class WebSocketClient:
                 context_info["stanzaId"] = clean_quoted_id
                 context_info["participant"] = participant_jid
                 context_info["quotedMessage"] = quoted_msg_payload
+                quoted_remote = wpp_msg.get("quotedRemoteJid") or (
+                    ctx_info.get("remoteJid") if isinstance(ctx_info, dict) else None
+                )
+                if not quoted_remote and any(
+                    "status@broadcast" in str(value or "")
+                    for value in (quoted_stanza_id, wpp_msg.get("quotedMsgId"))
+                ):
+                    quoted_remote = "status@broadcast"
+                if quoted_remote:
+                    context_info["remoteJid"] = self._clean_jid(quoted_remote)
             if mentioned_jids:
                 context_info["mentionedJid"] = mentioned_jids
             if is_forwarded:
@@ -3190,7 +3567,8 @@ class WebSocketClient:
                 # Put under specific sub-keys (e.g. imageMessage, videoMessage) if they exist
                 for sub_key in (
                     "extendedTextMessage", "imageMessage", "videoMessage", "audioMessage",
-                    "documentMessage", "stickerMessage", "locationMessage", "contactMessage"
+                    "documentMessage", "stickerMessage", "locationMessage", "contactMessage",
+                    "templateMessage", "interactiveMessage", "buttonsMessage", "listMessage"
                 ):
                     if sub_key in normalized["message"] and isinstance(normalized["message"][sub_key], dict):
                         normalized["message"][sub_key]["contextInfo"] = context_info

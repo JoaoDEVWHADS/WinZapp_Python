@@ -20,14 +20,11 @@ wx.App, so the method is exercised as a plain function against a small
 stub — same approach as tests/test_serialize_msg_id.py.
 """
 
-import json
-import os
-
 import pytest
 
 from main import MainWindow
 
-from tests.locales import registered_locale_files
+from tests.locales import load_strings, registered_locale_codes
 
 
 class _FakeI18n:
@@ -82,27 +79,23 @@ class TestSelfReferenceLabelModes:
         assert stub.self_reference_label() == "Me"
 
 
-LANG_DIR = os.path.join(os.path.dirname(__file__), "..", "client", "languages")
-
-
 #: Every registered locale, from language_map.json — pl used to be left out
 #: of this list, and this is the only check that the two keys are *distinct*
 #: (the union check in test_language_files_in_sync.py catches a missing or
 #: blank value, never two identical ones). Through the shared helper so an
 #: empty derivation cannot quietly turn the parametrize below into zero cases
 #: — see tests/locales.py.
-_LANG_FILES = list(registered_locale_files())
+_LOCALES = list(registered_locale_codes())
 
 
-@pytest.mark.parametrize("lang_file", _LANG_FILES)
+@pytest.mark.parametrize("locale", _LOCALES)
 class TestSelfReferenceKeysDifferAcrossEveryLanguage:
-    def test_eu_and_voce_keys_are_both_present_and_distinct(self, lang_file):
-        with open(os.path.join(LANG_DIR, lang_file), encoding="utf-8") as f:
-            strings = json.load(f)
+    def test_eu_and_voce_keys_are_both_present_and_distinct(self, locale):
+        strings = load_strings(locale)
 
         eu = strings.get("ui_self_reference_eu")
         voce = strings.get("ui_self_reference_voce")
 
-        assert eu, f"{lang_file} is missing ui_self_reference_eu"
-        assert voce, f"{lang_file} is missing ui_self_reference_voce"
-        assert eu != voce, f"{lang_file}: ui_self_reference_eu and ui_self_reference_voce are identical ({eu!r})"
+        assert eu, f"{locale} is missing ui_self_reference_eu"
+        assert voce, f"{locale} is missing ui_self_reference_voce"
+        assert eu != voce, f"{locale}: ui_self_reference_eu and ui_self_reference_voce are identical ({eu!r})"

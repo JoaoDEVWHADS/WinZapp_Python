@@ -86,17 +86,13 @@ class TestMutePresets:
         assert presets["mute_1w"] == 7 * 24 * 3600
 
     def test_every_preset_key_is_translated_in_every_locale(self):
-        import json
-
-        from tests.locales import LANGUAGES_DIR, registered_locale_codes
-
-        langs = LANGUAGES_DIR
+        from tests.locales import load_strings, registered_locale_codes
         # From language_map.json rather than written out: pl was missing from
         # the list this replaces, so it was never checked at all. Through the
         # shared helper so an empty map cannot turn this loop into zero
         # iterations and still pass — see tests/locales.py.
         for locale in registered_locale_codes():
-            strings = json.loads((langs / f"{locale}.json").read_text(encoding="utf-8"))
+            strings = load_strings(locale)
             for key, _ in ConversationsPanel.MUTE_PRESETS:
                 assert strings.get(key), f"{locale} is missing {key}"
             assert strings.get("mute_chat_menu_title"), locale

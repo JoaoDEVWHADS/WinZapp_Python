@@ -29,10 +29,13 @@ are bound to a plain stub, same pattern as
 tests/test_get_remote_chats_persistence.py.
 """
 
+import inspect
 import json
 import types
+import threading
 
 import pytest
+from cryptography.fernet import Fernet
 
 import main
 from main import MainWindow
@@ -71,8 +74,11 @@ class _Stub:
         self._muted_chats = {}
         self._pinned_chats = set()
         self._archived_chats = set()
+        self._phone_locked_chats = set()
+        self.key = Fernet.generate_key()
         self._lid_to_phone = {}
         self._phone_to_lid = {}
+        self._lid_mapping_lock = threading.RLock()
         self._group_name_cache = {}
         self._locally_read_at = {}
         self.conversations_panel = None
@@ -96,8 +102,12 @@ class _Stub:
 def _make(chats=None):
     stub = _Stub(chats)
     for name in ("get_remote_chats", "_normalize_jid", "_lift_contact_identity",
-                 "_last_received_jid", "_group_name_from_chat_dict"):
-        raw = MainWindow.__dict__[name]
+                 "_last_received_jid", "_group_name_from_chat_dict",
+                 "_note_server_unread",
+                 "_sync_phone_chat_lock", "_persist_phone_locked_chats",
+                 "_phone_lock_counterpart", "_phone_lock_fp",
+                 "_phone_locked_in_answer"):
+        raw = inspect.getattr_static(MainWindow, name)
         if isinstance(raw, staticmethod):
             setattr(stub, name, raw.__func__)
         else:
