@@ -123,12 +123,12 @@ def ensure_msys2_gcc() -> None:
 
 
 def run_setup() -> None:
-    """Run setup.py to prepare Node.js, MinGit and WPPConnect API for source execution."""
-    _log("Executing setup.py for source environment setup...")
-    setup_script = os.path.join(ROOT_DIR, "setup.py")
+    """Run setup_neonize.py to prepare the Neonize bridge (replaces setup.py)."""
+    _log("Executing setup_neonize.py for the Neonize bridge...")
+    setup_script = os.path.join(ROOT_DIR, "setup_neonize.py")
     res = subprocess.run([sys.executable, setup_script], cwd=ROOT_DIR)
     if res.returncode != 0:
-        _log("ERROR: setup.py execution failed!")
+        _log("ERROR: setup_neonize.py execution failed!")
         sys.exit(res.returncode)
 
 
@@ -147,7 +147,7 @@ def main() -> None:
     # 3. Ensure Python venv and requirements
     ensure_python_venv()
 
-    # 4. Delegate Source & API setup to setup.py
+    # 4. Prepare the Neonize bridge (replaces setup.py / WPPConnect)
     run_setup()
 
     _log("=== Builder Compiler Execution Completed Successfully! ===")
