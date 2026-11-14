@@ -17,17 +17,17 @@
   },
   "whatsmeow": {
     "module": "go.mau.fi/whatsmeow",
-    "version": "v0.0.0-20260921121126-35ae40906e74"
+    "version": "v0.0.0-20261113220833-ecc39170bc14"
   },
   "meowcaller": {
     "repository": "https://github.com/purpshell/meowcaller.git",
-    "commit": "27a3c6b18657614c9ec2ed16dfc497eff11de6ec"
+    "commit": "c48c3e2a243c672c942cbf0c941d14161720d540"
   },
   "toolchain": {
     "protoc": {
-      "version": "34.1",
-      "asset": "protoc-34.1-win64.zip",
-      "sha256": "6d7ebdc75e9c1f0026d4fb28f17ef1d0aae77d36744d83a9e052d79ba493724f"
+      "version": "36.2",
+      "asset": "protoc-36.2-win64.zip",
+      "sha256": "f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3"
     },
     "protoc_gen_go": "v1.36.12",
     "mypy_protobuf": "5.1.0"
