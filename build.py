@@ -775,8 +775,10 @@ def compile_installer_stub():
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
         f'-DWINZAPP_VERSION=L"{version}"',
         os.path.join(INSTALLER_DIR, "installer.c"),
+        os.path.join(INSTALLER_DIR, "zipextract.c"),
         INSTALLER_RES, "-o", INSTALLER_STUB, "-mwindows",
         "-I", INSTALLER_DIR,
+        "-l:libz.a",   # static: no zlib DLL to ship beside the installer
         "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32", "-luuid",
     ])
     print(f"  -> {INSTALLER_STUB}  (DisplayVersion={version})")
