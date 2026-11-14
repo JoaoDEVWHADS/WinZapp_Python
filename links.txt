@@ -1,0 +1,18 @@
+Neonize engine - upstream reference repositories (pinned)
+
+neonize
+  https://github.com/krypton-byte/neonize
+  pin: 0.10.0 @ 0a17277637df391ff4af9395bfa09abc236aa597
+
+whatsmeow (Go WhatsApp protocol)
+  https://go.mau.fi/whatsmeow
+  pin: v0.0.0-20260921121126-35ae40906e74 (commit 35ae40906e74)
+
+meowcaller (voice calls)
+  https://github.com/purpshell/meowcaller
+  pin: 27a3c6b18657614c9ec2ed16dfc497eff11de6ec
+
+Notes
+  - The authoritative pins live in neonize_bridge/neonize_upstream.json.
+  - The code the build actually uses (pin + WinZapp patches) is the workspace
+    created by: python neonize_bridge/build_neonize.py prepare
