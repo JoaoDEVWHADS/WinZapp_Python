@@ -78,6 +78,14 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
+      # build_neonize.py pins GOTOOLCHAIN=local, so the runner's Go must satisfy
+      # the go >= 1.26.0 required by the Neonize go.mod.
+      - name: Configurar Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
       - name: Executar Master Builder (Prepara Ambiente, Node, MinGit, DLLs e API)
         run: |
           python builder.py
