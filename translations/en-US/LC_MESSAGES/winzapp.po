@@ -1751,7 +1751,7 @@ msgctxt "api_update_now"
 msgid "&Update now"
 msgstr "&Update now"
 
-#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
+#: translations/en-US/LC_MESSAGES/winzapp.po
 #, python-brace-format
 msgctxt "api_update_outdated_message"
 msgid ""
@@ -1770,7 +1770,7 @@ msgstr ""
 "Would you like to automatically update WPPConnect?"
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
-#: client/ui/dialogs/api_version_check.py client/updater.py
+#: client/ui/dialogs/api_version_check.py
 msgctxt "api_update_outdated_title"
 msgid "WPPConnect version outdated"
 msgstr "WPPConnect version outdated"
@@ -20028,6 +20028,7 @@ msgstr ""
 "is ready to install."
 
 #: translations/en-US/LC_MESSAGES/winzapp.po client/update_package.py
+#: client/updater.py
 #, python-brace-format
 msgctxt "update_checksum_mismatch"
 msgid ""
@@ -20042,7 +20043,7 @@ msgctxt "update_closing_other_accounts"
 msgid "Closing the other WinZapp accounts..."
 msgstr "Closing the other WinZapp accounts..."
 
-#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
+#: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "update_coordination_failed"
 msgid ""
 "WinZapp could not verify that it is safe to install the update. Installation"
@@ -20051,7 +20052,7 @@ msgstr ""
 "WinZapp could not verify that it is safe to install the update. Installation"
 " was not started."
 
-#: translations/en-US/LC_MESSAGES/winzapp.po
+#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
 msgctxt "update_downloading"
 msgid "Downloading update..."
 msgstr "Downloading update..."
@@ -20091,7 +20092,7 @@ msgstr ""
 "been replaced. Check the update log and repair the program files if "
 "necessary, keeping your existing data folder."
 
-#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
+#: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "update_install_in_progress"
 msgid ""
 "An update installation is already in progress. Wait for it to finish before "
@@ -20219,7 +20220,7 @@ msgctxt "update_progress_title"
 msgid "WinZapp | Installing update"
 msgstr "WinZapp | Installing update"
 
-#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
+#: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "update_prompt_open_elsewhere"
 msgid ""
 "An update window is already open in another WinZapp account. Finish or close"
@@ -20228,7 +20229,7 @@ msgstr ""
 "An update window is already open in another WinZapp account. Finish or close"
 " that window to update."
 
-#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
+#: translations/en-US/LC_MESSAGES/winzapp.po
 #, python-brace-format
 msgctxt "update_recovery_instructions"
 msgid ""
@@ -20260,7 +20261,7 @@ msgstr ""
 "\n"
 "After repairing, open WinZapp again. The update package and diagnostic files have been retained temporarily."
 
-#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
+#: translations/en-US/LC_MESSAGES/winzapp.po
 #, python-brace-format
 msgctxt "update_reinstall_downgrade_warning"
 msgid ""
@@ -20270,7 +20271,7 @@ msgstr ""
 "Reinstalling will replace your current version {current} with the older "
 "version {new} from the selected update channel."
 
-#: translations/en-US/LC_MESSAGES/winzapp.po
+#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
 msgctxt "update_uac_declined"
 msgid ""
 "Administrator permission was denied, so the update could not be installed."
@@ -21244,7 +21245,7 @@ msgctxt "wpp_reinstall_notice_title"
 msgid "WPPConnect update recommended"
 msgstr "WPPConnect update recommended"
 
-#: translations/en-US/LC_MESSAGES/winzapp.po
+#: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
 #, python-brace-format
 msgctxt "wpp_update_available_msg"
 msgid ""
