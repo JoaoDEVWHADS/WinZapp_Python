@@ -319,32 +319,9 @@ def check_tools():
             if shutil.which(tool) is None:
                 missing.append(f"{name}  (not found in PATH)")
 
-    node_exe = os.path.join(NODE_DIR, "node.exe")
-    if not os.path.isfile(node_exe):
-        missing.append(
-            f"client/node/node.exe  (download portable Node.js for Windows x64 and "
-            f"extract to {NODE_DIR})"
-        )
-
-    # If client/api/ already exists, catch it having drifted from
-    # client/api_patches/ (a patch edited but setup_api.py never re-run)
-    # before checking dist/server.js below — re-running setup_api.py here
-    # both restores the patches AND rebuilds dist/server.js from them,
-    # closing the gap that let a stale/reverted patch ship silently.
-    if os.path.isdir(API_DIR):
-        out_of_sync = _api_patches_out_of_sync()
-        if out_of_sync:
-            _resync_api_patches(out_of_sync)
-
-    api_main = os.path.join(API_DIR, "dist", "server.js")
-    if not os.path.isfile(api_main):
-        missing.append(
-            "client/api/dist/server.js  -- WPPConnect Server API not built.\n"
-            "    1. Run:  venv\\Scripts\\python.exe setup_api.py\n"
-            "    2. Then inside client/api/ run:\n"
-            "         npm install\n"
-            "         npm run build"
-        )
+    # WPPConnect is no longer built at build time (the app installs it on
+    # demand when the WPPConnect engine is chosen), so neither client/node/
+    # nor client/api/dist/server.js is required here.
 
     if missing:
         print("\n[ERROR] Missing required tools or pre-built assets:")
@@ -651,11 +628,14 @@ def assemble_staging():
         shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
     print(f"  -> changelog_*.txt  ({len(changelog_files)} files)")
 
-    node_dst = os.path.join(STAGING_DIR, "node")
-    shutil.copytree(NODE_DIR, node_dst,
-                    ignore=shutil.ignore_patterns("corepack"))
-    node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
-    print(f"  -> node/  ({node_count} files)")
+    if os.path.isdir(NODE_DIR):
+        node_dst = os.path.join(STAGING_DIR, "node")
+        shutil.copytree(NODE_DIR, node_dst,
+                        ignore=shutil.ignore_patterns("corepack"))
+        node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
+        print(f"  -> node/  ({node_count} files)")
+    else:
+        print("  [INFO] client/node/ absent — Node is downloaded at runtime if WPPConnect is used")
 
     git_src = os.path.join(CLIENT_DIR, "git")
     if os.path.isdir(git_src):
@@ -669,35 +649,48 @@ def assemble_staging():
     os.makedirs(api_dst)
     api_count = 0
     custom_src_count = 0
-    for abs_path, rel_path in walk_dir(API_DIR,
-                                       exclude_top_dirs=API_EXCLUDE_DIRS,
-                                       exclude_top_files=API_EXCLUDE_FILES,
-                                       exclude_sub_dirs=API_EXCLUDE_SUB_DIRS):
-        dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(abs_path, dst)
-        api_count += 1
+    if os.path.isdir(API_DIR):
+        for abs_path, rel_path in walk_dir(API_DIR,
+                                           exclude_top_dirs=API_EXCLUDE_DIRS,
+                                           exclude_top_files=API_EXCLUDE_FILES,
+                                           exclude_sub_dirs=API_EXCLUDE_SUB_DIRS):
+            dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(abs_path, dst)
+            api_count += 1
 
-    sha_src = os.path.join(API_DIR, ".commit_sha")
-    if os.path.isfile(sha_src):
-        shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
-        print("  -> api/.commit_sha copied to staging")
+        sha_src = os.path.join(API_DIR, ".commit_sha")
+        if os.path.isfile(sha_src):
+            shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
+            print("  -> api/.commit_sha copied to staging")
 
-    cache_src = os.path.join(API_DIR, ".cache")
-    if os.path.isdir(cache_src):
-        cache_dst = os.path.join(api_dst, ".cache")
-        shutil.copytree(cache_src, cache_dst, dirs_exist_ok=True)
-        print("  -> api/.cache (Chrome Headless) copied to staging")
-    for rel_path in API_CUSTOM_SRC_FILES:
-        src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
-        if not os.path.isfile(src_path):
-            print(f"  [WARN] custom api source file missing: {rel_path}")
-            continue
-        dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src_path, dst)
-        api_count += 1
-        custom_src_count += 1
+        cache_src = os.path.join(API_DIR, ".cache")
+        if os.path.isdir(cache_src):
+            cache_dst = os.path.join(api_dst, ".cache")
+            shutil.copytree(cache_src, cache_dst, dirs_exist_ok=True)
+            print("  -> api/.cache (Chrome Headless) copied to staging")
+        for rel_path in API_CUSTOM_SRC_FILES:
+            src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
+            if not os.path.isfile(src_path):
+                print(f"  [WARN] custom api source file missing: {rel_path}")
+                continue
+            dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src_path, dst)
+            api_count += 1
+            custom_src_count += 1
+
+    # Always ship the minimal api/ skeleton ApiSetupDialog preserves on a
+    # runtime WPPConnect install (start.js + config.json), so choosing the
+    # WPPConnect engine at first run can set the API up on demand even though
+    # this build does not bundle a compiled api/.
+    for skeleton in ("start.js", "config.json"):
+        src = os.path.join(API_PATCHES_DIR, skeleton)
+        dst = os.path.join(api_dst, skeleton)
+        if os.path.isfile(src) and not os.path.isfile(dst):
+            shutil.copy2(src, dst)
+            api_count += 1
+
     print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
 
     # Second, untouched copy of the same patch files under api_patches/ — a
