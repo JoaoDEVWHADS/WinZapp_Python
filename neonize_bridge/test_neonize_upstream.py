@@ -26,7 +26,7 @@ def manifest():
 def test_the_committed_manifest_is_valid_and_latest_or_pinned():
     info = manifest()
     if info.get("source") == "upstream-latest":
-        for tree in ("neonize", "whatsmeow", "meowcaller"):
+        for tree in ("neonize", "whatsmeow", "meowcaller", "hypermeow"):
             assert info[tree]["latest"], f"{tree}.latest is empty"
         return
     current = nu.current(info)

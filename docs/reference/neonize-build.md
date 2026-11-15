@@ -185,7 +185,8 @@ What the patches carry today:
 ## Latest mode (what this checkout builds)
 
 The manifest carries `"source": "upstream-latest"`: `prepare` clones the
-newest `master`/`main` of all three upstream repositories and applies every
+newest `master`/`main` of all four upstream repositories (neonize, whatsmeow,
+meowcaller and hypermeow, which meowcaller has moved to) and applies every
 patch at build time. A patch conflict stops the build in
 `neonize_build/<tree>/` — resolve it there (`git am --continue`), keep the
 fix as part of the patch series (`neonize_bridge/neonize_patches/`), and

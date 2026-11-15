@@ -13,6 +13,10 @@
     "repository": "https://github.com/purpshell/meowcaller",
     "latest": "main"
   },
+  "hypermeow": {
+    "repository": "https://github.com/polymorfa/hypermeow",
+    "latest": "main"
+  },
   "toolchain": {
     "protoc": {
       "version": "36.2",

@@ -41,7 +41,7 @@ WORK = os.path.join(HERE, "neonize_build")
 PATCHES = os.path.join(HERE, "neonize_patches")
 TOOLS = os.path.join(WORK, "tools")
 DIST = os.path.join(WORK, "dist")
-TREES = ("neonize", "whatsmeow", "meowcaller")
+TREES = ("neonize", "whatsmeow", "meowcaller", "hypermeow")
 BRANCH, BASE = "winzapp", "upstream"
 # committer of the workspace commits (the author comes from each patch)
 GIT_ID = ["-c", "user.name=WinZapp build", "-c", "user.email=build@winzapp.invalid"]
@@ -340,12 +340,15 @@ def prepare(info, ref=None, force=False):
     latest = info.get("source") == "upstream-latest"
     branches = {t: (info.get(t) or {}).get("latest", "master") for t in TREES}
     if latest:
-        say("building from the latest upstream of the three repositories "
+        say("building from the latest upstream of the four repositories "
             f"(neonize@{branches['neonize']}, whatsmeow@{branches['whatsmeow']}, "
-            f"meowcaller@{branches['meowcaller']}); patch failures stop the build")
+            f"meowcaller@{branches['meowcaller']}, hypermeow@{branches['hypermeow']}); "
+            "patch failures stop the build")
         commit = prepare_git("neonize", info["neonize"]["repository"], ref or branches["neonize"],
                              "latest upstream", force)
         prepare_git("whatsmeow", info["whatsmeow"]["repository"], branches["whatsmeow"],
+                    "latest", force)
+        prepare_git("hypermeow", info["hypermeow"]["repository"], branches["hypermeow"],
                     "latest", force)
         prepare_git("meowcaller", info["meowcaller"]["repository"], branches["meowcaller"],
                     "latest", force)
@@ -482,7 +485,8 @@ def build(info):
     shutil.rmtree(DIST, ignore_errors=True)
     shutil.copytree(os.path.join(tree, "neonize"), package,
                     ignore=shutil.ignore_patterns("__pycache__", "*.dll", "*.so", "*.dylib"))
-    env = {**os.environ, "CGO_ENABLED": "1", "GOFLAGS": "-mod=readonly", "GOTOOLCHAIN": "local"}
+    gflags = "-mod=mod" if info.get("source") == "upstream-latest" else "-mod=readonly"
+    env = {**os.environ, "CGO_ENABLED": "1", "GOFLAGS": gflags, "GOTOOLCHAIN": "local"}
     say("compiling the DLL (go build -buildmode=c-shared)")
     run(["go", "build", "-buildmode=c-shared", "-trimpath", "-ldflags=-s",
          "-o", os.path.join(package, upstream.DLL_NAME), "."],
