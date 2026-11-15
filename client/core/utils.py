@@ -1073,6 +1073,8 @@ DEFAULT_SETTINGS = {
         # "document" (core.attachment_types.PASTED_AUDIO_MODES).
         "pasted_audio_as": "audio",
         "keep_muted_chats_silent_when_open": True,
+        "discount_archived_from_unread_badge": True,
+        "discount_muted_from_unread_badge": True,
         # Message notifications let through per second when many arrive at
         # once (core.notification_burst).
         "notification_burst_limit": 3,
@@ -1355,6 +1357,9 @@ DEFAULT_SETTINGS = {
         "typing_sound_interval": 3,
         "typing_sound_silence_capture": True,
         "announce_recording": True,
+        # Groups: name everyone typing/recording at once; off = the old
+        # one-participant preview, speech and Alt+T.
+        "announce_group_multiple_activity": True,
         "announce_conversations_update_start": True,
         "announce_conversations_update_complete": True,
         "announce_sync_progress": True,
