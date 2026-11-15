@@ -1,27 +1,17 @@
 {
   "schema": 1,
+  "source": "upstream-latest",
   "neonize": {
-    "repository": "https://github.com/krypton-byte/neonize.git",
-    "approved": [
-      {
-        "version": "0.6.0",
-        "commit": "ce082701aeb94d3fa2ede0e61f397b755051f556",
-        "approved_on": "2026-10-26"
-      },
-      {
-        "version": "0.10.0",
-        "commit": "0a17277637df391ff4af9395bfa09abc236aa597",
-        "approved_on": "2026-11-08"
-      }
-    ]
+    "repository": "https://github.com/krypton-byte/neonize",
+    "latest": "master"
   },
   "whatsmeow": {
-    "module": "go.mau.fi/whatsmeow",
-    "version": "v0.0.0-20261113220833-ecc39170bc14"
+    "repository": "https://github.com/tulir/whatsmeow",
+    "latest": "main"
   },
   "meowcaller": {
-    "repository": "https://github.com/purpshell/meowcaller.git",
-    "commit": "c48c3e2a243c672c942cbf0c941d14161720d540"
+    "repository": "https://github.com/purpshell/meowcaller",
+    "latest": "main"
   },
   "toolchain": {
     "protoc": {

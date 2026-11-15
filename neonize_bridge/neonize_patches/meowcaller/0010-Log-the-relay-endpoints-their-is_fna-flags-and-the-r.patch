@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 14:53:07 +0000
-Subject: [PATCH] Log the relay endpoints, their is_fna flags and the relay's
- STUN answers
+Subject: [PATCH 10/26] Log the relay endpoints, their is_fna flags and the
+ relay's STUN answers
 
 A call that never receives the peer's media (inbound calls on the WinZapp
 build: frames from the other side stay at 0) shows nothing about why. Log
@@ -19,7 +19,7 @@ after media started would have picked another endpoint.
  create mode 100644 relay_diag_test.go
 
 diff --git a/engine.go b/engine.go
-index 10054c9..9455450 100644
+index 64dcfc3..7a28137 100644
 --- a/engine.go
 +++ b/engine.go
 @@ -797,6 +797,7 @@ func (e *engine) onRelay(callID string, data *waBinary.Node) {
@@ -188,3 +188,6 @@ index 0000000..42e2d73
 +		t.Fatal("lost relay not reported")
 +	}
 +}
+-- 
+2.34.1
+

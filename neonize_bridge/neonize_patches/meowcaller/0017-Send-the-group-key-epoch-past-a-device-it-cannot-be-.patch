@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 12 Nov 2026 23:45:19 -0300
-Subject: [PATCH] Send the group key epoch past a device it cannot be encrypted
- for, and log the fan-out
+Subject: [PATCH 17/26] Send the group key epoch past a device it cannot be
+ encrypted for, and log the fan-out
 
 Seen live: after a 1:1 call became a group call, one member's device never
 received the new group key, so nobody could decrypt anybody and the call
@@ -29,7 +29,7 @@ named; full suite passes.
  create mode 100644 group_epoch_fanout_test.go
 
 diff --git a/engine.go b/engine.go
-index c1d922e..316ee9e 100644
+index c7bd934..86179d0 100644
 --- a/engine.go
 +++ b/engine.go
 @@ -625,6 +625,12 @@ func (e *engine) onGroupOffer(ev *events.CallOffer, update groupCallUpdate) {
@@ -46,7 +46,7 @@ index c1d922e..316ee9e 100644
  
  	preaccept, err := signaling.BuildActiveGroupPreaccept(
 diff --git a/engine_group_control.go b/engine_group_control.go
-index 8d0a2a2..866d612 100644
+index 549e641..e968033 100644
 --- a/engine_group_control.go
 +++ b/engine_group_control.go
 @@ -6,6 +6,7 @@ import (
@@ -56,7 +56,7 @@ index 8d0a2a2..866d612 100644
 +	"strings"
  
  	"github.com/purpshell/meowcaller/signaling"
- 	waBinary "go.mau.fi/whatsmeow/binary"
+ 	waBinary "github.com/polymorfa/hypermeow/binary"
 @@ -28,6 +29,12 @@ func (e *engine) onUnknownCallEvent(node *waBinary.Node) {
  			return
  		}
@@ -207,7 +207,7 @@ index 8d0a2a2..866d612 100644
 +}
 diff --git a/group_epoch_fanout_test.go b/group_epoch_fanout_test.go
 new file mode 100644
-index 0000000..e59ab8c
+index 0000000..1e9bf0c
 --- /dev/null
 +++ b/group_epoch_fanout_test.go
 @@ -0,0 +1,59 @@
@@ -218,7 +218,7 @@ index 0000000..e59ab8c
 +	"strconv"
 +	"testing"
 +
-+	"go.mau.fi/whatsmeow/types"
++	"github.com/polymorfa/hypermeow/types"
 +)
 +
 +func fanoutJID(t *testing.T, s string) types.JID {
@@ -271,7 +271,7 @@ index 0000000..e59ab8c
 +	}
 +}
 diff --git a/roster_diag_test.go b/roster_diag_test.go
-index 52bf1de..239f551 100644
+index 52bf1de..72ec7fe 100644
 --- a/roster_diag_test.go
 +++ b/roster_diag_test.go
 @@ -1,6 +1,10 @@
@@ -281,7 +281,7 @@ index 52bf1de..239f551 100644
 +import (
 +	"testing"
 +
-+	"go.mau.fi/whatsmeow/types"
++	"github.com/polymorfa/hypermeow/types"
 +)
  
  func TestDescribeGroupRosterCountsStatesAndPIDsWithoutNamingAnyone(t *testing.T) {
@@ -301,3 +301,6 @@ index 52bf1de..239f551 100644
 +		t.Fatal("no recipients should read as empty")
 +	}
 +}
+-- 
+2.34.1
+

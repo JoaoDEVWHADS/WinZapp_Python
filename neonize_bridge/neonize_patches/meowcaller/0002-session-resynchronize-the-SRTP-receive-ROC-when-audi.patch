@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: reffehcsoibaf <290818442+reffehcsoibaf@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 01:15:58 -0300
-Subject: [PATCH] session: resynchronize the SRTP receive ROC when audio stops
- authenticating
+Subject: [PATCH 02/26] session: resynchronize the SRTP receive ROC when audio
+ stops authenticating
 
 After a sequence rollover or heavy loss the ROC estimate could fall out
 of step and every later packet failed authentication: the call went
@@ -15,7 +15,7 @@ packets). Failures are logged sparingly with the estimator's state.
  2 files changed, 45 insertions(+), 3 deletions(-)
 
 diff --git a/session.go b/session.go
-index 187a502..fd54545 100644
+index 11665c3..52958e7 100644
 --- a/session.go
 +++ b/session.go
 @@ -167,6 +167,7 @@ type MediaPipeline struct {
@@ -91,3 +91,6 @@ index 86d5b8e..a8f5d0e 100644
  // GuessRoc estimates and commits seq in one step.
  func (t *RecvRocTracker) GuessRoc(seq uint16, log ...zerolog.Logger) uint32 {
  	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/2f001b5a3d6374cc5cf7177792c2a81f87a54080/wacore/src/voip/e2e_srtp.rs#L190-L198
+-- 
+2.34.1
+

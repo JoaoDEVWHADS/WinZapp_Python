@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
 Date: Mon, 26 Oct 2026 10:10:08 -0300
-Subject: [PATCH] send: the <biz> node of a native flow message, as WhatsApp
- Web sends it
+Subject: [PATCH 04/15] send: the <biz> node of a native flow message, as
+ WhatsApp Web sends it
 
 WhatsApp Web adds <biz native_flow_name=..> to a merchant's order updates
 and <biz><interactive type=native_flow v=1><native_flow name=../></biz> to
@@ -13,10 +13,10 @@ first button (WAWebSendMsgCreateFanoutStanza).
  1 file changed, 73 insertions(+)
 
 diff --git a/send.go b/send.go
-index 4f94142..95078d9 100644
+index 6e879a5..9903364 100644
 --- a/send.go
 +++ b/send.go
-@@ -1161,10 +1161,83 @@ func (cli *Client) getMessageContent(
+@@ -1178,10 +1178,83 @@ func (cli *Client) getMessageContent(
  				Attrs: getButtonAttributes(message),
  			}},
  		})
@@ -100,3 +100,6 @@ index 4f94142..95078d9 100644
  func (cli *Client) prepareMessageNode(
  	ctx context.Context,
  	to types.JID,
+-- 
+2.34.1
+

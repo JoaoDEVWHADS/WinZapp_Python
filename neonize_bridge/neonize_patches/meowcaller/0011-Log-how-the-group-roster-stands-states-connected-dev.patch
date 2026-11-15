@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sat, 7 Nov 2026 01:33:30 +0000
-Subject: [PATCH] Log how the group roster stands: states, connected devices
- and their PIDs
+Subject: [PATCH 11/26] Log how the group roster stands: states, connected
+ devices and their PIDs
 
 A callee that heard nobody in a group call applied rosters with no connected
 remote device carrying a PID, so only the fallback receiver stayed. Nothing in
@@ -17,7 +17,7 @@ state and connected devices with and without PID, naming no one.
  create mode 100644 roster_diag_test.go
 
 diff --git a/group_media_receive.go b/group_media_receive.go
-index 2bc7885..80cf5fa 100644
+index 6878b03..d319660 100644
 --- a/group_media_receive.go
 +++ b/group_media_receive.go
 @@ -348,6 +348,12 @@ func (r *participantReceiveRegistry) prepareGroupUpdateLocked(
@@ -103,3 +103,6 @@ index 0000000..52bf1de
 +		t.Fatalf("empty roster = %q", got)
 +	}
 +}
+-- 
+2.34.1
+

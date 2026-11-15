@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sat, 7 Nov 2026 03:07:33 +0000
-Subject: [PATCH] Keep a group device's PID when a later roster omits it
+Subject: [PATCH 12/26] Keep a group device's PID when a later roster omits it
 
 The server sends a connected device's PID only in the group update where it
 joins; every later update is a full roster listing the same connected device
@@ -18,7 +18,7 @@ device that leaves the roster or stops being connected is still dropped.
  2 files changed, 68 insertions(+), 5 deletions(-)
 
 diff --git a/group_media_receive.go b/group_media_receive.go
-index 80cf5fa..59d567d 100644
+index d319660..8688946 100644
 --- a/group_media_receive.go
 +++ b/group_media_receive.go
 @@ -291,14 +291,21 @@ func (r *participantReceiveRegistry) prepareGroupUpdateLocked(
@@ -66,7 +66,7 @@ index 80cf5fa..59d567d 100644
  	// Source of truth: https://github.com/purpshell/meowcaller/blob/65b1dbf33f365db7392e438c3e3bf3651decb6cf/datasheets/group-media-receive.md#L122-L137
  	for participantID, receiver := range r.byDeviceID {
 diff --git a/group_media_receive_test.go b/group_media_receive_test.go
-index 46e25ed..d811948 100644
+index f8f47f0..767f778 100644
 --- a/group_media_receive_test.go
 +++ b/group_media_receive_test.go
 @@ -1028,8 +1028,10 @@ func TestParticipantReceiveRegistryPrePIDUpdatePrunesNonFallbackReceivers(t *tes
@@ -128,3 +128,6 @@ index 46e25ed..d811948 100644
 +		t.Fatal("a device that left kept its receiver")
 +	}
 +}
+-- 
+2.34.1
+

@@ -49,6 +49,16 @@ def validate(manifest) -> dict:
     """The manifest itself when it is well formed; ValueError saying what is wrong."""
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ValueError(f"not a schema {SCHEMA} manifest")
+    if manifest.get("source") == "upstream-latest":
+        # no upstream version is pinned: every build consumes the branch HEADs,
+        # and only the branch names need to be there
+        for tree in ("neonize", "whatsmeow", "meowcaller"):
+            ref = str((manifest.get(tree) or {}).get("latest", "")).strip()
+            if not ref:
+                raise ValueError(f"{tree}.latest is missing or empty (branch, tag or commit)")
+        _toolchain_ok(manifest)
+        _release_ok(manifest)
+        return manifest
     approved = (manifest.get("neonize") or {}).get("approved")
     if not isinstance(approved, list) or not approved:
         raise ValueError("neonize.approved is empty")
@@ -61,18 +71,27 @@ def validate(manifest) -> dict:
         raise ValueError("whatsmeow.version is not a Go module version")
     if not _COMMIT.match(str((manifest.get("meowcaller") or {}).get("commit", ""))):
         raise ValueError("meowcaller.commit is not a full SHA-1")
+    _toolchain_ok(manifest)
+    _release_ok(manifest)
+    return manifest
+
+
+def _toolchain_ok(manifest) -> None:
     protoc = (manifest.get("toolchain") or {}).get("protoc") or {}
     if not _SHA256.match(str(protoc.get("sha256", ""))):
         raise ValueError("toolchain.protoc.sha256 is not a SHA-256")
+
+
+def _release_ok(manifest) -> None:
     release = manifest.get("release")
-    if release is not None:
-        if not _TAG.match(str(release.get("tag", ""))) or not _TAG.match(str(release.get("asset", ""))):
-            raise ValueError("release tag/asset are not plain names")
-        if not _SHA256.match(str(release.get("sha256", ""))):
-            raise ValueError("release.sha256 is not a SHA-256")
-        if not _SHA256.match(str(release.get("identity", ""))):
-            raise ValueError("release.identity is not a build identity (BUILD_INFO.json)")
-    return manifest
+    if release is None:
+        return
+    if not _TAG.match(str(release.get("tag", ""))) or not _TAG.match(str(release.get("asset", ""))):
+        raise ValueError("release tag/asset are not plain names")
+    if not _SHA256.match(str(release.get("sha256", ""))):
+        raise ValueError("release.sha256 is not a SHA-256")
+    if not _SHA256.match(str(release.get("identity", ""))):
+        raise ValueError("release.identity is not a build identity (BUILD_INFO.json)")
 
 
 def load(path) -> dict:
@@ -82,6 +101,8 @@ def load(path) -> dict:
 
 def current(manifest) -> dict:
     """The approved neonize release builds use: the last one."""
+    if manifest.get("source") == "upstream-latest":
+        raise ValueError("manifest is upstream-latest; nothing is pinned, no approved release to build from")
     return manifest["neonize"]["approved"][-1]
 
 

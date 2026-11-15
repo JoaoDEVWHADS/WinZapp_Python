@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JoaoDEVWHADS <121991282+JoaoDEVWHADS@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 12:47:31 +0000
+Subject: [PATCH 04/26] deps: bump pion/opus to the MLow-capable pre-release
+ (e7b8aa55508c)
+
+go.sum to be regenerated with 'go mod tidy' on the Go toolchain machine
+---
+ go.mod | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/go.mod b/go.mod
+index 033239b..ac6ccc6 100644
+--- a/go.mod
++++ b/go.mod
+@@ -7,7 +7,7 @@ require (
+ 	github.com/pion/datachannel v1.6.0
+ 	github.com/pion/dtls/v3 v3.1.2
+ 	github.com/pion/logging v0.2.4
+-	github.com/pion/opus v0.1.0
++	github.com/pion/opus v0.1.1-0.20261026214112-e7b8aa55508c
+ 	github.com/pion/sctp v1.9.4
+ 	github.com/polymorfa/hypermeow v0.0.0-20260906031440-90f9e4ec2c88
+ 	github.com/rs/zerolog v1.35.1
+-- 
+2.34.1
+

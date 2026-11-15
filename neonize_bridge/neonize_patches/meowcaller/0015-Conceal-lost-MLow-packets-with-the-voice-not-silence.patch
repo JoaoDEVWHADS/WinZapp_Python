@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 12 Nov 2026 19:41:21 -0300
-Subject: [PATCH] Conceal lost MLow packets with the voice, not silence
+Subject: [PATCH 15/26] Conceal lost MLow packets with the voice, not silence
 
 A lost or undecodable MLow packet used to fade the last sample to zero in
 5 ms and leave up to 60 ms of silence in the middle of a word. The decoder
@@ -611,3 +611,6 @@ index 0000000..9e9228a
 +		t.Fatal("the saved state shares memory with the live one")
 +	}
 +}
+-- 
+2.34.1
+

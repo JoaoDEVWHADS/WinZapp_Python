@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: WinZapp build <build@winzapp.invalid>
 Date: Wed, 4 Nov 2026 12:43:33 -0300
-Subject: [PATCH] send: a status goes to its recipients' numbers, never to a
- LID
+Subject: [PATCH 10/15] send: a status goes to its recipients' numbers, never
+ to a LID
 
 The contact store keys a saved name by the JID of the app state mutation
 that carried it, and WhatsApp now also sends contact mutations indexed by
@@ -54,7 +54,7 @@ index d376829..89d270d 100644
  var DefaultStatusPrivacy = []types.StatusPrivacy{{
 diff --git a/status_recipients.go b/status_recipients.go
 new file mode 100644
-index 0000000..8f5047f
+index 0000000..5879649
 --- /dev/null
 +++ b/status_recipients.go
 @@ -0,0 +1,65 @@
@@ -125,7 +125,7 @@ index 0000000..8f5047f
 +}
 diff --git a/status_recipients_test.go b/status_recipients_test.go
 new file mode 100644
-index 0000000..538e234
+index 0000000..69f6017
 --- /dev/null
 +++ b/status_recipients_test.go
 @@ -0,0 +1,51 @@
@@ -180,3 +180,6 @@ index 0000000..538e234
 +		t.Fatalf("got %v", got)
 +	}
 +}
+-- 
+2.34.1
+

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sat, 7 Nov 2026 20:02:39 +0000
-Subject: [PATCH] Log the relay traffic by kind every 5 seconds, silence
+Subject: [PATCH 13/26] Log the relay traffic by kind every 5 seconds, silence
  included
 
 The audio receive summary only prints when a packet arrives, so a call whose
@@ -142,3 +142,6 @@ index 0000000..0bd5758
 +		t.Fatalf("window = %q, want the silence of RTP to show as rtp=0", got)
 +	}
 +}
+-- 
+2.34.1
+

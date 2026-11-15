@@ -182,6 +182,28 @@ What the patches carry today:
   The ciphertext is authenticated by the media key's HMAC and the plaintext by
   `fileSHA256` (`mediaretry_decrypt.go`, tested alone with `go test`).
 
+## Latest mode (what this checkout builds)
+
+The manifest carries `"source": "upstream-latest"`: `prepare` clones the
+newest `master`/`main` of all three upstream repositories and applies every
+patch at build time. A patch conflict stops the build in
+`neonize_build/<tree>/` — resolve it there (`git am --continue`), keep the
+fix as part of the patch series (`neonize_bridge/neonize_patches/`), and
+re-export it with `python neonize_bridge/build_neonize.py export`. This is
+the WinZapp way to track upstream: always the latest commit of neonize,
+whatsmeow and meowcaller, with every conflict owned by whoever maintains
+the patches.
+
+- `check --ref <x>` / the approved pin are unaffected: `build_neonize.py
+  --pinned` builds the approved `neonize_upstream.json` entries instead,
+  `--latest` forces the latest mode for a single run.
+- `check_go_mod` is a warning in this mode, not a stop: the pinned whatsmeow
+  in the manifest can differ from upstream's `go.mod` by design; the build
+  proceeds with local replace directives, and dep bumps belong in
+  `goneonize/go.mod` (or in a patch touching it) like any other resolution.
+- `BUILD_INFO.json` reports `source: "upstream-latest"` and the actual
+  upstream heads, without a build `identity`.
+
 ## Toolchain (once)
 
 ```powershell

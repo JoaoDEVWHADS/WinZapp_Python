@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 13 Nov 2026 08:14:22 -0300
-Subject: [PATCH] Log the group relay subscriptions sent and the STUN types the
- relay answers
+Subject: [PATCH 21/26] Log the group relay subscriptions sent and the STUN
+ types the relay answers
 
 A joiner whose relay answered every allocate yet forwarded no media either
 way left no trace of what it asked for: the PIDs it subscribed to, its own
@@ -215,3 +215,6 @@ index 1011bed..4aa4de7 100644
  			Msg("relay traffic by kind")
  		previous = now
  	}
+-- 
+2.34.1
+

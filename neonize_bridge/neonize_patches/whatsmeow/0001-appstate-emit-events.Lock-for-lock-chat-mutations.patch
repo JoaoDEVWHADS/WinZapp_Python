@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: reffehcsoibaf <290818442+reffehcsoibaf@users.noreply.github.com>
 Date: Fri, 16 Oct 2026 16:06:48 -0300
-Subject: [PATCH] appstate: emit events.Lock for lock chat mutations
+Subject: [PATCH 01/15] appstate: emit events.Lock for lock chat mutations
 
 The lock mutation (index "lock", LockChatAction) was received but
 ignored, so linked-device clients could not learn that a chat was locked
@@ -13,10 +13,10 @@ Mute.
  2 files changed, 12 insertions(+)
 
 diff --git a/appstate.go b/appstate.go
-index ec1892c..3cb31ba 100644
+index b2db962..a10a4ac 100644
 --- a/appstate.go
 +++ b/appstate.go
-@@ -287,6 +287,9 @@ func (cli *Client) dispatchAppState(ctx context.Context, name appstate.WAPatchNa
+@@ -299,6 +299,9 @@ func (cli *Client) dispatchAppState(ctx context.Context, name appstate.WAPatchNa
  		if cli.Store.ChatSettings != nil {
  			storeUpdateError = cli.Store.ChatSettings.PutArchived(ctx, jid, act.GetArchived())
  		}
@@ -25,9 +25,9 @@ index ec1892c..3cb31ba 100644
 +		eventToDispatch = &events.Lock{JID: jid, Timestamp: ts, Action: act, FromFullSync: fullSync}
  	case appstate.IndexContact:
  		act := mutation.Action.GetContactAction()
- 		eventToDispatch = &events.Contact{JID: jid, Timestamp: ts, Action: act, FromFullSync: fullSync}
+ 		if isContactRemove {
 diff --git a/types/events/appstate.go b/types/events/appstate.go
-index a608274..2b58517 100644
+index dc425c8..e78067b 100644
 --- a/types/events/appstate.go
 +++ b/types/events/appstate.go
 @@ -91,6 +91,15 @@ type Archive struct {
@@ -46,3 +46,6 @@ index a608274..2b58517 100644
  // MarkChatAsRead is emitted when a whole chat is marked as read or unread from another device.
  type MarkChatAsRead struct {
  	JID       types.JID // The chat which was marked as read or unread.
+-- 
+2.34.1
+

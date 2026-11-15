@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Muhammet Enes Senovali <mesenovali@gmail.com>
 Date: Fri, 30 Oct 2026 12:44:04 +0300
-Subject: [PATCH] Use negotiated audio codecs and authenticate ordered call
- playout
+Subject: [PATCH 05/26] Use negotiated audio codecs and authenticate ordered
+ call playout
 
 ---
  audio_codec.go                | 129 ++++++++++++++++++++++++++++++++++
@@ -13,10 +13,8 @@ Subject: [PATCH] Use negotiated audio codecs and authenticate ordered call
  audio_receive_runtime.go      |  69 ++++++++++++++++++
  audio_receive_runtime_test.go |  71 +++++++++++++++++++
  engine_media.go               | 104 +++++++++++++++------------
- go.mod                        |   2 +-
- go.sum                        |   3 +
  group_media_receive.go        |   1 +
- 11 files changed, 637 insertions(+), 47 deletions(-)
+ 9 files changed, 633 insertions(+), 46 deletions(-)
  create mode 100644 audio_codec.go
  create mode 100644 audio_codec_test.go
  create mode 100644 audio_opus_reference_test.go
@@ -809,42 +807,8 @@ index ec5fd56..abcdb53 100644
  				}
  			}
  		}
-diff --git a/go.mod b/go.mod
-index cae5b58..d5a1ef3 100644
---- a/go.mod
-+++ b/go.mod
-@@ -7,7 +7,7 @@ require (
- 	github.com/pion/datachannel v1.6.0
- 	github.com/pion/dtls/v3 v3.1.2
- 	github.com/pion/logging v0.2.4
--	github.com/pion/opus v0.1.0
-+	github.com/pion/opus v0.1.1-0.20261026214112-e7b8aa55508c
- 	github.com/pion/sctp v1.9.4
- 	github.com/rs/zerolog v1.35.1
- 	go.mau.fi/whatsmeow v0.0.0-20260921121126-35ae40906e74
-diff --git a/go.sum b/go.sum
-index 971d650..fc5688a 100644
---- a/go.sum
-+++ b/go.sum
-@@ -30,6 +30,8 @@ github.com/pion/logging v0.2.4 h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=
- github.com/pion/logging v0.2.4/go.mod h1:DffhXTKYdNZU+KtJ5pyQDjvOAh/GsNSyv1lbkFbe3so=
- github.com/pion/opus v0.1.0 h1:GgK/a3DNDrffKjUFsK39rZKqfv7bQ2S2eqRKt0BnqAE=
- github.com/pion/opus v0.1.0/go.mod h1:t5Xog2n682JnawoykACE6nKVmupFvmJvkpM7x6bTv6g=
-+github.com/pion/opus v0.1.1-0.20261026214112-e7b8aa55508c h1:icxv25Ca9LiCVKigLyupvKvrZ6Vqvf3WQbXq8pcrnCI=
-+github.com/pion/opus v0.1.1-0.20261026214112-e7b8aa55508c/go.mod h1:shQv7gBOJYCF48/ElT1SH+se7rneJn88n5FVLFhPKqI=
- github.com/pion/randutil v0.1.0 h1:CFG1UdESneORglEsnimhUjf33Rwjubwj6xfiOXBa3mA=
- github.com/pion/randutil v0.1.0/go.mod h1:XcJrSMMbbMRhASFVOlj/5hQial/Y8oH/HVo7TBZq+j8=
- github.com/pion/sctp v1.9.4 h1:cMxEu0F5tbP4qH07bKf1Zjf4rUih9LIo0qQt424e258=
-@@ -45,6 +47,7 @@ github.com/rs/zerolog v1.35.1/go.mod h1:EjML9kdfa/RMA7h/6z6pYmq1ykOuA8/mjWaEvGI+
- github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
- github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
- github.com/stretchr/testify v1.12.0 h1:K6Mr6jO9JICuend/5xzTM03ydSV3vdNRYAdPSukj8uI=
-+github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
- github.com/vektah/gqlparser/v2 v2.5.27 h1:RHPD3JOplpk5mP5JGX8RKZkt2/Vwj/PZv0HxTdwFp0s=
- github.com/vektah/gqlparser/v2 v2.5.27/go.mod h1:D1/VCZtV3LPnQrcPBeR/q5jkSQIPti0uYCP/RI0gIeo=
- go.mau.fi/libsignal v0.2.2 h1:QV+XdzQkm3x3aSG7FcqfGSZuFXz83pRZPBFaPygHbOU=
 diff --git a/group_media_receive.go b/group_media_receive.go
-index e016e3a..016dcc9 100644
+index cca02ff..dbc1115 100644
 --- a/group_media_receive.go
 +++ b/group_media_receive.go
 @@ -55,6 +55,7 @@ type participantAudioReceiver struct {
@@ -855,3 +819,6 @@ index e016e3a..016dcc9 100644
  }
  
  type installedGroupRawEpoch struct {
+-- 
+2.34.1
+

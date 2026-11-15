@@ -23,8 +23,12 @@ def manifest():
     return nu.load(os.path.join(HERE, nu.MANIFEST))
 
 
-def test_the_committed_manifest_is_valid_and_pins_whole_commits():
+def test_the_committed_manifest_is_valid_and_latest_or_pinned():
     info = manifest()
+    if info.get("source") == "upstream-latest":
+        for tree in ("neonize", "whatsmeow", "meowcaller"):
+            assert info[tree]["latest"], f"{tree}.latest is empty"
+        return
     current = nu.current(info)
     assert re.fullmatch(r"\d+\.\d+\.\d+", current["version"])
     assert re.fullmatch(r"[0-9a-f]{40}", current["commit"])

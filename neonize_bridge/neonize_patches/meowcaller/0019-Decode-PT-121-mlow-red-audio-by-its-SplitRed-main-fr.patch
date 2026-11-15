@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 13 Nov 2026 01:07:22 -0300
-Subject: [PATCH] Decode PT 121 (mlow-red) audio by its SplitRed main frame
+Subject: [PATCH 19/26] Decode PT 121 (mlow-red) audio by its SplitRed main
+ frame
 
 Seen live: a member left a group call and joined it again; the others then
 sent it PT 121 (MLow with SplitRed redundancy) instead of PT 120. The packets
@@ -165,7 +166,7 @@ index 0000000..2d7e6af
 +	}
 +}
 diff --git a/group_media_receive.go b/group_media_receive.go
-index f70888c..0c09378 100644
+index 65721d6..d1ac09f 100644
 --- a/group_media_receive.go
 +++ b/group_media_receive.go
 @@ -17,6 +17,18 @@ type participantAudioDecoder interface {
@@ -244,3 +245,6 @@ index 32637d6..14d9132 100644
  }
  
  // IsOpusDtxPayload reports DTX / comfort-noise frames (RFC 0x10, mlow 0x90, warmup).
+-- 
+2.34.1
+

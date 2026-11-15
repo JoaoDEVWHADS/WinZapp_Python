@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Gustavo Almeida Barrios <gabarrios2006@gmail.com>
 Date: Mon, 2 Nov 2026 16:24:24 -0300
-Subject: [PATCH] engine: stop the callee's other devices when one answers
+Subject: [PATCH 09/26] engine: stop the callee's other devices when one
+ answers
 
 WhatsApp leaves this to the caller, so a call answered on one device went on
 ringing on the others until someone answered there too. One <terminate> per
@@ -44,7 +45,7 @@ index d341079..c371167 100644
  
  - Asks the server where a group call stands while the account is not in it
 diff --git a/engine.go b/engine.go
-index ddca6f6..10054c9 100644
+index 1fca2eb..64dcfc3 100644
 --- a/engine.go
 +++ b/engine.go
 @@ -76,6 +76,12 @@ type engineCall struct {
@@ -116,7 +117,7 @@ index ddca6f6..10054c9 100644
  			if fn := m.call.onMuteStateFn(); fn != nil {
 diff --git a/engine_dismiss.go b/engine_dismiss.go
 new file mode 100644
-index 0000000..ae5d525
+index 0000000..cfe267d
 --- /dev/null
 +++ b/engine_dismiss.go
 @@ -0,0 +1,61 @@
@@ -126,8 +127,8 @@ index 0000000..ae5d525
 +	"context"
 +
 +	"github.com/purpshell/meowcaller/signaling"
-+	waBinary "go.mau.fi/whatsmeow/binary"
-+	"go.mau.fi/whatsmeow/types"
++	waBinary "github.com/polymorfa/hypermeow/binary"
++	"github.com/polymorfa/hypermeow/types"
 +)
 +
 +// dismissRungDevices stops the devices an outgoing offer rang once one of them has
@@ -183,7 +184,7 @@ index 0000000..ae5d525
 +}
 diff --git a/engine_dismiss_test.go b/engine_dismiss_test.go
 new file mode 100644
-index 0000000..fdbf3f3
+index 0000000..6b011a6
 --- /dev/null
 +++ b/engine_dismiss_test.go
 @@ -0,0 +1,170 @@
@@ -194,12 +195,12 @@ index 0000000..fdbf3f3
 +	"testing"
 +
 +	"github.com/rs/zerolog"
-+	"go.mau.fi/whatsmeow"
-+	waBinary "go.mau.fi/whatsmeow/binary"
-+	"go.mau.fi/whatsmeow/store"
-+	"go.mau.fi/whatsmeow/types"
-+	"go.mau.fi/whatsmeow/types/events"
-+	waLog "go.mau.fi/whatsmeow/util/log"
++	"github.com/polymorfa/hypermeow"
++	waBinary "github.com/polymorfa/hypermeow/binary"
++	"github.com/polymorfa/hypermeow/store"
++	"github.com/polymorfa/hypermeow/types"
++	"github.com/polymorfa/hypermeow/types/events"
++	waLog "github.com/polymorfa/hypermeow/util/log"
 +)
 +
 +func onDevice(device uint16) types.JID {
@@ -358,7 +359,7 @@ index 0000000..fdbf3f3
 +	}
 +}
 diff --git a/signaling/stanza.go b/signaling/stanza.go
-index 1cd964c..944dd41 100644
+index 6e856b0..932c853 100644
 --- a/signaling/stanza.go
 +++ b/signaling/stanza.go
 @@ -288,6 +288,12 @@ func BuildHeartbeat(callID string, callCreator types.JID, wrapperID string, log
@@ -374,3 +375,6 @@ index 1cd964c..944dd41 100644
  // TerminateParams are the inputs to BuildTerminate.
  type TerminateParams struct {
  	CallID        string
+-- 
+2.34.1
+

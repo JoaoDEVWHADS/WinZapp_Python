@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: WinZapp <gabarrios2006@gmail.com>
 Date: Fri, 13 Nov 2026 21:54:37 -0300
-Subject: [PATCH] An old counter with the decrypted event buffer on is a lost
- message, retried with keys
+Subject: [PATCH 14/15] An old counter with the decrypted event buffer on is a
+ lost message, retried with keys
 
 ---
  message.go          |  9 ++++++---
@@ -13,10 +13,10 @@ Subject: [PATCH] An old counter with the decrypted event buffer on is a lost
  create mode 100644 old_counter_test.go
 
 diff --git a/message.go b/message.go
-index 98e97f6..190866b 100644
+index ff7bf04..afc42da 100644
 --- a/message.go
 +++ b/message.go
-@@ -408,7 +408,7 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
+@@ -412,7 +412,7 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
  		if errors.Is(err, ErrEventAlreadyProcessed) {
  			cli.Log.Debugf("Ignoring message %s from %s: %v", info.ID, info.SourceString(), err)
  			continue
@@ -25,15 +25,17 @@ index 98e97f6..190866b 100644
  			cli.Log.Warnf("Ignoring message %s from %s: %v", info.ID, info.SourceString(), err)
  			continue
  		} else if err != nil {
-@@ -417,16 +417,19 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
+@@ -421,6 +421,9 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
  				return
  			}
  			isUnavailable := encType == "skmsg" && !containsDirectMsg && errors.Is(err, signalerror.ErrNoSenderKeyForUser)
 +			// the retry carries this device's keys at once: the sender's session is
 +			// the broken part (old_counter.go), so it has to start a new one
 +			forceKeys := isUnavailable || oldCounterIsLostMessage(err, cli.EnableDecryptedEventBuffer)
- 			if encType == "msmsg" {
- 				cli.backgroundIfAsyncAck(func() {
+ 			decryptFail := ag.OptionalString("decrypt-fail")
+ 			if decryptFail == "" {
+ 				metaNode := node.GetChildByTag("meta")
+@@ -441,11 +444,11 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
  					cli.sendAck(ctx, node, NackMissingMessageSecret)
  				})
  			} else if cli.SynchronousAck {
@@ -46,7 +48,7 @@ index 98e97f6..190866b 100644
 +				go cli.sendRetryReceipt(context.WithoutCancel(ctx), node, info, forceKeys)
  				go cli.sendAck(ctx, node, 0)
  			}
- 			cli.dispatchEvent(&events.UndecryptableMessage{
+ 			return
 diff --git a/old_counter.go b/old_counter.go
 new file mode 100644
 index 0000000..c979549
@@ -105,3 +107,6 @@ index 0000000..35930ee
 +		t.Fatal("only an old counter is concerned")
 +	}
 +}
+-- 
+2.34.1
+

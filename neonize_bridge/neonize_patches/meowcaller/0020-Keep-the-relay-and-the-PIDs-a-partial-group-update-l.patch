@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 13 Nov 2026 08:14:21 -0300
-Subject: [PATCH] Keep the relay and the PIDs a partial group update leaves out
+Subject: [PATCH 20/26] Keep the relay and the PIDs a partial group update
+ leaves out
 
 The server sends a group call's relay allocation and a device's PID only when
 they change. A later update without them replaced the whole snapshot, so a
@@ -20,7 +21,7 @@ replaces; what it sends still wins.
  create mode 100644 group_update_carry_test.go
 
 diff --git a/engine_group_control.go b/engine_group_control.go
-index 2531980..c6ad390 100644
+index 01d13e2..de6c26d 100644
 --- a/engine_group_control.go
 +++ b/engine_group_control.go
 @@ -178,8 +178,17 @@ func (e *engine) applyGroupUpdate(update groupCallUpdate) bool {
@@ -97,7 +98,7 @@ index 0000000..b8afa33
 +}
 diff --git a/group_update_carry_test.go b/group_update_carry_test.go
 new file mode 100644
-index 0000000..b5bdaba
+index 0000000..e4f6ca3
 --- /dev/null
 +++ b/group_update_carry_test.go
 @@ -0,0 +1,105 @@
@@ -106,7 +107,7 @@ index 0000000..b5bdaba
 +import (
 +	"testing"
 +
-+	"go.mau.fi/whatsmeow/types"
++	"github.com/polymorfa/hypermeow/types"
 +)
 +
 +func carryTestUpdate(tx uint32, withRelay, withPIDs bool) groupCallUpdate {
@@ -206,3 +207,6 @@ index 0000000..b5bdaba
 +		t.Fatalf("stored = tx %d relay %v", stored.TransactionID, stored.Relay != nil)
 +	}
 +}
+-- 
+2.34.1
+

@@ -298,6 +298,15 @@ def prepare_git(name, url, ref, label, force):
     return commit
 
 
+def _is_go_mod_aligned(info):
+    """True when goneonize/go.mod names the same whatsmeow the manifest pins."""
+    go_mod = os.path.join(tree_path("neonize"), "goneonize", "go.mod")
+    try:
+        with open(go_mod, encoding="utf-8") as fh:
+            return info.get("whatsmeow", {}).get("version", "") in fh.read()
+    except OSError:
+        return True
+
 def prepare_whatsmeow(info, force):
     tree = tree_path("whatsmeow")
     if not force:
@@ -328,6 +337,24 @@ def check_go_mod(info):
 
 
 def prepare(info, ref=None, force=False):
+    latest = info.get("source") == "upstream-latest"
+    branches = {t: (info.get(t) or {}).get("latest", "master") for t in TREES}
+    if latest:
+        say("building from the latest upstream of the three repositories "
+            f"(neonize@{branches['neonize']}, whatsmeow@{branches['whatsmeow']}, "
+            f"meowcaller@{branches['meowcaller']}); patch failures stop the build")
+        commit = prepare_git("neonize", info["neonize"]["repository"], ref or branches["neonize"],
+                             "latest upstream", force)
+        prepare_git("whatsmeow", info["whatsmeow"]["repository"], branches["whatsmeow"],
+                    "latest", force)
+        prepare_git("meowcaller", info["meowcaller"]["repository"], branches["meowcaller"],
+                    "latest", force)
+        if not _is_go_mod_aligned(info):
+            say("WARNING: the upstream whatsmeow does not match the Go module version "
+                "neonize asks for; the build continues (local replace directives) — "
+                "deps in goneonize/go.mod may need a bump. Check this manually.")
+        say(f"workspace ready: neonize at upstream {branches['neonize']} ({commit[:12]})")
+        return commit
     neonize = upstream.current(info)
     label = ref or neonize["version"]
     commit = prepare_git("neonize", info["neonize"]["repository"], ref or neonize["commit"],
@@ -476,17 +503,29 @@ def build(info):
             for name in sorted(files):
                 full = os.path.join(root, name)
                 archive.write(full, os.path.relpath(full, DIST).replace(os.sep, "/"))
+    latest_mode = info.get("source") == "upstream-latest"
     commit = git(tree, "rev-parse", BASE, capture=True)
-    # the identity names committed patches only: a workspace with work not
-    # exported yet builds fine, but is never taken for the checkout's build
-    exported = all(not _uncommitted(tree_path(name)) and matches_patches(name) for name in TREES)
+    exported = (not latest_mode) and all(not _uncommitted(tree_path(name)) and matches_patches(name)
+                                          for name in TREES)
     identity = (upstream.build_identity(upstream.pins(info, commit), upstream.read_patches(PATCHES))
                 if exported else "")
-    if not exported:
+    if latest_mode:
+        identity = ""
+        say("latest source: BUILD_INFO reports the upstream heads unverified by the patch series")
+    elif not exported:
         say("the workspace differs from neonize_patches/: this build has no identity "
             "(run `export` to make it the checkout's)")
-    details = {"identity": identity, "neonize": version, "neonize_commit": commit,
-               "whatsmeow": info["whatsmeow"]["version"], "meowcaller": info["meowcaller"]["commit"],
+    if latest_mode:
+        whatsmeow_commit = git(tree_path("whatsmeow"), "rev-parse", BASE, capture=True)
+        meowcaller_commit = git(tree_path("meowcaller"), "rev-parse", BASE, capture=True)
+        whatsmeow_version = f"(latest: {whatsmeow_commit})"
+        meowcaller_version = meowcaller_commit
+    else:
+        whatsmeow_version = info["whatsmeow"]["version"]
+        meowcaller_version = info["meowcaller"]["commit"]
+    details = {"source": "upstream-latest" if latest_mode else "upstream-pinned",
+               "identity": identity, "neonize": version, "neonize_commit": commit,
+               "whatsmeow": whatsmeow_version, "meowcaller": meowcaller_version,
                "patches": {name: patches_sha256(name) for name in TREES},
                "asset": os.path.basename(asset), "sha256": file_sha256(asset)}
     with open(os.path.join(DIST, "BUILD_INFO.json"), "w", encoding="utf-8", newline="\n") as f:
@@ -537,10 +576,16 @@ def main(argv=None):
     parser.add_argument("--ref", help="neonize tag, branch or commit instead of the approved one")
     parser.add_argument("--version", help="X.Y.Z being approved (approve)")
     parser.add_argument("--force", action="store_true", help="discard uncommitted workspace changes")
+    parser.add_argument("--latest", action="store_true", help="build the latest upstream of the three repositories (same as source: upstream-latest)")
+    parser.add_argument("--pinned", action="store_true", help="build the approved pin instead of the manifest's source")
     parser.add_argument("--install", action="store_true", help="all: install after building")
     parser.add_argument("--venv", default=os.path.join(HERE, ".venv"), help="install: target virtualenv")
     args = parser.parse_args(argv)
     info = manifest()
+    if args.pinned:
+        info["source"] = "upstream-pinned"
+    elif args.latest:
+        info["source"] = "upstream-latest"
     os.makedirs(WORK, exist_ok=True)
     if args.command == "prepare":
         prepare(info, args.ref, args.force)

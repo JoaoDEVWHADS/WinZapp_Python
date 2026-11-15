@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: WinZapp build <build@winzapp.invalid>
 Date: Mon, 2 Nov 2026 21:15:03 -0300
-Subject: [PATCH] send: the sender key only for the devices that do not hold it
+Subject: [PATCH 09/15] send: the sender key only for the devices that do not
+ hold it
 
 Every group message encrypted the sender key distribution message for every
 device of the group: one pairwise encryption and one session write per device,
@@ -29,10 +30,10 @@ mappings cannot be read, every device gets the key.
  create mode 100644 send_senderkey_test.go
 
 diff --git a/client.go b/client.go
-index 5ca43e0..a434be7 100644
+index dcfbff2..d41257d 100644
 --- a/client.go
 +++ b/client.go
-@@ -143,6 +143,7 @@ type Client struct {
+@@ -148,6 +148,7 @@ type Client struct {
  
  	groupCache           map[types.JID]*groupMetaCache
  	groupCacheLock       sync.Mutex
@@ -41,10 +42,10 @@ index 5ca43e0..a434be7 100644
  	userDevicesCacheLock sync.Mutex
  
 diff --git a/send.go b/send.go
-index c75efa2..1151380 100644
+index 4a29ded..f41ac69 100644
 --- a/send.go
 +++ b/send.go
-@@ -406,6 +406,14 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
+@@ -416,6 +416,14 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
  	respChan := cli.waitResponse(req.ID)
  	var phash string
  	var data []byte
@@ -59,7 +60,7 @@ index c75efa2..1151380 100644
  	switch to.Server {
  	case types.GroupServer, types.BroadcastServer:
  		phash, data, err = cli.sendGroup(ctx, ownID, to, groupParticipants, req.ID, message, &resp.DebugTimings, extraParams)
-@@ -829,6 +837,9 @@ func (cli *Client) sendGroup(
+@@ -839,6 +847,9 @@ func (cli *Client) sendGroup(
  	if err != nil {
  		return "", nil, fmt.Errorf("failed to send message node: %w", err)
  	}
@@ -69,7 +70,7 @@ index c75efa2..1151380 100644
  	return phash, data, nil
  }
  
-@@ -1319,9 +1330,14 @@ func (cli *Client) prepareMessageNode(
+@@ -1336,9 +1347,14 @@ func (cli *Client) prepareMessageNode(
  		encAttrs["decrypt-fail"] = string(events.DecryptFailHide)
  	}
  
@@ -85,7 +86,7 @@ index c75efa2..1151380 100644
  	)
  	timings.PeerEncrypt = time.Since(start)
  	if err != nil {
-@@ -1331,12 +1347,14 @@ func (cli *Client) prepareMessageNode(
+@@ -1348,12 +1364,14 @@ func (cli *Client) prepareMessageNode(
  		Tag:     "participants",
  		Content: participantNodes,
  	}
@@ -405,3 +406,6 @@ index 0000000..c7b31b2
 +		t.Fatalf("content = %v", got)
 +	}
 +}
+-- 
+2.34.1
+

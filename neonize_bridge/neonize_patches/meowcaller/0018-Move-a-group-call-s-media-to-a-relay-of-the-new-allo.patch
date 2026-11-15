@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 13 Nov 2026 00:42:52 -0300
-Subject: [PATCH] Move a group call's media to a relay of the new allocation
- without a gap
+Subject: [PATCH 18/26] Move a group call's media to a relay of the new
+ allocation without a gap
 
 Seen live: a 1:1 call became a group call on relay gru2c02; when a member
 left and joined again, the server sent a group allocation listing gru1c02,
@@ -40,7 +40,7 @@ full suite passes.
  create mode 100644 relay_switch_test.go
 
 diff --git a/engine.go b/engine.go
-index 316ee9e..45d9da5 100644
+index 86179d0..d440d51 100644
 --- a/engine.go
 +++ b/engine.go
 @@ -630,6 +630,7 @@ func (e *engine) onGroupOffer(ev *events.CallOffer, update groupCallUpdate) {
@@ -52,7 +52,7 @@ index 316ee9e..45d9da5 100644
  	e.applyGroupUpdate(update)
  
 diff --git a/engine_group_control.go b/engine_group_control.go
-index 866d612..2531980 100644
+index e968033..01d13e2 100644
 --- a/engine_group_control.go
 +++ b/engine_group_control.go
 @@ -34,6 +34,7 @@ func (e *engine) onUnknownCallEvent(node *waBinary.Node) {
@@ -550,7 +550,7 @@ index d6aca3a..b010edb 100644
 +	return fmt.Sprintf("tx=%d relays=%s", update.Relay.TransactionID, strings.Join(names, ","))
 +}
 diff --git a/roster_diag_test.go b/roster_diag_test.go
-index 239f551..a82f4cb 100644
+index 72ec7fe..839433b 100644
 --- a/roster_diag_test.go
 +++ b/roster_diag_test.go
 @@ -32,3 +32,15 @@ func TestJoinJIDsListsEveryRecipient(t *testing.T) {
@@ -569,3 +569,6 @@ index 239f551..a82f4cb 100644
 +		t.Fatalf("describeGroupRelay = %q", got)
 +	}
 +}
+-- 
+2.34.1
+

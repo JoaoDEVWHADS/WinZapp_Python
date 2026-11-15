@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: WinZapp build <build@winzapp.invalid>
 Date: Thu, 29 Oct 2026 14:44:07 -0300
-Subject: [PATCH] appstate: send under appStateSyncLock, as fetch does
+Subject: [PATCH 08/15] appstate: send under appStateSyncLock, as fetch does
 
 sendAppState read the stored version and hash, encoded, sent and applied
 409 conflicts without the lock fetchAppState holds. Two sends together, or
@@ -16,10 +16,10 @@ a successful send takes it itself, as before.
  1 file changed, 27 insertions(+), 11 deletions(-)
 
 diff --git a/appstate.go b/appstate.go
-index 9a4011d..0a41969 100644
+index f932861..5242de4 100644
 --- a/appstate.go
 +++ b/appstate.go
-@@ -555,6 +555,32 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
+@@ -579,6 +579,32 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
  	if cli == nil {
  		return ErrClientIsNil
  	}
@@ -52,7 +52,7 @@ index 9a4011d..0a41969 100644
  	version, hash, err := cli.Store.AppState.GetAppStateVersion(ctx, string(patch.Type))
  	if err != nil {
  		return err
-@@ -625,21 +651,11 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
+@@ -649,21 +675,11 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
  						cli.dispatchEvent(evt)
  					}
  				}()
@@ -75,3 +75,6 @@ index 9a4011d..0a41969 100644
  	return nil
  }
  
+-- 
+2.34.1
+

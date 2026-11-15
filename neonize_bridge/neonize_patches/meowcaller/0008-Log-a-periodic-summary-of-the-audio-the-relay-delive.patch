@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 1 Nov 2026 22:23:55 +0000
-Subject: [PATCH] Log a periodic summary of the audio the relay delivers
+Subject: [PATCH 08/26] Log a periodic summary of the audio the relay delivers
 
 Count relay RTP by kind, authentication failures and frames released, so a
 call with no inbound audio shows where the packets stop.
@@ -170,3 +170,6 @@ index e4bb542..dd1e951 100644
  		if !ok {
  			if unprotectFail++; unprotectFail == 1 {
  				log.Warn().Uint32("ssrc", vh.Ssrc).Int("bytes", n).Msg("audio RTP did not match an authenticated active participant")
+-- 
+2.34.1
+
