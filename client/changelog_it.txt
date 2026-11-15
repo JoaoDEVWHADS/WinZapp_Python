@@ -4,6 +4,8 @@ This release brings communities and a reorganized settings window, on top of eve
 
 WHAT'S NEW
 
+- Con NVDA in esecuzione, la registrazione del microfono e dell'audio del computer non si interrompe più con "problema con il dispositivo audio" quando WinZapp si blocca per un secondo o due (computer lento o occupato): l'audio di quell'istante viene saltato, la registrazione continua e il resto resta sincronizzato. Valeva già senza l'audio di NVDA separato; ora copre anche i lettori dell'audio di NVDA e degli altri suoni del computer, registrati separatamente.
+
 - WPPConnect: quando lo spazio su disco scarseggia (meno di 4 GB liberi), WinZapp chiude WhatsApp in sicurezza prima che perda la sessione, va offline e dice perché. Quando ci sono almeno 5 GB liberi si riconnette da solo. Prima, con circa 3 GB liberi, la sessione poteva tornare disconnessa come se fosse stata cancellata.
 
 - Trascrizione automatica: un messaggio vocale ricevuto mentre il computer era in sospensione non resta più senza trascrizione quando arriva insieme ad altri al risveglio.

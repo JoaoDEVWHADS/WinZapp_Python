@@ -4,6 +4,8 @@ Esta versión trae las comunidades y una ventana de configuración reorganizada,
 
 NOVEDADES
 
+- Con el NVDA en ejecución, la grabación del micrófono y del audio del ordenador ya no se interrumpe con "problema con el dispositivo de audio" cuando WinZapp se bloquea uno o dos segundos (ordenador lento u ocupado): se omite el audio de ese instante, la grabación continúa y el resto sigue sincronizado. Antes ya valía sin el audio del NVDA separado; ahora cubre también los lectores del audio del NVDA y de los otros sonidos del ordenador, grabados por separado.
+
 - WPPConnect: con poco espacio en disco (menos de 4 GB libres), WinZapp cierra WhatsApp de forma segura antes de que pierda la sesión, se queda sin conexión y dice el motivo. Cuando haya al menos 5 GB libres, se vuelve a conectar solo. Antes, con unos 3 GB libres, la sesión podía volver desconectada como si se hubiera borrado.
 
 - Transcripción automática: un mensaje de voz recibido mientras el ordenador estaba suspendido ya no se queda sin transcribir cuando llega junto con otros al volver.
