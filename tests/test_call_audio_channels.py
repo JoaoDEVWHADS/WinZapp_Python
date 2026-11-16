@@ -19,7 +19,7 @@ def _session():
 def test_stereo_capture_preserves_frame_axis_and_copies_borrowed_memory():
     session = _session()
     data = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
-    session._on_microphone_frame(48000)(data, 2, None, None)
+    session._on_microphone_frame(48000, session._input_generation)(data, 2, None, None)
     captured = session._mic_queue.get_nowait().samples
     data[:] = 0
     np.testing.assert_array_equal(captured, np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32))
@@ -346,7 +346,7 @@ def test_stereo_sender_emits_one_mono_transport_frame_at_the_right_rate(rate, fr
     session = CallAudioSession(socket, CallAudioConfig(session="synthetic"), sounddevice_module=object())
     session._input_rate = rate
     signal = np.full((frames, 2), 0.25, dtype=np.float32)
-    session._on_microphone_frame(rate)(signal, frames, None, None)
+    session._on_microphone_frame(rate, session._input_generation)(signal, frames, None, None)
     session._send_microphone_loop()
     pcm = np.frombuffer(base64.b64decode(socket.payload["pcm"]), dtype="<i2")
     assert socket.payload["sampleRate"] == 48000
@@ -376,7 +376,7 @@ def test_skipped_microphone_backlog_keeps_the_stereo_channel_decision():
 
     session = CallAudioSession(Socket(), CallAudioConfig(session="synthetic"), sounddevice_module=object())
     session._input_rate = 48000
-    callback = session._on_microphone_frame(48000)
+    callback = session._on_microphone_frame(48000, session._input_generation)
     callback(frames.pop(0), 960, None, None)
     session._send_microphone_loop()
     assert session._mic_frames_dropped_for_latency > 0
