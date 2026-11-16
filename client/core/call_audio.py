@@ -1038,7 +1038,27 @@ class CallAudioSession:
                 pass
         return [(rate, count) for rate in self._candidate_rates(device) for count in channels]
 
-    def _open_input_stream(self):
+    def _open_input_stream(
+        self,
+        *,
+        device_name: Optional[str] = None,
+        strict: bool = False,
+        generation: Optional[int] = None,
+    ):
+        selected_name = self._input_device_name if device_name is None else str(device_name or "")
+        if generation is None:
+            generation = self._input_generation
+
+        if strict and selected_name:
+            preferred = self._resolve_device(selected_name, input_device=True)
+            if preferred is None:
+                raise CallAudioUnavailable(
+                    f"Selected microphone is not available: {selected_name}"
+                )
+            strict_device = preferred
+        else:
+            strict_device = None
+
         last_error = None
         # Exclusive mode is attempted first (unless the user opted out), across
         # the whole device/rate matrix; only once that entire space is
@@ -1047,10 +1067,14 @@ class CallAudioSession:
         # device — it should fall back to the same device in shared mode.
         exclusive_attempts = [True, False] if self._config.exclusive_input else [False]
         for attempt_index, exclusive in enumerate(exclusive_attempts):
-            for device in self._candidate_devices(
-                self._config.input_device_name, input_device=True,
-                include_fallbacks=not exclusive,
-            ):
+            if strict_device is not None:
+                devices = (strict_device,)
+            else:
+                devices = self._candidate_devices(
+                    selected_name, input_device=True,
+                    include_fallbacks=not exclusive,
+                )
+            for device in devices:
                 for rate, channels in self._candidate_formats(
                     device, input_device=True, exclusive=exclusive
                 ):
@@ -1198,7 +1222,7 @@ class CallAudioSession:
             exc,
         )
 
-    def _on_microphone_frame(self, source_rate: int):
+    def _on_microphone_frame(self, source_rate: int, generation: int):
         def _callback(indata, _frames, _time_info, status):
             epoch = self._media_epoch
             if status:

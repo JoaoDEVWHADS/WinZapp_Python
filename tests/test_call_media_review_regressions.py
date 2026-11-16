@@ -22,7 +22,7 @@ def test_bound_audio_session_rejects_a_different_call_epoch():
 
 def test_first_owner_binding_discards_unowned_pending_capture_and_playout():
     session = CallAudioSession(N(), CallAudioConfig('test'))
-    session._on_microphone_frame(48000)(np.ones((960, 1), dtype=np.float32), 960, None, None)
+    session._on_microphone_frame(48000, session._input_generation)(np.ones((960, 1), dtype=np.float32), 960, None, None)
     session.enqueue_remote_audio(b'\1\0' * 960, 48000)
     session._output_buffer.configure(48000)
     session._output_buffer.push(np.ones(2880, dtype=np.float32))
@@ -136,7 +136,7 @@ def test_capture_copy_uses_owner_from_callback_entry(monkeypatch):
         session.set_media_epoch(A)
         return copied
     monkeypatch.setattr(np, 'array', copy_then_bind)
-    session._on_microphone_frame(48000)(source, 960, None, None)
+    session._on_microphone_frame(48000, session._input_generation)(source, 960, None, None)
     captured = session._mic_queue.get_nowait()
     assert session.media_epoch == A and captured.epoch == ''
 
