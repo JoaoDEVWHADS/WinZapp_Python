@@ -671,7 +671,7 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
             return
         self.urlcode = None
         self.pairing_repairs.reset()
-        log.info("connected")
+        log.info("[Session %s] connected me=%s lid=%s uuid=%r", self.name, self.me, self.lid, getattr(c, 'uuid', None))
         if not (phone_number and self.simulate_code):   # the simulation notifies after the code
             self.emit("session-logged", {"session": self.name, "status": True})
         threading.Thread(target=self._load_names, daemon=True).start()
@@ -709,9 +709,11 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
         grace (INITIALIZING) instead of reading CONNECTED with a dead socket."""
         changed = self._apply(generation, event)
         if changed is not None and changed[0] != changed[1]:
-            log.info("%s: %s -> %s", what, changed[0], changed[1])
+            log.info("[Session %s] drop uuid=%r: %s -> %s (%s)", self.name,
+                     getattr(self.client, 'uuid', None), changed[0], changed[1], what)
         else:
-            log.info(what)
+            log.info("[Session %s] drop uuid=%r: %s", self.name,
+                     getattr(self.client, 'uuid', None), what)
 
     def _on_fail(self, generation, c, reason):
         """ConnectFailureEv: logout, terminal failure (ban, outdated version) or transient."""
@@ -750,9 +752,14 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
         # (pairing_history.py); it only matters until the session pairs
         # what this client registers with, which pairing-history compares
         self.pairing_days = pairing_history.load(self.folder, HISTORY_DAYS)
+        log.info("[Session %s] creating neonize client (calls=%s)", self.name, bool(calls_on))
         cli = self.client = NewClient(
             os.path.join(self.folder, "session.db"),
             props=device_props(self.pairing_days))
+        log.info(
+            "[Session %s] client created name=%r uuid=%r",
+            self.name, getattr(cli, 'name', None), getattr(cli, 'uuid', None),
+        )
         # Delivery receipts must render for the sender whatever the window is
         # doing: whatsmeow answers every received message with a receipt, but
         # marks it type="inactive" while the client is not online, and the
@@ -763,6 +770,7 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
         # directions keep the value (they compare against 0 and 1).
         try:
             cli.set_force_activate_delivery_receipts(True)
+            log.info("[Session %s] delivery receipts forced active (uuid=%r)", self.name, cli.uuid)
         except Exception:
             # Degraded on purpose, never fatal: an install whose neonize build
             # lacks the export (both approved releases carry it) keeps receipts
@@ -847,7 +855,16 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
         @cli.event(nev.UndecryptableMessageEv)
         def _undecryptable(c, e):
             try:
-                undecryptable_tally.failed(bool(e.Info.MessageSource.IsFromMe),
+                src = e.Info.MessageSource
+                chat = jid_text(src.Chat)
+                sender = jid_text(src.Sender)
+                mid = getattr(e.Info, 'ID', None)
+                log.info(
+                    "[Undecryptable %s] msg=%s chat=%s from=%s from_me=%s is_unavailable=%s",
+                    self.name, mid, chat, sender,
+                    bool(src.IsFromMe), bool(e.IsUnavailable),
+                )
+                undecryptable_tally.failed(bool(src.IsFromMe),
                                            bool(e.IsUnavailable))
                 _report_undecryptable()
             except Exception:
@@ -863,39 +880,67 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
                 log.exception("undecryptable summary")
             try:
                 o = e.Info.MessageSource
+                info = e.Info
                 chat = jid_text(o.Chat)
+                sender = jid_text(o.Sender)
+                mid = getattr(info, 'ID', None)
+                is_from_me = bool(o.IsFromMe)
+
+                def _msg_reject(reason, *, extra=None):
+                    details = f" reason={reason}"
+                    if extra:
+                        details += f" extra={extra}"
+                    log.info(
+                        "[MessageEv %s] msg=%s chat=%s from=%s from_me=%s type=%s drop=%s",
+                        self.name, mid, chat, sender, is_from_me,
+                        getattr(e.Message, 'message_type', None), details,
+                    )
+
+                log.info(
+                    "[MessageEv %s] received msg=%s chat=%s from=%s from_me=%s ts=%s",
+                    self.name, mid, chat, sender, is_from_me, getattr(info, 'Timestamp', None),
+                )
                 if message_rules.is_channel_chat(chat):
+                    _msg_reject("channel_chat")
                     return      # channel posts are not conversations
                 try:
                     self.observe_timer(chat, e.Message)
                 except Exception:
                     log.exception("temporary messages timer")
                 if self._reaction_received(chat, o, e):
+                    _msg_reject("reaction_received")
                     return
                 if self._vote_received(o, e):
+                    _msg_reject("vote_received")
                     return
                 if events.received(self, chat, o, e, jid_text):   # answer or edit of an event
+                    _msg_reject("event_received")
                     return
                 if comments.receive(self, chat, o, e):    # announcement comment
+                    _msg_reject("announcement_comment")
                     return
                 if self._edit_received(chat, o, e):
+                    _msg_reject("edit_received")
                     return
                 if self._pin_received(chat, e):
+                    _msg_reject("pin_received")
                     return
                 w = msgmap.build(
-                    chat=chat, from_me=bool(o.IsFromMe), id=e.Info.ID,
-                    sender=jid_text(o.Sender), ts=e.Info.Timestamp,
+                    chat=chat, from_me=is_from_me, id=mid,
+                    sender=sender, ts=e.Info.Timestamp,
                     message=e.Message, sender_name=e.Info.Pushname)
                 if w is None:
+                    _msg_reject("parse_failed")
                     return
                 if w.get("type") == "revoked" and w.get("protocolMessageKey"):
                     # deleted for everyone by whoever sent it: the original becomes deleted too
                     if not self.db.revocation(chat, w):
+                        _msg_reject("unknown_revocation")
                         return      # unknown original and chat: not a conversation (#762)
                 else:
                     self.db.message(chat, w, msgmap.media_record_of(e.Message))
                     if w.get("type") == "event_creation":
-                        events.remember(self, chat, e.Info.ID, bool(o.IsFromMe), o,
+                        events.remember(self, chat, e.Info.ID, is_from_me, o,
                                         e.Message, jid_text)
                 # a deletion raises the date but is never unread (unread_rule.py)
                 self.db.on_arrival(chat, w["t"], not unread_rule.counted(w))
@@ -906,6 +951,10 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
                 if e.Info.Pushname and not o.IsFromMe:
                     self.db.contact(jid_text(o.Sender), pushname=e.Info.Pushname)
                     contact_events.announce_name(c, self, o.Sender, e.Info.Pushname)
+                log.info(
+                    "[MessageEv %s] persisted msg=%s type=%s chat=%s",
+                    self.name, mid, w.get("type"), chat,
+                )
                 self.emit("received-message", {"session": self.name, "response": w})
             except Exception:
                 log.exception("received message")
@@ -1877,6 +1926,8 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
         if read_receipts.needs_read_notice(unread, len(to_read), marked_unread):
             self.state_read(conversation, True)
         if not to_read:
+            log.info("[read_and_confirm %s] nothing to mark read (unread=%d)",
+                     redact(conversation), unread)
             return 0, True
         from neonize.utils import build_jid
 
@@ -1890,6 +1941,10 @@ class Session(chat_aliases.ChatAlias, chat_timers.ChatTimers, read_receipts.Read
         sent = True
         # read-self when the account hides its read receipts (read_receipts.py)
         receipt = self.receipt_for(conversation, "READ")
+        log.info(
+            "[read_and_confirm %s] unread=%d to_read=%d authors=%d receipt=%s",
+            redact(conversation), unread, len(to_read), len(by_author), receipt,
+        )
         for author, ids in by_author.items():
             try:
                 self.client.mark_read(*ids, chat=jid_of(conversation), sender=jid_of(author),
@@ -3277,12 +3332,15 @@ def main():
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     for h in logging.getLogger().handlers:      # the bridge.log gets passed around in bug reports
         h.addFilter(redaction.RedactionFilter())
+    # Debug output is the point of a bug-report build: full receipt/presence/node
+    # detail is needed to locate protocol-level mistakes (2026-11-16: incoming
+    # "messages with no delivered tick" reproduced on v2026.11.16.1022).
+    from neonize.utils import log as neonize_log
+    neonize_log.setLevel(logging.DEBUG)
+    for name in ("neonize", "whatsmeow", "Whatsmeow"):
+        logging.getLogger(name).setLevel(logging.DEBUG)
     if a.log_state:
         import re
-        from neonize.utils import log as neonize_log
-        neonize_log.setLevel(logging.DEBUG)
-        for name in ("whatsmeow", "Whatsmeow"):
-            logging.getLogger(name).setLevel(logging.DEBUG)
         pattern = re.compile(r"app ?state|patch|snapshot|key ?share|sync ?key|lthash|mutation|appstate|<receipt|<notification|<message|read-self", re.I)
 
         class StateOnly(logging.Filter):

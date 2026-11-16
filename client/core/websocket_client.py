@@ -1544,6 +1544,14 @@ class WebSocketClient:
 
             msg = info.get("data", {})
             if not isinstance(msg, dict) or not msg.get("key"):
+                msg_id = None
+                if isinstance(msg, dict):
+                    msg_id = msg.get("key")
+                logging.warning(
+                    "[WebSocketClient] on_messages_upsert: dispatch dropped — \n"
+                    "msg=%s (no key / not dict)",
+                    msg_id,
+                )
                 return
 
             # See on_wpp_message_received()'s own breadcrumb for why this is
