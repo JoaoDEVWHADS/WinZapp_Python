@@ -211,7 +211,7 @@ def test_microphone_callback_copies_float32_without_filtering_or_quantizing(monk
     owner = 'a' * 32
     assert session.set_media_epoch(owner)
     signal = np.array([[0.1234567], [-0.2345678]], dtype=np.float32)
-    session._on_microphone_frame(44_100)(signal, len(signal), None, None)
+    session._on_microphone_frame(44_100, session._input_generation)(signal, len(signal), None, None)
     captured = session._mic_queue.get_nowait()
     signal[:] = 0
     assert isinstance(captured, CapturedPCM) and captured.epoch == owner
@@ -225,7 +225,7 @@ def test_sender_converts_captured_audio_to_one_transport_frame(rate, frames):
     session, socket = _session()
     session._input_rate = rate
     signal = np.full((frames, 1), 0.25, dtype=np.float32)
-    session._on_microphone_frame(rate)(signal, frames, None, None)
+    session._on_microphone_frame(rate, session._input_generation)(signal, frames, None, None)
     session._send_microphone_loop()
     name, payload = socket.events[0]
     assert name == "call:audio:mic"
