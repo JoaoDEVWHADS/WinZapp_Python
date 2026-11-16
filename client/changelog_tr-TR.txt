@@ -64,7 +64,7 @@ YENİLİKLER
 
 - Neonize: telefonun yeniden gönderme isteğinden sonra tekrar yüklediği eski medya artık gerçekten indiriliyor. Daha önce yeniden yüklenen dosya, orijinal dosyanın doğrulamasıyla eşleşmediği için reddediliyor ve medya yine açılmıyordu.
 
-- Çıkışta güncelle: Ayarlar > Genel bölümündeki yeni bir seçenek güncellemeleri sormadan otomatik indirir ve WinZapp'tan çıktığınızda yükler. Pencereyi tepsiye kapatmak çıkış sayılmaz ve WinZapp kurulumdan sonra yeniden açılmaz: kapalı kalır ve yeni sürümü bir sonraki açışınızda kullanır.
+- Çıkış: bu sürümde kullanılamayan «Çıkışta güncelle» seçeneği artık Ayarlar’da gösterilmez; menüden veya tepsiden çıkmak güncellemeyle ilgili bir hatayla başarısız olmaz. Güncellemeler normal güncelleme akışını kullanır.
 
 - Neonize: eski sohbet geçmişi artık arka plan eşzamanlaması sırasında gerçekten içe aktarılıyor; önceki düzeltme her taramanın sonunda yine geçersiz kalıyordu. Telefona sorulduktan sonra bile kurtarılamayan eski medya dosyaları artık tekrarlanan bir bağlantı hatası yerine süresi dolmuş olarak görünüyor.
 

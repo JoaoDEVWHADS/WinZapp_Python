@@ -590,12 +590,14 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
         )
         gen_sizer.Add(self._background_updates_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # Off by default: updates download on their own and install when the
-        # user exits WinZapp, with no relaunch (update_on_exit.py).
+        # Unsupported by this fork's divergent updater: keep the control for
+        # compatibility, but never show it. A stored True must not enable an
+        # install path the checker cannot run.
         self._update_on_exit_check = wx.CheckBox(
             self._general_page, label=i18n.t("update_on_exit_label")
         )
-        gen_sizer.Add(self._update_on_exit_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._update_on_exit_check.SetValue(False)
+        self._update_on_exit_check.Hide()
 
         self._hotkey_label = wx.StaticText(self._general_page, label=i18n.t("global_hotkey_label"))
         gen_sizer.Add(
@@ -2209,8 +2211,7 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
                 "background_update_downloads", False
             )
             self._background_updates_check.SetValue(background_updates)
-            self._update_on_exit_check.SetValue(
-                install_wide.get("general", {}).get("update_on_exit", False))
+            self._update_on_exit_check.SetValue(False)
 
         if wanted(unit, "advanced"):
             # Settings > Advanced (advanced_tab.py): off, the approved releases only.

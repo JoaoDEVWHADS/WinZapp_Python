@@ -904,7 +904,8 @@ class WindowChromeMixin:
         # An update downloaded for "install when I exit" goes in now, and the
         # app is not started again (update_on_exit.py).
         checker = getattr(self, "_update_checker", None)
-        if checker is not None and checker.install_staged_on_exit():
+        install_on_exit = getattr(checker, "install_staged_on_exit", None)
+        if callable(install_on_exit) and install_on_exit():
             return
 
         gd = getattr(self, "global_dir", None)
