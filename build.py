@@ -383,6 +383,7 @@ def pyinstaller_compile():
         "aiosqlite",
         "numpy",
         "livekit",
+        "sounddevice",
     ]
 
     cmd = [
