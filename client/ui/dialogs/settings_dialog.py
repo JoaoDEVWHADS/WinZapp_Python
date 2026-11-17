@@ -1883,6 +1883,21 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
             self._escape_clears_selection_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._escape_clears_filters_cb = wx.CheckBox(
+            self._chats_page, label=i18n.t("ui_escape_clears_filters")
+        )
+        chats_sizer.Add(
+            self._escape_clears_filters_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._escape_clears_message_search_cb = wx.CheckBox(
+            self._chats_page, label=i18n.t("ui_escape_clears_message_search")
+        )
+        chats_sizer.Add(
+            self._escape_clears_message_search_cb, 0,
+            wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._keep_search_after_open_cb = wx.CheckBox(
             self._chats_page, label=i18n.t("ui_keep_search_after_open")
         )
@@ -1968,6 +1983,13 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
         )
         confirm_sizer.Add(
             self._confirm_delete_chat_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._confirm_archive_chat_cb = wx.CheckBox(
+            self._confirmations_page, label=i18n.t("ui_confirm_archive_chat")
+        )
+        confirm_sizer.Add(
+            self._confirm_archive_chat_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
         # Same arrangement for F5 and Shift+F5: each mirrors the key its
@@ -2633,6 +2655,12 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
         if wanted(unit, "confirmations"):
             self._confirm_delete_chat_cb.SetValue(bool(confirm_delete_chat))
 
+        confirm_archive_chat = self.main_window.settings.get("user_interface", {}).get(
+            "confirm_archive_chat", True
+        )
+        if wanted(unit, "confirmations"):
+            self._confirm_archive_chat_cb.SetValue(bool(confirm_archive_chat))
+
         confirm_resync_all = self.main_window.settings.get("user_interface", {}).get(
             "confirm_resync_all", True
         )
@@ -2660,6 +2688,20 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
         )
         if wanted(unit, "chats"):
             self._escape_clears_selection_cb.SetValue(bool(escape_clears_selection))
+
+        escape_clears_filters = self.main_window.settings.get("user_interface", {}).get(
+            "escape_clears_filters", True
+        )
+        if wanted(unit, "chats"):
+            self._escape_clears_filters_cb.SetValue(bool(escape_clears_filters))
+
+        escape_clears_message_search = self.main_window.settings.get(
+            "user_interface", {}
+        ).get("escape_clears_message_search", True)
+        if wanted(unit, "chats"):
+            self._escape_clears_message_search_cb.SetValue(
+                bool(escape_clears_message_search)
+            )
 
         keep_search_after_open = self.main_window.settings.get("user_interface", {}).get(
             "keep_search_after_open", False
@@ -4191,6 +4233,9 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
                 "confirm_delete_chat"
             ] = self._confirm_delete_chat_cb.GetValue()
             self.main_window.settings.setdefault("user_interface", {})[
+                "confirm_archive_chat"
+            ] = self._confirm_archive_chat_cb.GetValue()
+            self.main_window.settings.setdefault("user_interface", {})[
                 "confirm_resync_all"
             ] = self._confirm_resync_all_cb.GetValue()
             self.main_window.settings.setdefault("user_interface", {})[
@@ -4206,6 +4251,12 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
             self.main_window.settings.setdefault("user_interface", {})[
                 "escape_clears_selection"
             ] = self._escape_clears_selection_cb.GetValue()
+            self.main_window.settings.setdefault("user_interface", {})[
+                "escape_clears_filters"
+            ] = self._escape_clears_filters_cb.GetValue()
+            self.main_window.settings.setdefault("user_interface", {})[
+                "escape_clears_message_search"
+            ] = self._escape_clears_message_search_cb.GetValue()
             self.main_window.settings.setdefault("user_interface", {})[
                 "keep_search_after_open"
             ] = self._keep_search_after_open_cb.GetValue()
@@ -5019,10 +5070,14 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
             self._confirm_resync_conversation_cb.SetLabel(i18n.t("ui_confirm_resync_conversation"))
             self._confirm_clear_chat_cb.SetLabel(i18n.t("ui_confirm_clear_chat"))
             self._confirm_delete_chat_cb.SetLabel(i18n.t("ui_confirm_delete_chat"))
+            self._confirm_archive_chat_cb.SetLabel(i18n.t("ui_confirm_archive_chat"))
             self._warn_system_audio_cb.SetLabel(i18n.t("ui_warn_system_audio_recording"))
         if ready(self, "chats"):
             self._space_selects_cb.SetLabel(i18n.t("ui_space_selects_in_selection_mode"))
             self._escape_clears_selection_cb.SetLabel(i18n.t("ui_escape_clears_selection"))
+            self._escape_clears_filters_cb.SetLabel(i18n.t("ui_escape_clears_filters"))
+            self._escape_clears_message_search_cb.SetLabel(
+                i18n.t("ui_escape_clears_message_search"))
             self._keep_search_after_open_cb.SetLabel(i18n.t("ui_keep_search_after_open"))
         if ready(self, "audio_playback"):
             self._auto_play_voice_in_sequence_cb.SetLabel(i18n.t("ui_auto_play_voice_in_sequence"))

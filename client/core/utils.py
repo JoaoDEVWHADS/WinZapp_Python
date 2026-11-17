@@ -1199,6 +1199,7 @@ DEFAULT_SETTINGS = {
         "confirm_mark_all_read": True,
         "confirm_clear_chat": True,
         "confirm_delete_chat": True,
+        "confirm_archive_chat": True,
         # Ask before F5 / Shift+F5 (MainWindow._confirm_resync()); the
         # confirmations' own "don't show again" boxes clear these.
         "confirm_resync_all": True,
@@ -1212,6 +1213,8 @@ DEFAULT_SETTINGS = {
         # users who already learned the previous behaviour.
         "space_selects_in_selection_mode": True,
         "escape_clears_selection": True,
+        "escape_clears_filters": True,
+        "escape_clears_message_search": True,
         # Opening a conversation keeps the chat search, so Esc returns to the
         # results. Off: the long-standing behaviour, so no migration.
         "keep_search_after_open": False,

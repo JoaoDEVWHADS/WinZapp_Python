@@ -2041,6 +2041,18 @@ msgid "Archive chat"
 msgstr "أرشف الدردشة"
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/conversation_panel/chat_menu.py
+msgctxt "archive_confirm_button"
+msgid "&Archive chat"
+msgstr "أ&رشف الدردشة"
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/conversation_panel/chat_menu.py
+msgctxt "archive_confirm_msg"
+msgid "Are you sure you want to archive this chat?"
+msgstr "هل أنت متأكد أنك تريد أرشفة هذه الدردشة؟"
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "archive_selected_chats"
 msgid "Archive selected chats"
 msgstr "أرشفة الدردشات المحددة"
@@ -3166,6 +3178,7 @@ msgstr "&إعدادات فيديو المكالمة"
 #: translations/en-US/LC_MESSAGES/winzapp.po client/account_ui.py
 #: client/main_window/calls.py client/ui/chat_lock.py
 #: client/ui/conversation_panel/bulk_messages.py
+#: client/ui/conversation_panel/chat_menu.py
 #: client/ui/conversation_panel/forwarding.py
 #: client/ui/conversation_panel/message_actions.py
 #: client/ui/conversation_panel/reactions.py
@@ -7290,6 +7303,12 @@ msgctxt "files_selected"
 msgid "{count} file(s) selected"
 msgstr "{count} ملف/ملفات محددة"
 
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/conversation_panel/chat_list_selection.py
+msgctxt "filters_cleared"
+msgid "Filters cleared"
+msgstr "تم مسح عوامل التصفية"
+
 #: translations/en-US/LC_MESSAGES/winzapp.po client/updater.py
 #, python-brace-format
 msgctxt "force_reinstall_confirm_msg"
@@ -9384,6 +9403,12 @@ msgctxt "message_recovered_from_quote_label"
 msgid "(recovered from a reply)"
 msgstr "(مستعادة من رد)"
 
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/conversation_panel/message_search.py
+msgctxt "message_search_cleared"
+msgid "Message search cleared"
+msgstr "تم مسح البحث في الرسائل"
+
 #: translations/en-US/LC_MESSAGES/winzapp.po client/main_window/sending.py
 msgctxt "message_send_unconfirmed"
 msgid ""
@@ -9706,8 +9731,11 @@ msgstr "لم يمكن حفظ جهة الاتصال في واتساب. تحقق �
 #: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "new_contact_phone_hint"
 msgid ""
-"This contact is saved in WhatsApp and synced with the phone's address book."
-msgstr "هذه جهة اتصال محفوظة في واتساب ومزامنة مع دليل عناوين الهاتف."
+"Saves the contact in WhatsApp and requests synchronization with the phone's "
+"address book. Completion on the phone cannot be verified here."
+msgstr ""
+"يحفظ جهة الاتصال في واتساب ويطلب مزامنتها مع دليل عناوين الهاتف. لا يمكن "
+"التحقّق هنا من اكتمال الحفظ على الهاتف."
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "new_contact_phone_lid_unknown"
@@ -9731,15 +9759,19 @@ msgstr ""
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "new_contact_phone_saved"
-msgid "Contact saved and synced with the phone."
-msgstr "تم حفظ جهة الاتصال ومزامنتها مع الهاتف."
+msgid ""
+"Contact saved in WhatsApp; synchronization with the phone requested. Check "
+"the phone's address book."
+msgstr ""
+"تم حفظ جهة الاتصال في واتساب وطلب مزامنتها مع الهاتف. تحقّق من دليل عناوين "
+"الهاتف."
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
 msgctxt "new_contact_phone_saved_unconfirmed"
 msgid ""
-"Contact saved in WhatsApp, but the sync with the phone could not be "
-"confirmed."
-msgstr "تم حفظ جهة الاتصال في واتساب، لكن لم يمكن تأكيد المزامنة مع الهاتف."
+"Contact saved in WhatsApp, but the phone synchronization request could not "
+"be confirmed."
+msgstr "تم حفظ جهة الاتصال في واتساب، لكن تعذّر تأكيد طلب المزامنة مع الهاتف."
 
 #: translations/en-US/LC_MESSAGES/winzapp.po client/ui/dialogs/new_contact.py
 msgctxt "new_contact_phone_saving"
@@ -11701,6 +11733,16 @@ msgstr "تم إيقاف التسجيل مؤقتًا."
 msgctxt "recording_text"
 msgid "{name} is recording audio..."
 msgstr "{name} يسجل صوتًا..."
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
+msgctxt "remote_chat_deleted_closed"
+msgid "This chat was deleted on another device, so it was closed."
+msgstr "تم حذف هذه الدردشة على جهاز آخر، لذا تم إغلاقها."
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
+msgctxt "remote_chat_locked_closed"
+msgid "This chat was locked on your phone, so it was closed."
+msgstr "تم قفل هذه الدردشة على هاتفك، لذا تم إغلاقها."
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
 #: client/status_tab/status_composer.py
@@ -19523,6 +19565,12 @@ msgstr "ال&دردشات"
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
 #: client/ui/dialogs/settings_dialog.py
+msgctxt "ui_confirm_archive_chat"
+msgid "Ask for confirmation before archi&ving chats"
+msgstr "طلب التأكيد قبل أر&شفة الدردشات"
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/dialogs/settings_dialog.py
 msgctxt "ui_confirm_clear_chat"
 msgid "Ask for confirmation &before clearing chats"
 msgstr "طلب التأكيد قبل مسح ال&دردشات"
@@ -19576,6 +19624,18 @@ msgstr ""
 "Enter و Space &على رسالة صوتية أو فيديو تفرغها نصيًا في سطرها في القائمة "
 "بدلاً من تشغيلها (Alt+Shift+N يشغلها أو يفتحها)؛ عند الإيقاف، Enter و Space "
 "يشغلانها أو يفتحانها و Alt+Shift+N يفرغها نصيًا في سطرها"
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/dialogs/settings_dialog.py
+msgctxt "ui_escape_clears_filters"
+msgid "Esc clears the search an&d the filters in a list of chats"
+msgstr "يم&سح Esc البحث وعوامل التصفية في قائمة الدردشات"
+
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/dialogs/settings_dialog.py
+msgctxt "ui_escape_clears_message_search"
+msgid "Esc clears the messa&ge search in the active chat"
+msgstr "يمسح Esc البحث في الد&ردشة النشطة"
 
 #: translations/en-US/LC_MESSAGES/winzapp.po
 #: client/ui/dialogs/settings_dialog.py

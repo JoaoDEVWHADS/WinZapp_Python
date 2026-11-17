@@ -11,6 +11,55 @@ NOUTĂȚI
 - Neonize: un mesaj trimis de dumneavoastră putea reveni la „trimis” după ce WhatsApp îl confirmase deja ca livrat — în lista de mesaje și pe linia de stare. Aplicația nu mai suprascrie o confirmare reală de livrare, citire sau redare cu propriul ei ack de „trimis”, iar nicio stare a mesajului nu dă înapoi după ce a fost confirmată.
 
 - Când NVDA rulează, înregistrarea microfonului împreună cu sunetul computerului nu se mai oprește cu „problemă la dispozitivul audio” când WinZapp se blochează o secundă sau două (computer lent sau ocupat): sunetul din acel moment este omis, înregistrarea continuă, iar restul rămâne sincronizat. Mai înainte asta era valabil fără sunetul NVDA separat; acum acoperă și cititoarele pentru sunetul NVDA și celelalte sunete ale computerului, înregistrate separat.
+
+- Sunetele de scriere, bulă de scriere, puls de scriere și procesare AI din pachetul de sunete implicit sunt acum fișiere Ogg, ca restul pachetului. Nu se schimbă nimic la sunet sau la sunetele tale personalizate.
+
+- Într-o conversație deschisă, cu căutarea mesajelor (Ctrl+Shift+F) activă, primul Esc șterge căutarea și închide bara, iar cititorul de ecran spune „Căutarea mesajelor a fost ștearsă”; următorul Esc închide conversația. Se poate dezactiva în Setări, Conversații.
+
+- În listele de conversații (obișnuită, arhivate și blocate), Esc șterge căutarea și filtrele, iar cititorul de ecran spune „Filtre șterse”; cu conversații selectate, primul Esc deselectează în continuare doar selecția. Se poate dezactiva în Setări, Conversații. Funcționează și din filtre, din căutare și din celelalte controale ale panoului de conversații; într-o conversație deschisă, Esc continuă să închidă conversația sau să deselecteze mesajele.
+
+- Adăugarea unei conversații într-o listă sau scoaterea ei dintr-o listă pe alt dispozitiv actualizează listele și filtrul deschis, fără a schimba lista selectată.
+
+- Schimbarea propriei fotografii de profil pe alt dispozitiv actualizează panoul Profil deschis, fără a înlocui numele, informațiile sau o fotografie încă nesalvată.
+
+- Schimbarea păstrării conversațiilor arhivate sau a confidențialității stării pe alt dispozitiv actualizează panoul deschis, păstrând alegerile încă neaplicate.
+
+- S-a corectat salvarea contactelor care nu apăreau în WhatsApp pe iPhone: identificatorul asociat este acum trimis complet, ca în ecranul nativ WhatsApp.
+
+- La salvarea unui contact pe telefon, WinZapp anunță acum că telefonului i s-a cerut să-l adauge, în loc să afirme că este deja în agendă; o salvare neconfirmată de WhatsApp nu mai este anunțată ca reușită.
+
+- Modificările de confidențialitate făcute pe alt dispozitiv actualizează panoul deschis, păstrând câmpurile modificate și încă neaplicate.
+
+- Blocarea sau deblocarea unui contact pe alt dispozitiv actualizează WinZapp imediat ce WhatsApp o anunță.
+
+- Când un contact sau un grup își schimbă ori își elimină fotografia, WinZapp nu o mai afișează pe cea veche.
+
+- Contactele salvate, redenumite sau eliminate din agendă pe alt dispozitiv și schimbările numelui public actualizează WinZapp la primirea notificării, păstrând numele locale și istoricul.
+
+- Descrierile, setările și participanții grupurilor urmăresc notificările în timp real, inclusiv promovarea și retrogradarea administratorilor, iar permisiunile de trimitere sunt actualizate în conversația deschisă.
+
+- Ștergerea unei conversații pe alt dispozitiv o elimină din WinZapp la primirea notificării; o conversație cu mesaje mai noi decât notificarea este păstrată. Dacă era deschisă, este închisă și WinZapp spune de ce.
+
+- Fixarea sau desprinderea unui mesaj pe alt dispozitiv actualizează marcajul și lista mesajelor fixate din conversația deschisă la primirea notificării.
+
+- Schimbarea duratei mesajelor temporare pe alt dispozitiv, într-o conversație sau într-un grup, actualizează WinZapp fără a aștepta o sincronizare completă.
+
+- Blocarea sau deblocarea unei conversații pe telefon actualizează WinZapp la primirea notificării; dacă era deschisă, este închisă și WinZapp spune de ce.
+
+- Modificările de dezactivare a sunetului, arhivare și fixare făcute pe alt dispozitiv actualizează lista conversațiilor când sosește notificarea, cu WPPConnect și Neonize.
+
+- Mesajele șterse doar pentru tine pe alt dispozitiv sunt eliminate din conversație când sosește notificarea de ștergere, cu WPPConnect și Neonize.
+
+- Marcarea sau demarcarea cu stea a unui mesaj pe telefon ori alt dispozitiv actualizează marcajul în conversația deschisă la primirea notificării, cu WPPConnect și Neonize.
+
+- Neonize: editările păstrează identificatorul mesajului original și înregistrează cheia completă a notificării de editare, inclusiv autorul în grupuri.
+
+- Neonize: evenimentele reacțiilor folosesc formatul WPPConnect, cu cheile complete ale reacției și mesajului original, expeditorul și timpul în secunde.
+
+- În conversația deschisă, rezultatele sondajelor se actualizează la primirea unui nou eveniment de vot, atât cu Neonize, cât și cu WPPConnect. Neonize: evenimente compatibile cu WPPConnect pentru voturi, mesaje șterse și asocieri de etichete; identificatorii stărilor primite păstrează autorul.
+
+- Arhivarea unei conversații cere acum confirmare, din meniul contextual sau cu Ctrl+Shift+Q, ca la ștergere. Fereastra întreabă "Sigur doriți să arhivați această conversație?" și are butoanele "Arhivați conversația" (Alt+A) și "Anulează" (Alt+Z), plus caseta "Nu mai afișați", care contează doar împreună cu confirmarea. În Setări, opțiunea "Cereți confirmare înainte de a arhiva conversațiile" reactivează întrebarea.
+
 - Traducerea mesajelor care sunt deja în conversație: meniul contextual al mesajului primește "Traduceți de aici până la sfârșit" (Alt+Shift+Y), iar acțiunea în bloc "Traduceți mesajele selectate" arată scurtătura Ctrl+Alt+Shift+Y. Ambele pot fi schimbate în fila Scurtături din Setări, iar elementele de meniu arată scurtătura folosită. Cât timp rulează traducerea mai multor mesaje, același element de meniu și aceeași scurtătură devin "Anulați traducerea mesajelor". Se aplică mesajelor text primite, până la 50 odată, cu furnizorul, modelul și afișarea de la "Traduceți mesajul".
 
 - Ajutor la scriere: WinZapp primește o funcție similară ajutorului la scriere din WhatsApp pentru telefoane, cu posibilitatea suplimentară de a traduce ciorna. Noul buton de după Emoji și meniul contextual al câmpului deschid aceeași fereastră. Corectează, reformulează, folosește un ton profesional sau încurajator cu furnizorii IA configurați în WinZapp, nu cu Meta AI; traducerea se face cu Google. Cere acordul înainte de a trimite ciorna și arată rezultatul înainte de înlocuire; mesajul nu este trimis niciodată automat. Alege o acțiune, apoi apasă "Execută acțiunea aleasă". Deschiderea sau închiderea acestei ferestre nu trimite ciorna.
@@ -44,6 +93,7 @@ NOUTĂȚI
 - Jurnalul contului nu mai înregistrează codul de acces al sesiunii WPPConnect când se descarcă un fișier media.
 
 - Motor de conectare: Neonize este acum primul din listă și opțiunea deja selectată când WinZapp întreabă ce motor să folosească la prima pornire; rămâne marcat ca experimental, dar este cel recomandat pentru uz general. WPPConnect devine a doua opțiune, cu mențiunea "alternativ" după nume, la prima pornire, în fereastra de asociere și în Setări > Conexiune. Cine folosește deja WPPConnect rămâne pe el până îl schimbă.
+
 - După mult timp fără a deschide WinZapp: cât timp WhatsApp încă livrează mesaje vechi după sincronizare, titlul ferestrei continuă să afișeze "Se actualizează conversațiile" în loc să prezinte totul ca sincronizat, iar lista de conversații rămâne nemișcată, ca să o puteți parcurge fără ca conversațiile să își schimbe locul. Este actualizată o singură dată, când mesajele nu mai sosesc. Se aplică atât pentru Neonize, cât și pentru WPPConnect. În Neonize, WinZapp folosește și anunțul propriu al WhatsApp că există mesaje vechi de livrat, așa că starea apare de la primul mesaj și dispare doar când livrarea se termină.
 
 - Notificări: când sosesc multe mesaje noi deodată (de exemplu, la revenirea unei conexiuni instabile), WinZapp redă și citește doar primele trei și rămâne în tăcere până la sfârșitul rafalei, în loc să repete sunetul de zeci de ori. Mesajele rămân în listă și sunt numărate ca necitite. Limita se alege în Setări > General > Notificări, la "Numărul maxim de notificări pe secundă când sosesc multe mesaje deodată" (implicit: 3).
@@ -193,11 +243,13 @@ NOUTĂȚI
 - Neonize: primul mesaj către un număr de telefon nou scris într-o conversație nouă (Ctrl+N) nu se mai termină ca „neconfirmat” când WhatsApp are numărul înregistrat în cealaltă formă (cu sau fără a 9-a cifră a mobilelor braziliene): acum este trimis la adresa pe care o cunoaște WhatsApp. În plus, un număr scris într-o conversație nouă deschide acum chatul cu adresa pe care o cunoaște WhatsApp, fără a lăsa o conversație duplicată.
 
 - Mesaje vocale: rata de biți a înregistrărilor a revenit la 64 kbps, care se trimit rapid chiar și după un minut (trecerea la 256 kbps încetinise trimiterea). Setări > Audio are acum "Rata de biți a mesajelor vocale (kbps)", cu valori între 32 și 256 kbps.
+
 - Mesaje vocale: înregistrările stereo (AAC) se trimit acum implicit la 128 kbps, deoarece 64 kbps le făcea să sune slab; înregistrările mono rămân la 64 kbps. Setări > Audio primește „Rata de biți a mesajelor vocale stereo (kbps)”. Cine era încă pe vechea valoare implicită de 64 kbps trece la 128 kbps pentru stereo; orice altă rată aleasă este păstrată.
 
 - Setări > Interfață utilizator > Conversații: opțiune nouă "Numărul de mesaje noi în lista de conversații", pentru ca cititorul de ecran să spună numărul de mesaje noi înainte de numele conversației, nu după. Se aplică listei de conversații, celor arhivate și celor blocate. (sugestia lui Michal Suchý)
 
 - Fereastră nouă Canale (Alt+9, și în lista de navigare): arată canalele pe care le urmăriți sau caută în directorul de canale WhatsApp (fără text, apar canalele recomandate). Pentru canalul ales îl puteți deschide și citi actualizările, îl puteți urmări sau nu mai urmări, îi puteți dezactiva sau activa notificările, îi puteți copia linkul și, la canalele dvs., îl puteți edita sau șterge. Puteți urmări un canal din linkul lui și puteți crea un canal. Afișarea canalelor în lista de conversații rămâne o opțiune separată. Funcționează cu WPPConnect și cu Neonize.
+
 - Canale, ca în WhatsApp Web: în "Găsiți canale", Categorie (afaceri, divertisment, stil de viață, știri, organizații, persoane, sport) și Listă (recomandate, în tendințe, populare, noi) restrâng directorul. În canalele pe care le administrați, câmpul de mesaj se deschide pentru a publica actualizări text, fotografii, videoclipuri și sondaje, pe cele proprii le puteți edita din meniul mesajului (Alt+E) în intervalul permis de WhatsApp, o actualizare poate fi fixată sau anulată fixarea din meniul mesajului (Ctrl+Shift+P), iar cele fixate apar în "Mesaje fixate"; butonul "Administratori și urmăritori..." spune câți administratori are canalul și, pentru proprietar, invită un contact să fie administrator sau anulează invitația. Funcționează cu WPPConnect și cu Neonize. Fereastra arată proprietarul, administratorii, invitațiile în așteptare și urmăritorii: proprietarul poate face administrator un urmăritor, poate anula o invitație, poate elimina un administrator sau poate face proprietar un administrator, iar un administrator poate renunța la rol.
 
 - Apeluri: acum puteți adăuga persoane la apelul în curs, cu butonul "Adăugați participanți" din lista de participanți a apelului. Într-un apel de grup apar membrii grupului care nu sunt încă în apel; într-un apel privat, contactele dvs., iar apelul devine un apel cu mai multe persoane, ca în WhatsApp. Cine a fost deja apelat și nu a intrat este apelat din nou. Funcționează cu WPPConnect și cu Neonize.
@@ -257,6 +309,7 @@ NOUTĂȚI
 - Grupuri: WinZapp te recunoaște acum în grupurile care te listează prin identificatorul asociat (@lid), așa că un administrator nu mai găsește dezactivată opțiunea de adăugare a unui membru.
 
 - Apeluri Neonize: un apel pe care îl faci și la care nu răspunde nimeni se încheie acum singur după un minut, cu rezultatul „fără răspuns”, în loc să sune minute în șir în fereastra de apel după ce WhatsApp a încetat să sune celălalt telefon.
+
 - Mac: WinZapp spune acum când macOS așteaptă permisiunea pentru microfon sau când a fost refuzată, în loc să pară că butonul de înregistrare nu face nimic.
 
 - Mesaje vocale: acum există un singur buton de înregistrare. WinZapp înregistrează în stereo când dispozitivul de intrare oferă două canale și în mono în celelalte cazuri, așa că al doilea buton, Ctrl+Shift+G și opțiunea stereo au dispărut. O înregistrare stereo este acum un mesaj vocal adevărat, care se aude pe iPhone, iar calitatea a crescut la 256 kbps. Un fișier Opus stereo atașat este acum convertit, ca să se audă și pe iPhone.
@@ -298,6 +351,7 @@ NOUTĂȚI
 - În chaturile de grup, când există un apel disponibil, butoanele de inițiere sunt înlocuite de "Alăturați-vă apelului vocal în desfășurare" sau "Alăturați-vă apelului video în desfășurare (camera oprită)". Apeluri afișează apelurile în desfășurare în Toate și În desfășurare, inclusiv între mai multe persoane în afara grupurilor. La alăturarea la un apel video, camera pornește oprită.
 
 - Multe actualizări de prezență ale contactelor la rând (scrie, online) nu mai blochează WinZapp câteva secunde și nu mai încetinesc întregul calculator pe conturile cu multe conversații.
+
 - Prezența contactelor: la memorarea unor nume noi, interfața nu mai așteaptă scrierea în baza de date. Actualizările în așteptare păstrează cea mai recentă copie completă și respectă ordinea la închidere și la ștergerea datelor locale.
 
 - Prezența contactelor: s-a redus munca repetată a interfeței la primirea multor actualizări de conectare sau tastare. Titlul ferestrei și eticheta conversațiilor arhivate nu mai sunt rescrise dacă nu se schimbă, fără a întârzia anunțurile de tastare.
@@ -501,6 +555,10 @@ NOUTĂȚI
 - Câmpul de mesaj: inserarea unui emoji nu mai provoacă eroarea "surrogates not allowed" la activarea butonului de ajutor pentru scris. Raportat de UlisesMilani (#797).
 
 - Opțiuni noi în Setări > Notificări pentru a nu număra conversațiile arhivate și pe cele dezactivate în numărul de mesaje necitite din pictograma din bara de sistem și din titlul ferestrei. Ambele sunt bifate implicit: cele arhivate nu erau deja numărate și acum se poate schimba; cele dezactivate nu mai sunt numărate, ceea ce schimbă comportamentul anterior. Debifați opțiunea pentru a le număra din nou.
+
+- Conversații lungi: actualizarea istoricului unei conversații deschise cu mii de mesaje nu mai blochează fereastra zeci de secunde atunci când lista de mesaje afișează poziția fiecărui mesaj („N din M”).
+
+- Remediat: cu anularea neuronală a zgomotului vocal activată, mesajele vocale sunt acum trimise în ordinea în care au fost înregistrate, chiar dacă procesarea uneia se termină înaintea alteia.
 
 V2.1.0.0
 
