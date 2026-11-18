@@ -1,12 +1,21 @@
 """Which conversations count toward the unread tally of the window title and
-the tray icon.
+the tray icon, and whether the tray tooltip shows that tally at all.
 
-Two options of Settings > Notifications decide it: archived and muted
-conversations can each be left out of that tally. Both default to left out.
+Two options of Settings > Notifications decide which conversations count:
+archived and muted conversations can each be left out of that tally. Both
+default to left out. A third option hides the unread count from the tray
+tooltip entirely, so the tray shows only the app name.
 """
 
 DISCOUNT_ARCHIVED_KEY = "discount_archived_from_unread_badge"
 DISCOUNT_MUTED_KEY = "discount_muted_from_unread_badge"
+HIDE_TRAY_UNREAD_KEY = "hide_tray_unread_count"
+
+
+def tray_unread_hidden(settings) -> bool:
+    """True when the tray tooltip must show only the app name, with no unread count."""
+    general = (settings or {}).get("general", {}) or {}
+    return bool(general.get(HIDE_TRAY_UNREAD_KEY, False))
 
 
 def badge_discount_flags(settings) -> tuple[bool, bool]:

@@ -73,6 +73,17 @@ class TrayIcon(wx.adv.TaskBarIcon):
 
     # ── Tooltip ───────────────────────────────────────────────────────────────
 
+    def _app_label(self):
+        """The leading label of the tooltip: 'WinZapp', or
+        'WinZapp — <account>' when more than one account is paired."""
+        mw = self.main_window
+        app_label = "WinZapp"
+        if getattr(mw, "_is_multi_account", lambda: False)():
+            app_label = getattr(mw, "account_name", None) or "WinZapp"
+        if app_label != "WinZapp":
+            app_label = f"WinZapp — {app_label}"
+        return app_label
+
     def update_tooltip(self):
         """Rebuild the tooltip from current unread counts and refresh the icon.
 
@@ -80,10 +91,17 @@ class TrayIcon(wx.adv.TaskBarIcon):
         calls on the same icon slot.  Removing the icon first ensures only the
         new tooltip text is announced.  Skip the Remove/Set cycle when the
         tooltip text is unchanged to avoid unnecessary flicker and NVDA chatter.
+
+        With hide_tray_unread_count on (Settings > Notifications) the tooltip
+        is only the app name: no unread count, no status tail.
         """
         self.i18n.get_language()
-        total, names = self._get_unread_info()
-        tooltip = self._build_tooltip(total, names)
+        from core.unread_badge import tray_unread_hidden
+        if tray_unread_hidden(getattr(self.main_window, "settings", {})):
+            tooltip = self._app_label()[:127]
+        else:
+            total, names = self._get_unread_info()
+            tooltip = self._build_tooltip(total, names)
         if tooltip == getattr(self, "_last_tooltip", None):
             return
         self._last_tooltip = tooltip
@@ -151,12 +169,7 @@ class TrayIcon(wx.adv.TaskBarIcon):
         # tray tooltip make clear WHICH account this icon is (plan Zad 4.4).
         # With a single connected account the name is redundant (nothing to
         # distinguish), so it is only shown when more than one account is paired.
-        app_label = "WinZapp"
-        if getattr(mw, "_is_multi_account", lambda: False)():
-            app_label = getattr(mw, "account_name", None) or "WinZapp"
-        if app_label != "WinZapp":
-            app_label = f"WinZapp — {app_label}"
-        parts  = [app_label]
+        parts  = [self._app_label()]
         if getattr(self.main_window, "offline_mode", False):
             parts.append(i18n.t("tray_offline_mode"))
         status = getattr(self.main_window, "_tray_status", "")

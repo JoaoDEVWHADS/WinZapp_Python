@@ -1075,6 +1075,9 @@ DEFAULT_SETTINGS = {
         "keep_muted_chats_silent_when_open": True,
         "discount_archived_from_unread_badge": True,
         "discount_muted_from_unread_badge": True,
+        # Settings > Notifications: never show the unread count in the
+        # tray tooltip, so the tray shows only the app name.
+        "hide_tray_unread_count": False,
         # Message notifications let through per second when many arrive at
         # once (core.notification_burst).
         "notification_burst_limit": 3,
