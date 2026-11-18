@@ -4,6 +4,7 @@
   "commit": "4b8a5c6a",
   "data": "14/10/2026",
   "itens": {
+    "0b65bba3af1e": "Configurações > Geral > Notificações ganha a opção de ocultar a contagem de não ",
     "adcffeba2dc3": "Corrigido: mensagens de voz não eram enviadas ao tocar em enviar; gravar uma men",
     "3871d1ee1e71": "A gravação do microfone junto com o áudio do computador agora vai como mensagem ",
     "b06250f189f7": "Neonize: as mensagens recebidas com o WinZapp aberto aparecem como entregues par",

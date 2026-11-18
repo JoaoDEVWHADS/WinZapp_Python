@@ -4,6 +4,8 @@ W tej wersji pojawiają się społeczności i zreorganizowane okno ustawień, op
 
 NOWOŚCI
 
+- Ustawienia > Ogólne > Powiadomienia zyskały opcję ukrycia licznika nieprzeczytanych w zasobniku systemowym, zasobnik pokazuje tylko nazwę aplikacji. Tytuł okna nadal zlicza jak wcześniej.
+
 - Naprawione: wiadomości głosowe nie były wysyłane po naciśnięciu wyślij; nagranie wiadomości głosowej znów ją wysyła jak dawniej.
 
 - Nagranie mikrofonu i dźwięku komputera trafia teraz jako wiadomość głosowa (Ctrl+Shift+H), a nie jako załącznik audio; zachowuje stereo (AAC), gdy oba kanały niosą dźwięk, jak inne nagrania stereo. Wcześniej wychodziło jako zwykły plik audio na czacie.

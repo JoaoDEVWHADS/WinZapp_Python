@@ -4,6 +4,8 @@ Esta versión trae las comunidades y una ventana de configuración reorganizada,
 
 NOVEDADES
 
+- Configuración > General > Notificaciones incorpora la opción de esconder el contador de no leídos en la bandeja del sistema, mostrando solo el nombre de la app. El título de la ventana sigue contando como antes.
+
 - Corregido: los mensajes de voz no se enviaban al pulsar enviar; grabar un mensaje de voz vuelve a enviarlo como antes.
 
 - La grabación del micrófono y el audio del ordenador ahora se envía como mensaje de voz (Ctrl+Shift+H), no como anexo de audio; mantiene el estéreo (AAC) cuando los dos canales tienen sonido, como las demás grabaciones en estéreo. Antes se enviaba como un archivo de audio común en el chat.

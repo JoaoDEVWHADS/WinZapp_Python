@@ -4,6 +4,8 @@ Această versiune aduce comunitățile și o fereastră de setări reorganizată
 
 NOUTĂȚI
 
+- Setări > Generale > Notificări câștigă opțiunea de a ascunde contorul de necitite din zona de notificări, afișând doar numele aplicației. Titlul ferestrei continuă să numere ca înainte.
+
 - Corectat: mesajele vocale nu erau trimise la apăsarea butonului de trimitere; înregistrarea unui mesaj vocal îl trimite din nou ca înainte.
 
 - Înregistrarea microfonului și a sunetului computerului pleacă acum ca mesaj vocal (Ctrl+Shift+H), nu ca atașament audio; păstrează stereo (AAC) când ambele canale poartă sunet, ca celelalte înregistrări stereo. Înainte pleca ca fișier audio obișnuit din chat.
