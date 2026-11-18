@@ -4,6 +4,8 @@ This release brings communities and a reorganized settings window, on top of eve
 
 WHAT'S NEW
 
+- Impostazioni > Generale > Notifiche guadagna l'opzione per rimuovere il conteggio dei non letti dall'area di notifica, mostrando solo il nome dell'app. Il titolo della finestra continua a contare come prima.
+
 - Corretto: i messaggi vocali non venivano inviati premendo invia; registrare un messaggio vocale torna a inviarlo come prima.
 
 - La registrazione del microfono e dell'audio del computer ora parte come messaggio vocale (Ctrl+Shift+H), non come allegato audio; mantiene lo stereo (AAC) quando entrambi i canali hanno suono, come le altre registrazioni in stereo. Prima veniva inviata come comune file audio nella chat.

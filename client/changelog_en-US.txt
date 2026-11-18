@@ -4,6 +4,8 @@ This release brings communities and a reorganized settings window, on top of eve
 
 WHAT'S NEW
 
+- Settings > General > Notifications gains an option to hide the unread count in the system tray, so the tray shows only the app name. The window title keeps counting as before.
+
 - Fixed: voice messages were not sent when you pressed send; recording a voice message sends it again as before.
 
 - The microphone + computer audio recording now goes out as a voice message (Ctrl+Shift+H), not as an audio attachment; it keeps stereo (AAC) when both channels carry sound, like other stereo recordings. Before, it was sent as an ordinary audio file in the chat.

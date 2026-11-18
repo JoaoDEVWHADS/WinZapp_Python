@@ -4,6 +4,8 @@ Esta versão traz as comunidades e uma janela de definições reorganizada, alé
 
 NOVIDADES
 
+- Definições > Geral > Notificações ganha a opção de esconder a contagem de não lidas no tabuleiro do sistema, mostrando apenas o nome da app. O título da janela continua a contar como antes.
+
 - Corrigido: as mensagens de voz não eram enviadas ao tocar em enviar; gravar uma mensagem de voz volta a enviá-la como antes.
 
 - A gravação do microfone juntamente com o áudio do computador agora vai como mensagem de voz (Ctrl+Shift+H), e não como anexo de áudio; mantém o estéreo (AAC) quando os dois canais têm som, como as outras gravações em estéreo. Antes era enviada como ficheiro de áudio comum no chat.
