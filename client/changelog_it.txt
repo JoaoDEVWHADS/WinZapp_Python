@@ -4,6 +4,8 @@ This release brings communities and a reorganized settings window, on top of eve
 
 WHAT'S NEW
 
+- Corretto: i messaggi vocali non venivano inviati premendo invia; registrare un messaggio vocale torna a inviarlo come prima.
+
 - La registrazione del microfono e dell'audio del computer ora parte come messaggio vocale (Ctrl+Shift+H), non come allegato audio; mantiene lo stereo (AAC) quando entrambi i canali hanno suono, come le altre registrazioni in stereo. Prima veniva inviata come comune file audio nella chat.
 
 - Neonize: i messaggi ricevuti con WinZapp aperto ora appaiono come consegnati a chi li ha inviati, anche con la finestra senza focus o in background. Prima, il mittente vedeva solo "inviato" quando WinZapp non aveva il focus; e, con le conferme di lettura disattivate, aprire la conversazione non cambiava nulla. La presenza online resta legata alla finestra.

@@ -4,6 +4,8 @@ W tej wersji pojawiają się społeczności i zreorganizowane okno ustawień, op
 
 NOWOŚCI
 
+- Naprawione: wiadomości głosowe nie były wysyłane po naciśnięciu wyślij; nagranie wiadomości głosowej znów ją wysyła jak dawniej.
+
 - Nagranie mikrofonu i dźwięku komputera trafia teraz jako wiadomość głosowa (Ctrl+Shift+H), a nie jako załącznik audio; zachowuje stereo (AAC), gdy oba kanały niosą dźwięk, jak inne nagrania stereo. Wcześniej wychodziło jako zwykły plik audio na czacie.
 
 - Neonize: wiadomości odebrane przy otwartym WinZapp są teraz pokazywane nadawcy jako dostarczone, nawet gdy okno nie ma fokusu albo jest w tle. Wcześniej nadawca widział tylko „wysłane”, gdy WinZapp nie miał fokusu; a przy wyłączonych potwierdzeniach odczytu otwarcie rozmowy niczego nie zmieniało. Obecność online pozostaje powiązana z oknem.

@@ -885,11 +885,6 @@ class VoiceRecordingMixin:
                                  mw.i18n.t("media_audio_convert_failed"), True)
                 return
 
-            if as_audio_file:
-                return lambda: self._enqueue_system_audio_file(
-                    wav_path, local_id, remote_jid, quoted_msg, enc_key, virtual_msg,
-                )
-
             # 3. Encode: stereo as AAC M4A (core/voice_stereo.py), never quietly
             # downmixed when that fails; mono as OGG Opus via ffmpeg conversion.
             voice_mimetype = ""

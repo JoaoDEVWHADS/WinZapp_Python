@@ -4,6 +4,8 @@ Bu sürüm, 2.1.0.0 sürümündeki her şeye ek olarak toplulukları ve yeniden 
 
 YENİLİKLER
 
+- Düzeltildi: gönder düğmesine basıldığında sesli mesajlar gönderilmiyordu; sesli mesaj kaydetmek artık onu eskisi gibi gönderiyor.
+
 - Mikrofon ve bilgisayar sesi kaydı artık sesli mesaj (Ctrl+Shift+H) olarak gönderiliyor, ses eki olarak değil; her iki kanalda ses varsa stereo (AAC) olarak kalır, diğer stereo kayıtlarda olduğu gibi. Önceden sohbette sıradan bir ses dosyası olarak gönderiliyordu.
 
 - Neonize: WinZapp açıkken alınan mesajlar artık gönderene ulaşmış olarak görünüyor; pencere odakta değilken veya arkada olsa bile. Önceden WinZapp odakta değilken gönderen yalnızca "gönderildi" görüyordu; okundu bilgisi kapalıyken sohbeti açmak da bir şeyi değiştirmiyordu. Çevrimiçi durumu pencereye bağlı kalmaya devam ediyor.

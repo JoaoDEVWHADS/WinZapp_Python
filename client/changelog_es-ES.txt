@@ -4,6 +4,8 @@ Esta versión trae las comunidades y una ventana de configuración reorganizada,
 
 NOVEDADES
 
+- Corregido: los mensajes de voz no se enviaban al pulsar enviar; grabar un mensaje de voz vuelve a enviarlo como antes.
+
 - La grabación del micrófono y el audio del ordenador ahora se envía como mensaje de voz (Ctrl+Shift+H), no como anexo de audio; mantiene el estéreo (AAC) cuando los dos canales tienen sonido, como las demás grabaciones en estéreo. Antes se enviaba como un archivo de audio común en el chat.
 
 - Neonize: los mensajes recibidos con WinZapp abierto ahora aparecen como entregados para quien los envió, incluso con la ventana desenfocada o en segundo plano. Antes, el remitente solo veía "enviado" cuando WinZapp no tenía el foco; y, con los acuses de lectura desactivados, abrir la conversación no cambiaba nada. La presencia en línea sigue ligada a la ventana.

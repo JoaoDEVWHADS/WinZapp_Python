@@ -4,6 +4,8 @@ Esta versão traz as comunidades e uma janela de definições reorganizada, alé
 
 NOVIDADES
 
+- Corrigido: as mensagens de voz não eram enviadas ao tocar em enviar; gravar uma mensagem de voz volta a enviá-la como antes.
+
 - A gravação do microfone juntamente com o áudio do computador agora vai como mensagem de voz (Ctrl+Shift+H), e não como anexo de áudio; mantém o estéreo (AAC) quando os dois canais têm som, como as outras gravações em estéreo. Antes era enviada como ficheiro de áudio comum no chat.
 
 - Neonize: as mensagens recebidas com o WinZapp aberto aparecem agora como entregues para quem as enviou, mesmo com a janela sem foco ou em fundo. Antes, o remetente via apenas "enviada" quando o WinZapp não tinha o foco; e, com as confirmações de leitura desativadas, abrir a conversa não mudava nada. A presença online continua ligada à janela.

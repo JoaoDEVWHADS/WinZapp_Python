@@ -4,6 +4,8 @@ Această versiune aduce comunitățile și o fereastră de setări reorganizată
 
 NOUTĂȚI
 
+- Corectat: mesajele vocale nu erau trimise la apăsarea butonului de trimitere; înregistrarea unui mesaj vocal îl trimite din nou ca înainte.
+
 - Înregistrarea microfonului și a sunetului computerului pleacă acum ca mesaj vocal (Ctrl+Shift+H), nu ca atașament audio; păstrează stereo (AAC) când ambele canale poartă sunet, ca celelalte înregistrări stereo. Înainte pleca ca fișier audio obișnuit din chat.
 
 - Neonize: mesajele primite cu WinZapp deschis apar acum ca livrate pentru expeditor, chiar și cu fereastra fără focus sau în fundal. Înainte, expeditorul vedea doar „trimis” când WinZapp nu avea focusul; iar cu confirmările de citire dezactivate, deschiderea conversației nu schimba nimic. Prezența online rămâne legată de fereastră.

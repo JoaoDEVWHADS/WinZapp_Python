@@ -4,6 +4,8 @@ This release brings communities and a reorganized settings window, on top of eve
 
 WHAT'S NEW
 
+- Fixed: voice messages were not sent when you pressed send; recording a voice message sends it again as before.
+
 - The microphone + computer audio recording now goes out as a voice message (Ctrl+Shift+H), not as an audio attachment; it keeps stereo (AAC) when both channels carry sound, like other stereo recordings. Before, it was sent as an ordinary audio file in the chat.
 
 - Neonize: messages received while WinZapp is open now show as delivered to the sender, even with the window unfocused or in the background. Before, the sender only ever saw "sent" while WinZapp was unfocused; and with read receipts off, opening the conversation changed nothing. The online presence stays bound to the window.
