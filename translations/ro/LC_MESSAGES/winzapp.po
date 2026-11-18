@@ -8469,6 +8469,13 @@ msgctxt "help_guide_unavailable"
 msgid "The usage guide could not be opened."
 msgstr "Ghidul de utilizare nu a putut fi deschis."
 
+#: translations/en-US/LC_MESSAGES/winzapp.po
+#: client/ui/dialogs/settings_dialog.py
+msgctxt "hide_tray_unread_count_label"
+msgid ""
+"&Hide the unread message count in the system tray (show only the app name)"
+msgstr "Ascunde contorul de mesaje necitite din &bara de sistem (afișează doar numele aplicației)"
+
 #: translations/en-US/LC_MESSAGES/winzapp.po client/main_window/settings.py
 msgctxt "hotkey_first_run_message"
 msgid ""

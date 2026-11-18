@@ -687,6 +687,10 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
             self._notifications_page, label=i18n.t("discount_muted_from_unread_badge_label")
         )
         notif_sizer.Add(self._discount_muted_check, 0, wx.ALL, 8)
+        self._hide_tray_unread_check = wx.CheckBox(
+            self._notifications_page, label=i18n.t("hide_tray_unread_count_label")
+        )
+        notif_sizer.Add(self._hide_tray_unread_check, 0, wx.ALL, 8)
 
         # How many message notifications a burst may play per second
         # (core/notification_burst.py).
@@ -2516,10 +2520,14 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
         discount_muted = self.main_window.settings.get("general", {}).get(
             "discount_muted_from_unread_badge", True
         )
+        hide_tray_unread = self.main_window.settings.get("general", {}).get(
+            "hide_tray_unread_count", False
+        )
         if wanted(unit, "notifications"):
             self._keep_muted_silent_check.SetValue(keep_muted_silent)
             self._discount_archived_check.SetValue(discount_archived)
             self._discount_muted_check.SetValue(discount_muted)
+            self._hide_tray_unread_check.SetValue(hide_tray_unread)
             self._notification_burst_spin.SetValue(burst_limit(self.main_window.settings))
 
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
@@ -4487,10 +4495,13 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
             self.main_window.settings.setdefault("general", {})["discount_muted_from_unread_badge"] = (
                 self._discount_muted_check.GetValue()
             )
+            self.main_window.settings.setdefault("general", {})["hide_tray_unread_count"] = (
+                self._hide_tray_unread_check.GetValue()
+            )
             self.main_window.settings.setdefault("general", {})["notification_burst_limit"] = (
                 self._notification_burst_spin.GetValue()
             )
-            # The title and the tray icon follow the two options right away.
+            # The title and the tray icon follow the options right away.
             refresh_title = getattr(self.main_window, "_update_title", None)
             if refresh_title is not None:
                 refresh_title()
@@ -4920,6 +4931,7 @@ class SettingsDialog(LazyUnitsMixin, ShortcutsTabMixin, TranscriptionTabMixin, E
             self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
             self._discount_archived_check.SetLabel(i18n.t("discount_archived_from_unread_badge_label"))
             self._discount_muted_check.SetLabel(i18n.t("discount_muted_from_unread_badge_label"))
+            self._hide_tray_unread_check.SetLabel(i18n.t("hide_tray_unread_count_label"))
             self._notification_burst_label.SetLabel(i18n.t("notification_burst_limit_label"))
         if ready(self, "speech"):
             self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
